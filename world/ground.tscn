@@ -1,0 +1,141 @@
+[gd_scene load_steps=11 format=3 uid="uid://bground123"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
+size = Vector3(100, 1, 100)
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
+size = Vector2(100, 100)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
+albedo_color = Color(0.3, 0.5, 0.3, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_rock"]
+albedo_color = Color(0.4, 0.4, 0.4, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_rock_small"]
+size = Vector3(1, 0.5, 1)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_rock_small"]
+size = Vector3(1, 0.5, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_rock_medium"]
+size = Vector3(2, 1, 1.5)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_rock_medium"]
+size = Vector3(2, 1, 1.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_rock_large"]
+size = Vector3(3, 1.5, 2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_rock_large"]
+size = Vector3(3, 1.5, 2)
+
+[node name="Ground" type="StaticBody3D"]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+shape = SubResource("BoxShape3D_ground")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+mesh = SubResource("PlaneMesh_ground")
+surface_material_override/0 = SubResource("StandardMaterial3D_ground")
+
+[node name="Rock1" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 15, 0.25, 10)
+
+[node name="Mesh" type="MeshInstance3D" parent="Rock1"]
+mesh = SubResource("BoxMesh_rock_small")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Collision" type="CollisionShape3D" parent="Rock1"]
+shape = SubResource("BoxShape3D_rock_small")
+
+[node name="Rock2" type="StaticBody3D" parent="."]
+transform = Transform3D(0.866, 0, 0.5, 0, 1, 0, -0.5, 0, 0.866, -20, 0.5, 15)
+
+[node name="Mesh" type="MeshInstance3D" parent="Rock2"]
+mesh = SubResource("BoxMesh_rock_medium")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Collision" type="CollisionShape3D" parent="Rock2"]
+shape = SubResource("BoxShape3D_rock_medium")
+
+[node name="Rock3" type="StaticBody3D" parent="."]
+transform = Transform3D(0.707, 0, -0.707, 0, 1, 0, 0.707, 0, 0.707, 25, 0.75, -20)
+
+[node name="Mesh" type="MeshInstance3D" parent="Rock3"]
+mesh = SubResource("BoxMesh_rock_large")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Collision" type="CollisionShape3D" parent="Rock3"]
+shape = SubResource("BoxShape3D_rock_large")
+
+[node name="Rock4" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10, 0.25, -25)
+
+[node name="Mesh" type="MeshInstance3D" parent="Rock4"]
+mesh = SubResource("BoxMesh_rock_small")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Collision" type="CollisionShape3D" parent="Rock4"]
+shape = SubResource("BoxShape3D_rock_small")
+
+[node name="Rock5" type="StaticBody3D" parent="."]
+transform = Transform3D(0.94, 0, 0.34, 0, 1, 0, -0.34, 0, 0.94, 30, 0.5, 5)
+
+[node name="Mesh" type="MeshInstance3D" parent="Rock5"]
+mesh = SubResource("BoxMesh_rock_medium")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Collision" type="CollisionShape3D" parent="Rock5"]
+shape = SubResource("BoxShape3D_rock_medium")
+
+[node name="Rock6" type="StaticBody3D" parent="."]
+transform = Transform3D(0.5, 0, 0.866, 0, 1, 0, -0.866, 0, 0.5, -35, 0.75, -10)
+
+[node name="Mesh" type="MeshInstance3D" parent="Rock6"]
+mesh = SubResource("BoxMesh_rock_large")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Collision" type="CollisionShape3D" parent="Rock6"]
+shape = SubResource("BoxShape3D_rock_large")
+
+[node name="Rock7" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 0.25, 30)
+
+[node name="Mesh" type="MeshInstance3D" parent="Rock7"]
+mesh = SubResource("BoxMesh_rock_small")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Collision" type="CollisionShape3D" parent="Rock7"]
+shape = SubResource("BoxShape3D_rock_small")
+
+[node name="Rock8" type="StaticBody3D" parent="."]
+transform = Transform3D(0.77, 0, -0.64, 0, 1, 0, 0.64, 0, 0.77, -15, 0.5, 35)
+
+[node name="Mesh" type="MeshInstance3D" parent="Rock8"]
+mesh = SubResource("BoxMesh_rock_medium")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Collision" type="CollisionShape3D" parent="Rock8"]
+shape = SubResource("BoxShape3D_rock_medium")
+
+[node name="Rock9" type="StaticBody3D" parent="."]
+transform = Transform3D(0.97, 0, 0.26, 0, 1, 0, -0.26, 0, 0.97, 40, 0.75, -35)
+
+[node name="Mesh" type="MeshInstance3D" parent="Rock9"]
+mesh = SubResource("BoxMesh_rock_large")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Collision" type="CollisionShape3D" parent="Rock9"]
+shape = SubResource("BoxShape3D_rock_large")
+
+[node name="Rock10" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -40, 0.25, 40)
+
+[node name="Mesh" type="MeshInstance3D" parent="Rock10"]
+mesh = SubResource("BoxMesh_rock_small")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Collision" type="CollisionShape3D" parent="Rock10"]
+shape = SubResource("BoxShape3D_rock_small")
