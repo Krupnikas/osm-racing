@@ -11,6 +11,11 @@ const OVERPASS_SERVERS := [
 	"https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 
+# Кеширование
+const CACHE_DIR := "user://osm_cache/"
+const CACHE_VERSION := 1  # Увеличить при изменении формата запроса
+var use_cache := true
+
 var http_request: HTTPRequest
 var center_lat: float
 var center_lon: float
@@ -19,16 +24,80 @@ var current_server_index := 0
 var retry_count := 0
 var max_retries := 3
 var pending_query: String = ""
+var current_cache_key: String = ""
 
 func _ready() -> void:
 	http_request = HTTPRequest.new()
 	add_child(http_request)
 	http_request.request_completed.connect(_on_request_completed)
+	_ensure_cache_dir()
+
+
+func _ensure_cache_dir() -> void:
+	if not DirAccess.dir_exists_absolute(CACHE_DIR):
+		DirAccess.make_dir_recursive_absolute(CACHE_DIR)
+
+
+func _get_cache_key(lat: float, lon: float, radius: float) -> String:
+	# Округляем координаты для стабильного ключа (до 4 знаков ~ 11м точность)
+	var lat_key := "%.4f" % lat
+	var lon_key := "%.4f" % lon
+	var radius_key := "%d" % int(radius)
+	return "osm_v%d_%s_%s_%s.json" % [CACHE_VERSION, lat_key, lon_key, radius_key]
+
+
+func _get_cache_path(cache_key: String) -> String:
+	return CACHE_DIR + cache_key
+
+
+func _load_from_cache(cache_key: String) -> Dictionary:
+	var cache_path := _get_cache_path(cache_key)
+	if not FileAccess.file_exists(cache_path):
+		return {}
+
+	var file := FileAccess.open(cache_path, FileAccess.READ)
+	if not file:
+		return {}
+
+	var json_string := file.get_as_text()
+	file.close()
+
+	var json := JSON.new()
+	if json.parse(json_string) != OK:
+		return {}
+
+	return json.data
+
+
+func _save_to_cache(cache_key: String, data: Dictionary) -> void:
+	var cache_path := _get_cache_path(cache_key)
+	var file := FileAccess.open(cache_path, FileAccess.WRITE)
+	if not file:
+		push_warning("OSM: Failed to write cache: " + cache_path)
+		return
+
+	file.store_string(JSON.stringify(data))
+	file.close()
+	print("OSM: Cached data to " + cache_key)
+
 
 func load_area(lat: float, lon: float, radius: float = 500.0) -> void:
 	center_lat = lat
 	center_lon = lon
 	radius_meters = radius
+
+	# Проверяем кеш
+	current_cache_key = _get_cache_key(lat, lon, radius)
+	if use_cache:
+		var cached := _load_from_cache(current_cache_key)
+		if not cached.is_empty():
+			print("OSM: Loaded from cache: " + current_cache_key)
+			# Обновляем центр из кеша
+			cached["center_lat"] = center_lat
+			cached["center_lon"] = center_lon
+			# Эмитим с небольшой задержкой чтобы вызывающий код успел подписаться
+			call_deferred("_emit_cached_data", cached)
+			return
 
 	# Конвертируем радиус в градусы (приблизительно)
 	var lat_delta := radius / 111000.0  # 111км на градус широты
@@ -65,6 +134,10 @@ out skel qt;
 	current_server_index = 0
 	retry_count = 0
 	_send_request()
+
+
+func _emit_cached_data(cached: Dictionary) -> void:
+	data_loaded.emit(cached)
 
 func _send_request() -> void:
 	var server_url: String = OVERPASS_SERVERS[current_server_index]
@@ -107,6 +180,11 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 
 	var data: Dictionary = json.data
 	var parsed := _parse_osm_data(data)
+
+	# Сохраняем в кеш
+	if use_cache and current_cache_key != "":
+		_save_to_cache(current_cache_key, parsed)
+
 	data_loaded.emit(parsed)
 
 func _parse_osm_data(data: Dictionary) -> Dictionary:
@@ -189,3 +267,47 @@ func latlon_to_local(lat: float, lon: float) -> Vector2:
 	var dx := (lon - center_lon) * 111000.0 * cos(deg_to_rad(center_lat))
 	var dz := (lat - center_lat) * 111000.0
 	return Vector2(dx, dz)
+
+
+# Очистка всего кеша
+func clear_cache() -> void:
+	var dir := DirAccess.open(CACHE_DIR)
+	if not dir:
+		return
+
+	dir.list_dir_begin()
+	var file_name := dir.get_next()
+	var count := 0
+	while file_name != "":
+		if not dir.current_is_dir() and file_name.ends_with(".json"):
+			dir.remove(file_name)
+			count += 1
+		file_name = dir.get_next()
+	dir.list_dir_end()
+	print("OSM: Cleared %d cached files" % count)
+
+
+# Получить размер кеша
+func get_cache_size() -> int:
+	var dir := DirAccess.open(CACHE_DIR)
+	if not dir:
+		return 0
+
+	var total_size := 0
+	dir.list_dir_begin()
+	var file_name := dir.get_next()
+	while file_name != "":
+		if not dir.current_is_dir() and file_name.ends_with(".json"):
+			var file := FileAccess.open(CACHE_DIR + file_name, FileAccess.READ)
+			if file:
+				total_size += file.get_length()
+				file.close()
+		file_name = dir.get_next()
+	dir.list_dir_end()
+	return total_size
+
+
+# Проверить есть ли данные в кеше для области
+func is_cached(lat: float, lon: float, radius: float) -> bool:
+	var cache_key := _get_cache_key(lat, lon, radius)
+	return FileAccess.file_exists(_get_cache_path(cache_key))

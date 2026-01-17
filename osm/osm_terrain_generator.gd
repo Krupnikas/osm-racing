@@ -503,15 +503,12 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			var dominated_by_chunk := false
 			if tags.has("highway"):
 				# Дорога принадлежит чанку если хотя бы одна точка внутри
+				# Дубликаты допустимы - дороги длинные и проходят через много чанков
 				for node in nodes:
 					var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 					if local.x >= chunk_min_x and local.x < chunk_max_x and local.y >= chunk_min_z and local.y < chunk_max_z:
 						dominated_by_chunk = true
 						break
-				# Но чтобы избежать дубликатов, проверяем первую точку дороги
-				if dominated_by_chunk:
-					var first_local: Vector2 = _latlon_to_local(nodes[0].lat, nodes[0].lon)
-					dominated_by_chunk = first_local.x >= chunk_min_x and first_local.x < chunk_max_x and first_local.y >= chunk_min_z and first_local.y < chunk_max_z
 			elif tags.has("waterway"):
 				# Водные пути (реки) - рисуем если хотя бы одна точка в чанке
 				# Дубликаты допустимы, т.к. реки длинные и проходят через много чанков
