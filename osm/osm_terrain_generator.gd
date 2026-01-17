@@ -1,26 +1,28 @@
 extends Node3D
 class_name OSMTerrainGenerator
 
+const OSMLoaderScript = preload("res://osm/osm_loader.gd")
+
 @export var start_lat := 59.149886
 @export var start_lon := 37.949370
 @export var area_radius := 300.0  # метров
 
-var osm_loader: OSMLoader
+var osm_loader: Node
 var terrain_mesh: MeshInstance3D
 var terrain_body: StaticBody3D
 
 # Цвета для разных типов поверхностей
 const COLORS := {
-	"road_primary": Color(0.3, 0.3, 0.3),      # Тёмно-серый - главные дороги
-	"road_secondary": Color(0.4, 0.4, 0.4),    # Серый - второстепенные
-	"road_residential": Color(0.5, 0.5, 0.5),  # Светло-серый - жилые
-	"road_path": Color(0.6, 0.5, 0.4),         # Коричневатый - тропинки
-	"building": Color(0.6, 0.4, 0.3),          # Коричневый - здания
-	"water": Color(0.2, 0.4, 0.7),             # Синий - вода
-	"grass": Color(0.3, 0.6, 0.3),             # Зелёный - трава/парки
-	"forest": Color(0.2, 0.5, 0.2),            # Тёмно-зелёный - лес
-	"farmland": Color(0.7, 0.7, 0.4),          # Жёлто-зелёный - поля
-	"default": Color(0.4, 0.5, 0.4),           # Базовый цвет земли
+	"road_primary": Color(0.3, 0.3, 0.3),
+	"road_secondary": Color(0.4, 0.4, 0.4),
+	"road_residential": Color(0.5, 0.5, 0.5),
+	"road_path": Color(0.6, 0.5, 0.4),
+	"building": Color(0.6, 0.4, 0.3),
+	"water": Color(0.2, 0.4, 0.7),
+	"grass": Color(0.3, 0.6, 0.3),
+	"forest": Color(0.2, 0.5, 0.2),
+	"farmland": Color(0.7, 0.7, 0.4),
+	"default": Color(0.4, 0.5, 0.4),
 }
 
 const ROAD_WIDTHS := {
@@ -38,45 +40,13 @@ const ROAD_WIDTHS := {
 }
 
 func _ready() -> void:
-	osm_loader = OSMLoader.new()
+	osm_loader = OSMLoaderScript.new()
 	add_child(osm_loader)
 	osm_loader.data_loaded.connect(_on_osm_data_loaded)
 	osm_loader.load_failed.connect(_on_osm_load_failed)
 
-	# Terrain уже в сцене, только загружаем OSM данные
 	print("OSM: Starting data load...")
 	osm_loader.load_area(start_lat, start_lon, area_radius)
-
-func _create_base_terrain() -> void:
-	# Базовая плоскость
-	terrain_body = StaticBody3D.new()
-	terrain_body.name = "TerrainBody"
-	add_child(terrain_body)
-
-	# Коллизия - плоский бокс на уровне Y=0
-	var collision := CollisionShape3D.new()
-	collision.name = "TerrainCollision"
-	var box_shape := BoxShape3D.new()
-	var terrain_size := area_radius * 3.0
-	box_shape.size = Vector3(terrain_size, 1.0, terrain_size)
-	collision.shape = box_shape
-	collision.position = Vector3(0, -0.5, 0)
-	terrain_body.add_child(collision)
-
-	# Визуальный меш
-	terrain_mesh = MeshInstance3D.new()
-	terrain_mesh.name = "TerrainMesh"
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(terrain_size, terrain_size)
-	terrain_mesh.mesh = plane
-	terrain_mesh.position = Vector3(0, 0, 0)
-
-	var material := StandardMaterial3D.new()
-	material.albedo_color = COLORS["default"]
-	terrain_mesh.material_override = material
-	terrain_body.add_child(terrain_mesh)
-
-	print("OSM: Base terrain created, size: ", terrain_size, "m")
 
 func _on_osm_load_failed(error: String) -> void:
 	push_error("OSM load failed: " + error)
@@ -95,7 +65,6 @@ func _generate_terrain(osm_data: Dictionary) -> void:
 		if nodes.size() < 2:
 			continue
 
-		# Определяем тип объекта и создаём геометрию
 		if tags.has("highway"):
 			_create_road(nodes, tags)
 		elif tags.has("building"):
@@ -134,10 +103,9 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height: float) 
 
 	var points: PackedVector2Array = []
 	for node in nodes:
-		var local := osm_loader.latlon_to_local(node.lat, node.lon)
+		var local: Vector2 = osm_loader.latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	# Создаём меш для каждого сегмента дороги
 	for i in range(points.size() - 1):
 		var p1 := points[i]
 		var p2 := points[i + 1]
@@ -156,7 +124,6 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height: float) 
 
 		im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
 
-		# Два треугольника для сегмента дороги
 		var v1 := Vector3(p1.x - perp.x, height, p1.y - perp.y)
 		var v2 := Vector3(p1.x + perp.x, height, p1.y + perp.y)
 		var v3 := Vector3(p2.x + perp.x, height, p2.y + perp.y)
@@ -180,10 +147,9 @@ func _create_building(nodes: Array, _tags: Dictionary) -> void:
 
 	var points: PackedVector2Array = []
 	for node in nodes:
-		var local := osm_loader.latlon_to_local(node.lat, node.lon)
+		var local: Vector2 = osm_loader.latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	# Простой полигон для здания (на земле)
 	_create_polygon_mesh(points, COLORS["building"], 0.03)
 
 func _create_natural(nodes: Array, tags: Dictionary) -> void:
@@ -205,7 +171,7 @@ func _create_natural(nodes: Array, tags: Dictionary) -> void:
 
 	var points: PackedVector2Array = []
 	for node in nodes:
-		var local := osm_loader.latlon_to_local(node.lat, node.lon)
+		var local: Vector2 = osm_loader.latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
 	_create_polygon_mesh(points, color, 0.01)
@@ -235,7 +201,7 @@ func _create_landuse(nodes: Array, tags: Dictionary) -> void:
 
 	var points: PackedVector2Array = []
 	for node in nodes:
-		var local := osm_loader.latlon_to_local(node.lat, node.lon)
+		var local: Vector2 = osm_loader.latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
 	_create_polygon_mesh(points, color, 0.005)
@@ -259,7 +225,7 @@ func _create_leisure(nodes: Array, tags: Dictionary) -> void:
 
 	var points: PackedVector2Array = []
 	for node in nodes:
-		var local := osm_loader.latlon_to_local(node.lat, node.lon)
+		var local: Vector2 = osm_loader.latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
 	_create_polygon_mesh(points, color, 0.01)
@@ -286,7 +252,6 @@ func _create_polygon_mesh(points: PackedVector2Array, color: Color, height: floa
 	if points.size() < 3:
 		return
 
-	# Простая триангуляция (fan от первой точки)
 	var mesh := MeshInstance3D.new()
 	var im := ImmediateMesh.new()
 	mesh.mesh = im
