@@ -57,6 +57,8 @@ func _on_osm_data_loaded(osm_data: Dictionary) -> void:
 
 func _generate_terrain(osm_data: Dictionary) -> void:
 	var ways: Array = osm_data.get("ways", [])
+	var road_count := 0
+	var building_count := 0
 
 	for way in ways:
 		var tags: Dictionary = way.get("tags", {})
@@ -67,8 +69,10 @@ func _generate_terrain(osm_data: Dictionary) -> void:
 
 		if tags.has("highway"):
 			_create_road(nodes, tags)
+			road_count += 1
 		elif tags.has("building"):
 			_create_building(nodes, tags)
+			building_count += 1
 		elif tags.has("natural"):
 			_create_natural(nodes, tags)
 		elif tags.has("landuse"):
@@ -78,7 +82,7 @@ func _generate_terrain(osm_data: Dictionary) -> void:
 		elif tags.has("waterway"):
 			_create_waterway(nodes, tags)
 
-	print("OSM: Terrain generation complete!")
+	print("OSM: Generated %d roads, %d buildings" % [road_count, building_count])
 
 func _create_road(nodes: Array, tags: Dictionary) -> void:
 	var highway_type: String = tags.get("highway", "residential")
@@ -95,7 +99,7 @@ func _create_road(nodes: Array, tags: Dictionary) -> void:
 		_:
 			color = COLORS["road_residential"]
 
-	_create_path_mesh(nodes, width, color, 0.02)
+	_create_path_mesh(nodes, width, color, 0.05)
 
 func _create_path_mesh(nodes: Array, width: float, color: Color, height: float) -> void:
 	if nodes.size() < 2:
@@ -141,7 +145,7 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height: float) 
 
 		add_child(mesh)
 
-func _create_building(nodes: Array, _tags: Dictionary) -> void:
+func _create_building(nodes: Array, tags: Dictionary) -> void:
 	if nodes.size() < 3:
 		return
 
@@ -150,7 +154,15 @@ func _create_building(nodes: Array, _tags: Dictionary) -> void:
 		var local: Vector2 = osm_loader.latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	_create_polygon_mesh(points, COLORS["building"], 0.03)
+	# Определяем высоту здания
+	var height := 8.0  # По умолчанию ~2-3 этажа
+	if tags.has("building:levels"):
+		var levels = int(tags.get("building:levels", "3"))
+		height = levels * 3.0  # 3 метра на этаж
+	elif tags.has("height"):
+		height = float(tags.get("height", "8"))
+
+	_create_3d_building(points, COLORS["building"], height)
 
 func _create_natural(nodes: Array, tags: Dictionary) -> void:
 	if nodes.size() < 3:
@@ -174,7 +186,7 @@ func _create_natural(nodes: Array, tags: Dictionary) -> void:
 		var local: Vector2 = osm_loader.latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	_create_polygon_mesh(points, color, 0.01)
+	_create_polygon_mesh(points, color, 0.04)
 
 func _create_landuse(nodes: Array, tags: Dictionary) -> void:
 	if nodes.size() < 3:
@@ -204,7 +216,7 @@ func _create_landuse(nodes: Array, tags: Dictionary) -> void:
 		var local: Vector2 = osm_loader.latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	_create_polygon_mesh(points, color, 0.005)
+	_create_polygon_mesh(points, color, 0.02)
 
 func _create_leisure(nodes: Array, tags: Dictionary) -> void:
 	if nodes.size() < 3:
@@ -228,7 +240,7 @@ func _create_leisure(nodes: Array, tags: Dictionary) -> void:
 		var local: Vector2 = osm_loader.latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	_create_polygon_mesh(points, color, 0.01)
+	_create_polygon_mesh(points, color, 0.04)
 
 func _create_waterway(nodes: Array, tags: Dictionary) -> void:
 	var waterway_type: String = tags.get("waterway", "")
@@ -246,7 +258,82 @@ func _create_waterway(nodes: Array, tags: Dictionary) -> void:
 		_:
 			width = 5.0
 
-	_create_path_mesh(nodes, width, COLORS["water"], 0.01)
+	_create_path_mesh(nodes, width, COLORS["water"], 0.03)
+
+func _create_3d_building(points: PackedVector2Array, color: Color, building_height: float) -> void:
+	if points.size() < 3:
+		return
+
+	var mesh := MeshInstance3D.new()
+	var im := ImmediateMesh.new()
+	mesh.mesh = im
+
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	mesh.material_override = material
+
+	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	# Крыша (верхняя грань)
+	var center := Vector2.ZERO
+	for p in points:
+		center += p
+	center /= points.size()
+
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
+
+		im.surface_add_vertex(Vector3(center.x, building_height, center.y))
+		im.surface_add_vertex(Vector3(p1.x, building_height, p1.y))
+		im.surface_add_vertex(Vector3(p2.x, building_height, p2.y))
+
+	# Стены
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
+
+		# Два треугольника для каждой стены
+		var v1 := Vector3(p1.x, 0, p1.y)
+		var v2 := Vector3(p2.x, 0, p2.y)
+		var v3 := Vector3(p2.x, building_height, p2.y)
+		var v4 := Vector3(p1.x, building_height, p1.y)
+
+		im.surface_add_vertex(v1)
+		im.surface_add_vertex(v2)
+		im.surface_add_vertex(v3)
+
+		im.surface_add_vertex(v1)
+		im.surface_add_vertex(v3)
+		im.surface_add_vertex(v4)
+
+	im.surface_end()
+
+	# Добавляем коллизию для здания
+	var body := StaticBody3D.new()
+	body.add_child(mesh)
+
+	# Простая коллизия - бокс вокруг здания
+	var collision := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+
+	var min_x := points[0].x
+	var max_x := points[0].x
+	var min_z := points[0].y
+	var max_z := points[0].y
+
+	for p in points:
+		min_x = min(min_x, p.x)
+		max_x = max(max_x, p.x)
+		min_z = min(min_z, p.y)
+		max_z = max(max_z, p.y)
+
+	box.size = Vector3(max_x - min_x, building_height, max_z - min_z)
+	collision.shape = box
+	collision.position = Vector3((min_x + max_x) / 2, building_height / 2, (min_z + max_z) / 2)
+	body.add_child(collision)
+
+	add_child(body)
 
 func _create_polygon_mesh(points: PackedVector2Array, color: Color, height: float) -> void:
 	if points.size() < 3:
