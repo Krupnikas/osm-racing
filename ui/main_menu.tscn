@@ -3,6 +3,7 @@
 [ext_resource type="Script" path="res://ui/main_menu.gd" id="1_menu"]
 
 [node name="MainMenu" type="Control"]
+process_mode = 3
 layout_mode = 3
 anchors_preset = 15
 anchor_right = 1.0
@@ -18,7 +19,7 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-color = Color(0.1, 0.1, 0.15, 0.9)
+color = Color(0.1, 0.1, 0.15, 1.0)
 
 [node name="VBox" type="VBoxContainer" parent="."]
 layout_mode = 1
@@ -126,6 +127,51 @@ custom_minimum_size = Vector2(0, 40)
 layout_mode = 2
 theme_override_font_sizes/font_size = 18
 text = "Назад"
+
+[node name="LoadingPanel" type="Panel" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="LoadingPanel"]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -200.0
+offset_top = -80.0
+offset_right = 200.0
+offset_bottom = 80.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Title" type="Label" parent="LoadingPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+text = "Загрузка..."
+horizontal_alignment = 1
+
+[node name="Spacer" type="Control" parent="LoadingPanel/VBox"]
+custom_minimum_size = Vector2(0, 20)
+layout_mode = 2
+
+[node name="ProgressBar" type="ProgressBar" parent="LoadingPanel/VBox"]
+custom_minimum_size = Vector2(400, 30)
+layout_mode = 2
+value = 0.0
+show_percentage = false
+
+[node name="StatusLabel" type="Label" parent="LoadingPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 16
+text = "Загрузка карты..."
+horizontal_alignment = 1
 
 [connection signal="pressed" from="VBox/StartButton" to="." method="_on_start_pressed"]
 [connection signal="pressed" from="VBox/ControlsButton" to="." method="_on_controls_pressed"]

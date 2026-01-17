@@ -42,6 +42,7 @@ func load_area(lat: float, lon: float, radius: float = 500.0) -> void:
 	]
 
 	# Overpass запрос для получения дорог, зданий, водоёмов, зелени, amenity
+	# Включаем relation для крупных зданий (школы, больницы и т.д.)
 	var query := """
 [out:json][timeout:30];
 (
@@ -52,11 +53,13 @@ func load_area(lat: float, lon: float, radius: float = 500.0) -> void:
   way["leisure"](%s);
   way["waterway"](%s);
   way["amenity"](%s);
+  relation["building"](%s);
+  relation["amenity"](%s);
 );
-out body;
+out body geom;
 >;
 out skel qt;
-""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox]
+""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
 	current_server_index = 0
@@ -109,6 +112,7 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 func _parse_osm_data(data: Dictionary) -> Dictionary:
 	var nodes := {}
 	var ways := []
+	var way_by_id := {}  # Для связи relation -> way
 
 	# Собираем все узлы
 	for element in data.get("elements", []):
@@ -118,7 +122,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 				"lon": element.lon
 			}
 
-	# Собираем все пути
+	# Собираем все пути (и сохраняем по id для relation)
 	for element in data.get("elements", []):
 		if element.get("type") == "way":
 			var way_nodes := []
@@ -127,10 +131,49 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 					way_nodes.append(nodes[node_id])
 
 			if way_nodes.size() > 1:
-				ways.append({
+				var way_data := {
 					"nodes": way_nodes,
 					"tags": element.get("tags", {})
+				}
+				ways.append(way_data)
+				way_by_id[element.id] = way_nodes
+
+	# Обрабатываем relation (multipolygon для крупных зданий)
+	# С out geom геометрия включена напрямую в members
+	var relations_found := 0
+	var relations_with_nodes := 0
+	for element in data.get("elements", []):
+		if element.get("type") == "relation":
+			relations_found += 1
+			var tags: Dictionary = element.get("tags", {})
+			# Берём только outer members для построения контура
+			var outer_nodes := []
+			for member in element.get("members", []):
+				if member.get("type") == "way" and member.get("role", "outer") == "outer":
+					# С out geom геометрия включена в member.geometry
+					var geometry: Array = member.get("geometry", [])
+					if geometry.size() > 0:
+						for point in geometry:
+							outer_nodes.append({
+								"lat": point.get("lat", 0.0),
+								"lon": point.get("lon", 0.0)
+							})
+					else:
+						# Fallback на старый метод через way_by_id
+						var way_id: int = member.get("ref", 0)
+						if way_by_id.has(way_id):
+							for node in way_by_id[way_id]:
+								outer_nodes.append(node)
+
+			if outer_nodes.size() > 2:
+				relations_with_nodes += 1
+				ways.append({
+					"nodes": outer_nodes,
+					"tags": tags
 				})
+
+	if relations_found > 0:
+		print("OSM: Found %d relations, %d with valid geometry" % [relations_found, relations_with_nodes])
 
 	print("OSM: Parsed %d nodes and %d ways" % [nodes.size(), ways.size()])
 

@@ -107,3 +107,5 @@ start_lat = 59.149886
 start_lon = 37.94937
 
 [node name="MainMenu" parent="UI" instance=ExtResource("9_menu")]
+terrain_generator_path = NodePath("../../OSMTerrain")
+car_path = NodePath("../../Car")
