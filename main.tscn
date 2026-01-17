@@ -1,8 +1,8 @@
 [gd_scene load_steps=6 format=3 uid="uid://bmain123"]
 
-[ext_resource type="PackedScene" uid="uid://bground123" path="res://world/ground.tscn" id="1_ground"]
 [ext_resource type="PackedScene" uid="uid://bcar123" path="res://car/car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://camera/follow_camera.gd" id="3_camera"]
+[ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="4_osm"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -23,7 +23,11 @@ ssao_enabled = true
 
 [node name="Main" type="Node3D"]
 
-[node name="Ground" parent="." instance=ExtResource("1_ground")]
+[node name="OSMTerrain" type="Node3D" parent="."]
+script = ExtResource("4_osm")
+start_lat = 59.149886
+start_lon = 37.94937
+area_radius = 300.0
 
 [node name="Car" parent="." instance=ExtResource("2_car")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
