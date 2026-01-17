@@ -8,10 +8,13 @@ extends Camera3D
 @export var smooth_speed := 5.0
 @export var mouse_sensitivity := 0.003
 @export var zoom_speed := 1.0
+@export var fly_speed := 20.0
+@export var fly_speed_fast := 60.0
 
 var _target_node: Node3D
 var _yaw := 0.0      # Горизонтальный угол (вокруг Y)
 var _pitch := 0.3    # Вертикальный угол (наклон вниз)
+var _fly_mode := false  # Режим свободного полёта
 
 func _ready() -> void:
 	if target:
@@ -22,7 +25,7 @@ func _input(event: InputEvent) -> void:
 	# Управление мышью
 	if event is InputEventMouseMotion:
 		_yaw -= event.relative.x * mouse_sensitivity
-		_pitch -= event.relative.y * mouse_sensitivity
+		_pitch += event.relative.y * mouse_sensitivity  # Инвертированная вертикальная ось
 		_pitch = clamp(_pitch, -0.2, 1.2)  # Ограничиваем наклон
 
 	# Зум колёсиком
@@ -32,15 +35,64 @@ func _input(event: InputEvent) -> void:
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			distance = min(max_distance, distance + zoom_speed)
 
-	# Escape для освобождения мыши
+	# Клавиши
 	if event is InputEventKey and event.pressed:
+		# Escape для освобождения мыши
 		if event.keycode == KEY_ESCAPE:
 			if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 				Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 			else:
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		# F - переключение режима полёта
+		elif event.keycode == KEY_F:
+			_fly_mode = not _fly_mode
+			if _fly_mode:
+				print("Camera: Fly mode ON (WASD + QE to move, Shift for fast)")
+			else:
+				print("Camera: Follow mode ON")
 
 func _physics_process(delta: float) -> void:
+	if _fly_mode:
+		_process_fly_mode(delta)
+	else:
+		_process_follow_mode(delta)
+
+func _process_fly_mode(delta: float) -> void:
+	# Определяем скорость (Shift для быстрого движения)
+	var speed := fly_speed_fast if Input.is_key_pressed(KEY_SHIFT) else fly_speed
+
+	# Направление движения на основе углов камеры
+	var forward := Vector3(-sin(_yaw), 0, -cos(_yaw)).normalized()
+	var right := Vector3(cos(_yaw), 0, -sin(_yaw)).normalized()
+	var up := Vector3.UP
+
+	var velocity := Vector3.ZERO
+
+	# WASD для горизонтального движения
+	if Input.is_key_pressed(KEY_W):
+		velocity += forward
+	if Input.is_key_pressed(KEY_S):
+		velocity -= forward
+	if Input.is_key_pressed(KEY_A):
+		velocity -= right
+	if Input.is_key_pressed(KEY_D):
+		velocity += right
+	# Q/E для вертикального движения
+	if Input.is_key_pressed(KEY_Q):
+		velocity -= up
+	if Input.is_key_pressed(KEY_E):
+		velocity += up
+
+	if velocity.length() > 0:
+		velocity = velocity.normalized() * speed
+
+	global_position += velocity * delta
+
+	# Обновляем направление взгляда
+	var look_dir := Vector3(-sin(_yaw) * cos(_pitch), -sin(_pitch), -cos(_yaw) * cos(_pitch))
+	look_at(global_position + look_dir)
+
+func _process_follow_mode(delta: float) -> void:
 	if not _target_node:
 		return
 
