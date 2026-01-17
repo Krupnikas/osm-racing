@@ -6,10 +6,12 @@ signal quit_game
 @export var terrain_generator_path: NodePath
 @export var car_path: NodePath
 @export var world_root_path: NodePath
+@export var hud_path: NodePath
 
 var _terrain_generator: Node3D
 var _car: Node3D
 var _world_root: Node3D
+var _hud: Control
 var _is_loading := false
 
 func _ready() -> void:
@@ -25,6 +27,8 @@ func _ready() -> void:
 		_car = get_node(car_path)
 	if world_root_path:
 		_world_root = get_node(world_root_path)
+	if hud_path:
+		_hud = get_node(hud_path)
 
 	# Подключаем сигналы от генератора террейна
 	if _terrain_generator:
@@ -79,6 +83,10 @@ func _start_game() -> void:
 	# Показываем мир
 	_show_world()
 
+	# Показываем HUD
+	if _hud:
+		_hud.show_hud()
+
 	# Скрываем меню
 	visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -124,8 +132,12 @@ func show_menu() -> void:
 	$LoadingPanel.visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	get_tree().paused = true
+	if _hud:
+		_hud.hide_hud()
 
 func hide_menu() -> void:
 	visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	get_tree().paused = false
+	if _hud:
+		_hud.show_hud()

@@ -8,6 +8,7 @@
 [ext_resource type="Script" path="res://camera/first_person_camera.gd" id="7_fps_cam"]
 [ext_resource type="Script" path="res://camera/top_down_camera.gd" id="8_top_cam"]
 [ext_resource type="PackedScene" uid="uid://menu123" path="res://ui/main_menu.tscn" id="9_menu"]
+[ext_resource type="PackedScene" uid="uid://hud123" path="res://ui/hud.tscn" id="10_hud"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -108,4 +109,8 @@ start_lon = 37.94937
 
 [node name="MainMenu" parent="UI" instance=ExtResource("9_menu")]
 terrain_generator_path = NodePath("../../OSMTerrain")
+car_path = NodePath("../../Car")
+hud_path = NodePath("../HUD")
+
+[node name="HUD" parent="UI" instance=ExtResource("10_hud")]
 car_path = NodePath("../../Car")
