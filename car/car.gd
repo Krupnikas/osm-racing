@@ -1,13 +1,13 @@
 extends VehicleBody3D
 
 ## Сила двигателя
-@export var engine_power := 300.0
+@export var engine_power := 800.0
 ## Максимальный угол поворота колёс (радианы)
-@export var steering_limit := 0.4
+@export var steering_limit := 0.5
 ## Скорость поворота руля
-@export var steering_speed := 3.0
+@export var steering_speed := 5.0
 ## Сила торможения
-@export var brake_power := 30.0
+@export var brake_power := 50.0
 
 func _physics_process(delta: float) -> void:
 	# Руление (стрелки влево/вправо)

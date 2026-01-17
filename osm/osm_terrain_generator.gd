@@ -99,7 +99,7 @@ func _create_road(nodes: Array, tags: Dictionary) -> void:
 		_:
 			color = COLORS["road_residential"]
 
-	_create_path_mesh(nodes, width, color, 0.05)
+	_create_path_mesh(nodes, width, color, 0.1)
 
 func _create_path_mesh(nodes: Array, width: float, color: Color, height: float) -> void:
 	if nodes.size() < 2:
@@ -110,6 +110,19 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height: float) 
 		var local: Vector2 = osm_loader.latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
+	# Создаём один меш для всей дороги
+	var mesh := MeshInstance3D.new()
+	var im := ImmediateMesh.new()
+	mesh.mesh = im
+
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED  # Видно с обеих сторон
+	mesh.material_override = material
+
+	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+
 	for i in range(points.size() - 1):
 		var p1 := points[i]
 		var p2 := points[i + 1]
@@ -117,33 +130,23 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height: float) 
 		var dir := (p2 - p1).normalized()
 		var perp := Vector2(-dir.y, dir.x) * width * 0.5
 
-		var mesh := MeshInstance3D.new()
-		var im := ImmediateMesh.new()
-		mesh.mesh = im
-
-		var material := StandardMaterial3D.new()
-		material.albedo_color = color
-		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mesh.material_override = material
-
-		im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
-
 		var v1 := Vector3(p1.x - perp.x, height, p1.y - perp.y)
 		var v2 := Vector3(p1.x + perp.x, height, p1.y + perp.y)
 		var v3 := Vector3(p2.x + perp.x, height, p2.y + perp.y)
 		var v4 := Vector3(p2.x - perp.x, height, p2.y - perp.y)
 
+		# Первый треугольник (порядок против часовой стрелки для нормали вверх)
 		im.surface_add_vertex(v1)
+		im.surface_add_vertex(v3)
 		im.surface_add_vertex(v2)
-		im.surface_add_vertex(v3)
 
+		# Второй треугольник
 		im.surface_add_vertex(v1)
-		im.surface_add_vertex(v3)
 		im.surface_add_vertex(v4)
+		im.surface_add_vertex(v3)
 
-		im.surface_end()
-
-		add_child(mesh)
+	im.surface_end()
+	add_child(mesh)
 
 func _create_building(nodes: Array, tags: Dictionary) -> void:
 	if nodes.size() < 3:
@@ -346,6 +349,7 @@ func _create_polygon_mesh(points: PackedVector2Array, color: Color, height: floa
 	var material := StandardMaterial3D.new()
 	material.albedo_color = color
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED  # Видно с обеих сторон
 	mesh.material_override = material
 
 	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -359,9 +363,10 @@ func _create_polygon_mesh(points: PackedVector2Array, color: Color, height: floa
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
+		# Порядок против часовой стрелки для нормали вверх
 		im.surface_add_vertex(Vector3(center.x, height, center.y))
-		im.surface_add_vertex(Vector3(p1.x, height, p1.y))
 		im.surface_add_vertex(Vector3(p2.x, height, p2.y))
+		im.surface_add_vertex(Vector3(p1.x, height, p1.y))
 
 	im.surface_end()
 

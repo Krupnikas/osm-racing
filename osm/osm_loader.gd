@@ -4,12 +4,21 @@ class_name OSMLoader
 signal data_loaded(osm_data: Dictionary)
 signal load_failed(error: String)
 
-const OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# Список серверов Overpass API (fallback)
+const OVERPASS_SERVERS := [
+	"https://overpass.kumi.systems/api/interpreter",
+	"https://overpass-api.de/api/interpreter",
+	"https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+]
 
 var http_request: HTTPRequest
 var center_lat: float
 var center_lon: float
 var radius_meters: float
+var current_server_index := 0
+var retry_count := 0
+var max_retries := 3
+var pending_query: String = ""
 
 func _ready() -> void:
 	http_request = HTTPRequest.new()
@@ -48,22 +57,40 @@ out body;
 out skel qt;
 """ % [bbox, bbox, bbox, bbox, bbox, bbox]
 
-	var headers := ["Content-Type: application/x-www-form-urlencoded"]
-	var body := "data=" + query.uri_encode()
+	pending_query = query
+	current_server_index = 0
+	retry_count = 0
+	_send_request()
 
-	print("OSM: Loading area around %.6f, %.6f with radius %.0fm" % [lat, lon, radius])
-	var error := http_request.request(OVERPASS_URL, headers, HTTPClient.METHOD_POST, body)
+func _send_request() -> void:
+	var server_url: String = OVERPASS_SERVERS[current_server_index]
+	var headers := ["Content-Type: application/x-www-form-urlencoded"]
+	var body := "data=" + pending_query.uri_encode()
+
+	print("OSM: Trying server %s (attempt %d)" % [server_url, retry_count + 1])
+	var error := http_request.request(server_url, headers, HTTPClient.METHOD_POST, body)
 
 	if error != OK:
-		load_failed.emit("HTTP request failed: " + str(error))
+		_try_next_server("HTTP request failed: " + str(error))
+
+func _try_next_server(reason: String) -> void:
+	print("OSM: Server failed - %s" % reason)
+	retry_count += 1
+
+	if retry_count < max_retries:
+		current_server_index = (current_server_index + 1) % OVERPASS_SERVERS.size()
+		print("OSM: Retrying with next server...")
+		_send_request()
+	else:
+		load_failed.emit("All servers failed after %d attempts. Last error: %s" % [max_retries, reason])
 
 func _on_request_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	if result != HTTPRequest.RESULT_SUCCESS:
-		load_failed.emit("Request failed with result: " + str(result))
+		_try_next_server("Request failed with result: " + str(result))
 		return
 
 	if response_code != 200:
-		load_failed.emit("HTTP error: " + str(response_code))
+		_try_next_server("HTTP error: " + str(response_code))
 		return
 
 	var json_string := body.get_string_from_utf8()
