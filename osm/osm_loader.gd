@@ -41,7 +41,7 @@ func load_area(lat: float, lon: float, radius: float = 500.0) -> void:
 		lon + lon_delta
 	]
 
-	# Overpass запрос для получения дорог, зданий, водоёмов, зелени
+	# Overpass запрос для получения дорог, зданий, водоёмов, зелени, amenity
 	var query := """
 [out:json][timeout:30];
 (
@@ -51,11 +51,12 @@ func load_area(lat: float, lon: float, radius: float = 500.0) -> void:
   way["natural"](%s);
   way["leisure"](%s);
   way["waterway"](%s);
+  way["amenity"](%s);
 );
 out body;
 >;
 out skel qt;
-""" % [bbox, bbox, bbox, bbox, bbox, bbox]
+""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
 	current_server_index = 0

@@ -35,17 +35,18 @@ const COLORS := {
 }
 
 const ROAD_WIDTHS := {
-	"motorway": 12.0,
-	"trunk": 10.0,
-	"primary": 8.0,
-	"secondary": 7.0,
-	"tertiary": 6.0,
-	"residential": 5.0,
+	"motorway": 16.0,
+	"trunk": 14.0,
+	"primary": 12.0,
+	"secondary": 10.0,
+	"tertiary": 8.0,
+	"residential": 6.0,
+	"unclassified": 5.0,
 	"service": 4.0,
 	"footway": 2.0,
 	"path": 1.5,
-	"cycleway": 2.0,
-	"track": 3.0,
+	"cycleway": 2.5,
+	"track": 3.5,
 }
 
 func _ready() -> void:
@@ -228,6 +229,10 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D) -> void:
 		elif tags.has("building"):
 			_create_building(nodes, tags, target, loader)
 			building_count += 1
+		elif tags.has("amenity") and not tags.has("building"):
+			# Amenity без building тега - создаём как здание
+			_create_amenity_building(nodes, tags, target, loader)
+			building_count += 1
 		elif tags.has("natural"):
 			_create_natural(nodes, tags, target, loader)
 		elif tags.has("landuse"):
@@ -288,7 +293,6 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height: float, 
 
 	var material := StandardMaterial3D.new()
 	material.albedo_color = color
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mesh.material_override = material
 
@@ -452,6 +456,57 @@ func _create_leisure(nodes: Array, tags: Dictionary, parent: Node3D, loader: Nod
 
 	_create_polygon_mesh(points, color, 0.04, parent)
 
+func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node) -> void:
+	if nodes.size() < 3:
+		return
+
+	var points: PackedVector2Array = []
+	for node in nodes:
+		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+		points.append(local)
+
+	# Определяем высоту по типу amenity
+	var amenity_type: String = str(tags.get("amenity", ""))
+	var height: float
+	var color: Color
+
+	match amenity_type:
+		"school", "kindergarten", "college":
+			height = 12.0
+			color = Color(0.7, 0.5, 0.4)  # Светло-коричневый
+		"university":
+			height = 18.0
+			color = Color(0.6, 0.4, 0.3)
+		"hospital", "clinic":
+			height = 18.0
+			color = Color(0.9, 0.9, 0.9)  # Белый
+		"pharmacy":
+			height = 5.0
+			color = Color(0.4, 0.8, 0.4)  # Зелёный
+		"police", "fire_station":
+			height = 10.0
+			color = Color(0.5, 0.5, 0.7)  # Синеватый
+		"place_of_worship", "church":
+			height = 20.0
+			color = Color(0.8, 0.7, 0.5)
+		"bank":
+			height = 12.0
+			color = Color(0.5, 0.5, 0.5)
+		"restaurant", "cafe", "fast_food":
+			height = 5.0
+			color = Color(0.7, 0.6, 0.5)
+		"fuel":
+			height = 4.0
+			color = Color(0.6, 0.6, 0.6)
+		"parking":
+			# Парковки не создаём как здания
+			return
+		_:
+			height = 8.0
+			color = Color(0.6, 0.5, 0.5)
+
+	_create_3d_building(points, color, height, parent)
+
 func _create_waterway(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node) -> void:
 	var waterway_type: String = tags.get("waterway", "")
 	var width: float
@@ -521,6 +576,7 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 	var mesh := MeshInstance3D.new()
 	var im := ImmediateMesh.new()
 	mesh.mesh = im
+	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON  # Отбрасывать тень
 
 	var material := StandardMaterial3D.new()
 	material.albedo_color = color
@@ -594,30 +650,34 @@ func _create_polygon_mesh(points: PackedVector2Array, color: Color, height: floa
 	if points.size() < 3:
 		return
 
+	# Убираем дубликат последней точки если она совпадает с первой
+	if points.size() > 1 and points[0].distance_to(points[points.size() - 1]) < 0.1:
+		points.remove_at(points.size() - 1)
+
+	if points.size() < 3:
+		return
+
 	var mesh := MeshInstance3D.new()
 	var im := ImmediateMesh.new()
 	mesh.mesh = im
 
 	var material := StandardMaterial3D.new()
 	material.albedo_color = color
-	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mesh.material_override = material
 
 	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
 
-	var center := Vector2.ZERO
-	for p in points:
-		center += p
-	center /= points.size()
-
-	for i in range(points.size()):
-		var p1 := points[i]
-		var p2 := points[(i + 1) % points.size()]
-
-		im.surface_add_vertex(Vector3(center.x, height, center.y))
-		im.surface_add_vertex(Vector3(p2.x, height, p2.y))
-		im.surface_add_vertex(Vector3(p1.x, height, p1.y))
+	# Используем триангуляцию для корректной работы с невыпуклыми полигонами
+	var indices := Geometry2D.triangulate_polygon(points)
+	if indices.size() >= 3:
+		for i in range(0, indices.size(), 3):
+			var p1 := points[indices[i]]
+			var p2 := points[indices[i + 1]]
+			var p3 := points[indices[i + 2]]
+			im.surface_add_vertex(Vector3(p1.x, height, p1.y))
+			im.surface_add_vertex(Vector3(p2.x, height, p2.y))
+			im.surface_add_vertex(Vector3(p3.x, height, p3.y))
 
 	im.surface_end()
 
