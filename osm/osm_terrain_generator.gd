@@ -43,7 +43,8 @@ func _ready() -> void:
 	osm_loader.data_loaded.connect(_on_osm_data_loaded)
 	osm_loader.load_failed.connect(_on_osm_load_failed)
 
-	_create_base_terrain()
+	# Terrain уже в сцене, только загружаем OSM данные
+	print("OSM: Starting data load...")
 	osm_loader.load_area(start_lat, start_lon, area_radius)
 
 func _create_base_terrain() -> void:
@@ -52,23 +53,30 @@ func _create_base_terrain() -> void:
 	terrain_body.name = "TerrainBody"
 	add_child(terrain_body)
 
+	# Коллизия - плоский бокс на уровне Y=0
 	var collision := CollisionShape3D.new()
+	collision.name = "TerrainCollision"
 	var box_shape := BoxShape3D.new()
-	box_shape.size = Vector3(area_radius * 2.5, 1, area_radius * 2.5)
+	var terrain_size := area_radius * 3.0
+	box_shape.size = Vector3(terrain_size, 1.0, terrain_size)
 	collision.shape = box_shape
-	collision.position.y = -0.5
+	collision.position = Vector3(0, -0.5, 0)
 	terrain_body.add_child(collision)
 
+	# Визуальный меш
 	terrain_mesh = MeshInstance3D.new()
 	terrain_mesh.name = "TerrainMesh"
 	var plane := PlaneMesh.new()
-	plane.size = Vector2(area_radius * 2.5, area_radius * 2.5)
+	plane.size = Vector2(terrain_size, terrain_size)
 	terrain_mesh.mesh = plane
+	terrain_mesh.position = Vector3(0, 0, 0)
 
 	var material := StandardMaterial3D.new()
 	material.albedo_color = COLORS["default"]
 	terrain_mesh.material_override = material
 	terrain_body.add_child(terrain_mesh)
+
+	print("OSM: Base terrain created, size: ", terrain_size, "m")
 
 func _on_osm_load_failed(error: String) -> void:
 	push_error("OSM load failed: " + error)
