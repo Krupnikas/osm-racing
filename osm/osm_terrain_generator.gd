@@ -859,6 +859,11 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 	else:
 		# Fallback цвет
 		material.albedo_color = COLORS.get("road_residential", Color(0.4, 0.4, 0.4))
+
+	# Применяем мокрый асфальт если дождь уже идёт
+	if _is_wet_mode:
+		WetRoadMaterial.apply_wet_properties(material, true)
+
 	mesh.material_override = material
 
 	parent.add_child(mesh)
@@ -2712,25 +2717,35 @@ func set_wet_mode(enabled: bool) -> void:
 func _update_chunk_road_wetness(chunk: Node3D, is_wet: bool) -> void:
 	"""Обновляет материалы дорог в чанке для мокрого/сухого состояния"""
 	for child in chunk.get_children():
-		# Ищем StaticBody3D с дорогами (они имеют MeshInstance3D дочерние ноды)
-		if child is StaticBody3D:
+		# Дороги добавляются как MeshInstance3D прямо в чанк
+		if child is MeshInstance3D:
+			var mat := child.material_override as StandardMaterial3D
+			if mat and _is_road_material(mat):
+				_apply_wet_material(mat, is_wet)
+		# Также проверяем внутри StaticBody3D (бордюры и коллизии)
+		elif child is StaticBody3D:
 			for mesh_child in child.get_children():
 				if mesh_child is MeshInstance3D:
 					var mat := mesh_child.material_override as StandardMaterial3D
-					if mat:
+					if mat and _is_road_material(mat):
 						_apply_wet_material(mat, is_wet)
+
+
+func _is_road_material(mat: StandardMaterial3D) -> bool:
+	"""Проверяет, является ли материал дорожным (не бордюр, не здание)"""
+	# Дороги имеют текстуру или тёмный цвет асфальта
+	if mat.albedo_texture:
+		return true
+	# Проверяем цвет - дороги обычно тёмно-серые
+	var color := mat.albedo_color
+	if color.r < 0.5 and color.g < 0.5 and color.b < 0.5:
+		return true
+	return false
 
 
 func _apply_wet_material(mat: StandardMaterial3D, is_wet: bool) -> void:
 	"""Применяет свойства мокрого/сухого асфальта к материалу"""
-	if is_wet:
-		mat.metallic = 0.35
-		mat.roughness = 0.08
-		mat.metallic_specular = 0.9
-	else:
-		mat.metallic = 0.0
-		mat.roughness = 0.85
-		mat.metallic_specular = 0.5
+	WetRoadMaterial.apply_wet_properties(mat, is_wet)
 
 
 func _connect_to_night_mode() -> void:

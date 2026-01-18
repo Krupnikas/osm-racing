@@ -3,10 +3,10 @@ class_name WetRoadMaterial
 
 ## Утилиты для создания эффекта мокрого асфальта
 
-# Параметры мокрой дороги
-const WET_METALLIC := 0.35
-const WET_ROUGHNESS := 0.08
-const WET_SPECULAR := 0.9
+# Параметры мокрой дороги - более отражающий асфальт
+const WET_METALLIC := 0.6
+const WET_ROUGHNESS := 0.02
+const WET_SPECULAR := 1.0
 
 # Параметры сухой дороги
 const DRY_METALLIC := 0.0
