@@ -8,11 +8,21 @@ signal quit_game
 @export var world_root_path: NodePath
 @export var hud_path: NodePath
 
+# Доступные локации: название -> [широта, долгота]
+const LOCATIONS := {
+	"Череповец": [59.149886, 37.949370],
+	"Москва (Отрадное)": [55.860580, 37.599646],
+	"Тбилиси (Важа-Пшавела)": [41.723972, 44.730502],
+	"Дубай (Крик)": [25.208591, 55.344100],
+}
+
 var _terrain_generator: Node3D
 var _car: Node3D
 var _world_root: Node3D
 var _hud: Control
 var _is_loading := false
+var _game_started := false  # Игра уже была запущена
+var _selected_location := "Череповец"
 
 func _ready() -> void:
 	# Показываем курсор в меню
@@ -39,20 +49,61 @@ func _ready() -> void:
 	# Скрываем мир до загрузки
 	_hide_world()
 
+	# Масштабируем UI для fullscreen (вызываем после layout)
+	await get_tree().process_frame
+	_scale_for_screen()
+
+func _on_continue_pressed() -> void:
+	# Просто продолжаем игру без повторной загрузки
+	hide_menu()
+
 func _on_start_pressed() -> void:
 	if _is_loading:
 		return
 
+	# Если игра уже запущена - просто продолжаем
+	if _game_started:
+		hide_menu()
+		return
+
+	# Показываем панель выбора локации
+	$VBox.visible = false
+	$LocationPanel.visible = true
+
+func _on_location_selected(location_name: String) -> void:
+	_selected_location = location_name
+	_start_loading()
+
+func _on_location_back_pressed() -> void:
+	$LocationPanel.visible = false
+	$VBox.visible = true
+
+func _on_cherepovets_pressed() -> void:
+	_on_location_selected("Череповец")
+
+func _on_moscow_pressed() -> void:
+	_on_location_selected("Москва (Отрадное)")
+
+func _on_tbilisi_pressed() -> void:
+	_on_location_selected("Тбилиси (Важа-Пшавела)")
+
+func _on_dubai_pressed() -> void:
+	_on_location_selected("Дубай (Крик)")
+
+func _start_loading() -> void:
 	_is_loading = true
 
-	# Скрываем основное меню, показываем экран загрузки
-	$VBox.visible = false
+	# Скрываем панель выбора, показываем экран загрузки
+	$LocationPanel.visible = false
 	$LoadingPanel.visible = true
 	$LoadingPanel/VBox/ProgressBar.value = 0
 	$LoadingPanel/VBox/StatusLabel.text = "Подготовка..."
 
-	# Начинаем загрузку террейна
+	# Устанавливаем координаты для генератора
 	if _terrain_generator:
+		var coords: Array = LOCATIONS[_selected_location]
+		_terrain_generator.start_lat = coords[0]
+		_terrain_generator.start_lon = coords[1]
 		_terrain_generator.start_loading()
 	else:
 		# Если нет генератора - сразу показываем игру
@@ -79,6 +130,7 @@ func _on_load_complete() -> void:
 
 func _start_game() -> void:
 	_is_loading = false
+	_game_started = true
 
 	# Показываем мир
 	_show_world()
@@ -135,9 +187,18 @@ func show_menu() -> void:
 	if _hud:
 		_hud.hide_hud()
 
+	# Показываем кнопку "Продолжить" если игра уже запущена
+	$VBox/ContinueButton.visible = _game_started
+	# Меняем текст кнопки "Старт" если игра уже запущена
+	$VBox/StartButton.text = "Новая игра" if _game_started else "Старт"
+
 func hide_menu() -> void:
 	visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	get_tree().paused = false
 	if _hud:
 		_hud.show_hud()
+
+func _scale_for_screen() -> void:
+	# Не масштабируем - используем большие шрифты в tscn
+	pass

@@ -435,6 +435,8 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	# Добавляем коллизию
 	var body := StaticBody3D.new()
 	body.name = "TerrainBody"
+	body.collision_layer = 1  # Слой 1 - земля, по которой едет машина
+	body.collision_mask = 1   # Реагирует на слой 1
 	body.add_child(mesh)
 
 	# Создаём коллизию из меша
@@ -556,7 +558,96 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 
 	if skipped_buildings > 0:
 		print("OSM: Skipped %d buildings (outside chunk bounds)" % skipped_buildings)
-	print("OSM: Generated %d roads, %d buildings" % [road_count, building_count])
+
+	# Ищем перекрёстки (узлы, которые используются несколькими дорогами)
+	# Оптимизация: проверяем только концы дорог (первый и последний узел)
+	var node_road_count: Dictionary = {}  # node_key -> count
+	var node_positions: Dictionary = {}  # node_key -> Vector2
+	var node_road_types: Dictionary = {}  # node_key -> Array of highway types
+
+	for way in ways:
+		var way_tags: Dictionary = way.get("tags", {})
+		var way_nodes: Array = way.get("nodes", [])
+
+		if not way_tags.has("highway"):
+			continue
+
+		var highway_type: String = way_tags.get("highway", "")
+		# Только primary дороги для перекрёстков
+		if highway_type not in ["primary", "secondary"]:
+			continue
+
+		if way_nodes.size() < 2:
+			continue
+
+		# Проверяем только первый и последний узел дороги (концы)
+		var endpoints := [way_nodes[0], way_nodes[way_nodes.size() - 1]]
+		for node in endpoints:
+			var node_key := "%.5f,%.5f" % [node.lat, node.lon]  # Уменьшил точность для группировки близких точек
+			var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+
+			# Фильтруем по чанку
+			if filter_by_chunk:
+				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
+					continue
+
+			if not node_road_count.has(node_key):
+				node_road_count[node_key] = 0
+				node_positions[node_key] = local
+				node_road_types[node_key] = []
+
+			node_road_count[node_key] += 1
+			if highway_type not in node_road_types[node_key]:
+				node_road_types[node_key].append(highway_type)
+
+	# Создаём светофоры и знаки на перекрёстках
+	var intersection_count := 0
+	for node_key in node_road_count:
+		if node_road_count[node_key] >= 2:  # Перекрёсток - 2+ дороги сходятся концами
+			var pos: Vector2 = node_positions[node_key]
+			var road_types: Array = node_road_types[node_key]
+			var elevation := _get_elevation_at_point(pos, elev_data)
+
+			# На крупных перекрёстках - светофор, на мелких - знаки
+			var has_primary := "primary" in road_types or "secondary" in road_types
+			if has_primary and node_road_count[node_key] >= 3:
+				_create_traffic_light(pos, elevation, target)
+			else:
+				# На обычных перекрёстках - один знак, не 4
+				_create_yield_sign(pos + Vector2(5, 5), elevation, target)
+
+			intersection_count += 1
+
+	# Обрабатываем точечные объекты (деревья, знаки, фонари)
+	var point_objects: Array = osm_data.get("point_objects", [])
+	var tree_count := 0
+	var sign_count := 0
+	var lamp_count := 0
+
+	for obj in point_objects:
+		var tags: Dictionary = obj.get("tags", {})
+		var lat: float = obj.get("lat", 0.0)
+		var lon: float = obj.get("lon", 0.0)
+		var local: Vector2 = _latlon_to_local(lat, lon)
+
+		# Фильтруем по чанку
+		if filter_by_chunk:
+			if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
+				continue
+
+		var elevation := _get_elevation_at_point(local, elev_data)
+
+		if tags.get("natural") == "tree":
+			_create_tree(local, elevation, target)
+			tree_count += 1
+		elif tags.has("traffic_sign"):
+			_create_traffic_sign(local, elevation, tags, target)
+			sign_count += 1
+		elif tags.get("highway") == "street_lamp":
+			_create_street_lamp(local, elevation, target)
+			lamp_count += 1
+
+	print("OSM: Generated %d roads, %d buildings, %d trees, %d signs, %d lamps, %d intersections" % [road_count, building_count, tree_count, sign_count, lamp_count, intersection_count])
 
 func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	var highway_type: String = tags.get("highway", "residential")
@@ -591,6 +682,10 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, 
 			height_offset = 0.06
 
 	_create_path_mesh(nodes, width, color, height_offset, parent, loader, elev_data)
+
+	# Процедурная генерация фонарей вдоль крупных дорог
+	if highway_type in ["motorway", "trunk", "primary", "secondary"]:
+		_generate_street_lamps_along_road(nodes, width, elev_data, parent)
 
 func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: float, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 2:
@@ -716,35 +811,80 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		if parsed_color.r >= 0:
 			color = parsed_color
 	else:
-		# Приоритет 2: цвет на основе типа здания
+		# Приоритет 2: цвет на основе amenity (важнее чем building type)
+		var amenity_type: String = str(tags.get("amenity", ""))
 		var building_type: String = str(tags.get("building", "yes"))
-		match building_type:
-			"house", "detached", "semidetached_house":
-				color = Color(0.75, 0.65, 0.55)  # Светло-бежевый
-			"residential", "apartments":
-				color = Color(0.7, 0.6, 0.5)  # Бежевый
-			"commercial", "retail":
-				color = Color(0.6, 0.65, 0.7)  # Серо-голубой
-			"office":
-				color = Color(0.55, 0.6, 0.65)  # Сине-серый
-			"industrial", "warehouse":
-				color = Color(0.5, 0.5, 0.55)  # Серый
-			"garage", "garages":
-				color = Color(0.55, 0.55, 0.5)  # Серо-коричневый
-			"shed", "hut":
-				color = Color(0.6, 0.5, 0.4)  # Коричневый
-			"church", "cathedral", "chapel":
-				color = Color(0.9, 0.85, 0.75)  # Кремовый
-			"school", "university", "college", "kindergarten":
-				color = Color(0.7, 0.5, 0.4)  # Терракотовый
-			"hospital":
-				color = Color(0.9, 0.9, 0.9)  # Белый
-			"hotel":
-				color = Color(0.65, 0.55, 0.5)  # Коричневатый
-			"public":
-				color = Color(0.6, 0.6, 0.55)  # Серо-оливковый
-			_:
-				color = Color(0.65, 0.55, 0.45)  # Стандартный коричневатый
+
+		# Сначала проверяем amenity - они имеют приоритет
+		if amenity_type == "kindergarten":
+			color = Color(0.5, 0.75, 0.9)  # Голубой для детских садов
+		elif amenity_type == "school":
+			color = Color(0.3, 0.5, 0.8)  # Синий для школ
+		elif amenity_type == "university" or amenity_type == "college":
+			color = Color(0.4, 0.45, 0.7)  # Тёмно-синий для вузов
+		elif amenity_type == "hospital":
+			color = Color(0.95, 0.95, 0.95)  # Белый для больниц
+		elif amenity_type == "clinic":
+			color = Color(0.9, 0.9, 0.95)  # Бело-голубой для поликлиник
+		elif amenity_type == "pharmacy":
+			color = Color(0.4, 0.75, 0.4)  # Зелёный для аптек
+		elif amenity_type == "police":
+			color = Color(0.3, 0.4, 0.6)  # Тёмно-синий для полиции
+		elif amenity_type == "fire_station":
+			color = Color(0.85, 0.3, 0.25)  # Красный для пожарных
+		elif amenity_type == "place_of_worship":
+			color = Color(0.95, 0.9, 0.75)  # Золотистый для церквей
+		elif amenity_type == "bank":
+			color = Color(0.5, 0.6, 0.5)  # Серо-зелёный для банков
+		elif amenity_type == "post_office":
+			color = Color(0.3, 0.45, 0.7)  # Синий для почты
+		elif amenity_type in ["restaurant", "cafe", "fast_food", "bar", "pub"]:
+			color = Color(0.8, 0.6, 0.4)  # Оранжево-коричневый для еды
+		elif amenity_type == "fuel":
+			color = Color(0.85, 0.75, 0.3)  # Жёлтый для заправок
+		elif amenity_type == "theatre" or amenity_type == "cinema":
+			color = Color(0.6, 0.35, 0.5)  # Пурпурный для театров/кино
+		elif amenity_type == "library":
+			color = Color(0.55, 0.45, 0.35)  # Коричневый для библиотек
+		else:
+			# Иначе по типу здания
+			match building_type:
+				"house", "detached", "semidetached_house":
+					color = Color(0.75, 0.65, 0.55)  # Светло-бежевый
+				"residential", "apartments":
+					color = Color(0.7, 0.6, 0.5)  # Бежевый
+				"commercial", "retail":
+					color = Color(0.6, 0.65, 0.7)  # Серо-голубой
+				"office":
+					color = Color(0.55, 0.6, 0.65)  # Сине-серый
+				"industrial":
+					color = Color(0.4, 0.4, 0.45)  # Тёмно-серый для промышленных
+				"warehouse":
+					color = Color(0.45, 0.45, 0.5)  # Серый для складов
+				"garage", "garages":
+					color = Color(0.5, 0.5, 0.48)  # Серый для гаражей
+				"shed", "hut":
+					color = Color(0.6, 0.5, 0.4)  # Коричневый
+				"church", "cathedral", "chapel":
+					color = Color(0.95, 0.9, 0.75)  # Золотисто-кремовый
+				"kindergarten":
+					color = Color(0.5, 0.75, 0.9)  # Голубой
+				"school":
+					color = Color(0.3, 0.5, 0.8)  # Синий
+				"university", "college":
+					color = Color(0.4, 0.45, 0.7)  # Тёмно-синий
+				"hospital":
+					color = Color(0.95, 0.95, 0.95)  # Белый
+				"hotel":
+					color = Color(0.7, 0.55, 0.45)  # Тёплый коричневый
+				"public":
+					color = Color(0.6, 0.6, 0.55)  # Серо-оливковый
+				"construction":
+					color = Color(0.8, 0.7, 0.4)  # Жёлто-коричневый
+				"ruins":
+					color = Color(0.5, 0.45, 0.4)  # Тёмно-коричневый
+				_:
+					color = Color(0.65, 0.55, 0.45)  # Стандартный коричневатый
 
 	# Получаем высоту террейна для здания (берём центр)
 	var base_elev := _get_elevation_at_point(_get_polygon_center(points), elev_data)
@@ -775,18 +915,31 @@ func _create_natural(nodes: Array, tags: Dictionary, parent: Node3D, loader: Nod
 
 	_create_polygon_mesh(points, color, 0.04, parent, elev_data)
 
+	# Процедурная генерация деревьев в лесах
+	if natural_type in ["wood"]:
+		_generate_trees_in_polygon(points, elev_data, parent, true)  # dense=true для леса
+
 func _create_landuse(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 3:
 		return
 
 	var landuse_type: String = tags.get("landuse", "")
-	var color: Color
 
+	var points: PackedVector2Array = []
+	for node in nodes:
+		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+		points.append(local)
+
+	# Индустриальные и коммерческие зоны - рисуем забор и генерируем здания внутри
+	if landuse_type in ["industrial", "commercial"]:
+		_create_fence(points, parent, elev_data)
+		_generate_industrial_buildings(points, elev_data, parent)
+		return
+
+	var color: Color
 	match landuse_type:
 		"residential":
 			color = COLORS["default"]
-		"commercial", "industrial":
-			color = COLORS["building"]
 		"farmland", "farm":
 			color = COLORS["farmland"]
 		"forest":
@@ -798,12 +951,11 @@ func _create_landuse(nodes: Array, tags: Dictionary, parent: Node3D, loader: Nod
 		_:
 			color = COLORS["default"]
 
-	var points: PackedVector2Array = []
-	for node in nodes:
-		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
-		points.append(local)
-
 	_create_polygon_mesh(points, color, 0.02, parent, elev_data)
+
+	# Процедурная генерация деревьев в лесах
+	if landuse_type == "forest":
+		_generate_trees_in_polygon(points, elev_data, parent, true)  # dense=true для леса
 
 func _create_leisure(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 3:
@@ -829,6 +981,10 @@ func _create_leisure(nodes: Array, tags: Dictionary, parent: Node3D, loader: Nod
 
 	_create_polygon_mesh(points, color, 0.04, parent, elev_data)
 
+	# Процедурная генерация деревьев в парках и садах
+	if leisure_type in ["park", "garden"]:
+		_generate_trees_in_polygon(points, elev_data, parent)
+
 func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 3:
 		return
@@ -840,9 +996,9 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 
 	var amenity_type: String = str(tags.get("amenity", ""))
 
-	# Территории (школы, детсады, университеты) - рисуем забор, а не здание
+	# Территории (школы, детсады, университеты, пожарные станции, полиция) - рисуем забор, а не здание
 	# Здание внутри рисуется отдельно если есть building тег
-	var territory_types := ["school", "kindergarten", "college", "university"]
+	var territory_types := ["school", "kindergarten", "college", "university", "fire_station", "police"]
 	if amenity_type in territory_types:
 		_create_fence(points, parent, elev_data)
 		return
@@ -856,27 +1012,42 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 	var color: Color
 
 	match amenity_type:
-		"hospital", "clinic":
+		"hospital":
 			building_height = 18.0
-			color = Color(0.9, 0.9, 0.9)  # Белый
+			color = Color(0.95, 0.95, 0.95)  # Белый
+		"clinic":
+			building_height = 12.0
+			color = Color(0.9, 0.9, 0.95)  # Бело-голубой
 		"pharmacy":
 			building_height = 5.0
-			color = Color(0.4, 0.8, 0.4)  # Зелёный
-		"police", "fire_station":
+			color = Color(0.4, 0.75, 0.4)  # Зелёный
+		"police":
 			building_height = 10.0
-			color = Color(0.5, 0.5, 0.7)  # Синеватый
+			color = Color(0.3, 0.4, 0.6)  # Тёмно-синий
+		"fire_station":
+			building_height = 10.0
+			color = Color(0.85, 0.3, 0.25)  # Красный
 		"place_of_worship", "church":
 			building_height = 20.0
-			color = Color(0.8, 0.7, 0.5)
+			color = Color(0.95, 0.9, 0.75)  # Золотистый
 		"bank":
 			building_height = 12.0
-			color = Color(0.5, 0.5, 0.5)
-		"restaurant", "cafe", "fast_food":
+			color = Color(0.5, 0.6, 0.5)  # Серо-зелёный
+		"post_office":
+			building_height = 8.0
+			color = Color(0.3, 0.45, 0.7)  # Синий
+		"restaurant", "cafe", "fast_food", "bar", "pub":
 			building_height = 5.0
-			color = Color(0.7, 0.6, 0.5)
+			color = Color(0.8, 0.6, 0.4)  # Оранжево-коричневый
 		"fuel":
 			building_height = 4.0
-			color = Color(0.6, 0.6, 0.6)
+			color = Color(0.85, 0.75, 0.3)  # Жёлтый
+		"theatre", "cinema":
+			building_height = 15.0
+			color = Color(0.6, 0.35, 0.5)  # Пурпурный
+		"library":
+			building_height = 10.0
+			color = Color(0.55, 0.45, 0.35)  # Коричневый
 		_:
 			building_height = 8.0
 			color = Color(0.6, 0.5, 0.5)
@@ -1222,3 +1393,544 @@ func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
 
 	# Возвращаем высоту относительно базовой
 	return (elevation - _base_elevation) * elevation_scale
+
+
+# Создание дерева из простых примитивов
+func _create_tree(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	var tree := Node3D.new()
+	tree.position = Vector3(pos.x, elevation, pos.y)
+
+	# Ствол - коричневый цилиндр
+	var trunk := MeshInstance3D.new()
+	var trunk_mesh := CylinderMesh.new()
+	trunk_mesh.top_radius = 0.15
+	trunk_mesh.bottom_radius = 0.2
+	trunk_mesh.height = 3.0
+	trunk.mesh = trunk_mesh
+
+	var trunk_mat := StandardMaterial3D.new()
+	trunk_mat.albedo_color = Color(0.4, 0.25, 0.15)  # Коричневый
+	trunk.material_override = trunk_mat
+	trunk.position.y = 1.5  # Половина высоты ствола
+	trunk.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	tree.add_child(trunk)
+
+	# Крона - зелёная сфера
+	var crown := MeshInstance3D.new()
+	var crown_mesh := SphereMesh.new()
+	crown_mesh.radius = 2.0
+	crown_mesh.height = 3.5
+	crown.mesh = crown_mesh
+
+	var crown_mat := StandardMaterial3D.new()
+	crown_mat.albedo_color = Color(0.2, 0.5, 0.2)  # Зелёный
+	crown.material_override = crown_mat
+	crown.position.y = 4.5  # Над стволом
+	crown.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	tree.add_child(crown)
+
+	# Коллизия для ствола
+	var body := StaticBody3D.new()
+	body.collision_layer = 2
+	body.collision_mask = 1
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.2
+	shape.height = 3.0
+	collision.shape = shape
+	collision.position.y = 1.5
+	body.add_child(collision)
+	tree.add_child(body)
+
+	parent.add_child(tree)
+
+
+# Создание дорожного знака
+func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, parent: Node3D) -> void:
+	var sign_node := Node3D.new()
+	sign_node.position = Vector3(pos.x, elevation, pos.y)
+
+	# Столб - серый тонкий цилиндр
+	var pole := MeshInstance3D.new()
+	var pole_mesh := CylinderMesh.new()
+	pole_mesh.top_radius = 0.03
+	pole_mesh.bottom_radius = 0.04
+	pole_mesh.height = 2.5
+	pole.mesh = pole_mesh
+
+	var pole_mat := StandardMaterial3D.new()
+	pole_mat.albedo_color = Color(0.5, 0.5, 0.5)  # Серый
+	pole_mat.metallic = 0.8
+	pole.material_override = pole_mat
+	pole.position.y = 1.25
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_node.add_child(pole)
+
+	# Знак - красный/белый диск
+	var sign_plate := MeshInstance3D.new()
+	var sign_mesh := CylinderMesh.new()
+	sign_mesh.top_radius = 0.3
+	sign_mesh.bottom_radius = 0.3
+	sign_mesh.height = 0.02
+	sign_plate.mesh = sign_mesh
+
+	var sign_mat := StandardMaterial3D.new()
+	# Определяем цвет по типу знака
+	var sign_type: String = str(tags.get("traffic_sign", ""))
+	if "stop" in sign_type.to_lower():
+		sign_mat.albedo_color = Color(0.9, 0.1, 0.1)  # Красный
+	elif "yield" in sign_type.to_lower() or "give_way" in sign_type.to_lower():
+		sign_mat.albedo_color = Color(0.9, 0.9, 0.1)  # Жёлтый
+	elif "speed" in sign_type.to_lower():
+		sign_mat.albedo_color = Color(0.95, 0.95, 0.95)  # Белый с красной каймой
+	else:
+		sign_mat.albedo_color = Color(0.2, 0.4, 0.8)  # Синий (информационный)
+
+	sign_plate.material_override = sign_mat
+	sign_plate.position.y = 2.3
+	sign_plate.rotation.x = PI / 2  # Повернуть горизонтально
+	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_node.add_child(sign_plate)
+
+	# Коллизия для столба
+	var body := StaticBody3D.new()
+	body.collision_layer = 2
+	body.collision_mask = 1
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.05
+	shape.height = 2.5
+	collision.shape = shape
+	collision.position.y = 1.25
+	body.add_child(collision)
+	sign_node.add_child(body)
+
+	parent.add_child(sign_node)
+
+
+# Создание уличного фонаря с кронштейном в сторону дороги
+func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, direction_to_road: Vector2 = Vector2.ZERO) -> void:
+	var lamp := Node3D.new()
+	lamp.position = Vector3(pos.x, elevation, pos.y)
+
+	# Поворачиваем весь фонарь в направлении дороги (+90° + 180° чтобы кронштейн смотрел К дороге)
+	if direction_to_road.length() > 0.1:
+		var angle_to_road := atan2(direction_to_road.x, direction_to_road.y) - PI / 2
+		lamp.rotation.y = angle_to_road
+
+	var pole_mat := StandardMaterial3D.new()
+	pole_mat.albedo_color = Color(0.25, 0.25, 0.25)  # Тёмно-серый
+	pole_mat.metallic = 0.9
+
+	# Основной столб - тёмно-серый цилиндр
+	var pole := MeshInstance3D.new()
+	var pole_mesh := CylinderMesh.new()
+	pole_mesh.top_radius = 0.05
+	pole_mesh.bottom_radius = 0.08
+	pole_mesh.height = 5.5
+	pole.mesh = pole_mesh
+	pole.material_override = pole_mat
+	pole.position.y = 2.75
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	lamp.add_child(pole)
+
+	# Кронштейн - наклонный цилиндр от верха столба к лампе (наклон ВВЕРХ)
+	var arm_length := 2.0
+	var arm_angle := PI / 6  # 30 градусов вверх от горизонтали
+	var arm := MeshInstance3D.new()
+	var arm_mesh := CylinderMesh.new()
+	arm_mesh.top_radius = 0.03
+	arm_mesh.bottom_radius = 0.04
+	arm_mesh.height = arm_length
+	arm.mesh = arm_mesh
+	arm.material_override = pole_mat
+	arm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+	# Кронштейн идёт от столба вверх и в сторону
+	var arm_start_y := 5.0  # Точка крепления к столбу
+	var arm_end_x := arm_length * cos(arm_angle)  # Горизонтальное смещение
+	var arm_end_y := arm_start_y + arm_length * sin(arm_angle)  # Вертикальное смещение (вверх)
+
+	# Позиция центра кронштейна
+	arm.position.x = arm_end_x / 2.0
+	arm.position.y = (arm_start_y + arm_end_y) / 2.0
+
+	# Поворот кронштейна: наклон вверх
+	arm.rotation.z = PI / 2 + arm_angle
+	lamp.add_child(arm)
+
+	# Плафон - светлая сфера на конце кронштейна
+	var light_globe := MeshInstance3D.new()
+	var globe_mesh := SphereMesh.new()
+	globe_mesh.radius = 0.2
+	globe_mesh.height = 0.35
+	light_globe.mesh = globe_mesh
+
+	var globe_mat := StandardMaterial3D.new()
+	globe_mat.albedo_color = Color(1.0, 0.95, 0.8)  # Тёплый белый
+	globe_mat.emission_enabled = true
+	globe_mat.emission = Color(1.0, 0.9, 0.7)
+	globe_mat.emission_energy_multiplier = 0.5
+	light_globe.material_override = globe_mat
+
+	# Позиция плафона на конце кронштейна
+	light_globe.position.x = arm_end_x
+	light_globe.position.y = arm_end_y
+	lamp.add_child(light_globe)
+
+	# Коллизия для столба
+	var body := StaticBody3D.new()
+	body.collision_layer = 2
+	body.collision_mask = 1
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.1
+	shape.height = 5.5
+	collision.shape = shape
+	collision.position.y = 2.75
+	body.add_child(collision)
+	lamp.add_child(body)
+
+	parent.add_child(lamp)
+
+
+# Процедурная генерация деревьев в полигоне (парк, лес)
+func _generate_trees_in_polygon(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D, dense: bool = false) -> void:
+	if points.size() < 3:
+		return
+
+	# Вычисляем bounding box
+	var min_x := points[0].x
+	var max_x := points[0].x
+	var min_y := points[0].y
+	var max_y := points[0].y
+
+	for p in points:
+		min_x = min(min_x, p.x)
+		max_x = max(max_x, p.x)
+		min_y = min(min_y, p.y)
+		max_y = max(max_y, p.y)
+
+	var width := max_x - min_x
+	var height := max_y - min_y
+
+	# Ограничиваем максимальное количество деревьев на полигон
+	var max_trees := 50 if dense else 30
+	var tree_count := 0
+
+	# Используем хаотичное размещение на основе хеша координат полигона
+	# Генерируем псевдослучайные точки внутри bounding box
+	var seed_value := int(abs(min_x * 1000 + min_y * 100 + width * 10 + height)) % 10000
+	var avg_spacing := 12.0 if dense else 20.0  # Среднее расстояние между деревьями
+	var estimated_trees := int((width * height) / (avg_spacing * avg_spacing))
+	estimated_trees = mini(estimated_trees, max_trees)
+
+	for i in range(estimated_trees):
+		# Генерируем псевдослучайные координаты используя разные множители
+		var hash1 := fmod(float(seed_value + i * 7919) * 0.61803398875, 1.0)  # Золотое сечение
+		var hash2 := fmod(float(seed_value + i * 104729) * 0.41421356237, 1.0)  # sqrt(2) - 1
+
+		# Добавляем вторичное смещение для большей хаотичности
+		var hash3 := fmod(hash1 * 17.0 + hash2 * 31.0, 1.0)
+		var hash4 := fmod(hash2 * 23.0 + hash1 * 13.0, 1.0)
+
+		var test_x := min_x + (hash1 * 0.7 + hash3 * 0.3) * width
+		var test_y := min_y + (hash2 * 0.7 + hash4 * 0.3) * height
+		var test_point := Vector2(test_x, test_y)
+
+		# Проверяем что точка внутри полигона
+		if Geometry2D.is_point_in_polygon(test_point, points):
+			var elevation := _get_elevation_at_point(test_point, elev_data)
+			_create_tree(test_point, elevation, parent)
+			tree_count += 1
+
+			if tree_count >= max_trees:
+				break
+
+
+# Процедурная генерация промышленных зданий внутри территории
+func _generate_industrial_buildings(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
+	if points.size() < 4:
+		return
+
+	# Вычисляем bounding box
+	var min_x := points[0].x
+	var max_x := points[0].x
+	var min_y := points[0].y
+	var max_y := points[0].y
+
+	for p in points:
+		min_x = min(min_x, p.x)
+		max_x = max(max_x, p.x)
+		min_y = min(min_y, p.y)
+		max_y = max(max_y, p.y)
+
+	var width := max_x - min_x
+	var height := max_y - min_y
+
+	# Пропускаем слишком маленькие территории
+	if width < 20.0 or height < 20.0:
+		return
+
+	var area := width * height
+	if area < 500.0:
+		return
+
+	# Генерируем 1-2 здания
+	var seed_value := int(abs(min_x * 73 + min_y * 37)) % 10000
+	var num_buildings := 1
+	if area > 2000:
+		num_buildings = 2
+
+	var building_color := Color(0.75, 0.55, 0.4)  # Кирпичный/промышленный цвет
+
+	for i in range(num_buildings):
+		# Псевдослучайная позиция (простой хеш)
+		var hash1 := fmod(float(seed_value + i * 127) * 0.618, 1.0)
+		var hash2 := fmod(float(seed_value + i * 311) * 0.414, 1.0)
+		var hash3 := fmod(float(seed_value + i * 541) * 0.314, 1.0)
+
+		# Позиция в центральной части (20-80% от размера)
+		var bld_x := min_x + width * (0.2 + hash1 * 0.6)
+		var bld_y := min_y + height * (0.2 + hash2 * 0.6)
+		var bld_center := Vector2(bld_x, bld_y)
+
+		# Проверяем что центр внутри полигона
+		if not Geometry2D.is_point_in_polygon(bld_center, points):
+			continue
+
+		# Размер здания (фиксированный, небольшой)
+		var bld_width := 10.0 + hash1 * 10.0   # 10-20 м
+		var bld_depth := 12.0 + hash2 * 12.0   # 12-24 м
+		var bld_height := 6.0 + hash3 * 6.0    # 6-12 м
+
+		# Создаём прямоугольный контур здания
+		var half_w := bld_width / 2.0
+		var half_d := bld_depth / 2.0
+		var bld_points: PackedVector2Array = [
+			Vector2(bld_x - half_w, bld_y - half_d),
+			Vector2(bld_x + half_w, bld_y - half_d),
+			Vector2(bld_x + half_w, bld_y + half_d),
+			Vector2(bld_x - half_w, bld_y + half_d)
+		]
+
+		# Проверяем что все углы внутри полигона
+		var all_inside := true
+		for corner in bld_points:
+			if not Geometry2D.is_point_in_polygon(corner, points):
+				all_inside = false
+				break
+
+		if all_inside:
+			var base_elev := _get_elevation_at_point(bld_center, elev_data)
+			_create_3d_building(bld_points, building_color, bld_height, parent, base_elev)
+
+
+# Процедурная генерация фонарей вдоль дороги
+func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_data: Dictionary, parent: Node3D) -> void:
+	if nodes.size() < 2:
+		return
+
+	var lamp_spacing := 40.0  # Расстояние между фонарями (метры)
+	var lamp_offset := road_width / 2 + 1.5  # Смещение от края дороги
+
+	var accumulated_distance := 0.0
+	var last_lamp_distance := 0.0
+
+	for i in range(nodes.size() - 1):
+		var p1 := _latlon_to_local(nodes[i].lat, nodes[i].lon)
+		var p2 := _latlon_to_local(nodes[i + 1].lat, nodes[i + 1].lon)
+
+		var segment_length := p1.distance_to(p2)
+		var dir := (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)  # Перпендикуляр
+
+		# Проходим по сегменту и ставим фонари
+		var pos_along := 0.0
+		while pos_along < segment_length:
+			var distance_from_last := accumulated_distance + pos_along - last_lamp_distance
+
+			if distance_from_last >= lamp_spacing:
+				# Интерполируем позицию
+				var t := pos_along / segment_length
+				var road_pos := p1.lerp(p2, t)
+
+				# Ставим фонари по обе стороны дороги
+				var lamp_pos_left := road_pos + perp * lamp_offset
+				var lamp_pos_right := road_pos - perp * lamp_offset
+
+				var elev_left := _get_elevation_at_point(lamp_pos_left, elev_data)
+				var elev_right := _get_elevation_at_point(lamp_pos_right, elev_data)
+
+				# Направление к дороге (от фонаря к центру дороги)
+				var dir_to_road_left := -perp  # Левый фонарь смотрит вправо (к дороге)
+				var dir_to_road_right := perp   # Правый фонарь смотрит влево (к дороге)
+
+				_create_street_lamp(lamp_pos_left, elev_left, parent, dir_to_road_left)
+				_create_street_lamp(lamp_pos_right, elev_right, parent, dir_to_road_right)
+
+				last_lamp_distance = accumulated_distance + pos_along
+
+			pos_along += lamp_spacing / 4  # Проверяем чаще для точности
+
+		accumulated_distance += segment_length
+
+
+# Создание светофора на перекрёстке
+func _create_traffic_light(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	var traffic_light := Node3D.new()
+	traffic_light.position = Vector3(pos.x, elevation, pos.y)
+
+	# Столб - тёмно-серый
+	var pole := MeshInstance3D.new()
+	var pole_mesh := CylinderMesh.new()
+	pole_mesh.top_radius = 0.08
+	pole_mesh.bottom_radius = 0.1
+	pole_mesh.height = 4.5
+	pole.mesh = pole_mesh
+
+	var pole_mat := StandardMaterial3D.new()
+	pole_mat.albedo_color = Color(0.2, 0.2, 0.2)
+	pole_mat.metallic = 0.8
+	pole.material_override = pole_mat
+	pole.position.y = 2.25
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	traffic_light.add_child(pole)
+
+	# Корпус светофора - чёрный бокс
+	var box := MeshInstance3D.new()
+	var box_mesh := BoxMesh.new()
+	box_mesh.size = Vector3(0.35, 1.0, 0.25)
+	box.mesh = box_mesh
+
+	var box_mat := StandardMaterial3D.new()
+	box_mat.albedo_color = Color(0.1, 0.1, 0.1)
+	box.material_override = box_mat
+	box.position.y = 4.2
+	box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	traffic_light.add_child(box)
+
+	# Красный сигнал
+	var red_light := MeshInstance3D.new()
+	var light_mesh := SphereMesh.new()
+	light_mesh.radius = 0.1
+	light_mesh.height = 0.2
+	red_light.mesh = light_mesh
+
+	var red_mat := StandardMaterial3D.new()
+	red_mat.albedo_color = Color(0.9, 0.1, 0.1)
+	red_mat.emission_enabled = true
+	red_mat.emission = Color(0.9, 0.1, 0.1)
+	red_mat.emission_energy_multiplier = 0.3
+	red_light.material_override = red_mat
+	red_light.position = Vector3(0, 4.5, 0.13)
+	traffic_light.add_child(red_light)
+
+	# Жёлтый сигнал
+	var yellow_light := MeshInstance3D.new()
+	yellow_light.mesh = light_mesh
+
+	var yellow_mat := StandardMaterial3D.new()
+	yellow_mat.albedo_color = Color(0.9, 0.7, 0.1)
+	yellow_light.material_override = yellow_mat
+	yellow_light.position = Vector3(0, 4.2, 0.13)
+	traffic_light.add_child(yellow_light)
+
+	# Зелёный сигнал
+	var green_light := MeshInstance3D.new()
+	green_light.mesh = light_mesh
+
+	var green_mat := StandardMaterial3D.new()
+	green_mat.albedo_color = Color(0.1, 0.7, 0.1)
+	green_mat.emission_enabled = true
+	green_mat.emission = Color(0.1, 0.8, 0.1)
+	green_mat.emission_energy_multiplier = 0.5
+	green_light.material_override = green_mat
+	green_light.position = Vector3(0, 3.9, 0.13)
+	traffic_light.add_child(green_light)
+
+	# Коллизия для столба
+	var body := StaticBody3D.new()
+	body.collision_layer = 2
+	body.collision_mask = 1
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.12
+	shape.height = 4.5
+	collision.shape = shape
+	collision.position.y = 2.25
+	body.add_child(collision)
+	traffic_light.add_child(body)
+
+	parent.add_child(traffic_light)
+
+
+# Создание знаков на перекрёстке (уступи дорогу)
+func _create_intersection_signs(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	# Ставим знак немного в стороне от центра перекрёстка
+	var offset := 5.0
+
+	# 4 знака по углам перекрёстка
+	var offsets: Array[Vector2] = [
+		Vector2(offset, offset),
+		Vector2(-offset, offset),
+		Vector2(offset, -offset),
+		Vector2(-offset, -offset)
+	]
+
+	for off in offsets:
+		var sign_pos: Vector2 = pos + off
+		# Создаём знак "Уступи дорогу" (треугольный)
+		_create_yield_sign(sign_pos, elevation, parent)
+
+
+# Создание знака "Уступи дорогу"
+func _create_yield_sign(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	var sign_node := Node3D.new()
+	sign_node.position = Vector3(pos.x, elevation, pos.y)
+
+	# Столб
+	var pole := MeshInstance3D.new()
+	var pole_mesh := CylinderMesh.new()
+	pole_mesh.top_radius = 0.03
+	pole_mesh.bottom_radius = 0.04
+	pole_mesh.height = 2.2
+	pole.mesh = pole_mesh
+
+	var pole_mat := StandardMaterial3D.new()
+	pole_mat.albedo_color = Color(0.5, 0.5, 0.5)
+	pole_mat.metallic = 0.8
+	pole.material_override = pole_mat
+	pole.position.y = 1.1
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_node.add_child(pole)
+
+	# Треугольный знак (используем призму/цилиндр с 3 гранями)
+	var sign_plate := MeshInstance3D.new()
+	var sign_mesh := PrismMesh.new()
+	sign_mesh.size = Vector3(0.5, 0.5, 0.02)
+	sign_plate.mesh = sign_mesh
+
+	var sign_mat := StandardMaterial3D.new()
+	sign_mat.albedo_color = Color(0.95, 0.95, 0.95)  # Белый с красной каймой (упрощённо - белый)
+	sign_plate.material_override = sign_mat
+	sign_plate.position.y = 2.3
+	sign_plate.rotation.x = PI / 2  # Поворот чтобы был вертикально
+	sign_plate.rotation.z = PI  # Вершина вниз (уступи дорогу)
+	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_node.add_child(sign_plate)
+
+	# Коллизия
+	var body := StaticBody3D.new()
+	body.collision_layer = 2
+	body.collision_mask = 1
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.05
+	shape.height = 2.2
+	collision.shape = shape
+	collision.position.y = 1.1
+	body.add_child(collision)
+	sign_node.add_child(body)
+
+	parent.add_child(sign_node)

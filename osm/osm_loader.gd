@@ -13,7 +13,7 @@ const OVERPASS_SERVERS := [
 
 # Кеширование
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 1  # Увеличить при изменении формата запроса
+const CACHE_VERSION := 2  # Увеличить при изменении формата запроса (v2: добавлены деревья, знаки, фонари)
 var use_cache := true
 
 var http_request: HTTPRequest
@@ -110,7 +110,7 @@ func load_area(lat: float, lon: float, radius: float = 500.0) -> void:
 		lon + lon_delta
 	]
 
-	# Overpass запрос для получения дорог, зданий, водоёмов, зелени, amenity
+	# Overpass запрос для получения дорог, зданий, водоёмов, зелени, amenity, деревьев, знаков
 	# Включаем relation для крупных зданий (школы, больницы и т.д.)
 	var query := """
 [out:json][timeout:30];
@@ -124,11 +124,14 @@ func load_area(lat: float, lon: float, radius: float = 500.0) -> void:
   way["amenity"](%s);
   relation["building"](%s);
   relation["amenity"](%s);
+  node["natural"="tree"](%s);
+  node["traffic_sign"](%s);
+  node["highway"="street_lamp"](%s);
 );
 out body geom;
 >;
 out skel qt;
-""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
+""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
 	current_server_index = 0
@@ -191,6 +194,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	var nodes := {}
 	var ways := []
 	var way_by_id := {}  # Для связи relation -> way
+	var point_objects := []  # Точечные объекты (деревья, знаки, фонари)
 
 	# Собираем все узлы
 	for element in data.get("elements", []):
@@ -199,6 +203,14 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 				"lat": element.lat,
 				"lon": element.lon
 			}
+			# Проверяем есть ли теги - это точечный объект
+			var tags: Dictionary = element.get("tags", {})
+			if not tags.is_empty():
+				point_objects.append({
+					"lat": element.lat,
+					"lon": element.lon,
+					"tags": tags
+				})
 
 	# Собираем все пути (и сохраняем по id для relation)
 	for element in data.get("elements", []):
@@ -253,13 +265,14 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	if relations_found > 0:
 		print("OSM: Found %d relations, %d with valid geometry" % [relations_found, relations_with_nodes])
 
-	print("OSM: Parsed %d nodes and %d ways" % [nodes.size(), ways.size()])
+	print("OSM: Parsed %d nodes, %d ways, %d point objects" % [nodes.size(), ways.size(), point_objects.size()])
 
 	return {
 		"center_lat": center_lat,
 		"center_lon": center_lon,
 		"nodes": nodes,
-		"ways": ways
+		"ways": ways,
+		"point_objects": point_objects
 	}
 
 # Конвертация координат в локальные метры относительно центра

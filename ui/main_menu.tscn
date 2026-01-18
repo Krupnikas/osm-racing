@@ -19,7 +19,119 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-color = Color(0.1, 0.1, 0.15, 1.0)
+color = Color(0.35, 0.45, 0.35, 1.0)
+
+[node name="MapPattern" type="Control" parent="Background"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Road1" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 100.0
+offset_top = 200.0
+offset_right = 1800.0
+offset_bottom = 220.0
+color = Color(0.5, 0.5, 0.5, 0.4)
+
+[node name="Road2" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 400.0
+offset_top = 100.0
+offset_right = 420.0
+offset_bottom = 900.0
+color = Color(0.5, 0.5, 0.5, 0.4)
+
+[node name="Road3" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 200.0
+offset_top = 500.0
+offset_right = 1600.0
+offset_bottom = 520.0
+color = Color(0.5, 0.5, 0.5, 0.4)
+
+[node name="Road4" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 900.0
+offset_top = 50.0
+offset_right = 920.0
+offset_bottom = 800.0
+color = Color(0.5, 0.5, 0.5, 0.4)
+
+[node name="Road5" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 50.0
+offset_top = 700.0
+offset_right = 1400.0
+offset_bottom = 720.0
+color = Color(0.5, 0.5, 0.5, 0.4)
+
+[node name="Road6" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 1200.0
+offset_top = 150.0
+offset_right = 1220.0
+offset_bottom = 950.0
+color = Color(0.5, 0.5, 0.5, 0.4)
+
+[node name="Building1" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 450.0
+offset_top = 250.0
+offset_right = 580.0
+offset_bottom = 380.0
+color = Color(0.55, 0.4, 0.35, 0.5)
+
+[node name="Building2" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 950.0
+offset_top = 550.0
+offset_right = 1100.0
+offset_bottom = 680.0
+color = Color(0.55, 0.4, 0.35, 0.5)
+
+[node name="Building3" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 150.0
+offset_top = 550.0
+offset_right = 350.0
+offset_bottom = 650.0
+color = Color(0.55, 0.4, 0.35, 0.5)
+
+[node name="Building4" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 1250.0
+offset_top = 250.0
+offset_right = 1400.0
+offset_bottom = 450.0
+color = Color(0.55, 0.4, 0.35, 0.5)
+
+[node name="Building5" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 600.0
+offset_top = 600.0
+offset_right = 750.0
+offset_bottom = 750.0
+color = Color(0.55, 0.4, 0.35, 0.5)
+
+[node name="Water" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 1400.0
+offset_top = 600.0
+offset_right = 1700.0
+offset_bottom = 850.0
+color = Color(0.25, 0.4, 0.6, 0.5)
+
+[node name="Park" type="ColorRect" parent="Background/MapPattern"]
+layout_mode = 0
+offset_left = 100.0
+offset_top = 750.0
+offset_right = 350.0
+offset_bottom = 950.0
+color = Color(0.3, 0.55, 0.3, 0.5)
 
 [node name="VBox" type="VBoxContainer" parent="."]
 layout_mode = 1
@@ -28,39 +140,50 @@ anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -150.0
-offset_top = -120.0
-offset_right = 150.0
-offset_bottom = 120.0
+offset_left = -250.0
+offset_top = -200.0
+offset_right = 250.0
+offset_bottom = 200.0
 grow_horizontal = 2
 grow_vertical = 2
 
 [node name="Title" type="Label" parent="VBox"]
 layout_mode = 2
-theme_override_font_sizes/font_size = 48
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_shadow_color = Color(0, 0, 0, 0.7)
+theme_override_constants/shadow_offset_x = 2
+theme_override_constants/shadow_offset_y = 2
+theme_override_font_sizes/font_size = 72
 text = "OSM Racing"
 horizontal_alignment = 1
 
 [node name="Spacer" type="Control" parent="VBox"]
-custom_minimum_size = Vector2(0, 30)
+custom_minimum_size = Vector2(0, 40)
 layout_mode = 2
 
-[node name="StartButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(200, 50)
+[node name="ContinueButton" type="Button" parent="VBox"]
+visible = false
+custom_minimum_size = Vector2(350, 70)
 layout_mode = 2
-theme_override_font_sizes/font_size = 24
+theme_override_font_sizes/font_size = 36
+text = "Продолжить"
+
+[node name="StartButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(350, 70)
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
 text = "Старт"
 
 [node name="ControlsButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(200, 50)
+custom_minimum_size = Vector2(350, 70)
 layout_mode = 2
-theme_override_font_sizes/font_size = 24
+theme_override_font_sizes/font_size = 36
 text = "Управление"
 
 [node name="QuitButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(200, 50)
+custom_minimum_size = Vector2(350, 70)
 layout_mode = 2
-theme_override_font_sizes/font_size = 24
+theme_override_font_sizes/font_size = 36
 text = "Выход"
 
 [node name="ControlsPanel" type="Panel" parent="."]
@@ -71,10 +194,10 @@ anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -200.0
-offset_top = -180.0
-offset_right = 200.0
-offset_bottom = 180.0
+offset_left = -350.0
+offset_top = -300.0
+offset_right = 350.0
+offset_bottom = 300.0
 grow_horizontal = 2
 grow_vertical = 2
 
@@ -83,26 +206,26 @@ layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = 20.0
-offset_top = 20.0
-offset_right = -20.0
-offset_bottom = -20.0
+offset_left = 30.0
+offset_top = 30.0
+offset_right = -30.0
+offset_bottom = -30.0
 grow_horizontal = 2
 grow_vertical = 2
 
 [node name="Title" type="Label" parent="ControlsPanel/VBox"]
 layout_mode = 2
-theme_override_font_sizes/font_size = 24
+theme_override_font_sizes/font_size = 36
 text = "Управление"
 horizontal_alignment = 1
 
 [node name="Spacer" type="Control" parent="ControlsPanel/VBox"]
-custom_minimum_size = Vector2(0, 10)
+custom_minimum_size = Vector2(0, 20)
 layout_mode = 2
 
 [node name="Controls" type="Label" parent="ControlsPanel/VBox"]
 layout_mode = 2
-theme_override_font_sizes/font_size = 16
+theme_override_font_sizes/font_size = 24
 text = "↑ ↓ ← → - Управление машиной
 Пробел - Ручной тормоз
 
@@ -123,9 +246,9 @@ layout_mode = 2
 size_flags_vertical = 3
 
 [node name="BackButton" type="Button" parent="ControlsPanel/VBox"]
-custom_minimum_size = Vector2(0, 40)
+custom_minimum_size = Vector2(0, 60)
 layout_mode = 2
-theme_override_font_sizes/font_size = 18
+theme_override_font_sizes/font_size = 28
 text = "Назад"
 
 [node name="LoadingPanel" type="Panel" parent="."]
@@ -144,36 +267,113 @@ anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -200.0
-offset_top = -80.0
-offset_right = 200.0
-offset_bottom = 80.0
+offset_left = -300.0
+offset_top = -120.0
+offset_right = 300.0
+offset_bottom = 120.0
 grow_horizontal = 2
 grow_vertical = 2
 
 [node name="Title" type="Label" parent="LoadingPanel/VBox"]
 layout_mode = 2
-theme_override_font_sizes/font_size = 32
+theme_override_font_sizes/font_size = 48
 text = "Загрузка..."
 horizontal_alignment = 1
 
 [node name="Spacer" type="Control" parent="LoadingPanel/VBox"]
-custom_minimum_size = Vector2(0, 20)
+custom_minimum_size = Vector2(0, 30)
 layout_mode = 2
 
 [node name="ProgressBar" type="ProgressBar" parent="LoadingPanel/VBox"]
-custom_minimum_size = Vector2(400, 30)
+custom_minimum_size = Vector2(600, 40)
 layout_mode = 2
 value = 0.0
 show_percentage = false
 
 [node name="StatusLabel" type="Label" parent="LoadingPanel/VBox"]
 layout_mode = 2
-theme_override_font_sizes/font_size = 16
+theme_override_font_sizes/font_size = 24
 text = "Загрузка карты..."
 horizontal_alignment = 1
 
+[node name="LocationPanel" type="Panel" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -300.0
+offset_top = -250.0
+offset_right = 300.0
+offset_bottom = 250.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="LocationPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 30.0
+offset_top = 30.0
+offset_right = -30.0
+offset_bottom = -30.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Title" type="Label" parent="LocationPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "Выберите локацию"
+horizontal_alignment = 1
+
+[node name="Spacer" type="Control" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 25)
+layout_mode = 2
+
+[node name="CherepovetsButton" type="Button" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Череповец"
+
+[node name="MoscowButton" type="Button" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Москва (Отрадное)"
+
+[node name="TbilisiButton" type="Button" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Тбилиси (Важа-Пшавела)"
+
+[node name="DubaiButton" type="Button" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Дубай (Крик)"
+
+[node name="Spacer2" type="Control" parent="LocationPanel/VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="BackButton" type="Button" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Назад"
+
+[connection signal="pressed" from="VBox/ContinueButton" to="." method="_on_continue_pressed"]
 [connection signal="pressed" from="VBox/StartButton" to="." method="_on_start_pressed"]
 [connection signal="pressed" from="VBox/ControlsButton" to="." method="_on_controls_pressed"]
 [connection signal="pressed" from="VBox/QuitButton" to="." method="_on_quit_pressed"]
 [connection signal="pressed" from="ControlsPanel/VBox/BackButton" to="." method="_on_back_pressed"]
+[connection signal="pressed" from="LocationPanel/VBox/CherepovetsButton" to="." method="_on_cherepovets_pressed"]
+[connection signal="pressed" from="LocationPanel/VBox/MoscowButton" to="." method="_on_moscow_pressed"]
+[connection signal="pressed" from="LocationPanel/VBox/TbilisiButton" to="." method="_on_tbilisi_pressed"]
+[connection signal="pressed" from="LocationPanel/VBox/DubaiButton" to="." method="_on_dubai_pressed"]
+[connection signal="pressed" from="LocationPanel/VBox/BackButton" to="." method="_on_location_back_pressed"]

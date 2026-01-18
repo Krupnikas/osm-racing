@@ -3,7 +3,7 @@ extends Camera3D
 # Камера от первого лица (вид из машины)
 
 @export var target: NodePath
-@export var offset := Vector3(0, 0.8, 0.5)  # Позиция внутри машины
+@export var offset := Vector3(0, 0.8, -0.5)  # Позиция внутри машины (впереди)
 @export var look_ahead := 10.0  # Смотрим вперёд
 
 var _target_node: Node3D

@@ -44,67 +44,67 @@ func _assert(condition: bool, test_name: String, message: String = "") -> void:
 		test_results.append({"name": test_name, "passed": false, "message": message})
 		print("[FAIL] %s - %s" % [test_name, message])
 
-func _assert_eq(actual, expected, test_name: String) -> void:
-	var condition := actual == expected
-	var message := "Expected %s, got %s" % [expected, actual]
+func _assert_eq(actual: Variant, expected: Variant, test_name: String) -> void:
+	var condition: bool = actual == expected
+	var message: String = "Expected %s, got %s" % [expected, actual]
 	_assert(condition, test_name, message)
 
 func _assert_near(actual: float, expected: float, tolerance: float, test_name: String) -> void:
-	var condition := abs(actual - expected) < tolerance
-	var message := "Expected ~%f (±%f), got %f" % [expected, tolerance, actual]
+	var condition: bool = abs(actual - expected) < tolerance
+	var message: String = "Expected ~%f (±%f), got %f" % [expected, tolerance, actual]
 	_assert(condition, test_name, message)
 
 # === Тесты latlon_to_local ===
 
 func test_latlon_to_local_center() -> void:
 	# В центре координаты должны быть (0, 0)
-	var loader := _create_mock_loader(59.149886, 37.949370)
-	var result := loader.latlon_to_local(59.149886, 37.949370)
+	var loader: Node = _create_mock_loader(59.149886, 37.949370)
+	var result: Vector2 = loader.latlon_to_local(59.149886, 37.949370)
 
 	_assert_near(result.x, 0.0, 0.01, "latlon_to_local: center X should be 0")
 	_assert_near(result.y, 0.0, 0.01, "latlon_to_local: center Y should be 0")
 
 func test_latlon_to_local_offset() -> void:
 	# Смещение на ~111 метров к северу (изменение широты на 0.001)
-	var loader := _create_mock_loader(59.149886, 37.949370)
-	var result := loader.latlon_to_local(59.150886, 37.949370)
+	var loader: Node = _create_mock_loader(59.149886, 37.949370)
+	var result: Vector2 = loader.latlon_to_local(59.150886, 37.949370)
 
 	_assert_near(result.x, 0.0, 0.01, "latlon_to_local: north offset X should be 0")
 	_assert_near(result.y, 111.0, 5.0, "latlon_to_local: north offset Y should be ~111m")
 
 func test_latlon_to_local_negative() -> void:
 	# Смещение на юг - должно быть отрицательным
-	var loader := _create_mock_loader(59.149886, 37.949370)
-	var result := loader.latlon_to_local(59.148886, 37.949370)
+	var loader: Node = _create_mock_loader(59.149886, 37.949370)
+	var result: Vector2 = loader.latlon_to_local(59.148886, 37.949370)
 
 	_assert(result.y < 0, "latlon_to_local: south offset Y should be negative")
 
 # === Тесты парсинга OSM данных ===
 
 func test_parse_osm_data_empty() -> void:
-	var loader := _create_mock_loader(59.149886, 37.949370)
-	var data := {"elements": []}
-	var result := loader._parse_osm_data(data)
+	var loader: Node = _create_mock_loader(59.149886, 37.949370)
+	var data: Dictionary = {"elements": []}
+	var result: Dictionary = loader._parse_osm_data(data)
 
 	_assert_eq(result.ways.size(), 0, "parse_osm_data: empty data should have 0 ways")
 	_assert_eq(result.nodes.size(), 0, "parse_osm_data: empty data should have 0 nodes")
 
 func test_parse_osm_data_nodes_only() -> void:
-	var loader := _create_mock_loader(59.149886, 37.949370)
-	var data := {
+	var loader: Node = _create_mock_loader(59.149886, 37.949370)
+	var data: Dictionary = {
 		"elements": [
 			{"type": "node", "id": 1, "lat": 59.15, "lon": 37.95},
 			{"type": "node", "id": 2, "lat": 59.16, "lon": 37.96}
 		]
 	}
-	var result := loader._parse_osm_data(data)
+	var result: Dictionary = loader._parse_osm_data(data)
 
 	_assert_eq(result.nodes.size(), 2, "parse_osm_data: should parse 2 nodes")
 	_assert_eq(result.ways.size(), 0, "parse_osm_data: should have 0 ways without way elements")
 
 func test_parse_osm_data_way_with_nodes() -> void:
-	var loader := _create_mock_loader(59.149886, 37.949370)
-	var data := {
+	var loader: Node = _create_mock_loader(59.149886, 37.949370)
+	var data: Dictionary = {
 		"elements": [
 			{"type": "node", "id": 1, "lat": 59.15, "lon": 37.95},
 			{"type": "node", "id": 2, "lat": 59.16, "lon": 37.96},
@@ -117,7 +117,7 @@ func test_parse_osm_data_way_with_nodes() -> void:
 			}
 		]
 	}
-	var result := loader._parse_osm_data(data)
+	var result: Dictionary = loader._parse_osm_data(data)
 
 	_assert_eq(result.ways.size(), 1, "parse_osm_data: should parse 1 way")
 	_assert_eq(result.ways[0].nodes.size(), 3, "parse_osm_data: way should have 3 nodes")

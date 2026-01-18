@@ -10,23 +10,33 @@ extends Camera3D
 @export var zoom_speed := 1.0
 @export var fly_speed := 20.0
 @export var fly_speed_fast := 60.0
+@export var follow_rotation := true  # Камера следует за поворотом машины
+@export var rotation_smooth := 3.0   # Скорость следования за поворотом
 
 var _target_node: Node3D
 var _yaw := 0.0      # Горизонтальный угол (вокруг Y)
 var _pitch := 0.3    # Вертикальный угол (наклон вниз)
 var _fly_mode := false  # Режим свободного полёта
+var _target_yaw := 0.0  # Целевой угол от машины
+var _yaw_offset := 0.0  # Смещение от мыши
+var _mouse_return_speed := 2.0  # Скорость возврата смещения мыши
 
 func _ready() -> void:
 	if target:
 		_target_node = get_node(target)
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	# Мышь управляется через MainMenu, не захватываем здесь
 
 func _input(event: InputEvent) -> void:
 	# Управление мышью
 	if event is InputEventMouseMotion:
-		_yaw -= event.relative.x * mouse_sensitivity
-		_pitch += event.relative.y * mouse_sensitivity  # Инвертированная вертикальная ось
-		_pitch = clamp(_pitch, -0.2, 1.2)  # Ограничиваем наклон
+		if follow_rotation and not _fly_mode:
+			# В режиме следования мышь создаёт временное смещение
+			_yaw_offset -= event.relative.x * mouse_sensitivity
+			_yaw_offset = clamp(_yaw_offset, -PI, PI)
+		else:
+			_yaw -= event.relative.x * mouse_sensitivity
+		_pitch += event.relative.y * mouse_sensitivity
+		_pitch = clamp(_pitch, -0.2, 1.2)
 
 	# Зум колёсиком
 	if event is InputEventMouseButton:
@@ -98,7 +108,16 @@ func _process_follow_mode(delta: float) -> void:
 
 	var target_pos := _target_node.global_position + Vector3(0, 1, 0)
 
-	# Вычисляем позицию камеры на основе углов
+	# Если включено следование за поворотом машины
+	if follow_rotation:
+		# Получаем угол поворота машины (Y rotation) и добавляем PI для позиции сзади
+		_target_yaw = _target_node.rotation.y + PI
+		# Плавно интерполируем угол камеры к углу машины + смещение от мыши
+		_yaw = lerp_angle(_yaw, _target_yaw + _yaw_offset, rotation_smooth * delta)
+		# Плавно возвращаем смещение мыши к нулю
+		_yaw_offset = lerp(_yaw_offset, 0.0, _mouse_return_speed * delta)
+
+	# Вычисляем позицию камеры на основе углов (камера сзади машины)
 	var offset := Vector3.ZERO
 	offset.x = sin(_yaw) * cos(_pitch) * distance
 	offset.z = cos(_yaw) * cos(_pitch) * distance
