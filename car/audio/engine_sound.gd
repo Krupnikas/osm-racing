@@ -10,7 +10,7 @@ var _car: Car = null
 var _stream_ready := false
 
 func _ready() -> void:
-	bus = "Master"
+	bus = "SFX"
 	volume_db = min_volume
 	pitch_scale = 0.5
 
