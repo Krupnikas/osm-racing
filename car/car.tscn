@@ -1,6 +1,7 @@
-[gd_scene load_steps=12 format=3 uid="uid://bcar123"]
+[gd_scene load_steps=13 format=3 uid="uid://bcar123"]
 
 [ext_resource type="Script" path="res://car/car.gd" id="1_car"]
+[ext_resource type="Script" path="res://car/audio/engine_sound.gd" id="2_engine_sound"]
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_body"]
 size = Vector3(1.9, 0.6, 4.4)
@@ -160,3 +161,6 @@ surface_material_override/0 = SubResource("Material_tire")
 transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
 mesh = SubResource("CylinderMesh_rim")
 surface_material_override/0 = SubResource("Material_rim")
+
+[node name="EngineSound" type="AudioStreamPlayer" parent="."]
+script = ExtResource("2_engine_sound")
