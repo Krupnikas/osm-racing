@@ -15,6 +15,7 @@ var track_info := {
 	"petya_pavlov_ya_hochu_skorosti.ogg": ["Петя Павлов", "Я хочу скорости"],
 	"kristalniy_metod_rodilsya_medlennym.ogg": ["Кристальный метод", "Рожденный медленным"],
 	"stariy_pes_i_dimon_morison_vsadniki_grozy.ogg": ["Старый Пёс и Димон Морисон", "Всадники грозы"],
+	"element_80_s_menya_hvatit.ogg": ["Элемент-80", "С меня хватит"],
 }
 
 # Audio player
@@ -46,6 +47,7 @@ func _initialize_playlist() -> void:
 		"res://audio/music/petya_pavlov_ya_hochu_skorosti.ogg",
 		"res://audio/music/kristalniy_metod_rodilsya_medlennym.ogg",
 		"res://audio/music/stariy_pes_i_dimon_morison_vsadniki_grozy.ogg",
+		"res://audio/music/element_80_s_menya_hvatit.ogg",
 	]
 
 func play_track(index: int) -> void:
