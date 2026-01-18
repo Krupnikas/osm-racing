@@ -7,7 +7,6 @@ var animation_player: AnimationPlayer
 var show_duration := 5.0  # Сколько секунд показывать титр
 
 func _ready() -> void:
-	print("TrackDisplay: _ready() called")
 	# Создаём Label
 	label = Label.new()
 	label.name = "Label"
@@ -17,8 +16,16 @@ func _ready() -> void:
 	label.add_theme_constant_override("shadow_offset_x", 2)
 	label.add_theme_constant_override("shadow_offset_y", 2)
 
-	# Позиционируем в левом нижнем углу
-	label.position = Vector2(20, get_viewport().size.y - 80)
+	# Используем anchors для позиционирования в левом нижнем углу
+	label.anchor_left = 0.0
+	label.anchor_top = 1.0
+	label.anchor_right = 0.0
+	label.anchor_bottom = 1.0
+	label.offset_left = 20.0
+	label.offset_top = -60.0
+	label.offset_right = 600.0
+	label.offset_bottom = -20.0
+
 	label.modulate.a = 0.0  # Начинаем невидимым
 
 	add_child(label)
@@ -36,7 +43,6 @@ func _ready() -> void:
 		# Подключаемся к сигналу начала трека (создадим его в MusicManager)
 		if music_manager.has_signal("track_started"):
 			music_manager.track_started.connect(_on_track_started)
-			print("TrackDisplay: Connected to MusicManager signal")
 
 			# Показываем текущий трек, если он уже играет
 			var current_index: int = music_manager.current_track_index
@@ -46,10 +52,6 @@ func _ready() -> void:
 				var artist: String = info[0]
 				var title: String = info[1]
 				_on_track_started(title, artist)
-		else:
-			print("TrackDisplay: ERROR - MusicManager has no track_started signal")
-	else:
-		print("TrackDisplay: ERROR - MusicManager not found")
 
 func _create_animations() -> void:
 	# Анимация появления
@@ -78,7 +80,6 @@ func _create_animations() -> void:
 func _on_track_started(track_name: String, artist: String) -> void:
 	# Обновляем текст
 	label.text = "%s – %s" % [artist, track_name]
-	print("TrackDisplay: Showing track: %s - %s" % [artist, track_name])
 
 	# Показываем титр
 	animation_player.play("show")
@@ -87,7 +88,6 @@ func _on_track_started(track_name: String, artist: String) -> void:
 	await get_tree().create_timer(show_duration).timeout
 
 	animation_player.play("hide")
-	print("TrackDisplay: Hiding track display")
 
 func show_track(track_name: String, artist: String) -> void:
 	"""Публичный метод для показа трека"""
