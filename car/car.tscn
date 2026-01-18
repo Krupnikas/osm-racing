@@ -28,6 +28,14 @@ metallic = 0.9
 roughness = 0.1
 transparency = 1
 
+[sub_resource type="BoxMesh" id="BoxMesh_rear_window"]
+size = Vector3(1.5, 0.5, 0.05)
+
+[sub_resource type="StandardMaterial3D" id="Material_rear_window"]
+albedo_color = Color(0.05, 0.05, 0.08, 1)
+metallic = 0.8
+roughness = 0.2
+
 [sub_resource type="CylinderMesh" id="CylinderMesh_wheel"]
 top_radius = 0.35
 bottom_radius = 0.35
@@ -66,6 +74,11 @@ surface_material_override/0 = SubResource("Material_body")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, -0.3)
 mesh = SubResource("BoxMesh_cabin")
 surface_material_override/0 = SubResource("Material_windows")
+
+[node name="RearWindow" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, -1.32)
+mesh = SubResource("BoxMesh_rear_window")
+surface_material_override/0 = SubResource("Material_rear_window")
 
 [node name="Hood" type="MeshInstance3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.85, 1.3)

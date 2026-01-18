@@ -67,7 +67,7 @@ func _create_headlights() -> void:
 	headlight_left.spot_range = 80.0
 	headlight_left.spot_angle = 45.0
 	headlight_left.spot_angle_attenuation = 0.8
-	headlight_left.light_energy = 8.0  # Увеличиваем для освещения зданий
+	headlight_left.light_energy = 4.0
 	headlight_left.light_color = Color(1.0, 0.98, 0.9)
 	headlight_left.shadow_enabled = true
 	headlight_left.visible = false
@@ -81,7 +81,7 @@ func _create_headlights() -> void:
 	headlight_right.spot_range = 80.0
 	headlight_right.spot_angle = 45.0
 	headlight_right.spot_angle_attenuation = 0.8
-	headlight_right.light_energy = 8.0  # Увеличиваем для освещения зданий
+	headlight_right.light_energy = 4.0
 	headlight_right.light_color = Color(1.0, 0.98, 0.9)
 	headlight_right.shadow_enabled = true
 	headlight_right.visible = false
@@ -89,12 +89,12 @@ func _create_headlights() -> void:
 
 
 func _create_taillights() -> void:
-	# Левый габарит/стоп - смещён назад и ниже, чтобы не отражался в заднем стекле
+	# Левый габарит/стоп - смещён дальше назад, чтобы не отражался в заднем стекле
 	taillight_left = OmniLight3D.new()
 	taillight_left.name = "TaillightL"
-	taillight_left.position = Vector3(-0.75, 0.4, -2.25)
-	taillight_left.omni_range = 3.0
-	taillight_left.light_energy = 0.8
+	taillight_left.position = Vector3(-0.75, 0.35, -2.5)  # Дальше назад и ниже
+	taillight_left.omni_range = 2.5
+	taillight_left.light_energy = 0.6
 	taillight_left.light_color = Color(1.0, 0.0, 0.0)
 	taillight_left.visible = false
 	add_child(taillight_left)
@@ -102,9 +102,9 @@ func _create_taillights() -> void:
 	# Правый габарит/стоп
 	taillight_right = OmniLight3D.new()
 	taillight_right.name = "TaillightR"
-	taillight_right.position = Vector3(0.75, 0.4, -2.25)
-	taillight_right.omni_range = 3.0
-	taillight_right.light_energy = 0.8
+	taillight_right.position = Vector3(0.75, 0.35, -2.5)  # Дальше назад и ниже
+	taillight_right.omni_range = 2.5
+	taillight_right.light_energy = 0.6
 	taillight_right.light_color = Color(1.0, 0.0, 0.0)
 	taillight_right.visible = false
 	add_child(taillight_right)
@@ -114,9 +114,9 @@ func _create_reverse_light() -> void:
 	# Фонарь заднего хода (белый, по центру) - смещён назад
 	reverse_light = OmniLight3D.new()
 	reverse_light.name = "ReverseLight"
-	reverse_light.position = Vector3(0, 0.35, -2.25)
-	reverse_light.omni_range = 4.0
-	reverse_light.light_energy = 1.2
+	reverse_light.position = Vector3(0, 0.3, -2.5)  # Дальше назад
+	reverse_light.omni_range = 3.5
+	reverse_light.light_energy = 1.0
 	reverse_light.light_color = Color(1.0, 1.0, 1.0)
 	reverse_light.visible = false
 	add_child(reverse_light)
@@ -186,14 +186,14 @@ func _create_light_meshes() -> void:
 	_taillight_mat_right.emission = Color(1.0, 0.0, 0.0)
 	_taillight_mat_right.emission_energy_multiplier = 1.5
 
-	# Левый габарит - ниже и дальше назад
+	# Левый габарит - дальше назад чтобы не отражался
 	taillight_mesh_left = MeshInstance3D.new()
 	taillight_mesh_left.name = "TaillightMeshL"
 	var tl_mesh := BoxMesh.new()
 	tl_mesh.size = Vector3(0.18, 0.08, 0.03)
 	taillight_mesh_left.mesh = tl_mesh
 	taillight_mesh_left.material_override = _taillight_mat_left
-	taillight_mesh_left.position = Vector3(-0.75, 0.4, -2.28)
+	taillight_mesh_left.position = Vector3(-0.75, 0.35, -2.52)  # Дальше назад
 	taillight_mesh_left.visible = false
 	add_child(taillight_mesh_left)
 
@@ -202,7 +202,7 @@ func _create_light_meshes() -> void:
 	taillight_mesh_right.name = "TaillightMeshR"
 	taillight_mesh_right.mesh = tl_mesh
 	taillight_mesh_right.material_override = _taillight_mat_right
-	taillight_mesh_right.position = Vector3(0.75, 0.4, -2.28)
+	taillight_mesh_right.position = Vector3(0.75, 0.35, -2.52)  # Дальше назад
 	taillight_mesh_right.visible = false
 	add_child(taillight_mesh_right)
 

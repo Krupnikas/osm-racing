@@ -25,7 +25,11 @@ func _ready() -> void:
 			camera_names.append(child.name)
 
 	if cameras.size() > 0:
-		_activate_camera(0)
+		# Найти камеру которая уже current (установлена в сцене)
+		for i in range(cameras.size()):
+			if cameras[i].current:
+				current_camera_index = i
+				break
 		print("CameraManager: %d cameras available, press C to switch" % cameras.size())
 
 func _input(event: InputEvent) -> void:

@@ -758,8 +758,8 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, 
 	if curb_height > 0.0:
 		_create_curbs(nodes, width, height_offset, curb_height, parent, elev_data)
 
-	# Процедурная генерация фонарей вдоль крупных дорог
-	if highway_type in ["motorway", "trunk", "primary", "secondary"]:
+	# Процедурная генерация фонарей вдоль дорог
+	if highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary"]:
 		_generate_street_lamps_along_road(nodes, width, elev_data, parent)
 
 	# Извлекаем данные для RoadNetwork (для навигации NPC)
@@ -1461,9 +1461,11 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 	mesh.mesh = im
 	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
-	var material := StandardMaterial3D.new()
-	material.albedo_color = fence_color
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# Используем шейдер для правильного двустороннего освещения
+	var material := ShaderMaterial.new()
+	material.shader = BuildingWallShader
+	material.set_shader_parameter("albedo_color", fence_color)
+	material.set_shader_parameter("use_texture", false)
 	mesh.material_override = material
 
 	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -1607,9 +1609,11 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 	mesh.mesh = im
 	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON  # Отбрасывать тень
 
-	var material := StandardMaterial3D.new()
-	material.albedo_color = color
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# Используем шейдер для правильного двустороннего освещения
+	var material := ShaderMaterial.new()
+	material.shader = BuildingWallShader
+	material.set_shader_parameter("albedo_color", color)
+	material.set_shader_parameter("use_texture", false)
 	mesh.material_override = material
 
 	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -2273,19 +2277,26 @@ func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, directi
 	light_globe.position.y = arm_end_y
 	lamp.add_child(light_globe)
 
-	# Добавляем источник света (видим только ночью) - SpotLight светит вниз на дорогу
-	var lamp_light := SpotLight3D.new()
+	# Добавляем источник света - OmniLight для освещения вокруг
+	# 4% шанс что фонарь сломан
+	var is_broken := randf() < 0.04
+
+	var lamp_light := OmniLight3D.new()
 	lamp_light.name = "LampLight"
 	lamp_light.position = light_globe.position
-	lamp_light.rotation_degrees = Vector3(-90, 0, 0)  # Светит вниз
-	lamp_light.spot_range = 18.0
-	lamp_light.spot_angle = 55.0
-	lamp_light.spot_angle_attenuation = 0.9
-	lamp_light.light_energy = 2.0
-	lamp_light.light_color = Color(1.0, 0.9, 0.7)
+	lamp_light.omni_range = 12.0  # Радиус освещения
+	lamp_light.omni_attenuation = 1.2
+	lamp_light.light_energy = 1.5
+	lamp_light.light_color = Color(1.0, 0.55, 0.15)  # Оранжевый натриевый
 	lamp_light.shadow_enabled = false
-	lamp_light.visible = false  # Включается ночью
+	lamp_light.light_bake_mode = Light3D.BAKE_DISABLED
+	lamp_light.visible = not is_broken  # Сломанные фонари не горят
 	lamp.add_child(lamp_light)
+
+	# Если фонарь сломан, выключаем эмиссию плафона
+	if is_broken:
+		globe_mat.emission_enabled = false
+		globe_mat.albedo_color = Color(0.3, 0.3, 0.3)  # Тусклый серый
 
 	# Коллизия для столба
 	var body := StaticBody3D.new()
@@ -2440,7 +2451,7 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 	if nodes.size() < 2:
 		return
 
-	var lamp_spacing := 40.0  # Расстояние между фонарями (метры)
+	var lamp_spacing := 25.0  # Расстояние между фонарями (метры) - чаще для лучшего освещения
 	var lamp_offset := road_width / 2 + 1.5  # Смещение от края дороги
 
 	var accumulated_distance := 0.0

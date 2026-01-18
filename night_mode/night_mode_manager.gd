@@ -21,13 +21,15 @@ var _terrain_generator: Node
 
 # Сохранённые дневные настройки
 var _day_sun_energy := 1.0
+var _day_sun_color := Color(1.0, 1.0, 1.0)
 var _day_ambient_color := Color(0.5, 0.5, 0.5)
 var _day_ambient_energy := 1.0
 
 # Ночные настройки
-const NIGHT_SUN_ENERGY := 0.05
-const NIGHT_AMBIENT_COLOR := Color(0.02, 0.03, 0.06)
-const NIGHT_AMBIENT_ENERGY := 0.3
+const NIGHT_SUN_ENERGY := 0.15  # Лунный свет чуть ярче
+const NIGHT_SUN_COLOR := Color(0.7, 0.8, 1.0)  # Холодный белый лунный свет
+const NIGHT_AMBIENT_COLOR := Color(0.03, 0.04, 0.08)  # Холодный синеватый
+const NIGHT_AMBIENT_ENERGY := 0.25
 
 # Transition
 var _transition_tween: Tween
@@ -44,10 +46,10 @@ func _ready() -> void:
 	# Создаём систему дождя
 	_create_rain_system()
 
-	# По умолчанию включаем ночь и дождь
-	await get_tree().create_timer(0.5).timeout
+	# По умолчанию включаем ночь и дождь (ждём загрузки чанков)
+	await get_tree().create_timer(1.5).timeout
 	enable_night_mode()
-	await get_tree().create_timer(0.3).timeout
+	await get_tree().create_timer(0.5).timeout
 	if is_night:
 		toggle_rain()
 
@@ -64,6 +66,7 @@ func _find_scene_components() -> void:
 	_sun_light = get_tree().current_scene.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
 	if _sun_light:
 		_day_sun_energy = _sun_light.light_energy
+		_day_sun_color = _sun_light.light_color
 
 	# Ищем terrain generator
 	_terrain_generator = get_tree().current_scene.find_child("OSMTerrain", true, false)
@@ -100,13 +103,13 @@ void sky() {
 		col += vec3(star * twinkle * brightness * 0.9);
 	}
 
-	// Moon
+	// Moon - cold white
 	vec3 moon_dir = normalize(moon_direction);
 	float moon_dist = distance(dir, moon_dir);
 	float moon = smoothstep(moon_size, moon_size * 0.7, moon_dist);
 	float moon_glow = smoothstep(moon_size * 5.0, moon_size, moon_dist) * 0.25;
-	col += vec3(0.95, 0.90, 0.75) * moon;
-	col += vec3(0.2, 0.25, 0.35) * moon_glow;
+	col += vec3(0.85, 0.9, 1.0) * moon;
+	col += vec3(0.15, 0.2, 0.35) * moon_glow;
 
 	// Slight horizon glow (city lights reflection)
 	float city_glow = smoothstep(0.1, -0.05, dir.y) * 0.15;
@@ -205,9 +208,10 @@ func enable_night_mode() -> void:
 	_transition_tween = create_tween()
 	_transition_tween.set_parallel(true)
 
-	# Dim sun
+	# Dim sun and change color to moonlight
 	if _sun_light:
 		_transition_tween.tween_property(_sun_light, "light_energy", NIGHT_SUN_ENERGY, 1.5)
+		_transition_tween.tween_property(_sun_light, "light_color", NIGHT_SUN_COLOR, 1.5)
 
 	# Change ambient
 	if _environment:
@@ -248,6 +252,7 @@ func disable_night_mode() -> void:
 	# Restore sun
 	if _sun_light:
 		_transition_tween.tween_property(_sun_light, "light_energy", _day_sun_energy, 1.5)
+		_transition_tween.tween_property(_sun_light, "light_color", _day_sun_color, 1.5)
 
 	# Restore ambient
 	if _environment:

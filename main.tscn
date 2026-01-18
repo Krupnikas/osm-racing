@@ -7,6 +7,9 @@
 [ext_resource type="Script" path="res://camera/camera_manager.gd" id="6_cam_mgr"]
 [ext_resource type="Script" path="res://camera/first_person_camera.gd" id="7_fps_cam"]
 [ext_resource type="Script" path="res://camera/top_down_camera.gd" id="8_top_cam"]
+[ext_resource type="Script" path="res://camera/bumper_camera.gd" id="13_bumper_cam"]
+[ext_resource type="Script" path="res://camera/chase_camera.gd" id="14_chase_cam"]
+[ext_resource type="Script" path="res://camera/cinematic_camera.gd" id="15_cinematic_cam"]
 [ext_resource type="PackedScene" uid="uid://menu123" path="res://ui/main_menu.tscn" id="9_menu"]
 [ext_resource type="PackedScene" uid="uid://hud123" path="res://ui/hud.tscn" id="10_hud"]
 [ext_resource type="Script" path="res://traffic/traffic_manager.gd" id="11_traffic"]
@@ -71,12 +74,12 @@ car_path = NodePath("../Car")
 
 [node name="FollowCamera" type="Camera3D" parent="CameraManager"]
 transform = Transform3D(1, 0, 0, 0, 0.9, 0.44, 0, -0.44, 0.9, 0, 7, -10)
-current = true
 script = ExtResource("3_camera")
 target = NodePath("../../Car")
 
-[node name="FirstPersonCamera" type="Camera3D" parent="CameraManager"]
-script = ExtResource("7_fps_cam")
+[node name="CinematicCamera" type="Camera3D" parent="CameraManager"]
+current = true
+script = ExtResource("15_cinematic_cam")
 target = NodePath("../../Car")
 
 [node name="TopDownCamera" type="Camera3D" parent="CameraManager"]
