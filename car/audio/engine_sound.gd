@@ -68,8 +68,8 @@ func _process(delta: float) -> void:
 	_current_freq = lerp(_current_freq, _target_freq, delta * 8.0)
 
 	# Громкость зависит от оборотов и газа
-	var throttle := _car.throttle_input
-	var vol := lerp(min_volume, max_volume, rpm_normalized * 0.5 + throttle * 0.5)
+	var throttle: float = _car.throttle_input
+	var vol: float = lerp(min_volume, max_volume, rpm_normalized * 0.5 + throttle * 0.5)
 	volume_db = vol
 
 	# Заполняем буфер

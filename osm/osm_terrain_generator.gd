@@ -757,6 +757,9 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, 
 	if highway_type in ["motorway", "trunk", "primary", "secondary"]:
 		_generate_street_lamps_along_road(nodes, width, elev_data, parent)
 
+	# Извлекаем данные для RoadNetwork (для навигации NPC)
+	_extract_road_for_traffic(nodes, tags, elev_data)
+
 func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: String, height_offset: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 2:
 		return
@@ -2616,3 +2619,36 @@ func _create_yield_sign(pos: Vector2, elevation: float, parent: Node3D) -> void:
 	sign_node.add_child(body)
 
 	parent.add_child(sign_node)
+
+# Извлечение данных дороги для навигации NPC
+func _extract_road_for_traffic(nodes: Array, tags: Dictionary, elev_data: Dictionary) -> void:
+	"""Извлекает данные дороги в RoadNetwork для навигации NPC"""
+	# Проверяем наличие TrafficManager
+	if not get_parent().has_node("TrafficManager"):
+		return
+
+	var traffic_mgr = get_parent().get_node("TrafficManager")
+	if not traffic_mgr.has_method("get_road_network"):
+		return
+
+	var road_network = traffic_mgr.get_road_network()
+	if road_network == null:
+		return
+
+	# Конвертируем nodes в PackedVector2Array
+	var local_points := PackedVector2Array()
+	for node in nodes:
+		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+		local_points.append(local)
+
+	# Определяем chunk_key по первой точке дороги
+	var first_point := local_points[0]
+	var chunk_x := int(floor(first_point.x / chunk_size))
+	var chunk_z := int(floor(first_point.y / chunk_size))
+	var chunk_key := "%d,%d" % [chunk_x, chunk_z]
+
+	# Получаем тип дороги
+	var highway_type: String = tags.get("highway", "residential")
+
+	# Добавляем дорожный сегмент в RoadNetwork
+	road_network.add_road_segment(local_points, highway_type, chunk_key, elev_data)
