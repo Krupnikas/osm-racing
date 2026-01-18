@@ -7,6 +7,13 @@ signal initial_load_complete
 
 const OSMLoaderScript = preload("res://osm/osm_loader.gd")
 const ElevationLoaderScript = preload("res://osm/elevation_loader.gd")
+const TextureGeneratorScript = preload("res://textures/texture_generator.gd")
+
+# Кэш текстур (создаются один раз)
+var _road_textures: Dictionary = {}
+var _building_textures: Dictionary = {}
+var _ground_textures: Dictionary = {}
+var _textures_initialized := false
 
 @export var start_lat := 59.149886
 @export var start_lon := 37.949370
@@ -73,6 +80,9 @@ func _ready() -> void:
 	osm_loader.data_loaded.connect(_on_osm_data_loaded)
 	osm_loader.load_failed.connect(_on_osm_load_failed)
 
+	# Инициализируем текстуры
+	_init_textures()
+
 	# Найти машину
 	if car_path:
 		_car = get_node(car_path)
@@ -90,6 +100,34 @@ func _ready() -> void:
 		_camera = get_node(camera_path)
 
 	print("OSM: Ready for loading (waiting for start_loading call)...")
+
+func _init_textures() -> void:
+	if _textures_initialized:
+		return
+
+	print("OSM: Initializing textures...")
+	var start_time := Time.get_ticks_msec()
+
+	# Текстуры дорог
+	_road_textures["highway"] = TextureGeneratorScript.create_highway_texture(512, 4)
+	_road_textures["primary"] = TextureGeneratorScript.create_highway_texture(512, 4)  # 4 полосы как магистраль
+	_road_textures["residential"] = TextureGeneratorScript.create_road_texture(256, 2, true, false)
+	_road_textures["path"] = TextureGeneratorScript.create_sidewalk_texture(256)
+
+	# Текстуры зданий
+	_building_textures["panel"] = TextureGeneratorScript.create_panel_building_texture(512, 5, 4)
+	_building_textures["brick"] = TextureGeneratorScript.create_brick_building_texture(512, 4, 3)
+	_building_textures["wall"] = TextureGeneratorScript.create_wall_texture(256)
+	_building_textures["roof"] = TextureGeneratorScript.create_roof_texture(256)
+
+	# Текстуры земли
+	_ground_textures["grass"] = TextureGeneratorScript.create_grass_texture(256)
+	_ground_textures["forest"] = TextureGeneratorScript.create_forest_texture(256)
+	_ground_textures["water"] = TextureGeneratorScript.create_water_texture(256)
+
+	_textures_initialized = true
+	var elapsed := Time.get_ticks_msec() - start_time
+	print("OSM: Textures initialized in %d ms" % elapsed)
 
 func _process(delta: float) -> void:
 	# Не обновляем чанки если загрузка на паузе
@@ -676,40 +714,343 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, 
 	var highway_type: String = tags.get("highway", "residential")
 	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
 
-	var color: Color
-	var height_offset: float  # Смещение над террейном
+	var texture_key: String
+	var height_offset: float  # Высота дороги
+	var curb_height: float    # Высота бордюра над дорогой
 	match highway_type:
 		"motorway", "trunk":
-			color = COLORS["road_primary"]
-			height_offset = 0.15  # Самые высокие - магистрали
+			texture_key = "highway"
+			height_offset = 0.02
+			curb_height = 0.12  # Высокие бордюры для магистралей
 		"primary":
-			color = COLORS["road_primary"]
-			height_offset = 0.13
-		"secondary":
-			color = COLORS["road_secondary"]
-			height_offset = 0.11
-		"tertiary":
-			color = COLORS["road_secondary"]
-			height_offset = 0.09
+			texture_key = "primary"
+			height_offset = 0.02
+			curb_height = 0.10  # 10 см бордюр
+		"secondary", "tertiary":
+			texture_key = "primary"
+			height_offset = 0.02
+			curb_height = 0.08
 		"residential", "unclassified":
-			color = COLORS["road_residential"]
-			height_offset = 0.07
+			texture_key = "residential"
+			height_offset = 0.02
+			curb_height = 0.06
 		"service":
-			color = COLORS["road_residential"]
-			height_offset = 0.05
+			texture_key = "residential"
+			height_offset = 0.02
+			curb_height = 0.04
 		"footway", "path", "cycleway", "track":
-			color = COLORS["road_path"]
-			height_offset = 0.03  # Самые низкие - пешеходные
+			texture_key = "path"
+			height_offset = 0.08  # Пешеходные на уровне тротуара
+			curb_height = 0.0    # Без бордюра
 		_:
-			color = COLORS["road_residential"]
-			height_offset = 0.06
+			texture_key = "residential"
+			height_offset = 0.02
+			curb_height = 0.05
 
-	_create_path_mesh(nodes, width, color, height_offset, parent, loader, elev_data)
+	_create_road_mesh_with_texture(nodes, width, texture_key, height_offset, parent, elev_data)
+
+	# Создаём бордюры если нужно
+	if curb_height > 0.0:
+		_create_curbs(nodes, width, height_offset, curb_height, parent, elev_data)
 
 	# Процедурная генерация фонарей вдоль крупных дорог
 	if highway_type in ["motorway", "trunk", "primary", "secondary"]:
 		_generate_street_lamps_along_road(nodes, width, elev_data, parent)
 
+func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: String, height_offset: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
+	if nodes.size() < 2:
+		return
+
+	var points: PackedVector2Array = []
+	for node in nodes:
+		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+		points.append(local)
+
+	# Добавляем небольшое случайное смещение по высоте для предотвращения z-fighting
+	# на пересечениях (используем хэш от первой точки дороги)
+	var hash_val := int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
+	var z_offset := hash_val * 0.0003  # 0-3 см случайное смещение
+
+	# Используем ArrayMesh для UV координат
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+
+	var vertices := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var normals := PackedVector3Array()
+	var indices := PackedInt32Array()
+
+	var accumulated_length := 0.0
+	var uv_scale := 0.1  # Масштаб UV вдоль дороги (чтобы разметка повторялась)
+
+	for i in range(points.size() - 1):
+		var p1 := points[i]
+		var p2 := points[i + 1]
+
+		var segment_length := p1.distance_to(p2)
+		var dir := (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x) * width * 0.5
+
+		# Получаем высоты для каждой точки с z_offset
+		var h1 := _get_elevation_at_point(p1, elev_data) + height_offset + z_offset
+		var h2 := _get_elevation_at_point(p2, elev_data) + height_offset + z_offset
+
+		var v1 := Vector3(p1.x - perp.x, h1, p1.y - perp.y)
+		var v2 := Vector3(p1.x + perp.x, h1, p1.y + perp.y)
+		var v3 := Vector3(p2.x + perp.x, h2, p2.y + perp.y)
+		var v4 := Vector3(p2.x - perp.x, h2, p2.y - perp.y)
+
+		# UV координаты: x = поперёк дороги (0-1), y = вдоль дороги (повторяется)
+		var uv_y1 := accumulated_length * uv_scale
+		var uv_y2 := (accumulated_length + segment_length) * uv_scale
+
+		var idx := vertices.size()
+		vertices.append(v1)
+		vertices.append(v2)
+		vertices.append(v3)
+		vertices.append(v4)
+
+		uvs.append(Vector2(0.0, uv_y1))  # v1 - левый край, начало
+		uvs.append(Vector2(1.0, uv_y1))  # v2 - правый край, начало
+		uvs.append(Vector2(1.0, uv_y2))  # v3 - правый край, конец
+		uvs.append(Vector2(0.0, uv_y2))  # v4 - левый край, конец
+
+		normals.append(Vector3.UP)
+		normals.append(Vector3.UP)
+		normals.append(Vector3.UP)
+		normals.append(Vector3.UP)
+
+		# Два треугольника
+		indices.append(idx + 0)
+		indices.append(idx + 2)
+		indices.append(idx + 1)
+
+		indices.append(idx + 0)
+		indices.append(idx + 3)
+		indices.append(idx + 2)
+
+		accumulated_length += segment_length
+
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = indices
+
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	var mesh := MeshInstance3D.new()
+	mesh.mesh = arr_mesh
+
+	# Материал с текстурой
+	var material := StandardMaterial3D.new()
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if _road_textures.has(texture_key):
+		material.albedo_texture = _road_textures[texture_key]
+		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	else:
+		# Fallback цвет
+		material.albedo_color = COLORS.get("road_residential", Color(0.4, 0.4, 0.4))
+	mesh.material_override = material
+
+	parent.add_child(mesh)
+
+# Создаёт бордюры вдоль дороги
+func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_height: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
+	if nodes.size() < 2:
+		return
+
+	var points: PackedVector2Array = []
+	for node in nodes:
+		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+		points.append(local)
+
+	var curb_width := 0.15  # Ширина бордюра 15 см
+
+	# Добавляем небольшое случайное смещение по высоте для предотвращения z-fighting
+	# на пересечениях (используем хэш от первой точки дороги)
+	var hash_val := int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
+	var z_offset := hash_val * 0.0002  # 0-2 см случайное смещение
+
+	# Создаём меш для бордюров
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var indices := PackedInt32Array()
+
+	# Пропускаем первый и последний сегменты (перекрёстки)
+	var start_idx := 1 if points.size() > 3 else 0
+	var end_idx := points.size() - 2 if points.size() > 3 else points.size() - 1
+
+	for i in range(start_idx, end_idx):
+		var p1 := points[i]
+		var p2 := points[i + 1]
+
+		var dir := (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)
+
+		var h1 := _get_elevation_at_point(p1, elev_data)
+		var h2 := _get_elevation_at_point(p2, elev_data)
+
+		# Высоты с z_offset для предотвращения z-fighting
+		var road_y1 := h1 + road_height + z_offset
+		var road_y2 := h2 + road_height + z_offset
+		var curb_y1 := h1 + road_height + curb_height + z_offset
+		var curb_y2 := h2 + road_height + curb_height + z_offset
+
+		# Левый бордюр
+		var left_inner1 := p1 + perp * (road_width * 0.5)
+		var left_outer1 := p1 + perp * (road_width * 0.5 + curb_width)
+		var left_inner2 := p2 + perp * (road_width * 0.5)
+		var left_outer2 := p2 + perp * (road_width * 0.5 + curb_width)
+
+		# Правый бордюр
+		var right_inner1 := p1 - perp * (road_width * 0.5)
+		var right_outer1 := p1 - perp * (road_width * 0.5 + curb_width)
+		var right_inner2 := p2 - perp * (road_width * 0.5)
+		var right_outer2 := p2 - perp * (road_width * 0.5 + curb_width)
+
+		var idx := vertices.size()
+
+		# === Левый бордюр ===
+		# Внутренняя стенка (со стороны дороги)
+		vertices.append(Vector3(left_inner1.x, road_y1, left_inner1.y))
+		vertices.append(Vector3(left_inner2.x, road_y2, left_inner2.y))
+		vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
+		vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
+		for _j in range(4):
+			normals.append(Vector3(-perp.x, 0, -perp.y))  # Внутрь к дороге
+
+		indices.append(idx + 0)
+		indices.append(idx + 1)
+		indices.append(idx + 2)
+		indices.append(idx + 0)
+		indices.append(idx + 2)
+		indices.append(idx + 3)
+
+		idx = vertices.size()
+
+		# Верхняя грань
+		vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
+		vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
+		vertices.append(Vector3(left_outer2.x, curb_y2, left_outer2.y))
+		vertices.append(Vector3(left_outer1.x, curb_y1, left_outer1.y))
+		for _j in range(4):
+			normals.append(Vector3.UP)
+
+		indices.append(idx + 0)
+		indices.append(idx + 1)
+		indices.append(idx + 2)
+		indices.append(idx + 0)
+		indices.append(idx + 2)
+		indices.append(idx + 3)
+
+		idx = vertices.size()
+
+		# === Правый бордюр ===
+		# Внутренняя стенка (со стороны дороги)
+		vertices.append(Vector3(right_inner1.x, road_y1, right_inner1.y))
+		vertices.append(Vector3(right_inner2.x, road_y2, right_inner2.y))
+		vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
+		vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
+		for _j in range(4):
+			normals.append(Vector3(perp.x, 0, perp.y))  # Внутрь к дороге
+
+		indices.append(idx + 0)
+		indices.append(idx + 2)
+		indices.append(idx + 1)
+		indices.append(idx + 0)
+		indices.append(idx + 3)
+		indices.append(idx + 2)
+
+		idx = vertices.size()
+
+		# Верхняя грань
+		vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
+		vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
+		vertices.append(Vector3(right_outer2.x, curb_y2, right_outer2.y))
+		vertices.append(Vector3(right_outer1.x, curb_y1, right_outer1.y))
+		for _j in range(4):
+			normals.append(Vector3.UP)
+
+		indices.append(idx + 0)
+		indices.append(idx + 2)
+		indices.append(idx + 1)
+		indices.append(idx + 0)
+		indices.append(idx + 3)
+		indices.append(idx + 2)
+
+	if vertices.size() == 0:
+		return
+
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = indices
+
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	var mesh := MeshInstance3D.new()
+	mesh.mesh = arr_mesh
+	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	# Материал бордюра - серый бетон
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.6, 0.6, 0.58)
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# Добавляем depth bias для устранения z-fighting на пересечениях
+	material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
+	mesh.material_override = material
+
+	# Создаём StaticBody3D с коллизией для бордюров
+	var body := StaticBody3D.new()
+	body.collision_layer = 1  # Слой 1 - земля/дороги
+	body.collision_mask = 0   # Не реагируем ни на что
+	body.add_child(mesh)
+
+	# Создаём коллизии для каждого сегмента бордюра (тоже пропускаем перекрёстки)
+	for i in range(start_idx, end_idx):
+		var p1 := points[i]
+		var p2 := points[i + 1]
+
+		var dir := (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)
+		var segment_length := p1.distance_to(p2)
+
+		if segment_length < 0.5:
+			continue
+
+		var h1 := _get_elevation_at_point(p1, elev_data)
+		var h2 := _get_elevation_at_point(p2, elev_data)
+		var avg_h := (h1 + h2) / 2.0 + road_height + curb_height * 0.5 + z_offset
+
+		var wall_angle := atan2(p2.y - p1.y, p2.x - p1.x)
+
+		# Левый бордюр
+		var left_center := (p1 + p2) / 2 + perp * (road_width * 0.5 + curb_width * 0.5)
+		var left_collision := CollisionShape3D.new()
+		var left_box := BoxShape3D.new()
+		left_box.size = Vector3(segment_length, curb_height, curb_width)
+		left_collision.shape = left_box
+		left_collision.position = Vector3(left_center.x, avg_h, left_center.y)
+		left_collision.rotation.y = -wall_angle
+		body.add_child(left_collision)
+
+		# Правый бордюр
+		var right_center := (p1 + p2) / 2 - perp * (road_width * 0.5 + curb_width * 0.5)
+		var right_collision := CollisionShape3D.new()
+		var right_box := BoxShape3D.new()
+		right_box.size = Vector3(segment_length, curb_height, curb_width)
+		right_collision.shape = right_box
+		right_collision.position = Vector3(right_center.x, avg_h, right_center.y)
+		right_collision.rotation.y = -wall_angle
+		body.add_child(right_collision)
+
+	parent.add_child(body)
+
+# Старая версия без текстур (для совместимости)
 func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: float, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 2:
 		return
@@ -912,31 +1253,45 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	# Получаем высоту террейна для здания (берём центр)
 	var base_elev := _get_elevation_at_point(_get_polygon_center(points), elev_data)
 
-	_create_3d_building(points, color, building_height, parent, base_elev, debug_name)
+	# Определяем тип текстуры здания
+	var building_type: String = str(tags.get("building", "yes"))
+	var texture_type := "panel"  # По умолчанию панельки
+	if building_height > 15.0:
+		texture_type = "panel"  # Высотки - панельные
+	elif building_type in ["house", "detached", "semidetached_house"]:
+		texture_type = "brick"  # Частные дома - кирпич
+	elif building_type in ["industrial", "warehouse", "garage", "garages"]:
+		texture_type = "wall"  # Промышленные - простая штукатурка
+	else:
+		texture_type = "brick"  # Остальное - кирпич
+
+	_create_3d_building_with_texture(points, building_height, texture_type, parent, base_elev, debug_name)
 
 func _create_natural(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 3:
 		return
 
 	var natural_type: String = tags.get("natural", "")
-	var color: Color
+	var texture_key := "grass"
+	var is_water := false
 
 	match natural_type:
 		"water":
-			color = COLORS["water"]
+			texture_key = "water"
+			is_water = true
 		"wood", "tree_row":
-			color = COLORS["forest"]
+			texture_key = "forest"
 		"grassland", "scrub":
-			color = COLORS["grass"]
+			texture_key = "grass"
 		_:
-			color = COLORS["grass"]
+			texture_key = "grass"
 
 	var points: PackedVector2Array = []
 	for node in nodes:
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	_create_polygon_mesh(points, color, 0.04, parent, elev_data)
+	_create_polygon_mesh_with_texture(points, texture_key, 0.04, parent, elev_data, is_water)
 
 	# Процедурная генерация деревьев в лесах
 	if natural_type in ["wood"]:
@@ -959,22 +1314,24 @@ func _create_landuse(nodes: Array, tags: Dictionary, parent: Node3D, loader: Nod
 		_generate_industrial_buildings(points, elev_data, parent)
 		return
 
-	var color: Color
+	var texture_key := "grass"
+	var is_water := false
 	match landuse_type:
 		"residential":
-			color = COLORS["default"]
+			texture_key = "grass"  # Жилые районы - трава
 		"farmland", "farm":
-			color = COLORS["farmland"]
+			texture_key = "grass"  # Поля - трава (позже можно добавить специальную текстуру)
 		"forest":
-			color = COLORS["forest"]
+			texture_key = "forest"
 		"grass", "meadow", "recreation_ground":
-			color = COLORS["grass"]
+			texture_key = "grass"
 		"reservoir", "basin":
-			color = COLORS["water"]
+			texture_key = "water"
+			is_water = true
 		_:
-			color = COLORS["default"]
+			texture_key = "grass"
 
-	_create_polygon_mesh(points, color, 0.02, parent, elev_data)
+	_create_polygon_mesh_with_texture(points, texture_key, 0.02, parent, elev_data, is_water)
 
 	# Процедурная генерация деревьев в лесах
 	if landuse_type == "forest":
@@ -985,24 +1342,26 @@ func _create_leisure(nodes: Array, tags: Dictionary, parent: Node3D, loader: Nod
 		return
 
 	var leisure_type: String = tags.get("leisure", "")
-	var color: Color
+	var texture_key := "grass"
+	var is_water := false
 
 	match leisure_type:
 		"park", "garden":
-			color = COLORS["grass"]
+			texture_key = "grass"
 		"pitch", "stadium":
-			color = Color(0.3, 0.5, 0.3)
+			texture_key = "grass"  # Можно добавить специальную текстуру для стадионов
 		"swimming_pool":
-			color = COLORS["water"]
+			texture_key = "water"
+			is_water = true
 		_:
-			color = COLORS["grass"]
+			texture_key = "grass"
 
 	var points: PackedVector2Array = []
 	for node in nodes:
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	_create_polygon_mesh(points, color, 0.04, parent, elev_data)
+	_create_polygon_mesh_with_texture(points, texture_key, 0.04, parent, elev_data, is_water)
 
 	# Процедурная генерация деревьев в парках и садах
 	if leisure_type in ["park", "garden"]:
@@ -1026,8 +1385,8 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 		_create_fence(points, parent, elev_data)
 		return
 
-	# Парковки не создаём как здания
-	if amenity_type == "parking":
+	# Парковки и заправки не создаём как здания и не обносим забором
+	if amenity_type in ["parking", "fuel"]:
 		return
 
 	# Остальные amenity - создаём как маленькие здания
@@ -1087,6 +1446,7 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 
 	var fence_height := 2.0  # Высота забора в метрах
 	var fence_color := Color(0.4, 0.35, 0.3)  # Коричневый/серый
+	var fence_offset := 0.3  # Отступ забора от контура здания для предотвращения z-fighting
 
 	var mesh := MeshInstance3D.new()
 	var im := ImmediateMesh.new()
@@ -1100,13 +1460,19 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 
 	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
 
-	# Рисуем забор как стены по периметру
+	# Рисуем забор как стены по периметру с небольшим отступом наружу
 	for i in range(points.size()):
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
-		var h1 := _get_elevation_at_point(p1, elev_data) + 0.1
-		var h2 := _get_elevation_at_point(p2, elev_data) + 0.1
+		# Вычисляем направление наружу для отступа
+		var dir := (p2 - p1).normalized()
+		var outward := Vector2(-dir.y, dir.x) * fence_offset
+		p1 = p1 + outward
+		p2 = p2 + outward
+
+		var h1 := _get_elevation_at_point(p1, elev_data) + 0.12
+		var h2 := _get_elevation_at_point(p2, elev_data) + 0.12
 
 		var v1 := Vector3(p1.x, h1, p1.y)
 		var v2 := Vector3(p2.x, h2, p2.y)
@@ -1134,12 +1500,18 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
+		# Применяем тот же отступ что и для визуала
+		var dir := (p2 - p1).normalized()
+		var outward := Vector2(-dir.y, dir.x) * fence_offset
+		p1 = p1 + outward
+		p2 = p2 + outward
+
 		var wall_length := p1.distance_to(p2)
 		if wall_length < 0.5:
 			continue
 
-		var h1 := _get_elevation_at_point(p1, elev_data) + 0.1
-		var h2 := _get_elevation_at_point(p2, elev_data) + 0.1
+		var h1 := _get_elevation_at_point(p1, elev_data) + 0.12
+		var h2 := _get_elevation_at_point(p2, elev_data) + 0.12
 		var avg_h := (h1 + h2) / 2.0
 
 		var wall_center := Vector3((p1.x + p2.x) / 2, avg_h + fence_height / 2, (p1.y + p2.y) / 2)
@@ -1299,6 +1671,219 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 
 	parent.add_child(body)
 
+func _create_3d_building_with_texture(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
+	# Минимум 4 точки для нормального здания (3 - треугольник, плохо)
+	if points.size() < 4:
+		return
+
+	# Убираем дубликат последней точки если она совпадает с первой
+	if points.size() > 1 and points[0].distance_to(points[points.size() - 1]) < 0.1:
+		points.remove_at(points.size() - 1)
+
+	if points.size() < 3:
+		return
+
+	# Проверка на слишком маленькие или вырожденные здания
+	var min_x := points[0].x
+	var max_x := points[0].x
+	var min_z := points[0].y
+	var max_z := points[0].y
+
+	for p in points:
+		min_x = min(min_x, p.x)
+		max_x = max(max_x, p.x)
+		min_z = min(min_z, p.y)
+		max_z = max(max_z, p.y)
+
+	var size_x := max_x - min_x
+	var size_z := max_z - min_z
+
+	# Пропускаем слишком маленькие здания (< 3м)
+	if size_x < 3.0 or size_z < 3.0:
+		return
+
+	# Пропускаем слишком большие здания (возможно ошибка данных > 200м)
+	if size_x > 200.0 or size_z > 200.0:
+		return
+
+	# Проверка на соотношение сторон (слишком вытянутые - вероятно ошибка)
+	var min_size: float = min(size_x, size_z)
+	if min_size < 0.1:
+		return
+	var aspect: float = max(size_x, size_z) / min_size
+	if aspect > 20.0:
+		return
+
+	# Проверка на площадь (слишком маленькая площадь = плохие данные)
+	var area: float = _calculate_polygon_area(points)
+	if area < 10.0:  # Меньше 10 м²
+		return
+
+	# Высоты с учётом террейна
+	var floor_y := base_elev + 0.1  # Чуть выше террейна
+	var roof_y := base_elev + building_height
+
+	# === СТЕНЫ с ArrayMesh для UV ===
+	var wall_arrays := []
+	wall_arrays.resize(Mesh.ARRAY_MAX)
+
+	var wall_vertices := PackedVector3Array()
+	var wall_uvs := PackedVector2Array()
+	var wall_normals := PackedVector3Array()
+	var wall_indices := PackedInt32Array()
+
+	var uv_scale_x := 0.1  # Масштаб UV по горизонтали (10м = 1 повтор текстуры)
+	var uv_scale_y := 0.1  # Масштаб UV по вертикали
+
+	var accumulated_width := 0.0
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
+
+		var wall_width := p1.distance_to(p2)
+
+		var v1 := Vector3(p1.x, floor_y, p1.y)
+		var v2 := Vector3(p2.x, floor_y, p2.y)
+		var v3 := Vector3(p2.x, roof_y, p2.y)
+		var v4 := Vector3(p1.x, roof_y, p1.y)
+
+		# Нормаль стены (наружу)
+		var dir := (p2 - p1).normalized()
+		var normal := Vector3(-dir.y, 0, dir.x)
+
+		# UV координаты
+		var u1 := accumulated_width * uv_scale_x
+		var u2 := (accumulated_width + wall_width) * uv_scale_x
+		var v_bottom := 0.0
+		var v_top := building_height * uv_scale_y
+
+		var idx := wall_vertices.size()
+
+		wall_vertices.append(v1)
+		wall_vertices.append(v2)
+		wall_vertices.append(v3)
+		wall_vertices.append(v4)
+
+		wall_uvs.append(Vector2(u1, v_bottom))
+		wall_uvs.append(Vector2(u2, v_bottom))
+		wall_uvs.append(Vector2(u2, v_top))
+		wall_uvs.append(Vector2(u1, v_top))
+
+		wall_normals.append(normal)
+		wall_normals.append(normal)
+		wall_normals.append(normal)
+		wall_normals.append(normal)
+
+		# Два треугольника для квадрата стены
+		wall_indices.append(idx + 0)
+		wall_indices.append(idx + 1)
+		wall_indices.append(idx + 2)
+
+		wall_indices.append(idx + 0)
+		wall_indices.append(idx + 2)
+		wall_indices.append(idx + 3)
+
+		accumulated_width += wall_width
+
+	wall_arrays[Mesh.ARRAY_VERTEX] = wall_vertices
+	wall_arrays[Mesh.ARRAY_TEX_UV] = wall_uvs
+	wall_arrays[Mesh.ARRAY_NORMAL] = wall_normals
+	wall_arrays[Mesh.ARRAY_INDEX] = wall_indices
+
+	var wall_mesh := ArrayMesh.new()
+	wall_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, wall_arrays)
+
+	var wall_mesh_instance := MeshInstance3D.new()
+	wall_mesh_instance.mesh = wall_mesh
+	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+	# Материал стен с текстурой
+	var wall_material := StandardMaterial3D.new()
+	wall_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if _building_textures.has(texture_type):
+		wall_material.albedo_texture = _building_textures[texture_type]
+		wall_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	else:
+		wall_material.albedo_color = Color(0.7, 0.6, 0.5)
+	wall_mesh_instance.material_override = wall_material
+
+	# === КРЫША с ArrayMesh для UV ===
+	var roof_indices_2d := Geometry2D.triangulate_polygon(points)
+	if roof_indices_2d.size() >= 3:
+		var roof_arrays := []
+		roof_arrays.resize(Mesh.ARRAY_MAX)
+
+		var roof_vertices := PackedVector3Array()
+		var roof_uvs := PackedVector2Array()
+		var roof_normals := PackedVector3Array()
+		var roof_indices := PackedInt32Array()
+
+		# Добавляем все вершины крыши
+		for p in points:
+			roof_vertices.append(Vector3(p.x, roof_y, p.y))
+			# UV для крыши - мировые координаты
+			roof_uvs.append(Vector2(p.x * 0.1, p.y * 0.1))
+			roof_normals.append(Vector3.UP)
+
+		# Индексы из триангуляции
+		for idx in roof_indices_2d:
+			roof_indices.append(idx)
+
+		roof_arrays[Mesh.ARRAY_VERTEX] = roof_vertices
+		roof_arrays[Mesh.ARRAY_TEX_UV] = roof_uvs
+		roof_arrays[Mesh.ARRAY_NORMAL] = roof_normals
+		roof_arrays[Mesh.ARRAY_INDEX] = roof_indices
+
+		var roof_mesh := ArrayMesh.new()
+		roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, roof_arrays)
+
+		var roof_mesh_instance := MeshInstance3D.new()
+		roof_mesh_instance.mesh = roof_mesh
+		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+		# Материал крыши с текстурой
+		var roof_material := StandardMaterial3D.new()
+		roof_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		if _building_textures.has("roof"):
+			roof_material.albedo_texture = _building_textures["roof"]
+			roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		else:
+			roof_material.albedo_color = Color(0.4, 0.35, 0.3)
+		roof_mesh_instance.material_override = roof_material
+
+		# Добавляем крышу к стенам
+		wall_mesh_instance.add_child(roof_mesh_instance)
+
+	# Создаём физическое тело
+	var body := StaticBody3D.new()
+	body.collision_layer = 2  # Слой 2 для зданий
+	body.collision_mask = 1   # Реагирует на слой 1 (машина)
+	body.add_child(wall_mesh_instance)
+
+	# Создаём коллизию для каждой стены отдельно
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
+
+		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev + building_height / 2, (p1.y + p2.y) / 2)
+		var wall_length := p1.distance_to(p2)
+
+		if wall_length < 0.5:  # Пропускаем слишком короткие стены
+			continue
+
+		var wall_angle := atan2(p2.y - p1.y, p2.x - p1.x)
+
+		var collision := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		box.size = Vector3(wall_length, building_height, 0.3)  # Толщина стены 0.3м
+		collision.shape = box
+		collision.position = wall_center
+		collision.rotation.y = -wall_angle
+
+		body.add_child(collision)
+
+	parent.add_child(body)
+
 func _create_polygon_mesh(points: PackedVector2Array, color: Color, height_offset: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
 	if points.size() < 3:
 		return
@@ -1337,6 +1922,80 @@ func _create_polygon_mesh(points: PackedVector2Array, color: Color, height_offse
 
 	im.surface_end()
 
+	parent.add_child(mesh)
+
+func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: String, height_offset: float, parent: Node3D, elev_data: Dictionary = {}, is_water: bool = false) -> void:
+	if points.size() < 3:
+		return
+
+	# Убираем дубликат последней точки если она совпадает с первой
+	if points.size() > 1 and points[0].distance_to(points[points.size() - 1]) < 0.1:
+		points.remove_at(points.size() - 1)
+
+	if points.size() < 3:
+		return
+
+	# Триангуляция
+	var indices := Geometry2D.triangulate_polygon(points)
+	if indices.size() < 3:
+		return
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+
+	var vertices := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var normals := PackedVector3Array()
+	var tri_indices := PackedInt32Array()
+
+	var uv_scale := 0.05  # Масштаб UV для земли (20м = 1 повтор текстуры)
+
+	# Добавляем вершины
+	for p in points:
+		var h := _get_elevation_at_point(p, elev_data) + height_offset
+		vertices.append(Vector3(p.x, h, p.y))
+		uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
+		normals.append(Vector3.UP)
+
+	# Добавляем индексы
+	for idx in indices:
+		tri_indices.append(idx)
+
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = tri_indices
+
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	var mesh := MeshInstance3D.new()
+	mesh.mesh = arr_mesh
+
+	# Материал с текстурой
+	var material := StandardMaterial3D.new()
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if _ground_textures.has(texture_key):
+		material.albedo_texture = _ground_textures[texture_key]
+		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	else:
+		# Fallback цвета
+		match texture_key:
+			"grass":
+				material.albedo_color = Color(0.3, 0.5, 0.2)
+			"forest":
+				material.albedo_color = Color(0.2, 0.4, 0.15)
+			"water":
+				material.albedo_color = Color(0.2, 0.4, 0.6)
+			_:
+				material.albedo_color = Color(0.4, 0.5, 0.3)
+
+	# Для воды добавляем прозрачность
+	if is_water:
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.albedo_color.a = 0.8
+
+	mesh.material_override = material
 	parent.add_child(mesh)
 
 # Конвертация lat/lon в локальные координаты относительно стартовой точки
