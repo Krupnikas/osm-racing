@@ -398,6 +398,9 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	_generate_terrain(osm_data, chunk_node, chunk_key)
 	loader.queue_free()
 
+	# Если ночь уже включена - активируем свет в новом чанке
+	_apply_night_mode_to_chunk(chunk_node)
+
 	# Проверяем завершение начальной загрузки
 	_check_initial_load_complete()
 
@@ -2284,8 +2287,8 @@ func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, directi
 	lamp.add_child(light_globe)
 
 	# Добавляем источник света - OmniLight для освещения вокруг
-	# 4% шанс что фонарь сломан
-	var is_broken := randf() < 0.04
+	# 5% шанс что фонарь сломан
+	var is_broken := randf() < 0.05
 
 	var lamp_light := OmniLight3D.new()
 	lamp_light.name = "LampLight"
@@ -2763,14 +2766,31 @@ func _connect_to_night_mode() -> void:
 			_on_night_mode_changed(true)
 
 
+var _is_night_mode := false
+
 func _on_night_mode_changed(enabled: bool) -> void:
 	"""Обрабатывает переключение ночного режима"""
 	print("OSM: Night mode ", "enabled" if enabled else "disabled")
+	_is_night_mode = enabled
 
 	# Обновляем все фонари и неоновые вывески
 	for chunk_key in _loaded_chunks.keys():
 		var chunk: Node3D = _loaded_chunks[chunk_key]
 		_update_chunk_night_lights(chunk, enabled)
+
+
+func _apply_night_mode_to_chunk(chunk: Node3D) -> void:
+	"""Применяет текущее состояние ночного режима к чанку"""
+	# Проверяем состояние ночного режима из NightModeManager
+	var night_manager := get_tree().current_scene.find_child("NightModeManager", true, false)
+	var is_night := false
+	if night_manager:
+		is_night = night_manager.is_night
+	elif _is_night_mode:
+		is_night = true
+
+	if is_night:
+		_update_chunk_night_lights(chunk, true)
 
 
 func _update_chunk_night_lights(chunk: Node3D, night_enabled: bool) -> void:
@@ -2792,8 +2812,8 @@ func _recursive_update_lights(node: Node, night_enabled: bool) -> void:
 				if mat:
 					mat.emission_energy_multiplier = 5.0 if night_enabled else 0.5
 
-	# Проверяем неоновые вывески
-	if node.name.begins_with("NeonSign") or node.name.begins_with("WindowLight"):
+	# Проверяем неоновые вывески и окна
+	if node.name.begins_with("NeonSign") or node.name.begins_with("WindowLights"):
 		node.visible = night_enabled
 
 	# Рекурсивно обходим дочерние ноды
@@ -2812,6 +2832,9 @@ const NEON_COLORS := [
 	Color(0.0, 1.0, 0.3),   # Green
 ]
 
+
+var _neon_signs_created := 0
+var _window_lights_created := 0
 
 func _add_building_night_decorations(building_mesh: MeshInstance3D, points: PackedVector2Array, building_height: float, parent: Node3D) -> void:
 	"""Добавляет неоновые вывески и освещённые окна к зданию"""
@@ -2836,55 +2859,87 @@ func _add_building_night_decorations(building_mesh: MeshInstance3D, points: Pack
 
 	# 35% шанс на неоновую вывеску
 	if rng.randf() < 0.35 and building_width > 5.0:
-		_add_neon_sign(center, building_height, building_width, rng, parent)
+		_add_neon_sign(center, building_height, building_width, rng, parent, building_depth)
+		_neon_signs_created += 1
+		if _neon_signs_created % 10 == 0:
+			print("OSM: Created %d neon signs" % _neon_signs_created)
 
-	# 55% шанс на освещённые окна для высоких зданий
-	if rng.randf() < 0.55 and building_height > 6.0:
+	# Светящиеся окна для высоких зданий (проверка внутри функции)
+	if building_height > 6.0:
+		var prev_count := _window_lights_created
 		_add_window_lights(center, building_height, building_width, building_depth, rng, parent)
+		if _window_lights_created > prev_count and _window_lights_created % 5 == 0:
+			print("OSM: Created %d window lights" % _window_lights_created)
 
 
-func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNumberGenerator, parent: Node3D) -> void:
-	"""Добавляет неоновую вывеску на здание"""
+func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNumberGenerator, parent: Node3D, depth: float = 0.0) -> void:
+	"""Добавляет неоновую вывеску на здание - видимую издалека"""
 	var sign_container := Node3D.new()
 	sign_container.name = "NeonSign_%d" % rng.randi()
 
 	# Выбираем случайный цвет
 	var color: Color = NEON_COLORS[rng.randi() % NEON_COLORS.size()]
 
-	# Размер вывески
-	var sign_width := minf(width * 0.5, 3.5)
-	var sign_height := rng.randf_range(0.6, 1.0)
+	# Размер вывески - увеличен для видимости издалека
+	var sign_width := minf(width * 0.6, 5.0)
+	var sign_height := rng.randf_range(1.0, 1.5)
 
 	# Позиция - на фасаде здания
-	var sign_y := minf(height * 0.35, 4.5)
+	var sign_y := minf(height * 0.35, 5.0)
 
 	# Создаём светящийся mesh
 	var sign_mesh := MeshInstance3D.new()
 	sign_mesh.name = "SignMesh"
 	var box := BoxMesh.new()
-	box.size = Vector3(sign_width, sign_height, 0.12)
+	box.size = Vector3(sign_width, sign_height, 0.15)
 	sign_mesh.mesh = box
 
-	# Материал с emission
+	# Материал с emission - очень яркий для видимости издалека
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = color
 	mat.emission_enabled = true
 	mat.emission = color
-	mat.emission_energy_multiplier = 6.0
+	mat.emission_energy_multiplier = 20.0  # Очень яркий
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	sign_mesh.material_override = mat
 
-	sign_mesh.position = Vector3(0, sign_y, 0.1)
+	# Выбираем случайную сторону для вывески
+	var side := rng.randi() % 4
+	var sign_offset: Vector3
+	var sign_rotation := 0.0
+
+	# Используем depth если передан, иначе берём width (квадратное здание)
+	var actual_depth := depth if depth > 0 else width
+
+	match side:
+		0:  # Z+ (фасад)
+			sign_offset = Vector3(0, sign_y, actual_depth / 2 + 0.15)
+			sign_rotation = 0.0
+		1:  # Z-
+			sign_offset = Vector3(0, sign_y, -actual_depth / 2 - 0.15)
+			sign_rotation = PI
+		2:  # X+
+			sign_offset = Vector3(width / 2 + 0.15, sign_y, 0)
+			sign_rotation = PI / 2
+		3:  # X-
+			sign_offset = Vector3(-width / 2 - 0.15, sign_y, 0)
+			sign_rotation = -PI / 2
+
+	sign_mesh.position = sign_offset
+	sign_mesh.rotation.y = sign_rotation
 	sign_container.add_child(sign_mesh)
 
-	# Источник света
+	# Источник света - увеличен для видимости издалека
 	var light := OmniLight3D.new()
 	light.name = "SignLight"
-	light.position = Vector3(0, sign_y, 1.5)
-	light.omni_range = 10.0
-	light.light_energy = 1.8
+	# Свет чуть впереди вывески
+	var light_offset := Vector3(0, 0, 2.0).rotated(Vector3.UP, sign_rotation)
+	light.position = sign_offset + light_offset
+	light.omni_range = 25.0  # Большой радиус
+	light.light_energy = 3.0  # Яркий свет
 	light.light_color = color
 	light.shadow_enabled = false
+	light.light_bake_mode = Light3D.BAKE_DISABLED
 	sign_container.add_child(light)
 
 	# Позиция контейнера
@@ -2895,52 +2950,87 @@ func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNum
 
 
 func _add_window_lights(center: Vector2, height: float, width: float, depth: float, rng: RandomNumberGenerator, parent: Node3D) -> void:
-	"""Добавляет освещённые окна к зданию"""
+	"""Добавляет светящиеся окна: 5% жёлтые, 0.5% фиолетовые - видимые издалека"""
+	# 5% жёлтые + 0.5% фиолетовые = 5.5% зданий
+	var chance := rng.randf()
+	var is_purple := chance < 0.005  # 0.5% фиолетовые
+	var is_yellow := chance >= 0.005 and chance < 0.055  # 5% жёлтые
+
+	if not is_purple and not is_yellow:
+		return
+
+	_window_lights_created += 1
+
 	var container := Node3D.new()
 	container.name = "WindowLights_%d" % rng.randi()
 	container.position = Vector3(center.x, 0, center.y)
 
-	# Параметры окон
+	# Параметры - увеличенные для видимости издалека
 	var floor_height := 3.0
-	var num_floors := int(height / floor_height)
+	var num_floors := mini(int(height / floor_height), 3)
 	if num_floors < 1:
 		num_floors = 1
 
-	# Цвета окон
-	var window_colors := [
-		Color(1.0, 0.9, 0.7),   # Тёплый белый
-		Color(1.0, 0.95, 0.8),  # Жёлтый
-		Color(0.7, 0.8, 1.0),   # Холодный (TV)
+	# Цвет окна - более яркий для видимости
+	var color: Color
+	var emission_energy: float
+	if is_purple:
+		color = Color(0.8, 0.3, 1.0)  # Яркий фиолетовый
+		emission_energy = 15.0  # Очень яркий для видимости издалека
+	else:
+		color = Color(1.0, 0.95, 0.7)  # Яркий тёплый жёлтый
+		emission_energy = 10.0  # Яркий для видимости издалека
+
+	# Выбираем одну случайную сторону
+	var all_sides := [
+		{"offset": Vector3(0, 0, depth / 2 + 0.08), "rot": 0.0, "length": width},
+		{"offset": Vector3(0, 0, -depth / 2 - 0.08), "rot": PI, "length": width},
+		{"offset": Vector3(width / 2 + 0.08, 0, 0), "rot": PI / 2, "length": depth},
+		{"offset": Vector3(-width / 2 - 0.08, 0, 0), "rot": -PI / 2, "length": depth},
 	]
+	var side: Dictionary = all_sides[rng.randi() % 4]
+	var side_length: float = side["length"]
 
-	# Создаём несколько окон на каждом этаже
-	var windows_per_floor := rng.randi_range(2, 5)
+	# Создаём 1-3 окна на случайных этажах
+	var num_windows := rng.randi_range(1, mini(3, num_floors))
 
-	for floor_idx in range(num_floors):
-		for win_idx in range(windows_per_floor):
-			# 45% шанс что окно горит
-			if rng.randf() > 0.45:
-				continue
+	for _i in range(num_windows):
+		var floor_idx := rng.randi() % num_floors
+		var along := rng.randf_range(-side_length / 2 + 1.0, side_length / 2 - 1.0)
+		var wy := floor_height * 0.6 + floor_idx * floor_height
 
-			var wx := rng.randf_range(-width / 2 + 1, width / 2 - 1)
-			var wy := floor_height * 0.6 + floor_idx * floor_height
-			var wz := depth / 2 + 0.05
+		var window_mesh := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		# Увеличенный размер для видимости издалека
+		box.size = Vector3(1.5, 2.0, 0.08)
+		window_mesh.mesh = box
 
-			# Mesh окна
-			var window_mesh := MeshInstance3D.new()
-			var box := BoxMesh.new()
-			box.size = Vector3(0.7, 1.0, 0.04)
-			window_mesh.mesh = box
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = color
+		mat.emission_enabled = true
+		mat.emission = color
+		mat.emission_energy_multiplier = emission_energy
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED  # Всегда яркий, без затенения
+		window_mesh.material_override = mat
 
-			var color: Color = window_colors[rng.randi() % window_colors.size()]
-			var mat := StandardMaterial3D.new()
-			mat.albedo_color = color
-			mat.emission_enabled = true
-			mat.emission = color
-			mat.emission_energy_multiplier = 2.0
-			window_mesh.material_override = mat
-			window_mesh.position = Vector3(wx, wy, wz)
-			container.add_child(window_mesh)
+		var base_offset: Vector3 = side["offset"]
+		var rotation_y: float = side["rot"]
+		window_mesh.position = base_offset + Vector3(along, wy, 0).rotated(Vector3.UP, rotation_y)
+		window_mesh.position.y = wy
+		window_mesh.rotation.y = rotation_y
+
+		container.add_child(window_mesh)
+
+	# Добавляем OmniLight для видимости издалека (один на все окна здания)
+	var window_light := OmniLight3D.new()
+	window_light.name = "WindowOmniLight"
+	window_light.position = Vector3(0, height * 0.5, 0)  # В центре здания по высоте
+	window_light.omni_range = 25.0 if is_purple else 20.0  # Большой радиус для видимости
+	window_light.light_energy = 2.5 if is_purple else 1.5
+	window_light.light_color = color
+	window_light.shadow_enabled = false
+	window_light.light_bake_mode = Light3D.BAKE_DISABLED
+	container.add_child(window_light)
 
 	container.visible = false  # Включается ночью
 	parent.add_child(container)
