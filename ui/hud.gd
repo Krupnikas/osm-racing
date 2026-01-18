@@ -28,8 +28,8 @@ func _ready() -> void:
 
 
 func _on_speed_changed(speed: float) -> void:
-	# Конвертируем км/ч в MPH (миль/ч)
-	_current_speed = speed * 0.621371
+	# Скорость уже в км/ч
+	_current_speed = speed
 	_update_speedometer()
 
 

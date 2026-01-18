@@ -2,7 +2,7 @@ extends Control
 
 ## Спидометр в стиле NFS с круглой шкалой и стрелкой
 
-@export var current_speed: float = 0.0  # В MPH
+@export var current_speed: float = 0.0  # В км/ч
 @export var current_rpm: float = 0.0    # Обороты двигателя
 @export var current_gear: String = "N"   # Текущая передача
 
@@ -11,7 +11,7 @@ const GAUGE_RADIUS := 165.0
 const GAUGE_CENTER := Vector2(210, 210)
 const SCALE_START_ANGLE := 135.0  # Градусы (начало шкалы слева внизу)
 const SCALE_END_ANGLE := 45.0     # Градусы (конец шкалы справа внизу)
-const MAX_SPEED := 200.0          # Максимальная скорость на шкале (MPH)
+const MAX_SPEED := 200.0          # Максимальная скорость на шкале (км/ч)
 
 # Цвета
 const COLOR_BG := Color(0.05, 0.05, 0.05, 0.9)
@@ -81,6 +81,19 @@ func _draw_main_gauge() -> void:
 		var outer_point: Vector2 = GAUGE_CENTER + Vector2(cos(angle_rad), sin(angle_rad)) * (GAUGE_RADIUS - 5)
 		draw_line(inner_point, outer_point, COLOR_SCALE, 2.0)
 
+		# Рисуем цифры (0, 20, 40, ... 200 км/ч)
+		if _font_small:
+			var speed_value: int = i * 20
+			var number_text: String = str(speed_value)
+			var number_font_size: int = 16
+			var text_size: Vector2 = _font_small.get_string_size(number_text, HORIZONTAL_ALIGNMENT_CENTER, -1, number_font_size)
+			# Позиция текста дальше от центра (увеличили расстояние)
+			var text_radius: float = GAUGE_RADIUS - 40
+			var text_pos: Vector2 = GAUGE_CENTER + Vector2(cos(angle_rad), sin(angle_rad)) * text_radius
+			# Центрируем текст
+			text_pos -= text_size / 2.0
+			draw_string(_font_small, text_pos, number_text, HORIZONTAL_ALIGNMENT_CENTER, -1, number_font_size, COLOR_NUMBERS)
+
 		# Короткие деления между цифрами
 		if i < 10:
 			for j in range(1, 5):
@@ -147,7 +160,7 @@ func _draw_rpm_gauge() -> void:
 func _draw_info_panel() -> void:
 	# Панель в стиле NFS - две узкие подложки
 	# Выравниваем по правому краю
-	var panel_right_edge: float = 330.0  # Правый край плашек (ещё левее)
+	var panel_right_edge: float = 310.0  # Правый край плашек (ещё левее)
 	var base_y: float = GAUGE_CENTER.y - 70.0
 
 	if _font_large:
@@ -193,16 +206,16 @@ func _draw_info_panel() -> void:
 		var speed_y: float = speed_panel_pos.y + speed_size.y + 4
 		draw_string(_font_medium, Vector2(speed_x, speed_y), speed_text, HORIZONTAL_ALIGNMENT_LEFT, -1, speed_font_size, Color.WHITE)
 
-		# === MPH (БЕЗ ПОДЛОЖКИ) ===
-		var mph_text: String = "MPH"
-		var mph_font_size: int = 18  # Уменьшили с 20
-		var mph_size: Vector2 = _font_small.get_string_size(mph_text, HORIZONTAL_ALIGNMENT_LEFT, -1, mph_font_size)
-		# Центрируем MPH под плашкой скорости
-		var mph_x: float = speed_panel_pos.x + (speed_panel_size.x - mph_size.x) / 2.0
-		var mph_y: float = speed_panel_pos.y + speed_panel_size.y + mph_size.y + 8
+		# === KM/H (БЕЗ ПОДЛОЖКИ) ===
+		var kmh_text: String = "KM/H"
+		var kmh_font_size: int = 18  # Уменьшили с 20
+		var kmh_size: Vector2 = _font_small.get_string_size(kmh_text, HORIZONTAL_ALIGNMENT_LEFT, -1, kmh_font_size)
+		# Центрируем KM/H под плашкой скорости
+		var kmh_x: float = speed_panel_pos.x + (speed_panel_size.x - kmh_size.x) / 2.0
+		var kmh_y: float = speed_panel_pos.y + speed_panel_size.y + kmh_size.y + 8
 
-		# MPH без подложки (italic шрифт)
-		draw_string(_font_small, Vector2(mph_x, mph_y), mph_text, HORIZONTAL_ALIGNMENT_LEFT, -1, mph_font_size, Color(0.8, 0.8, 0.8))
+		# KM/H без подложки (italic шрифт)
+		draw_string(_font_small, Vector2(kmh_x, kmh_y), kmh_text, HORIZONTAL_ALIGNMENT_LEFT, -1, kmh_font_size, Color(0.8, 0.8, 0.8))
 
 func update_values(speed: float, rpm: float, gear: String) -> void:
 	current_speed = speed
