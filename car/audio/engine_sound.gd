@@ -1,108 +1,86 @@
 extends AudioStreamPlayer
 class_name EngineSound
 
-## Процедурный звук двигателя на основе оборотов
+## Звук двигателя на основе оборотов
 
-@export var min_volume := -25.0  ## Громкость на холостых (dB)
-@export var max_volume := -8.0   ## Громкость на максимальных оборотах (dB)
+@export var min_volume := -8.0
+@export var max_volume := 2.0
 
 var _car: Car = null
-var _audio_generator: AudioStreamGenerator
-var _playback: AudioStreamGeneratorPlayback = null
-
-# Параметры синтеза звука
-var _phase := 0.0
-var _phase2 := 0.0
-var _phase3 := 0.0
-var _sample_rate := 22050.0
-var _current_freq := 25.0
-var _target_freq := 25.0
-var _initialized := false
+var _stream_ready := false
 
 func _ready() -> void:
-	# Настраиваем аудио
 	bus = "Master"
 	volume_db = min_volume
-	process_mode = Node.PROCESS_MODE_ALWAYS  # Работаем даже на паузе
+	pitch_scale = 0.5
 
-	# Создаём генератор звука
-	_audio_generator = AudioStreamGenerator.new()
-	_audio_generator.mix_rate = _sample_rate
-	_audio_generator.buffer_length = 0.1
+	# Создаём звук
+	stream = _generate_engine_loop()
+	_stream_ready = true
 
-	stream = _audio_generator
-	play()
-
-	print("EngineSound: Started")
+	# Ищем машину
+	var parent = get_parent()
+	if parent is Car:
+		_car = parent
 
 func _process(delta: float) -> void:
-	# Ищем машину если ещё не нашли
+	if not _stream_ready:
+		return
+
+	# Не играем на паузе (меню)
+	if get_tree().paused:
+		if playing:
+			stop()
+		return
+
+	# Ищем машину
 	if not _car:
 		var parent = get_parent()
 		if parent is Car:
 			_car = parent
-			print("EngineSound: Found car")
-		else:
-			return
-
-	# Получаем playback если ещё не получили
-	if not _playback:
-		_playback = get_stream_playback()
-		if _playback:
-			print("EngineSound: Got playback")
 		return
 
-	# Получаем обороты двигателя
-	var rpm := _car.get_rpm()
-	var max_rpm := _car.max_rpm
-	var idle_rpm := _car.idle_rpm
+	# Запускаем если не играет
+	if not playing:
+		play()
 
-	# Нормализованные обороты (0-1)
-	var rpm_normalized := (rpm - idle_rpm) / (max_rpm - idle_rpm)
-	rpm_normalized = clamp(rpm_normalized, 0.0, 1.0)
+	# Обороты
+	var rpm: float = _car.get_rpm()
+	var rpm_norm: float = clamp((rpm - _car.idle_rpm) / (_car.max_rpm - _car.idle_rpm), 0.0, 1.0)
 
-	# Целевая частота (25-90 Гц)
-	_target_freq = lerp(25.0, 90.0, rpm_normalized)
+	# Pitch: 0.5 -> 2.0
+	pitch_scale = lerp(pitch_scale, 0.5 + rpm_norm * 1.5, delta * 10.0)
 
-	# Плавное изменение частоты
-	_current_freq = lerp(_current_freq, _target_freq, delta * 8.0)
+	# Громкость
+	volume_db = lerp(min_volume, max_volume, rpm_norm * 0.5 + _car.throttle_input * 0.5)
 
-	# Громкость зависит от оборотов и газа
-	var throttle: float = _car.throttle_input
-	var vol: float = lerp(min_volume, max_volume, rpm_normalized * 0.5 + throttle * 0.5)
-	volume_db = vol
+func _generate_engine_loop() -> AudioStreamWAV:
+	var sample_rate := 44100
+	var base_freq := 100.0
+	var samples := int(sample_rate / base_freq)
 
-	# Заполняем буфер
-	_fill_buffer()
+	var data := PackedByteArray()
+	data.resize(samples * 2)
 
-func _fill_buffer() -> void:
-	if not _playback:
-		return
+	for i in range(samples):
+		var phase := float(i) / float(samples)
 
-	var frames_available := _playback.get_frames_available()
-	if frames_available <= 0:
-		return
+		var sample := sin(phase * TAU) * 0.4
+		sample += sin(phase * 2.0 * TAU) * 0.3
+		sample += sin(phase * 4.0 * TAU) * 0.15
+		sample = clamp(sample * 0.7, -0.95, 0.95)
 
-	var inc1 := _current_freq / _sample_rate
-	var inc2 := _current_freq * 2.0 / _sample_rate
-	var inc3 := _current_freq * 0.5 / _sample_rate
+		var sample_int := int(sample * 32767)
+		data[i * 2] = sample_int & 0xFF
+		data[i * 2 + 1] = (sample_int >> 8) & 0xFF
 
-	for i in range(frames_available):
-		# Основной тон
-		var sample := sin(_phase * TAU) * 0.4
+	var wav := AudioStreamWAV.new()
+	wav.format = AudioStreamWAV.FORMAT_16_BITS
+	wav.mix_rate = sample_rate
+	wav.stereo = false
+	wav.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	wav.loop_begin = 0
+	wav.loop_end = samples
+	wav.data = data
 
-		# Гармоники
-		sample += sin(_phase2 * TAU) * 0.25
-		sample += sin(_phase3 * TAU) * 0.2
-
-		# Шум
-		sample += (randf() - 0.5) * 0.12
-
-		# Мягкое ограничение
-		sample = clamp(sample, -0.9, 0.9)
-
-		_playback.push_frame(Vector2(sample, sample))
-
-		_phase = fmod(_phase + inc1, 1.0)
-		_phase2 = fmod(_phase2 + inc2, 1.0)
-		_phase3 = fmod(_phase3 + inc3, 1.0)
+	return wav
