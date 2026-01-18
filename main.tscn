@@ -9,6 +9,7 @@
 [ext_resource type="Script" path="res://camera/top_down_camera.gd" id="8_top_cam"]
 [ext_resource type="PackedScene" uid="uid://menu123" path="res://ui/main_menu.tscn" id="9_menu"]
 [ext_resource type="PackedScene" uid="uid://hud123" path="res://ui/hud.tscn" id="10_hud"]
+[ext_resource type="Script" path="res://traffic/traffic_manager.gd" id="11_traffic"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -59,6 +60,9 @@ car_path = NodePath("../Car")
 
 [node name="Car" parent="." instance=ExtResource("2_car")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
+
+[node name="TrafficManager" type="Node" parent="."]
+script = ExtResource("11_traffic")
 
 [node name="CameraManager" type="Node" parent="."]
 script = ExtResource("6_cam_mgr")

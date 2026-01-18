@@ -1,8 +1,6 @@
-[gd_scene load_steps=14 format=3 uid="uid://bcar123"]
+[gd_scene load_steps=10 format=3 uid="uid://npccar123"]
 
-[ext_resource type="Script" path="res://car/car.gd" id="1_car"]
-[ext_resource type="Script" path="res://car/audio/engine_sound.gd" id="2_engine_sound"]
-[ext_resource type="Script" path="res://car/audio/collision_sound.gd" id="3_collision_sound"]
+[ext_resource type="Script" path="res://traffic/npc_car.gd" id="1_npc_car"]
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_body"]
 size = Vector3(1.9, 0.6, 4.4)
@@ -17,7 +15,7 @@ size = Vector3(1.7, 0.6, 2.0)
 size = Vector3(1.7, 0.3, 1.4)
 
 [sub_resource type="StandardMaterial3D" id="Material_body"]
-albedo_color = Color(0.15, 0.35, 0.7, 1)
+albedo_color = Color(0.5, 0.5, 0.5, 1)
 metallic = 0.7
 roughness = 0.3
 
@@ -37,24 +35,13 @@ radial_segments = 24
 albedo_color = Color(0.08, 0.08, 0.08, 1)
 roughness = 0.9
 
-[sub_resource type="CylinderMesh" id="CylinderMesh_rim"]
-top_radius = 0.22
-bottom_radius = 0.22
-height = 0.24
-radial_segments = 16
-
-[sub_resource type="StandardMaterial3D" id="Material_rim"]
-albedo_color = Color(0.7, 0.7, 0.75, 1)
-metallic = 0.9
-roughness = 0.2
-
-[node name="Car" type="VehicleBody3D" groups=["car"]]
+[node name="NPCCar" type="VehicleBody3D"]
 mass = 1400.0
-collision_layer = 1
+collision_layer = 4
 collision_mask = 7
 center_of_mass_mode = 1
 center_of_mass = Vector3(0, -0.3, 0)
-script = ExtResource("1_car")
+script = ExtResource("1_npc_car")
 
 [node name="Chassis" type="MeshInstance3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)
@@ -92,11 +79,6 @@ transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
 mesh = SubResource("CylinderMesh_wheel")
 surface_material_override/0 = SubResource("Material_tire")
 
-[node name="Rim" type="MeshInstance3D" parent="WheelFL"]
-transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
-mesh = SubResource("CylinderMesh_rim")
-surface_material_override/0 = SubResource("Material_rim")
-
 [node name="WheelFR" type="VehicleWheel3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.85, 0.5, 1.35)
 use_as_steering = true
@@ -113,11 +95,6 @@ damping_relaxation = 2.0
 transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
 mesh = SubResource("CylinderMesh_wheel")
 surface_material_override/0 = SubResource("Material_tire")
-
-[node name="Rim" type="MeshInstance3D" parent="WheelFR"]
-transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
-mesh = SubResource("CylinderMesh_rim")
-surface_material_override/0 = SubResource("Material_rim")
 
 [node name="WheelRL" type="VehicleWheel3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.85, 0.5, -1.4)
@@ -136,11 +113,6 @@ transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
 mesh = SubResource("CylinderMesh_wheel")
 surface_material_override/0 = SubResource("Material_tire")
 
-[node name="Rim" type="MeshInstance3D" parent="WheelRL"]
-transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
-mesh = SubResource("CylinderMesh_rim")
-surface_material_override/0 = SubResource("Material_rim")
-
 [node name="WheelRR" type="VehicleWheel3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.85, 0.5, -1.4)
 use_as_traction = true
@@ -157,14 +129,3 @@ damping_relaxation = 2.2
 transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
 mesh = SubResource("CylinderMesh_wheel")
 surface_material_override/0 = SubResource("Material_tire")
-
-[node name="Rim" type="MeshInstance3D" parent="WheelRR"]
-transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
-mesh = SubResource("CylinderMesh_rim")
-surface_material_override/0 = SubResource("Material_rim")
-
-[node name="EngineSound" type="AudioStreamPlayer" parent="."]
-script = ExtResource("2_engine_sound")
-
-[node name="CollisionSound" type="Node" parent="."]
-script = ExtResource("3_collision_sound")
