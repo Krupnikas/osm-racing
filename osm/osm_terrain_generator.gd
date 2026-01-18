@@ -242,6 +242,29 @@ func _unload_chunk(chunk_key: String) -> void:
 		_chunk_elevations.erase(chunk_key)
 		print("OSM: Unloaded chunk %s" % chunk_key)
 
+# Сбрасывает все загруженные чанки (для смены локации)
+func reset_terrain() -> void:
+	print("OSM: Resetting terrain...")
+	# Выгружаем все чанки
+	var chunks_to_unload: Array[String] = []
+	for chunk_key in _loaded_chunks:
+		chunks_to_unload.append(chunk_key)
+	for chunk_key in chunks_to_unload:
+		_unload_chunk(chunk_key)
+
+	# Сбрасываем состояние
+	_loading_chunks.clear()
+	_chunk_elevations.clear()
+	_loading_elevations.clear()
+	_elevation_queue.clear()
+	_active_elevation_requests = 0
+	_base_elevation = 0.0
+	_initial_loading = false
+	_initial_chunks_needed.clear()
+	_initial_chunks_loaded = 0
+	_loading_paused = true
+	print("OSM: Terrain reset complete")
+
 func _on_osm_load_failed(error: String) -> void:
 	push_error("OSM load failed: " + error)
 

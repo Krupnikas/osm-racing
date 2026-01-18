@@ -7,6 +7,7 @@ signal quit_game
 @export var car_path: NodePath
 @export var world_root_path: NodePath
 @export var hud_path: NodePath
+@export var camera_path: NodePath
 
 # Доступные локации: название -> [широта, долгота]
 const LOCATIONS := {
@@ -20,6 +21,7 @@ var _terrain_generator: Node3D
 var _car: Node3D
 var _world_root: Node3D
 var _hud: Control
+var _camera: Camera3D
 var _is_loading := false
 var _game_started := false  # Игра уже была запущена
 var _selected_location := "Череповец"
@@ -39,6 +41,8 @@ func _ready() -> void:
 		_world_root = get_node(world_root_path)
 	if hud_path:
 		_hud = get_node(hud_path)
+	if camera_path:
+		_camera = get_node(camera_path)
 
 	# Подключаем сигналы от генератора террейна
 	if _terrain_generator:
@@ -61,12 +65,7 @@ func _on_start_pressed() -> void:
 	if _is_loading:
 		return
 
-	# Если игра уже запущена - просто продолжаем
-	if _game_started:
-		hide_menu()
-		return
-
-	# Показываем панель выбора локации
+	# Показываем панель выбора локации (и для первого старта, и для новой игры)
 	$VBox.visible = false
 	$LocationPanel.visible = true
 
@@ -98,6 +97,21 @@ func _start_loading() -> void:
 	$LoadingPanel.visible = true
 	$LoadingPanel/VBox/ProgressBar.value = 0
 	$LoadingPanel/VBox/StatusLabel.text = "Подготовка..."
+
+	# Если игра уже была запущена - сбрасываем террейн
+	if _game_started and _terrain_generator:
+		_terrain_generator.reset_terrain()
+
+	# Сбрасываем машину на начальную позицию
+	if _car:
+		_car.global_position = Vector3(0, 2, 0)
+		_car.rotation = Vector3.ZERO
+		_car.linear_velocity = Vector3.ZERO
+		_car.angular_velocity = Vector3.ZERO
+
+	# Сбрасываем камеру
+	if _camera and _camera.has_method("reset_camera"):
+		_camera.reset_camera()
 
 	# Устанавливаем координаты для генератора
 	if _terrain_generator:

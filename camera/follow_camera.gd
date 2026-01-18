@@ -26,7 +26,19 @@ func _ready() -> void:
 		_target_node = get_node(target)
 	# Мышь управляется через MainMenu, не захватываем здесь
 
+# Сброс камеры в начальное положение
+func reset_camera() -> void:
+	_yaw = 0.0
+	_pitch = 0.3
+	_yaw_offset = 0.0
+	_fly_mode = false
+	_target_yaw = 0.0
+
 func _input(event: InputEvent) -> void:
+	# Игнорируем мышь когда меню открыто
+	if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+		return
+
 	# Управление мышью
 	if event is InputEventMouseMotion:
 		if follow_rotation and not _fly_mode:
