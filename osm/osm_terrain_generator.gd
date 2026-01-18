@@ -9,6 +9,7 @@ const OSMLoaderScript = preload("res://osm/osm_loader.gd")
 const ElevationLoaderScript = preload("res://osm/elevation_loader.gd")
 const TextureGeneratorScript = preload("res://textures/texture_generator.gd")
 const BuildingWallShader = preload("res://osm/building_wall.gdshader")
+const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 
 # Кэш текстур (создаются один раз)
 var _road_textures: Dictionary = {}

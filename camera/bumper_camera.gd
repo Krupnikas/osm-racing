@@ -36,5 +36,5 @@ func _physics_process(delta: float) -> void:
 	if _car:
 		var speed := _car.linear_velocity.length() * 3.6  # м/с -> км/ч
 		var speed_factor := clamp(speed / max_speed_for_fov, 0.0, 1.0)
-		var target_fov := fov_base + fov_speed_boost * speed_factor
+		var target_fov: float = fov_base + fov_speed_boost * speed_factor
 		fov = lerp(fov, target_fov, 5.0 * delta)
