@@ -10,12 +10,12 @@ var _sample_rate := 44100.0
 func _ready() -> void:
 	# Создаём плееры для звуков
 	_hover_player = AudioStreamPlayer.new()
-	_hover_player.bus = "Master"
+	_hover_player.bus = "SFX"
 	_hover_player.volume_db = -15.0
 	add_child(_hover_player)
 
 	_click_player = AudioStreamPlayer.new()
-	_click_player.bus = "Master"
+	_click_player.bus = "SFX"
 	_click_player.volume_db = -10.0
 	add_child(_click_player)
 
