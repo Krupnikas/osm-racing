@@ -14,6 +14,7 @@
 [ext_resource type="PackedScene" uid="uid://hud123" path="res://ui/hud.tscn" id="10_hud"]
 [ext_resource type="Script" path="res://traffic/traffic_manager.gd" id="11_traffic"]
 [ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="12_night"]
+[ext_resource type="Script" path="res://ui/track_display.gd" id="12_track_display"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -63,7 +64,7 @@ unload_distance = 800.0
 car_path = NodePath("../Car")
 
 [node name="Car" parent="." instance=ExtResource("2_car")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)
 
 [node name="TrafficManager" type="Node" parent="."]
 script = ExtResource("11_traffic")
@@ -126,3 +127,6 @@ car_path = NodePath("../../Car")
 
 [node name="NightModeManager" type="Node" parent="."]
 script = ExtResource("12_night")
+
+[node name="TrackDisplay" type="CanvasLayer" parent="."]
+script = ExtResource("12_track_display")
