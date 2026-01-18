@@ -34,7 +34,8 @@ func _initialize_playlist() -> void:
 	"""Инициализирует список треков"""
 	playlist = [
 		"res://audio/music/petya_pavlov_ya_hochu_skorosti.ogg",
-		# Здесь будут добавляться новые треки
+		"res://audio/music/kristalniy_metod_rodilsya_medlennym.ogg",
+		"res://audio/music/stariy_pes_i_dimon_morison_vsadniki_grozy.ogg",
 	]
 
 func play_track(index: int) -> void:
