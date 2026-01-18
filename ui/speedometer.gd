@@ -6,9 +6,9 @@ extends Control
 @export var current_rpm: float = 0.0    # Обороты двигателя
 @export var current_gear: String = "N"   # Текущая передача
 
-# Константы для отрисовки (увеличиваем в 1.5 раза)
-const GAUGE_RADIUS := 140.0
-const GAUGE_CENTER := Vector2(180, 180)
+# Константы для отрисовки (увеличиваем в 1.7 раза)
+const GAUGE_RADIUS := 165.0
+const GAUGE_CENTER := Vector2(210, 210)
 const SCALE_START_ANGLE := 135.0  # Градусы (начало шкалы слева внизу)
 const SCALE_END_ANGLE := 45.0     # Градусы (конец шкалы справа внизу)
 const MAX_SPEED := 200.0          # Максимальная скорость на шкале (MPH)
@@ -21,43 +21,33 @@ const COLOR_NEEDLE := Color(0.9, 0.1, 0.1, 1)
 const COLOR_BLUE_RING := Color(0.2, 0.6, 1, 1)
 
 # RPM gauge (маленький тахометр слева)
-const RPM_RADIUS := 50.0
-const RPM_CENTER := Vector2(70, 270)
+const RPM_RADIUS := 60.0
+const RPM_CENTER := Vector2(80, 315)
 const RPM_MAX := 8000.0
 
-# Label узлы для текста
-var _gear_label: Label
-var _speed_label: Label
-var _mph_label: Label
+# Шрифты для текста
+var _font_large: Font
+var _font_medium: Font
+var _font_small: Font
 
 func _ready() -> void:
 	print("Speedometer: _ready() called")
 	# Устанавливаем размер (увеличиваем)
-	custom_minimum_size = Vector2(380, 380)
+	custom_minimum_size = Vector2(450, 450)
 
-	# Создаём Label для передачи (выравниваем по центру панели)
-	_gear_label = Label.new()
-	_gear_label.position = Vector2(330, 100)
-	_gear_label.add_theme_font_size_override("font_size", 48)
-	_gear_label.add_theme_color_override("font_color", Color.WHITE)
-	_gear_label.text = "N"
-	add_child(_gear_label)
-
-	# Создаём Label для скорости (выравниваем по центру панели)
-	_speed_label = Label.new()
-	_speed_label.position = Vector2(318, 160)
-	_speed_label.add_theme_font_size_override("font_size", 32)
-	_speed_label.add_theme_color_override("font_color", Color.WHITE)
-	_speed_label.text = "000"
-	add_child(_speed_label)
-
-	# Создаём Label для MPH (выравниваем по центру панели)
-	_mph_label = Label.new()
-	_mph_label.position = Vector2(325, 195)
-	_mph_label.add_theme_font_size_override("font_size", 16)
-	_mph_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
-	_mph_label.text = "MPH"
-	add_child(_mph_label)
+	# Загружаем italic шрифт Roboto
+	var italic_font := load("res://ui/fonts/Roboto-BoldItalic.ttf") as Font
+	if italic_font:
+		_font_large = italic_font
+		_font_medium = italic_font
+		_font_small = italic_font
+		print("Speedometer: Roboto-BoldItalic font loaded")
+	else:
+		# Фоллбэк на системный шрифт
+		_font_large = ThemeDB.fallback_font
+		_font_medium = ThemeDB.fallback_font
+		_font_small = ThemeDB.fallback_font
+		print("Speedometer: Using fallback font")
 
 	queue_redraw()
 	print("Speedometer: setup complete")
@@ -155,31 +145,67 @@ func _draw_rpm_gauge() -> void:
 	draw_circle(RPM_CENTER, 3, COLOR_NEEDLE)
 
 func _draw_info_panel() -> void:
-	# Серая панель для передачи и скорости (увеличиваем и выравниваем)
-	var panel_pos: Vector2 = Vector2(GAUGE_CENTER.x + GAUGE_RADIUS + 20, GAUGE_CENTER.y - 70)
-	var panel_size: Vector2 = Vector2(90, 140)
+	# Панель в стиле NFS - две узкие подложки
+	# Выравниваем по правому краю
+	var panel_right_edge: float = 330.0  # Правый край плашек (ещё левее)
+	var base_y: float = GAUGE_CENTER.y - 70.0
 
-	# Фон панели
-	draw_rect(Rect2(panel_pos, panel_size), Color(0.2, 0.2, 0.2, 0.85))
+	if _font_large:
+		# === ПЕРЕДАЧА ===
+		var gear_text: String = current_gear
+		var gear_font_size: int = 54  # Уменьшили с 64
+		# Вычисляем размер текста для подложки
+		var gear_size: Vector2 = _font_large.get_string_size(gear_text, HORIZONTAL_ALIGNMENT_LEFT, -1, gear_font_size)
+		var gear_panel_size: Vector2 = Vector2(gear_size.x + 20, gear_size.y + 15)
+		# Позиционируем от правого края
+		var gear_panel_pos: Vector2 = Vector2(panel_right_edge - gear_panel_size.x, base_y)
 
-	# Белый треугольник (индикатор) - указывает на передачу
-	var triangle_center: Vector2 = panel_pos + Vector2(-10, 45)
-	var triangle_points := PackedVector2Array([
-		triangle_center,
-		triangle_center + Vector2(10, -6),
-		triangle_center + Vector2(10, 6)
-	])
-	draw_colored_polygon(triangle_points, Color(1, 1, 1, 1))
+		# Подложка для передачи
+		draw_rect(Rect2(gear_panel_pos, gear_panel_size), Color(0.2, 0.2, 0.2, 0.85))
+
+		# Белый треугольник слева от подложки передачи
+		var triangle_center: Vector2 = gear_panel_pos + Vector2(-8, gear_panel_size.y / 2.0)
+		var triangle_points := PackedVector2Array([
+			triangle_center,
+			triangle_center + Vector2(8, -5),
+			triangle_center + Vector2(8, 5)
+		])
+		draw_colored_polygon(triangle_points, Color(1, 1, 1, 1))
+
+		# Текст передачи (italic шрифт)
+		var gear_x: float = gear_panel_pos.x + 10
+		var gear_y: float = gear_panel_pos.y + gear_size.y + 5
+		draw_string(_font_large, Vector2(gear_x, gear_y), gear_text, HORIZONTAL_ALIGNMENT_LEFT, -1, gear_font_size, Color.WHITE)
+
+		# === СКОРОСТЬ ===
+		var speed_text: String = "%03d" % int(current_speed)
+		var speed_font_size: int = 38  # Уменьшили с 44
+		var speed_size: Vector2 = _font_medium.get_string_size(speed_text, HORIZONTAL_ALIGNMENT_LEFT, -1, speed_font_size)
+		var speed_panel_size: Vector2 = Vector2(speed_size.x + 20, speed_size.y + 12)
+		# Позиционируем от правого края (та же линия что и передача)
+		var speed_panel_pos: Vector2 = Vector2(panel_right_edge - speed_panel_size.x, base_y + gear_panel_size.y + 10)
+
+		# Подложка для скорости
+		draw_rect(Rect2(speed_panel_pos, speed_panel_size), Color(0.2, 0.2, 0.2, 0.85))
+
+		# Текст скорости (italic шрифт)
+		var speed_x: float = speed_panel_pos.x + 10
+		var speed_y: float = speed_panel_pos.y + speed_size.y + 4
+		draw_string(_font_medium, Vector2(speed_x, speed_y), speed_text, HORIZONTAL_ALIGNMENT_LEFT, -1, speed_font_size, Color.WHITE)
+
+		# === MPH (БЕЗ ПОДЛОЖКИ) ===
+		var mph_text: String = "MPH"
+		var mph_font_size: int = 18  # Уменьшили с 20
+		var mph_size: Vector2 = _font_small.get_string_size(mph_text, HORIZONTAL_ALIGNMENT_LEFT, -1, mph_font_size)
+		# Центрируем MPH под плашкой скорости
+		var mph_x: float = speed_panel_pos.x + (speed_panel_size.x - mph_size.x) / 2.0
+		var mph_y: float = speed_panel_pos.y + speed_panel_size.y + mph_size.y + 8
+
+		# MPH без подложки (italic шрифт)
+		draw_string(_font_small, Vector2(mph_x, mph_y), mph_text, HORIZONTAL_ALIGNMENT_LEFT, -1, mph_font_size, Color(0.8, 0.8, 0.8))
 
 func update_values(speed: float, rpm: float, gear: String) -> void:
 	current_speed = speed
 	current_rpm = rpm
 	current_gear = gear
-
-	# Обновляем текст в Label'ах
-	if _gear_label:
-		_gear_label.text = gear
-	if _speed_label:
-		_speed_label.text = "%03d" % int(speed)
-
 	queue_redraw()  # Перерисовываем при обновлении значений
