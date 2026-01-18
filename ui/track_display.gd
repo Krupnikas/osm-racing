@@ -7,8 +7,10 @@ var animation_player: AnimationPlayer
 var show_duration := 5.0  # Сколько секунд показывать титр
 
 func _ready() -> void:
+	print("TrackDisplay: _ready() called")
 	# Создаём Label
 	label = Label.new()
+	label.name = "Label"
 	label.add_theme_font_size_override("font_size", 24)
 	label.add_theme_color_override("font_color", Color(1, 1, 1, 1))
 	label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
@@ -34,12 +36,26 @@ func _ready() -> void:
 		# Подключаемся к сигналу начала трека (создадим его в MusicManager)
 		if music_manager.has_signal("track_started"):
 			music_manager.track_started.connect(_on_track_started)
+			print("TrackDisplay: Connected to MusicManager signal")
+
+			# Показываем текущий трек, если он уже играет
+			var current_index: int = music_manager.current_track_index
+			if current_index >= 0 and current_index < music_manager.playlist.size():
+				var filename: String = music_manager.playlist[current_index].get_file()
+				var info: Array = music_manager.track_info.get(filename, ["Unknown Artist", "Unknown Track"])
+				var artist: String = info[0]
+				var title: String = info[1]
+				_on_track_started(title, artist)
+		else:
+			print("TrackDisplay: ERROR - MusicManager has no track_started signal")
+	else:
+		print("TrackDisplay: ERROR - MusicManager not found")
 
 func _create_animations() -> void:
 	# Анимация появления
 	var anim_show := Animation.new()
 	var track_idx := anim_show.add_track(Animation.TYPE_VALUE)
-	anim_show.track_set_path(track_idx, ".:label:modulate:a")
+	anim_show.track_set_path(track_idx, "../Label:modulate:a")
 	anim_show.track_insert_key(track_idx, 0.0, 0.0)
 	anim_show.track_insert_key(track_idx, 0.5, 1.0)
 	anim_show.length = 0.5
@@ -50,7 +66,7 @@ func _create_animations() -> void:
 	# Анимация исчезновения
 	var anim_hide := Animation.new()
 	track_idx = anim_hide.add_track(Animation.TYPE_VALUE)
-	anim_hide.track_set_path(track_idx, ".:label:modulate:a")
+	anim_hide.track_set_path(track_idx, "../Label:modulate:a")
 	anim_hide.track_insert_key(track_idx, 0.0, 1.0)
 	anim_hide.track_insert_key(track_idx, 0.5, 0.0)
 	anim_hide.length = 0.5
@@ -62,6 +78,7 @@ func _create_animations() -> void:
 func _on_track_started(track_name: String, artist: String) -> void:
 	# Обновляем текст
 	label.text = "%s – %s" % [artist, track_name]
+	print("TrackDisplay: Showing track: %s - %s" % [artist, track_name])
 
 	# Показываем титр
 	animation_player.play("show")
@@ -70,6 +87,7 @@ func _on_track_started(track_name: String, artist: String) -> void:
 	await get_tree().create_timer(show_duration).timeout
 
 	animation_player.play("hide")
+	print("TrackDisplay: Hiding track display")
 
 func show_track(track_name: String, artist: String) -> void:
 	"""Публичный метод для показа трека"""
