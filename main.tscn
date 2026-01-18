@@ -1,4 +1,4 @@
-[gd_scene load_steps=14 format=3 uid="uid://bmain123"]
+[gd_scene load_steps=15 format=3 uid="uid://bmain123"]
 
 [ext_resource type="PackedScene" uid="uid://bcar123" path="res://car/car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://camera/follow_camera.gd" id="3_camera"]
@@ -10,6 +10,7 @@
 [ext_resource type="PackedScene" uid="uid://menu123" path="res://ui/main_menu.tscn" id="9_menu"]
 [ext_resource type="PackedScene" uid="uid://hud123" path="res://ui/hud.tscn" id="10_hud"]
 [ext_resource type="Script" path="res://traffic/traffic_manager.gd" id="11_traffic"]
+[ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="12_night"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -119,3 +120,6 @@ camera_path = NodePath("../../CameraManager/FollowCamera")
 
 [node name="HUD" parent="UI" instance=ExtResource("10_hud")]
 car_path = NodePath("../../Car")
+
+[node name="NightModeManager" type="Node" parent="."]
+script = ExtResource("12_night")

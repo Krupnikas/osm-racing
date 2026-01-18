@@ -50,6 +50,10 @@ var spawn_grace_timer := 0.0  # Grace period after spawn
 var wheels_front: Array[VehicleWheel3D] = []
 var wheels_rear: Array[VehicleWheel3D] = []
 
+# Night mode lights
+var _lights: Node3D
+var _lights_enabled := false
+
 # Colors for randomization
 const NPC_COLORS := [
 	Color(0.8, 0.1, 0.1),  # Красный
@@ -84,6 +88,13 @@ func _ready() -> void:
 	obstacle_check_ray.collision_mask = 2 | 4  # Buildings + NPCs (НЕ terrain!)
 	obstacle_check_ray.hit_from_inside = false
 	add_child(obstacle_check_ray)
+
+	# Создаём освещение
+	_setup_lights()
+
+	# Подключаемся к NightModeManager
+	await get_tree().process_frame
+	_connect_to_night_mode()
 
 
 func _physics_process(delta: float) -> void:
@@ -475,3 +486,48 @@ func _extend_path() -> void:
 
 	# Добавляем новые waypoints к существующему пути
 	waypoint_path.append_array(new_waypoints)
+
+
+# === Night Mode Lights ===
+
+func _setup_lights() -> void:
+	"""Создаёт источники света для NPC машины"""
+	const NPCCarLightsScript = preload("res://night_mode/npc_car_lights.gd")
+	_lights = NPCCarLightsScript.new()
+	add_child(_lights)
+	_lights.setup_lights(self)
+
+
+func _connect_to_night_mode() -> void:
+	"""Подключается к NightModeManager"""
+	var night_manager := get_tree().current_scene.find_child("NightModeManager", true, false)
+	if night_manager:
+		night_manager.night_mode_changed.connect(_on_night_mode_changed)
+		# Если уже ночь - включаем свет
+		if night_manager.is_night:
+			enable_lights()
+
+
+func _on_night_mode_changed(enabled: bool) -> void:
+	if enabled:
+		enable_lights()
+	else:
+		disable_lights()
+
+
+func enable_lights() -> void:
+	"""Включает освещение"""
+	if _lights_enabled:
+		return
+	_lights_enabled = true
+	if _lights and _lights.has_method("enable_lights"):
+		_lights.enable_lights()
+
+
+func disable_lights() -> void:
+	"""Выключает освещение"""
+	if not _lights_enabled:
+		return
+	_lights_enabled = false
+	if _lights and _lights.has_method("disable_lights"):
+		_lights.disable_lights()

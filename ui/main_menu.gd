@@ -22,6 +22,8 @@ var _car: Node3D
 var _world_root: Node3D
 var _hud: Control
 var _camera: Camera3D
+var _night_manager: Node
+var _car_lights: Node3D
 var _is_loading := false
 var _game_started := false  # Игра уже была запущена
 var _selected_location := "Череповец"
@@ -43,6 +45,12 @@ func _ready() -> void:
 		_hud = get_node(hud_path)
 	if camera_path:
 		_camera = get_node(camera_path)
+
+	# Находим NightModeManager
+	_night_manager = get_tree().current_scene.find_child("NightModeManager", true, false)
+	if _night_manager:
+		_night_manager.night_mode_changed.connect(_on_night_mode_state_changed)
+		_night_manager.rain_changed.connect(_on_rain_state_changed)
 
 	# Подключаем сигналы от генератора террейна
 	if _terrain_generator:
@@ -216,3 +224,77 @@ func hide_menu() -> void:
 func _scale_for_screen() -> void:
 	# Не масштабируем - используем большие шрифты в tscn
 	pass
+
+
+# === Настройки ===
+
+func _on_settings_pressed() -> void:
+	$VBox.visible = false
+	$SettingsPanel.visible = true
+	# Синхронизируем чекбоксы с текущим состоянием
+	if _night_manager:
+		$SettingsPanel/VBox/NightModeCheck.set_pressed_no_signal(_night_manager.is_night)
+		$SettingsPanel/VBox/RainCheck.set_pressed_no_signal(_night_manager.is_raining)
+	# Синхронизируем неон
+	_update_underglow_checkbox()
+
+
+func _on_settings_back_pressed() -> void:
+	$SettingsPanel.visible = false
+	$VBox.visible = true
+
+
+func _on_night_mode_toggled(toggled_on: bool) -> void:
+	if not _night_manager:
+		return
+	if toggled_on and not _night_manager.is_night:
+		_night_manager.enable_night_mode()
+	elif not toggled_on and _night_manager.is_night:
+		_night_manager.disable_night_mode()
+		# Если выключаем ночь - выключаем и дождь
+		$SettingsPanel/VBox/RainCheck.set_pressed_no_signal(false)
+
+
+func _on_rain_toggled(toggled_on: bool) -> void:
+	if not _night_manager:
+		return
+	# Дождь работает только ночью
+	if not _night_manager.is_night:
+		$SettingsPanel/VBox/RainCheck.set_pressed_no_signal(false)
+		return
+	if toggled_on != _night_manager.is_raining:
+		_night_manager.toggle_rain()
+
+
+func _on_night_mode_state_changed(enabled: bool) -> void:
+	# Обновляем чекбокс при изменении извне (клавиша N)
+	if has_node("SettingsPanel/VBox/NightModeCheck"):
+		$SettingsPanel/VBox/NightModeCheck.set_pressed_no_signal(enabled)
+	if not enabled and has_node("SettingsPanel/VBox/RainCheck"):
+		$SettingsPanel/VBox/RainCheck.set_pressed_no_signal(false)
+
+
+func _on_rain_state_changed(enabled: bool) -> void:
+	# Обновляем чекбокс при изменении извне (клавиша R)
+	if has_node("SettingsPanel/VBox/RainCheck"):
+		$SettingsPanel/VBox/RainCheck.set_pressed_no_signal(enabled)
+
+
+func _on_underglow_toggled(toggled_on: bool) -> void:
+	var car_lights := _get_car_lights()
+	if car_lights and car_lights.has_method("set_underglow_enabled"):
+		car_lights.set_underglow_enabled(toggled_on)
+
+
+func _update_underglow_checkbox() -> void:
+	var car_lights := _get_car_lights()
+	if car_lights and has_node("SettingsPanel/VBox/UnderglowCheck"):
+		$SettingsPanel/VBox/UnderglowCheck.set_pressed_no_signal(car_lights.underglow_enabled)
+
+
+func _get_car_lights() -> Node3D:
+	if _car_lights:
+		return _car_lights
+	if _car:
+		_car_lights = _car.find_child("CarLights", true, false)
+	return _car_lights

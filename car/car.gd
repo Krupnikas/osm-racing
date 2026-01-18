@@ -46,6 +46,9 @@ var handbrake_input := 0.0
 var wheels_front: Array[VehicleWheel3D] = []
 var wheels_rear: Array[VehicleWheel3D] = []
 
+# Ссылка на освещение
+var _car_lights: Node3D
+
 # Сигналы для UI
 signal speed_changed(speed_kmh: float)
 signal rpm_changed(rpm: float)
@@ -53,6 +56,9 @@ signal gear_changed(gear: int)
 
 
 func _ready() -> void:
+	# Подключаемся к NightModeManager
+	await get_tree().process_frame
+	_setup_night_mode_connection()
 	# Находим колёса
 	for child in get_children():
 		if child is VehicleWheel3D:
@@ -289,3 +295,28 @@ func reset_position(pos: Vector3, rot: Vector3 = Vector3.ZERO) -> void:
 	rotation = rot
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
+
+
+func _setup_night_mode_connection() -> void:
+	# Ищем CarLights
+	_car_lights = find_child("CarLights", false)
+
+	# Ищем NightModeManager
+	var night_manager := get_tree().current_scene.find_child("NightModeManager", true, false)
+	if night_manager:
+		night_manager.night_mode_changed.connect(_on_night_mode_changed)
+		# Если уже ночь - включаем свет
+		if night_manager.is_night:
+			_on_night_mode_changed(true)
+
+
+func _on_night_mode_changed(enabled: bool) -> void:
+	if _car_lights and _car_lights.has_method("enable_lights"):
+		if enabled:
+			_car_lights.enable_lights()
+		else:
+			_car_lights.disable_lights()
+
+
+func is_braking() -> bool:
+	return brake_input > 0.1

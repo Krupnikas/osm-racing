@@ -99,6 +99,10 @@ func _ready() -> void:
 	if camera_path:
 		_camera = get_node(camera_path)
 
+	# Подключаемся к NightModeManager
+	await get_tree().process_frame
+	_connect_to_night_mode()
+
 	print("OSM: Ready for loading (waiting for start_loading call)...")
 
 func _init_textures() -> void:
@@ -1887,6 +1891,9 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 
 	parent.add_child(body)
 
+	# Добавляем ночные декорации (неоновые вывески и окна)
+	_add_building_night_decorations(wall_mesh_instance, points, building_height, parent)
+
 func _create_polygon_mesh(points: PackedVector2Array, color: Color, height_offset: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
 	if points.size() < 3:
 		return
@@ -2257,11 +2264,23 @@ func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, directi
 	globe_mat.emission = Color(1.0, 0.9, 0.7)
 	globe_mat.emission_energy_multiplier = 0.5
 	light_globe.material_override = globe_mat
+	light_globe.name = "LampGlobe"
 
 	# Позиция плафона на конце кронштейна
 	light_globe.position.x = arm_end_x
 	light_globe.position.y = arm_end_y
 	lamp.add_child(light_globe)
+
+	# Добавляем источник света (видим только ночью)
+	var lamp_light := OmniLight3D.new()
+	lamp_light.name = "LampLight"
+	lamp_light.position = light_globe.position
+	lamp_light.omni_range = 15.0
+	lamp_light.light_energy = 1.5
+	lamp_light.light_color = Color(1.0, 0.9, 0.7)
+	lamp_light.shadow_enabled = false
+	lamp_light.visible = false  # Включается ночью
+	lamp.add_child(lamp_light)
 
 	# Коллизия для столба
 	var body := StaticBody3D.new()
@@ -2652,3 +2671,244 @@ func _extract_road_for_traffic(nodes: Array, tags: Dictionary, elev_data: Dictio
 
 	# Добавляем дорожный сегмент в RoadNetwork
 	road_network.add_road_segment(local_points, highway_type, chunk_key, elev_data)
+
+
+# === NIGHT MODE ===
+
+var _is_wet_mode := false
+var _night_mode_connected := false
+var _building_night_lights: Array[Node3D] = []  # Храним ссылки на созданные источники света
+
+func set_wet_mode(enabled: bool) -> void:
+	"""Включает/выключает мокрый асфальт для дорог"""
+	if _is_wet_mode == enabled:
+		return
+
+	_is_wet_mode = enabled
+	print("OSM: Wet mode ", "enabled" if enabled else "disabled")
+
+	# Обновляем материалы всех загруженных дорог
+	for chunk_key in _loaded_chunks.keys():
+		var chunk: Node3D = _loaded_chunks[chunk_key]
+		_update_chunk_road_wetness(chunk, enabled)
+
+
+func _update_chunk_road_wetness(chunk: Node3D, is_wet: bool) -> void:
+	"""Обновляет материалы дорог в чанке для мокрого/сухого состояния"""
+	for child in chunk.get_children():
+		# Ищем StaticBody3D с дорогами (они имеют MeshInstance3D дочерние ноды)
+		if child is StaticBody3D:
+			for mesh_child in child.get_children():
+				if mesh_child is MeshInstance3D:
+					var mat := mesh_child.material_override as StandardMaterial3D
+					if mat:
+						_apply_wet_material(mat, is_wet)
+
+
+func _apply_wet_material(mat: StandardMaterial3D, is_wet: bool) -> void:
+	"""Применяет свойства мокрого/сухого асфальта к материалу"""
+	if is_wet:
+		mat.metallic = 0.35
+		mat.roughness = 0.08
+		mat.metallic_specular = 0.9
+	else:
+		mat.metallic = 0.0
+		mat.roughness = 0.85
+		mat.metallic_specular = 0.5
+
+
+func _connect_to_night_mode() -> void:
+	"""Подключается к NightModeManager для получения сигналов"""
+	if _night_mode_connected:
+		return
+
+	var night_manager := get_tree().current_scene.find_child("NightModeManager", true, false)
+	if night_manager:
+		night_manager.night_mode_changed.connect(_on_night_mode_changed)
+		_night_mode_connected = true
+		# Если уже ночь - включаем фонари
+		if night_manager.is_night:
+			_on_night_mode_changed(true)
+
+
+func _on_night_mode_changed(enabled: bool) -> void:
+	"""Обрабатывает переключение ночного режима"""
+	print("OSM: Night mode ", "enabled" if enabled else "disabled")
+
+	# Обновляем все фонари и неоновые вывески
+	for chunk_key in _loaded_chunks.keys():
+		var chunk: Node3D = _loaded_chunks[chunk_key]
+		_update_chunk_night_lights(chunk, enabled)
+
+
+func _update_chunk_night_lights(chunk: Node3D, night_enabled: bool) -> void:
+	"""Включает/выключает ночное освещение в чанке"""
+	_recursive_update_lights(chunk, night_enabled)
+
+
+func _recursive_update_lights(node: Node, night_enabled: bool) -> void:
+	"""Рекурсивно обновляет все источники света"""
+	# Проверяем лампы уличных фонарей
+	if node.name == "LampLight" and node is OmniLight3D:
+		node.visible = night_enabled
+		# Усиливаем emission на плафоне
+		var lamp_parent := node.get_parent()
+		if lamp_parent:
+			var globe := lamp_parent.find_child("LampGlobe", false)
+			if globe and globe.material_override:
+				var mat := globe.material_override as StandardMaterial3D
+				if mat:
+					mat.emission_energy_multiplier = 5.0 if night_enabled else 0.5
+
+	# Проверяем неоновые вывески
+	if node.name.begins_with("NeonSign") or node.name.begins_with("WindowLight"):
+		node.visible = night_enabled
+
+	# Рекурсивно обходим дочерние ноды
+	for child in node.get_children():
+		_recursive_update_lights(child, night_enabled)
+
+
+# Цвета для неоновых вывесок (NFS Underground style)
+const NEON_COLORS := [
+	Color(1.0, 0.0, 0.4),   # Hot pink
+	Color(0.0, 1.0, 0.9),   # Cyan
+	Color(1.0, 0.3, 0.0),   # Orange
+	Color(0.0, 0.5, 1.0),   # Blue
+	Color(1.0, 1.0, 0.0),   # Yellow
+	Color(0.8, 0.0, 1.0),   # Purple
+	Color(0.0, 1.0, 0.3),   # Green
+]
+
+
+func _add_building_night_decorations(building_mesh: MeshInstance3D, points: PackedVector2Array, building_height: float, parent: Node3D) -> void:
+	"""Добавляет неоновые вывески и освещённые окна к зданию"""
+	# Случайный seed на основе позиции здания
+	var center := _get_polygon_center(points)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(Vector2(center.x, center.y))
+
+	# Размер здания
+	var min_x := points[0].x
+	var max_x := points[0].x
+	var min_z := points[0].y
+	var max_z := points[0].y
+	for p in points:
+		min_x = min(min_x, p.x)
+		max_x = max(max_x, p.x)
+		min_z = min(min_z, p.y)
+		max_z = max(max_z, p.y)
+
+	var building_width := max_x - min_x
+	var building_depth := max_z - min_z
+
+	# 35% шанс на неоновую вывеску
+	if rng.randf() < 0.35 and building_width > 5.0:
+		_add_neon_sign(center, building_height, building_width, rng, parent)
+
+	# 55% шанс на освещённые окна для высоких зданий
+	if rng.randf() < 0.55 and building_height > 6.0:
+		_add_window_lights(center, building_height, building_width, building_depth, rng, parent)
+
+
+func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNumberGenerator, parent: Node3D) -> void:
+	"""Добавляет неоновую вывеску на здание"""
+	var sign_container := Node3D.new()
+	sign_container.name = "NeonSign_%d" % rng.randi()
+
+	# Выбираем случайный цвет
+	var color: Color = NEON_COLORS[rng.randi() % NEON_COLORS.size()]
+
+	# Размер вывески
+	var sign_width := minf(width * 0.5, 3.5)
+	var sign_height := rng.randf_range(0.6, 1.0)
+
+	# Позиция - на фасаде здания
+	var sign_y := minf(height * 0.35, 4.5)
+
+	# Создаём светящийся mesh
+	var sign_mesh := MeshInstance3D.new()
+	sign_mesh.name = "SignMesh"
+	var box := BoxMesh.new()
+	box.size = Vector3(sign_width, sign_height, 0.12)
+	sign_mesh.mesh = box
+
+	# Материал с emission
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+	mat.emission_enabled = true
+	mat.emission = color
+	mat.emission_energy_multiplier = 6.0
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	sign_mesh.material_override = mat
+
+	sign_mesh.position = Vector3(0, sign_y, 0.1)
+	sign_container.add_child(sign_mesh)
+
+	# Источник света
+	var light := OmniLight3D.new()
+	light.name = "SignLight"
+	light.position = Vector3(0, sign_y, 1.5)
+	light.omni_range = 10.0
+	light.light_energy = 1.8
+	light.light_color = color
+	light.shadow_enabled = false
+	sign_container.add_child(light)
+
+	# Позиция контейнера
+	sign_container.position = Vector3(center.x, 0, center.y)
+	sign_container.visible = false  # Включается ночью
+
+	parent.add_child(sign_container)
+
+
+func _add_window_lights(center: Vector2, height: float, width: float, depth: float, rng: RandomNumberGenerator, parent: Node3D) -> void:
+	"""Добавляет освещённые окна к зданию"""
+	var container := Node3D.new()
+	container.name = "WindowLights_%d" % rng.randi()
+	container.position = Vector3(center.x, 0, center.y)
+
+	# Параметры окон
+	var floor_height := 3.0
+	var num_floors := int(height / floor_height)
+	if num_floors < 1:
+		num_floors = 1
+
+	# Цвета окон
+	var window_colors := [
+		Color(1.0, 0.9, 0.7),   # Тёплый белый
+		Color(1.0, 0.95, 0.8),  # Жёлтый
+		Color(0.7, 0.8, 1.0),   # Холодный (TV)
+	]
+
+	# Создаём несколько окон на каждом этаже
+	var windows_per_floor := rng.randi_range(2, 5)
+
+	for floor_idx in range(num_floors):
+		for win_idx in range(windows_per_floor):
+			# 45% шанс что окно горит
+			if rng.randf() > 0.45:
+				continue
+
+			var wx := rng.randf_range(-width / 2 + 1, width / 2 - 1)
+			var wy := floor_height * 0.6 + floor_idx * floor_height
+			var wz := depth / 2 + 0.05
+
+			# Mesh окна
+			var window_mesh := MeshInstance3D.new()
+			var box := BoxMesh.new()
+			box.size = Vector3(0.7, 1.0, 0.04)
+			window_mesh.mesh = box
+
+			var color: Color = window_colors[rng.randi() % window_colors.size()]
+			var mat := StandardMaterial3D.new()
+			mat.albedo_color = color
+			mat.emission_enabled = true
+			mat.emission = color
+			mat.emission_energy_multiplier = 2.0
+			window_mesh.material_override = mat
+			window_mesh.position = Vector3(wx, wy, wz)
+			container.add_child(window_mesh)
+
+	container.visible = false  # Включается ночью
+	parent.add_child(container)
