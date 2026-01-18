@@ -3,9 +3,19 @@ extends Node
 ## Глобальный менеджер фоновой музыки
 ## Управляет плейлистом и автоматическим переключением треков
 
+# Сигнал для уведомления о начале трека
+signal track_started(track_name: String, artist: String)
+
 # Playlist с путями к аудио файлам
 var playlist: Array[String] = []
 var current_track_index: int = 0
+
+# Информация о треках (artist, title)
+var track_info := {
+	"petya_pavlov_ya_hochu_skorosti.ogg": ["Петя Павлов", "Я хочу скорости"],
+	"kristalniy_metod_rodilsya_medlennym.ogg": ["Кристальный метод", "Рожденный медленным"],
+	"stariy_pes_i_dimon_morison_vsadniki_grozy.ogg": ["Старый Пёс и Димон Морисон", "Всадники грозы"],
+}
 
 # Audio player
 var music_player: AudioStreamPlayer
@@ -55,7 +65,16 @@ func play_track(index: int) -> void:
 	music_player.stream = stream
 	music_player.play()
 
-	print("MusicManager: Now playing track %d: %s" % [index, track_path.get_file()])
+	# Получаем информацию о треке
+	var filename := track_path.get_file()
+	var info: Array = track_info.get(filename, ["Unknown Artist", "Unknown Track"])
+	var artist: String = info[0]
+	var title: String = info[1]
+
+	print("MusicManager: Now playing track %d: %s - %s" % [index, artist, title])
+
+	# Отправляем сигнал
+	track_started.emit(title, artist)
 
 func _on_track_finished() -> void:
 	"""Вызывается когда трек заканчивается"""

@@ -10,6 +10,7 @@
 [ext_resource type="PackedScene" uid="uid://menu123" path="res://ui/main_menu.tscn" id="9_menu"]
 [ext_resource type="PackedScene" uid="uid://hud123" path="res://ui/hud.tscn" id="10_hud"]
 [ext_resource type="Script" path="res://traffic/traffic_manager.gd" id="11_traffic"]
+[ext_resource type="Script" path="res://ui/track_display.gd" id="12_track_display"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -119,3 +120,6 @@ camera_path = NodePath("../../CameraManager/FollowCamera")
 
 [node name="HUD" parent="UI" instance=ExtResource("10_hud")]
 car_path = NodePath("../../Car")
+
+[node name="TrackDisplay" type="CanvasLayer" parent="."]
+script = ExtResource("12_track_display")
