@@ -46,12 +46,10 @@ func _ready() -> void:
 	# Создаём систему дождя
 	_create_rain_system()
 
-	# По умолчанию включаем ночь и дождь (ждём загрузки чанков)
-	await get_tree().create_timer(1.5).timeout
+	# По умолчанию включаем ночь и дождь
 	enable_night_mode()
-	await get_tree().create_timer(0.5).timeout
-	if is_night:
-		toggle_rain()
+	toggle_rain()
+	print("Night mode enabled")
 
 
 func _find_scene_components() -> void:

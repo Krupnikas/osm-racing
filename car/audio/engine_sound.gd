@@ -27,17 +27,17 @@ func _process(delta: float) -> void:
 	if not _stream_ready:
 		return
 
-	# Не играем на паузе (меню)
-	if get_tree().paused:
-		if playing:
-			stop()
-		return
-
 	# Ищем машину
 	if not _car:
 		var parent = get_parent()
 		if parent is Car:
 			_car = parent
+		return
+
+	# Не играем если машина заморожена (в меню)
+	if _car.freeze:
+		if playing:
+			stop()
 		return
 
 	# Запускаем если не играет
