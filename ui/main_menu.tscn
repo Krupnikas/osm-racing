@@ -62,25 +62,25 @@ text = "Продолжить"
 [node name="StartButton" type="Button" parent="VBox"]
 custom_minimum_size = Vector2(400, 80)
 layout_mode = 2
-theme_override_colors/font_color = Color(1, 0.9, 0, 1)
+theme_override_colors/font_color = Color(1, 1, 1, 1)
 theme_override_colors/font_hover_color = Color(1, 1, 0.5, 1)
-theme_override_colors/font_pressed_color = Color(1, 0.5, 0, 1)
+theme_override_colors/font_pressed_color = Color(0.8, 0.8, 0.8, 1)
 theme_override_font_sizes/font_size = 42
 text = "▶ СТАРТ"
 
 [node name="ControlsButton" type="Button" parent="VBox"]
 custom_minimum_size = Vector2(400, 70)
 layout_mode = 2
-theme_override_colors/font_color = Color(0.9, 0.9, 1, 1)
-theme_override_colors/font_hover_color = Color(1, 1, 1, 1)
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_hover_color = Color(1, 1, 0.5, 1)
 theme_override_font_sizes/font_size = 36
 text = "⚙ УПРАВЛЕНИЕ"
 
 [node name="QuitButton" type="Button" parent="VBox"]
 custom_minimum_size = Vector2(400, 70)
 layout_mode = 2
-theme_override_colors/font_color = Color(1, 0.5, 0.5, 1)
-theme_override_colors/font_hover_color = Color(1, 0.3, 0.3, 1)
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_hover_color = Color(1, 1, 0.5, 1)
 theme_override_font_sizes/font_size = 36
 text = "✕ ВЫХОД"
 
