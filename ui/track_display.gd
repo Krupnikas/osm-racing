@@ -57,7 +57,7 @@ func _create_animations() -> void:
 	# Анимация появления
 	var anim_show := Animation.new()
 	var track_idx := anim_show.add_track(Animation.TYPE_VALUE)
-	anim_show.track_set_path(track_idx, "../Label:modulate:a")
+	anim_show.track_set_path(track_idx, "Label:modulate:a")
 	anim_show.track_insert_key(track_idx, 0.0, 0.0)
 	anim_show.track_insert_key(track_idx, 0.5, 1.0)
 	anim_show.length = 0.5
@@ -68,7 +68,7 @@ func _create_animations() -> void:
 	# Анимация исчезновения
 	var anim_hide := Animation.new()
 	track_idx = anim_hide.add_track(Animation.TYPE_VALUE)
-	anim_hide.track_set_path(track_idx, "../Label:modulate:a")
+	anim_hide.track_set_path(track_idx, "Label:modulate:a")
 	anim_hide.track_insert_key(track_idx, 0.0, 1.0)
 	anim_hide.track_insert_key(track_idx, 0.5, 0.0)
 	anim_hide.length = 0.5
