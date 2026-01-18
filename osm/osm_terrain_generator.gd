@@ -2265,10 +2265,10 @@ func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, directi
 	light_globe.mesh = globe_mesh
 
 	var globe_mat := StandardMaterial3D.new()
-	globe_mat.albedo_color = Color(1.0, 0.95, 0.8)  # Тёплый белый
+	globe_mat.albedo_color = Color(1.0, 0.75, 0.3)  # Натриевый оранжевый
 	globe_mat.emission_enabled = true
-	globe_mat.emission = Color(1.0, 0.9, 0.7)
-	globe_mat.emission_energy_multiplier = 0.5
+	globe_mat.emission = Color(1.0, 0.65, 0.2)  # Тёплый натриевый
+	globe_mat.emission_energy_multiplier = 0.8
 	light_globe.material_override = globe_mat
 	light_globe.name = "LampGlobe"
 
@@ -2287,7 +2287,7 @@ func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, directi
 	lamp_light.omni_range = 12.0  # Радиус освещения
 	lamp_light.omni_attenuation = 1.2
 	lamp_light.light_energy = 1.5
-	lamp_light.light_color = Color(1.0, 0.55, 0.15)  # Оранжевый натриевый
+	lamp_light.light_color = Color(1.0, 0.65, 0.2)  # Тёплый натриевый жёлто-оранжевый
 	lamp_light.shadow_enabled = false
 	lamp_light.light_bake_mode = Light3D.BAKE_DISABLED
 	lamp_light.visible = not is_broken  # Сломанные фонари не горят
