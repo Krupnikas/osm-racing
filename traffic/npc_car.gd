@@ -114,6 +114,9 @@ func _physics_process(delta: float) -> void:
 	_apply_forces()
 	_auto_shift()
 
+	# Обновляем стоп-сигналы и задний ход
+	_update_light_states()
+
 	# Debug: если застряли на месте слишком долго, сбрасываем состояние
 	if current_speed_kmh < 1.0 and ai_state == AIState.STOPPED:
 		if randf() < 0.01:  # 1% шанс каждый frame
@@ -531,3 +534,17 @@ func disable_lights() -> void:
 	_lights_enabled = false
 	if _lights and _lights.has_method("disable_lights"):
 		_lights.disable_lights()
+
+
+func _update_light_states() -> void:
+	"""Обновляет стоп-сигналы и задний ход"""
+	if not _lights or not _lights_enabled:
+		return
+
+	# Стоп-сигналы при торможении
+	if _lights.has_method("set_braking"):
+		_lights.set_braking(brake_input > 0.1)
+
+	# Задний ход
+	if _lights.has_method("set_reversing"):
+		_lights.set_reversing(current_gear == 0)

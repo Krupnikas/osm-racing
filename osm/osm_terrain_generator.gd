@@ -8,6 +8,7 @@ signal initial_load_complete
 const OSMLoaderScript = preload("res://osm/osm_loader.gd")
 const ElevationLoaderScript = preload("res://osm/elevation_loader.gd")
 const TextureGeneratorScript = preload("res://textures/texture_generator.gd")
+const BuildingWallShader = preload("res://osm/building_wall.gdshader")
 
 # Кэш текстур (создаются один раз)
 var _road_textures: Dictionary = {}
@@ -1804,14 +1805,15 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	wall_mesh_instance.mesh = wall_mesh
 	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
-	# Материал стен с текстурой
-	var wall_material := StandardMaterial3D.new()
-	wall_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# Материал стен с шейдером для правильного двустороннего освещения
+	var wall_material := ShaderMaterial.new()
+	wall_material.shader = BuildingWallShader
 	if _building_textures.has(texture_type):
-		wall_material.albedo_texture = _building_textures[texture_type]
-		wall_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		wall_material.set_shader_parameter("albedo_texture", _building_textures[texture_type])
+		wall_material.set_shader_parameter("use_texture", true)
 	else:
-		wall_material.albedo_color = Color(0.7, 0.6, 0.5)
+		wall_material.set_shader_parameter("albedo_color", Color(0.7, 0.6, 0.5))
+		wall_material.set_shader_parameter("use_texture", false)
 	wall_mesh_instance.material_override = wall_material
 
 	# === КРЫША с ArrayMesh для UV ===
@@ -2271,12 +2273,15 @@ func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, directi
 	light_globe.position.y = arm_end_y
 	lamp.add_child(light_globe)
 
-	# Добавляем источник света (видим только ночью)
-	var lamp_light := OmniLight3D.new()
+	# Добавляем источник света (видим только ночью) - SpotLight светит вниз на дорогу
+	var lamp_light := SpotLight3D.new()
 	lamp_light.name = "LampLight"
 	lamp_light.position = light_globe.position
-	lamp_light.omni_range = 15.0
-	lamp_light.light_energy = 1.5
+	lamp_light.rotation_degrees = Vector3(-90, 0, 0)  # Светит вниз
+	lamp_light.spot_range = 18.0
+	lamp_light.spot_angle = 55.0
+	lamp_light.spot_angle_attenuation = 0.9
+	lamp_light.light_energy = 2.0
 	lamp_light.light_color = Color(1.0, 0.9, 0.7)
 	lamp_light.shadow_enabled = false
 	lamp_light.visible = false  # Включается ночью
@@ -2748,8 +2753,8 @@ func _update_chunk_night_lights(chunk: Node3D, night_enabled: bool) -> void:
 
 func _recursive_update_lights(node: Node, night_enabled: bool) -> void:
 	"""Рекурсивно обновляет все источники света"""
-	# Проверяем лампы уличных фонарей
-	if node.name == "LampLight" and node is OmniLight3D:
+	# Проверяем лампы уличных фонарей (SpotLight3D или OmniLight3D для совместимости)
+	if node.name == "LampLight" and (node is SpotLight3D or node is OmniLight3D):
 		node.visible = night_enabled
 		# Усиливаем emission на плафоне
 		var lamp_parent := node.get_parent()
