@@ -1,6 +1,7 @@
-[gd_scene load_steps=2 format=3 uid="uid://hud123"]
+[gd_scene load_steps=3 format=3 uid="uid://hud123"]
 
 [ext_resource type="Script" path="res://ui/hud.gd" id="1_hud"]
+[ext_resource type="Script" path="res://ui/speedometer.gd" id="2_speedo"]
 
 [node name="HUD" type="Control"]
 layout_mode = 3
@@ -10,87 +11,17 @@ anchor_bottom = 1.0
 mouse_filter = 2
 script = ExtResource("1_hud")
 
-[node name="SpeedPanel" type="Panel" parent="."]
+[node name="Speedometer" type="Control" parent="."]
 layout_mode = 1
 anchors_preset = 3
 anchor_left = 1.0
 anchor_top = 1.0
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = -200.0
-offset_top = -120.0
+offset_left = -280.0
+offset_top = -280.0
 offset_right = -20.0
 offset_bottom = -20.0
 grow_horizontal = 0
 grow_vertical = 0
-
-[node name="SpeedLabel" type="Label" parent="."]
-layout_mode = 1
-anchors_preset = 3
-anchor_left = 1.0
-anchor_top = 1.0
-anchor_right = 1.0
-anchor_bottom = 1.0
-offset_left = -170.0
-offset_top = -100.0
-offset_right = -50.0
-offset_bottom = -35.0
-grow_horizontal = 0
-grow_vertical = 0
-theme_override_font_sizes/font_size = 48
-text = "0"
-horizontal_alignment = 2
-vertical_alignment = 2
-
-[node name="UnitLabel" type="Label" parent="."]
-layout_mode = 1
-anchors_preset = 3
-anchor_left = 1.0
-anchor_top = 1.0
-anchor_right = 1.0
-anchor_bottom = 1.0
-offset_left = -55.0
-offset_top = -70.0
-offset_right = -25.0
-offset_bottom = -35.0
-grow_horizontal = 0
-grow_vertical = 0
-theme_override_font_sizes/font_size = 18
-text = "км/ч"
-horizontal_alignment = 1
-vertical_alignment = 2
-
-[node name="GearLabel" type="Label" parent="."]
-layout_mode = 1
-anchors_preset = 3
-anchor_left = 1.0
-anchor_top = 1.0
-anchor_right = 1.0
-anchor_bottom = 1.0
-offset_left = -70.0
-offset_top = -115.0
-offset_right = -25.0
-offset_bottom = -75.0
-grow_horizontal = 0
-grow_vertical = 0
-theme_override_font_sizes/font_size = 28
-text = "N"
-horizontal_alignment = 1
-vertical_alignment = 1
-
-[node name="RPMBar" type="ProgressBar" parent="."]
-layout_mode = 1
-anchors_preset = 3
-anchor_left = 1.0
-anchor_top = 1.0
-anchor_right = 1.0
-anchor_bottom = 1.0
-offset_left = -195.0
-offset_top = -30.0
-offset_right = -25.0
-offset_bottom = -25.0
-grow_horizontal = 0
-grow_vertical = 0
-max_value = 7000.0
-value = 900.0
-show_percentage = false
+script = ExtResource("2_speedo")
