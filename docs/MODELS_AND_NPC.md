@@ -2,7 +2,98 @@
 
 ## Обзор системы
 
-Игра поддерживает несколько моделей автомобилей, которые могут использоваться как для игрока, так и для NPC трафика. Система построена на расширяемой архитектуре, позволяющей легко добавлять новые модели.
+Игра поддерживает несколько моделей автомобилей, которые могут использоваться как для игрока, так и для NPC трафика. Система построена на расширяемой архитектуре с единым базовым классом физики.
+
+## Архитектура
+
+### Иерархия классов
+
+```
+VehicleBase (car/vehicle_base.gd)
+├── Car (car/car.gd) - Автомобиль игрока
+└── NPCCar (traffic/npc_car.gd) - NPC трафик
+```
+
+### VehicleBase - Базовый класс
+
+**Путь**: `car/vehicle_base.gd`
+
+**Ответственность**:
+- Общая физика колёс (сбор, настройка traction)
+- Расчёт крутящего момента и RPM
+- Применение рулежки с учётом скорости
+- Применение сил двигателя и тормозов
+- Автоматическая КПП
+- Расчёт скорости
+
+**Абстрактные методы** (реализуются в наследниках):
+```gdscript
+func _get_steering_input() -> float  # Рулежка [-1.0 .. 1.0]
+func _get_throttle_input() -> float  # Газ [0.0 .. 1.0]
+func _get_brake_input() -> float     # Тормоз [0.0 .. 1.0]
+```
+
+**Экспортируемые параметры**:
+- Двигатель: `max_engine_power`, `max_rpm`, `idle_rpm`, `gear_ratios`, `final_drive`
+- Руление: `max_steering_angle`, `steering_speed`, `steering_return_speed`
+- Тормоза: `brake_force`
+
+### Car - Автомобиль игрока
+
+**Путь**: `car/car.gd`
+
+**Дополнительные возможности**:
+- Input от клавиатуры (стрелки/WASD)
+- Ручной тормоз (пробел)
+- Тип привода (RWD/FWD/AWD)
+- TCS (антипробуксовочная система)
+- ESC (система стабилизации)
+- Сигналы для UI
+
+**Реализация абстрактных методов**:
+```gdscript
+func _get_steering_input() -> float:
+    return Input.get_axis("ui_right", "ui_left")
+
+func _get_throttle_input() -> float:
+    return 1.0 if Input.is_action_pressed("ui_up") else 0.0
+
+func _get_brake_input() -> float:
+    # Обычный тормоз или ручной
+    if handbrake_input > 0.1:
+        return handbrake_input * handbrake_force / brake_force
+    return brake_input
+```
+
+### NPCCar - NPC трафик
+
+**Путь**: `traffic/npc_car.gd`
+
+**Дополнительные возможности**:
+- Pure Pursuit steering algorithm
+- Waypoint navigation
+- Obstacle detection
+- AI driver behavior (cautious driving)
+- Path extension
+- Random color variation
+
+**Реализация абстрактных методов**:
+```gdscript
+func _get_steering_input() -> float:
+    return steering_input  # Рассчитан в _update_ai_driver()
+
+func _get_throttle_input() -> float:
+    return throttle_input  # Рассчитан в _update_ai_driver()
+
+func _get_brake_input() -> float:
+    return brake_input  # Рассчитан в _update_ai_driver()
+```
+
+**AI параметры**:
+- `LOOKAHEAD_MIN`: 8.0 - минимальный lookahead для Pure Pursuit
+- `LOOKAHEAD_MAX`: 20.0 - максимальный lookahead
+- `CAUTIOUS_FACTOR`: 0.8 - осторожное вождение (80% от лимита)
+- `UPDATE_INTERVAL`: 0.1 - обновление AI каждые 100ms
 
 ## Текущие модели
 
@@ -139,6 +230,14 @@ func _get_npc_from_pool():
 
 ## Добавление новой модели
 
+### Обзор процесса
+
+Добавление новой модели не требует дублирования физики - все модели используют VehicleBase. Необходимо только:
+1. Подготовить 3D модель (GLTF)
+2. Создать setup скрипт для настройки внешнего вида
+3. Создать сцены для player и NPC (если нужно)
+4. Настроить позиции фар в системе освещения
+
 ### Шаг 1: Подготовка файлов модели
 
 1. Создать папку `car/models/<название_модели>/`
@@ -148,6 +247,8 @@ func _get_npc_from_pool():
 ### Шаг 2: Создание setup скрипта
 
 Создать `car/<название>_setup.gd`:
+
+**Важно**: Setup скрипт отвечает только за визуал (цвета, материалы). Физика настраивается в сцене через параметры VehicleBase.
 
 ```gdscript
 extends Node3D
@@ -179,6 +280,8 @@ func _find_all_meshes(node: Node) -> Array:
 
 Создать `car/car_<название>.tscn`:
 
+**Важно**: Сцена должна использовать скрипт `car.gd` который наследуется от VehicleBase.
+
 **Структура**:
 ```
 [node name="Car" type="VehicleBody3D" groups=["car"]]
@@ -187,6 +290,25 @@ collision_layer = 1
 collision_mask = 7
 center_of_mass_mode = 1
 center_of_mass = Vector3(0, <y_offset>, 0)
+script = ExtResource("res://car/car.gd")
+
+# Параметры VehicleBase (наследуются от базового класса)
+max_engine_power = 300.0
+max_rpm = 7000.0
+idle_rpm = 900.0
+gear_ratios = [-3.5, 0.0, 3.5, 2.2, 1.4, 1.0, 0.8]
+final_drive = 3.7
+max_steering_angle = 35.0
+steering_speed = 3.0
+steering_return_speed = 5.0
+brake_force = 30.0
+
+# Параметры Car (специфичные для игрока)
+handbrake_force = 50.0
+auto_transmission = true
+drive_type = 2  # AWD
+traction_control = true
+stability_control = true
 
 [node name="<Название>Model" parent="." instance=<путь к scene.gltf>]
 transform = Transform3D(1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0, 0, <y_offset>, 0)
@@ -201,24 +323,73 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, <x>, <y>, <z>)
 use_as_steering = true
 wheel_radius = <радиус>
 wheel_rest_length = <длина подвески>
+suspension_stiffness = 55.0  # Жёсткая для игрока
 ...
+
+[node name="EngineSound" type="AudioStreamPlayer" parent="."]
+script = ExtResource("res://car/audio/engine_sound.gd")
+
+[node name="CollisionSound" type="Node" parent="."]
+script = ExtResource("res://car/audio/collision_sound.gd")
+
+[node name="CarLights" type="Node3D" parent="."]
+script = ExtResource("res://night_mode/car_lights.gd")
 ```
 
-**Важные параметры для настройки**:
-- `mass` - масса автомобиля
-- `center_of_mass` - центр масс (обычно ниже центра, y < 0)
-- Позиция модели по Y - чтобы колёса были на правильной высоте
-- `collision_layer` - слой 1 для игрока, 4 для NPC
-- Позиции колёс - должны соответствовать модели
+**Ключевые параметры**:
+- **Физика VehicleBase**: Все параметры двигателя, руления и тормозов
+- **Масса и центр масс**: Влияют на управляемость
+- **Подвеска игрока**: `suspension_stiffness = 55.0` (жёсткая, отзывчивая)
+- **Collision layer**: 1 для игрока
+- **Дополнительные узлы**: EngineSound, CollisionSound, CarLights
 
 ### Шаг 4: Создание сцены NPC
 
 Создать `traffic/npc_<название>.tscn`:
 
-Аналогично сцене игрока, но:
-- `collision_layer = 4` (слой NPC)
-- `script = ExtResource("npc_car.gd")`
-- Без `EngineSound`, `CollisionSound`, `CarLights`
+**Важно**: Сцена должна использовать скрипт `traffic/npc_car.gd` который наследуется от VehicleBase.
+
+**Структура** (аналогична player, но с отличиями):
+```
+[node name="NPCCar" type="VehicleBody3D"]
+mass = <вес в кг>
+collision_layer = 4  # NPC слой
+collision_mask = 7
+center_of_mass_mode = 1
+center_of_mass = Vector3(0, <y_offset>, 0)
+script = ExtResource("res://traffic/npc_car.gd")
+
+# Параметры VehicleBase (слабее чем у игрока)
+max_engine_power = 150.0  # Меньше мощность
+max_rpm = 6000.0
+idle_rpm = 900.0
+gear_ratios = [-3.5, 0.0, 3.5, 2.2, 1.4, 1.0, 0.8]
+final_drive = 3.7
+max_steering_angle = 30.0  # Более осторожное руление
+steering_speed = 3.0
+steering_return_speed = 5.0
+brake_force = 30.0
+
+[node name="<Название>Model" parent="." instance=<путь к scene.gltf>]
+transform = Transform3D(1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0, 0, <y_offset>, 0)
+script = ExtResource("<название>_setup.gd")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("BoxShape3D_body")
+
+[node name="WheelFL" type="VehicleWheel3D" parent="."]
+use_as_steering = true
+wheel_radius = <радиус>
+suspension_stiffness = 35.0  # Мягкая для NPC (плавная для AI)
+...
+```
+
+**Ключевые отличия от player**:
+- **Collision layer**: 4 (NPC)
+- **Меньше мощности**: `max_engine_power = 150.0`
+- **Мягкая подвеска**: `suspension_stiffness = 35.0` (для плавного AI управления)
+- **Нет дополнительных узлов**: Без EngineSound, CollisionSound (AI создаёт свои lights)
+- **AI управление**: Input рассчитывается в `_update_ai_driver()`
 
 ### Шаг 5: Добавление в систему освещения
 
@@ -380,6 +551,76 @@ print("TrafficManager: %d active NPCs" % active_npcs.size())
 - **Distance Culling**: NPC за пределами DESPAWN_DISTANCE удаляются
 - **Chunk-based Spawning**: NPC spawning ограничен по чанкам
 
+## Преимущества архитектуры VehicleBase
+
+### 1. Устранение дублирования кода
+
+**До рефакторинга**:
+- ~500 строк дублированной физики в `car.gd` и `npc_car.gd`
+- Одинаковые методы: `_apply_steering()`, `_apply_forces()`, `_get_torque_curve()`, `_auto_shift()`, `_update_speed()`
+- Изменения нужно было вносить в двух местах
+
+**После рефакторинга**:
+- ~300 строк общей физики в `VehicleBase`
+- Используется обоими типами автомобилей
+- Изменения вносятся в одном месте
+
+### 2. Единая точка изменений
+
+Все изменения физики делаются в `VehicleBase`:
+```gdscript
+// Изменение кривой крутящего момента
+func _get_torque_curve(rpm_normalized: float) -> float:
+    // Новая логика применяется ко всем машинам автоматически
+```
+
+### 3. Гибкость настройки
+
+Каждая сцена может переопределить параметры через `@export`:
+```
+# Player Nexia
+max_engine_power = 300.0
+suspension_stiffness = 55.0  # Жёсткая
+
+# NPC Nexia
+max_engine_power = 150.0
+suspension_stiffness = 35.0  # Мягкая
+```
+
+### 4. Расширяемость
+
+Новые типы машин получают физику бесплатно:
+```gdscript
+extends VehicleBase
+class_name TruckCar
+
+# Переопределяем только input методы
+func _get_steering_input() -> float:
+    # Специфичная логика для грузовика
+    return truck_steering_input
+```
+
+### 5. Сохранение различий
+
+**Player (car.gd)** сохраняет:
+- Input handling (клавиатура)
+- TCS и ESC системы
+- Ручной тормоз
+- Тип привода (RWD/FWD/AWD)
+
+**NPC (npc_car.gd)** сохраняет:
+- AI steering (Pure Pursuit)
+- Waypoint navigation
+- Obstacle detection
+- Path extension
+
+### 6. Упрощение тестирования
+
+Изменения в базовой физике тестируются один раз:
+- Запуск игры с player машиной
+- Проверка NPC трафика
+- Оба используют одну и ту же физику
+
 ## Будущие улучшения
 
 - [ ] Динамический выбор моделей NPC с весами
@@ -387,3 +628,4 @@ print("TrafficManager: %d active NPCs" % active_npcs.size())
 - [ ] Автоматическое определение позиций фар из модели
 - [ ] Система лодов (LOD) для далёких NPC
 - [ ] Больше типов машин (грузовики, легковые, спорткары)
+- [ ] Мотоциклы (наследуются от VehicleBase с 2 колёсами)

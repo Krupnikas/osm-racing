@@ -1,25 +1,22 @@
-extends VehicleBody3D
+extends VehicleBase
 class_name Car
 
-## Настройки двигателя
-@export_group("Engine")
-@export var max_engine_power := 300.0  ## Максимальная мощность двигателя (Н·м)
-@export var max_rpm := 7000.0  ## Максимальные обороты
-@export var idle_rpm := 900.0  ## Обороты холостого хода
-@export var gear_ratios: Array[float] = [-3.5, 0.0, 3.5, 2.2, 1.4, 1.0, 0.8]  ## Передаточные числа (R, N, 1-5)
-@export var final_drive := 3.7  ## Главная передача
-@export var auto_transmission := true  ## Автоматическая КПП
+## Автомобиль игрока с управлением от клавиатуры
+## Наследуется от VehicleBase для общей физики
+##
+## Дополнительные возможности:
+## - Ручной тормоз
+## - TCS (антипробуксовочная система)
+## - ESC (система стабилизации)
+## - Тип привода (RWD/FWD/AWD)
 
-## Настройки управления
-@export_group("Steering")
-@export var max_steering_angle := 35.0  ## Максимальный угол поворота колёс (градусы)
-@export var steering_speed := 3.0  ## Скорость поворота руля
-@export var steering_return_speed := 5.0  ## Скорость возврата руля
-
-## Настройки тормозов
+## Настройки тормозов (дополнительные)
 @export_group("Brakes")
-@export var brake_force := 30.0  ## Сила основных тормозов
 @export var handbrake_force := 50.0  ## Сила ручного тормоза
+
+## Автоматическая КПП
+@export_group("Transmission")
+@export var auto_transmission := true  ## Автоматическая КПП
 
 ## Настройки привода
 @export_group("Drivetrain")
@@ -33,18 +30,8 @@ class_name Car
 @export var tc_slip_threshold := 0.3  ## Порог срабатывания TCS
 @export var sc_angle_threshold := 30.0  ## Порог срабатывания ESC (градусы)
 
-# Внутренние переменные
-var current_gear := 1  # 0=R, 1=N, 2-6=1-5 передачи
-var current_rpm := 0.0
-var current_speed_kmh := 0.0
-var throttle_input := 0.0
-var steering_input := 0.0
-var brake_input := 0.0
+# Внутренние переменные (специфичные для player car)
 var handbrake_input := 0.0
-
-# Ссылки на колёса
-var wheels_front: Array[VehicleWheel3D] = []
-var wheels_rear: Array[VehicleWheel3D] = []
 
 # Ссылка на освещение
 var _car_lights: Node3D
@@ -56,22 +43,18 @@ signal gear_changed(gear: int)
 
 
 func _ready() -> void:
-	# Подключаемся к NightModeManager
-	await get_tree().process_frame
-	_setup_night_mode_connection()
-	# Находим колёса
-	for child in get_children():
-		if child is VehicleWheel3D:
-			if child.use_as_steering:
-				wheels_front.append(child)
-			else:
-				wheels_rear.append(child)
+	# Вызываем базовый _ready (собирает колёса)
+	super._ready()
 
 	# Настраиваем привод
 	_setup_drivetrain()
 
 	# Добавляем в группу для поиска
 	add_to_group("car")
+
+	# Подключаемся к NightModeManager
+	await get_tree().process_frame
+	_setup_night_mode_connection()
 
 
 func _setup_drivetrain() -> void:
@@ -95,15 +78,15 @@ func _setup_drivetrain() -> void:
 
 func _physics_process(delta: float) -> void:
 	_handle_input()
-	_update_speed()
-	_update_engine(delta)
-	_apply_steering(delta)
-	_apply_forces()
-	_apply_stability_control(delta)
 
-	# Auto transmission
-	if auto_transmission:
-		_auto_shift()
+	# Вызываем базовую физику (скорость, руление, силы, auto-shift)
+	_base_physics_process(delta)
+
+	# Player-specific: engine RPM simulation
+	_update_engine(delta)
+
+	# Player-specific: stability systems
+	_apply_stability_control(delta)
 
 
 func _handle_input() -> void:
@@ -132,28 +115,35 @@ func _handle_input() -> void:
 	handbrake_input = 1.0 if Input.is_action_pressed("ui_accept") else 0.0
 
 
-func _update_speed() -> void:
-	# Скорость в км/ч
-	var velocity_local := linear_velocity.length()
-	current_speed_kmh = velocity_local * 3.6
-	speed_changed.emit(current_speed_kmh)
+# ===== РЕАЛИЗАЦИЯ АБСТРАКТНЫХ МЕТОДОВ VehicleBase =====
+
+func _get_steering_input() -> float:
+	"""Возвращает текущий steering input от клавиатуры"""
+	return steering_input
+
+
+func _get_throttle_input() -> float:
+	"""Возвращает текущий throttle input от клавиатуры"""
+	return throttle_input
+
+
+func _get_brake_input() -> float:
+	"""Возвращает текущий brake input (обычный или ручной тормоз)"""
+	if handbrake_input > 0.1:
+		return handbrake_input * handbrake_force / brake_force
+	return brake_input
+
+
 
 
 func _update_engine(delta: float) -> void:
+	"""Player-specific: более детальная симуляция RPM с эффектами газа"""
 	if current_gear == 1:  # Нейтраль
 		current_rpm = lerp(current_rpm, idle_rpm + throttle_input * 3000.0, delta * 5.0)
 	else:
 		# Рассчитываем обороты от скорости
 		var gear_ratio: float = gear_ratios[current_gear]
-		var wheel_rpm := 0.0
-
-		if wheels_rear.size() > 0:
-			# Средняя угловая скорость ведущих колёс
-			var avg_rotation := 0.0
-			for wheel in wheels_rear:
-				avg_rotation += abs(wheel.get_rpm())
-			avg_rotation /= wheels_rear.size()
-			wheel_rpm = avg_rotation
+		var wheel_rpm := _get_average_wheel_rpm()
 
 		var engine_rpm: float = wheel_rpm * abs(gear_ratio) * final_drive
 		engine_rpm = clamp(engine_rpm, idle_rpm, max_rpm)
@@ -164,82 +154,16 @@ func _update_engine(delta: float) -> void:
 	current_rpm = clamp(current_rpm, idle_rpm, max_rpm)
 	rpm_changed.emit(current_rpm)
 
-
-func _apply_steering(delta: float) -> void:
-	# Максимальный угол уменьшается на скорости
-	var speed_factor: float = clamp(1.0 - current_speed_kmh / 200.0, 0.3, 1.0)
-	var max_steer: float = deg_to_rad(max_steering_angle) * speed_factor
-
-	# Целевой угол
-	var target_steer: float = steering_input * max_steer
-
-	# Скорость поворота
-	var steer_speed: float
-	if abs(steering_input) > 0.1:
-		steer_speed = steering_speed
-	else:
-		steer_speed = steering_return_speed
-
-	steering = lerp(steering, target_steer, steer_speed * delta)
+	# Эмитим сигнал скорости (после обновления в base)
+	speed_changed.emit(current_speed_kmh)
 
 
-func _apply_forces() -> void:
-	if current_gear == 1:  # Нейтраль
-		engine_force = 0.0
-	else:
-		# Расчёт силы от двигателя
-		var gear_ratio: float = gear_ratios[current_gear]
-		var rpm_factor := _get_torque_curve(current_rpm / max_rpm)
-		var torque := max_engine_power * rpm_factor * throttle_input
-
-		# Сила на колёсах
-		var wheel_force := torque * gear_ratio * final_drive
-
-		# Ограничение по оборотам
-		if current_rpm >= max_rpm * 0.98:
-			wheel_force *= 0.5
-
-		# Применяем TCS
-		if traction_control:
-			wheel_force = _apply_traction_control(wheel_force)
-
-		engine_force = wheel_force
-
-	# Тормоза
-	if brake_input > 0:
-		brake = brake_force * brake_input
-	elif handbrake_input > 0:
-		brake = handbrake_force * handbrake_input
-	else:
-		brake = 0.0
 
 
-func _get_torque_curve(rpm_normalized: float) -> float:
-	# Простая кривая крутящего момента
-	# Максимум около 0.5-0.7 от max RPM
-	if rpm_normalized < 0.2:
-		return lerp(0.4, 0.8, rpm_normalized / 0.2)
-	elif rpm_normalized < 0.6:
-		return lerp(0.8, 1.0, (rpm_normalized - 0.2) / 0.4)
-	else:
-		return lerp(1.0, 0.7, (rpm_normalized - 0.6) / 0.4)
-
-
-func _apply_traction_control(force: float) -> float:
-	if not traction_control:
-		return force
-
-	# Проверяем пробуксовку
-	for wheel in wheels_rear:
-		var slip := wheel.get_skidinfo()
-		if slip < 1.0 - tc_slip_threshold:
-			# Уменьшаем силу при пробуксовке
-			force *= slip + 0.3
-
-	return force
 
 
 func _apply_stability_control(_delta: float) -> void:
+	"""Player-specific: ESC система стабилизации"""
 	if not stability_control:
 		return
 
@@ -253,20 +177,11 @@ func _apply_stability_control(_delta: float) -> void:
 		apply_torque(Vector3(0, -correction * mass, 0))
 
 
+# Переопределяем auto_shift чтобы эмитить сигнал
 func _auto_shift() -> void:
-	if current_gear <= 1:
-		return
-
-	var shift_up_rpm := max_rpm * 0.85
-	var shift_down_rpm := max_rpm * 0.35
-
-	# Повышение передачи
-	if current_rpm > shift_up_rpm and current_gear < gear_ratios.size() - 1:
-		current_gear += 1
-		gear_changed.emit(current_gear)
-	# Понижение передачи
-	elif current_rpm < shift_down_rpm and current_gear > 2:
-		current_gear -= 1
+	var old_gear := current_gear
+	super._auto_shift()  # Вызываем базовый метод
+	if current_gear != old_gear:
 		gear_changed.emit(current_gear)
 
 
