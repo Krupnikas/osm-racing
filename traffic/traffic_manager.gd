@@ -13,6 +13,7 @@ const NPCS_PER_CHUNK := 3  # Машин на чанк (было 4)
 
 # Ссылки
 var npc_car_scene: PackedScene
+var npc_paz_scene: PackedScene
 var road_network: Node  # RoadNetwork
 var terrain_generator: Node  # OSMTerrainGenerator
 var player_car: Node3D
@@ -33,8 +34,9 @@ var npc_path_visuals: Dictionary = {}  # npc -> Array[MeshInstance3D] для в�
 
 
 func _ready() -> void:
-	# Загружаем сцену NPC машины
+	# Загружаем сцены NPC машин
 	npc_car_scene = preload("res://traffic/npc_car.tscn")
+	npc_paz_scene = preload("res://traffic/npc_paz.tscn")
 
 	# Создаём RoadNetwork
 	var RoadNetworkScript = preload("res://traffic/road_network.gd")
@@ -209,7 +211,11 @@ func _get_npc_from_pool():
 		return npc
 
 	if active_npcs.size() < MAX_NPCS:
-		var npc = npc_car_scene.instantiate()
+		# 100% ПАЗов для теста
+		var scene_to_use: PackedScene = npc_paz_scene
+		print("TrafficManager: Spawning PAZ bus")
+
+		var npc = scene_to_use.instantiate()
 		get_parent().add_child(npc)
 		return npc
 

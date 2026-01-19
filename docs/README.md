@@ -150,9 +150,20 @@ osm-racing/
 
 ## Запуск
 
+### Из Godot Editor:
 1. Открыть проект в Godot 4.x
-2. Запустить сцену `main.tscn`
+2. Запустить сцену `main.tscn` (F5)
 3. Дождаться загрузки OSM данных (появится в консоли)
+
+### Из командной строки (запуск игры напрямую):
+```bash
+/Applications/Godot.app/Contents/MacOS/Godot --path /Users/alekseiaksenov/osm-racing res://main.tscn
+```
+
+### Перезапуск игры:
+```bash
+killall -9 Godot 2>/dev/null; sleep 1 && /Applications/Godot.app/Contents/MacOS/Godot --path /Users/alekseiaksenov/osm-racing res://main.tscn 2>&1 &
+```
 
 ## Управление
 

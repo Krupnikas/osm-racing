@@ -1,0 +1,72 @@
+[gd_scene load_steps=5 format=3 uid="uid://npcpaz123"]
+
+[ext_resource type="Script" path="res://traffic/npc_car.gd" id="1_npc_car"]
+[ext_resource type="PackedScene" path="res://car/models/paz_32053/scene.gltf" id="2_paz_model"]
+[ext_resource type="Script" path="res://car/paz_setup.gd" id="3_paz_setup"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_body"]
+size = Vector3(2.5, 2.8, 7.0)
+
+[node name="NPCCar" type="VehicleBody3D"]
+mass = 5500.0
+collision_layer = 4
+collision_mask = 7
+center_of_mass_mode = 1
+center_of_mass = Vector3(0, 0.0, 0)
+script = ExtResource("1_npc_car")
+
+[node name="PAZModel" parent="." instance=ExtResource("2_paz_model")]
+transform = Transform3D(1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0, 0, 0.8, 0)
+script = ExtResource("3_paz_setup")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4, 0)
+shape = SubResource("BoxShape3D_body")
+
+[node name="WheelFL" type="VehicleWheel3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.0, 0.5, 2.5)
+use_as_steering = true
+wheel_radius = 0.55
+wheel_rest_length = 0.4
+wheel_friction_slip = 2.5
+suspension_stiffness = 50.0
+suspension_max_force = 18000.0
+suspension_travel = 0.3
+damping_compression = 3.0
+damping_relaxation = 4.0
+
+[node name="WheelFR" type="VehicleWheel3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0, 0.5, 2.5)
+use_as_steering = true
+wheel_radius = 0.55
+wheel_rest_length = 0.4
+wheel_friction_slip = 2.5
+suspension_stiffness = 50.0
+suspension_max_force = 18000.0
+suspension_travel = 0.3
+damping_compression = 3.0
+damping_relaxation = 4.0
+
+[node name="WheelRL" type="VehicleWheel3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.0, 0.5, -2.5)
+use_as_traction = true
+wheel_radius = 0.55
+wheel_rest_length = 0.4
+wheel_friction_slip = 2.5
+suspension_stiffness = 55.0
+suspension_max_force = 18000.0
+suspension_travel = 0.3
+damping_compression = 3.2
+damping_relaxation = 4.2
+
+[node name="WheelRR" type="VehicleWheel3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0, 0.5, -2.5)
+use_as_traction = true
+wheel_radius = 0.55
+wheel_rest_length = 0.4
+wheel_friction_slip = 2.5
+suspension_stiffness = 55.0
+suspension_max_force = 18000.0
+suspension_travel = 0.3
+damping_compression = 3.2
+damping_relaxation = 4.2

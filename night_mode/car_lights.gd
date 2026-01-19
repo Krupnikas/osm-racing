@@ -41,7 +41,7 @@ var _car: VehicleBody3D
 var _lights_enabled := false
 
 # Тип модели машины
-enum CarModel { DEFAULT, NEXIA }
+enum CarModel { DEFAULT, NEXIA, PAZ }
 var _car_model: CarModel = CarModel.DEFAULT
 
 
@@ -56,11 +56,15 @@ func _ready() -> void:
 
 func _detect_car_model() -> void:
 	"""Определяет тип модели машины по наличию дочерних узлов"""
-	# Ищем узел NexiaModel
+	# Ищем узлы моделей
 	for child in _car.get_children():
 		if child.name == "NexiaModel":
 			_car_model = CarModel.NEXIA
 			print("CarLights: Detected Nexia model")
+			return
+		elif child.name == "PAZModel":
+			_car_model = CarModel.PAZ
+			print("CarLights: Detected PAZ bus model")
 			return
 
 	_car_model = CarModel.DEFAULT
@@ -85,6 +89,11 @@ func _create_headlights() -> void:
 		left_pos = Vector3(-0.55, 0.6, 1.8)
 		right_pos = Vector3(0.55, 0.6, 1.8)
 		print("CarLights: Creating Nexia headlights at z=1.8")
+	elif _car_model == CarModel.PAZ:
+		# Позиции для ПАЗ - автобус, фары ближе к корпусу и друг к другу
+		left_pos = Vector3(-0.55, 0.1, 2.3)
+		right_pos = Vector3(0.55, 0.1, 2.3)
+		print("CarLights: Creating PAZ headlights - closer to body and together")
 	else:
 		# Позиции для стандартной модели
 		left_pos = Vector3(-0.55, 0.6, 2.3)
@@ -130,6 +139,11 @@ func _create_taillights() -> void:
 		left_pos = Vector3(-0.45, 0.80, -2.0)
 		right_pos = Vector3(0.45, 0.80, -2.0)
 		print("CarLights: Creating Nexia taillights at (-0.45, 0.80, -2.0)")
+	elif _car_model == CarModel.PAZ:
+		# Позиции для ПАЗ - автобус, задние фары очень низко
+		left_pos = Vector3(-0.55, -0.4, -2.4)
+		right_pos = Vector3(0.55, -0.4, -2.4)
+		print("CarLights: Creating PAZ taillights - very low")
 	else:
 		# Позиции для стандартной модели
 		left_pos = Vector3(-0.75, 0.35, -2.5)
@@ -203,6 +217,12 @@ func _create_light_meshes() -> void:
 		headlight_right_pos = Vector3(0.55, 0.55, 1.72)
 		headlight_size = Vector3(0.25, 0.12, 0.05)
 		print("CarLights: Creating Nexia headlight meshes at z=1.72")
+	elif _car_model == CarModel.PAZ:
+		# Для ПАЗ - автобус, фары ближе к корпусу и друг к другу
+		headlight_left_pos = Vector3(-0.55, 0.05, 2.22)
+		headlight_right_pos = Vector3(0.55, 0.05, 2.22)
+		headlight_size = Vector3(0.35, 0.18, 0.08)
+		print("CarLights: Creating PAZ headlight meshes - closer")
 	else:
 		# Позиции для стандартной модели
 		headlight_left_pos = Vector3(-0.55, 0.55, 2.22)
@@ -251,6 +271,14 @@ func _create_light_meshes() -> void:
 		reverse_pos = Vector3(0, 0.80, -1.78)
 		reverse_size = Vector3(0.08, 0.04, 0.02)  # В 1.5 раза меньше: 0.12/1.5, 0.06/1.5, 0.03/1.5
 		print("CarLights: Creating Nexia taillight meshes at (-0.45, 0.80, -2.02)")
+	elif _car_model == CarModel.PAZ:
+		# Для ПАЗ - автобус, задние фары очень низко
+		taillight_left_pos = Vector3(-0.55, -0.45, -2.42)
+		taillight_right_pos = Vector3(0.55, -0.45, -2.42)
+		taillight_size = Vector3(0.25, 0.12, 0.04)
+		reverse_pos = Vector3(0, -0.45, -2.18)
+		reverse_size = Vector3(0.18, 0.09, 0.04)
+		print("CarLights: Creating PAZ taillight meshes - very low")
 	else:
 		# Позиции для стандартной модели
 		taillight_left_pos = Vector3(-0.75, 0.35, -2.52)

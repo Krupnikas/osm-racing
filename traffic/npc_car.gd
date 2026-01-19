@@ -76,6 +76,12 @@ func _ready() -> void:
 			else:
 				wheels_rear.append(child)
 
+	print("NPC %s: Found %d wheels (front: %d, rear: %d)" % [name, wheels_front.size() + wheels_rear.size(), wheels_front.size(), wheels_rear.size()])
+
+	# Выводим позиции колёс для отладки
+	for wheel in wheels_front + wheels_rear:
+		print("  Wheel %s: position y=%.2f, radius=%.2f, rest_length=%.2f" % [wheel.name, wheel.position.y, wheel.wheel_radius, wheel.wheel_rest_length])
+
 	# Настраиваем привод (AWD)
 	for wheel in wheels_front:
 		wheel.use_as_traction = true
@@ -107,6 +113,9 @@ func _physics_process(delta: float) -> void:
 	if update_timer >= UPDATE_INTERVAL:
 		update_timer = 0.0
 		_update_ai_driver()
+
+		# Отладка контакта колёс (каждые UPDATE_INTERVAL секунд)
+		_debug_wheel_contact()
 
 	# Применяем управление каждый frame
 	_update_speed()
@@ -548,3 +557,20 @@ func _update_light_states() -> void:
 	# Задний ход
 	if _lights.has_method("set_reversing"):
 		_lights.set_reversing(current_gear == 0)
+
+
+func _debug_wheel_contact() -> void:
+	"""Отладка: проверяет контакт колёс с землёй"""
+	var all_wheels = wheels_front + wheels_rear
+	var in_contact := 0
+
+	for wheel in all_wheels:
+		if wheel.is_in_contact():
+			in_contact += 1
+
+	if in_contact == 0:
+		print("⚠️ NPC %s: NO WHEELS IN CONTACT! Speed: %.1f km/h, Position: %s, Throttle: %.2f" % [
+			name, current_speed_kmh, global_position, throttle_input
+		])
+	elif in_contact < all_wheels.size():
+		print("⚠️ NPC %s: Only %d/%d wheels in contact" % [name, in_contact, all_wheels.size()])

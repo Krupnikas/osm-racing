@@ -1,0 +1,11 @@
+Model Information:
+* title:	Bus ПАЗ 32053
+* source:	https://sketchfab.com/3d-models/bus-32053-5d02a6448537479aacf0093d57de0c39
+* author:	morrrtu1o (https://sketchfab.com/morrrtu1o)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Bus ПАЗ 32053" (https://sketchfab.com/3d-models/bus-32053-5d02a6448537479aacf0093d57de0c39) by morrrtu1o (https://sketchfab.com/morrrtu1o) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
