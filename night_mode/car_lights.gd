@@ -40,13 +40,31 @@ var _taillight_mat_right: StandardMaterial3D
 var _car: VehicleBody3D
 var _lights_enabled := false
 
+# Тип модели машины
+enum CarModel { DEFAULT, NEXIA }
+var _car_model: CarModel = CarModel.DEFAULT
+
 
 func _ready() -> void:
 	# Ищем машину-родителя
 	var parent := get_parent()
 	if parent is VehicleBody3D:
 		_car = parent
+		_detect_car_model()
 		_setup_all_lights()
+
+
+func _detect_car_model() -> void:
+	"""Определяет тип модели машины по наличию дочерних узлов"""
+	# Ищем узел NexiaModel
+	for child in _car.get_children():
+		if child.name == "NexiaModel":
+			_car_model = CarModel.NEXIA
+			print("CarLights: Detected Nexia model")
+			return
+
+	_car_model = CarModel.DEFAULT
+	print("CarLights: Using default model")
 
 
 func _setup_all_lights() -> void:
@@ -58,11 +76,25 @@ func _setup_all_lights() -> void:
 
 
 func _create_headlights() -> void:
+	# Позиции фар в зависимости от модели
+	var left_pos: Vector3
+	var right_pos: Vector3
+
+	if _car_model == CarModel.NEXIA:
+		# Позиции для Nexia - немного ближе к кузову по Z
+		left_pos = Vector3(-0.55, 0.6, 1.8)
+		right_pos = Vector3(0.55, 0.6, 1.8)
+		print("CarLights: Creating Nexia headlights at z=1.8")
+	else:
+		# Позиции для стандартной модели
+		left_pos = Vector3(-0.55, 0.6, 2.3)
+		right_pos = Vector3(0.55, 0.6, 2.3)
+
 	# Левая фара
 	# SpotLight3D светит по -Z, машина едет по +Z, поэтому поворачиваем на 180° по Y
 	headlight_left = SpotLight3D.new()
 	headlight_left.name = "HeadlightL"
-	headlight_left.position = Vector3(-0.55, 0.6, 2.3)
+	headlight_left.position = left_pos
 	headlight_left.rotation_degrees = Vector3(10, 180, 0)  # 180° по Y + 10° вниз
 	headlight_left.spot_range = 80.0
 	headlight_left.spot_angle = 45.0
@@ -76,7 +108,7 @@ func _create_headlights() -> void:
 	# Правая фара
 	headlight_right = SpotLight3D.new()
 	headlight_right.name = "HeadlightR"
-	headlight_right.position = Vector3(0.55, 0.6, 2.3)
+	headlight_right.position = right_pos
 	headlight_right.rotation_degrees = Vector3(10, 180, 0)  # 180° по Y + 10° вниз
 	headlight_right.spot_range = 80.0
 	headlight_right.spot_angle = 45.0
@@ -89,10 +121,24 @@ func _create_headlights() -> void:
 
 
 func _create_taillights() -> void:
+	# Позиции задних фонарей в зависимости от модели
+	var left_pos: Vector3
+	var right_pos: Vector3
+
+	if _car_model == CarModel.NEXIA:
+		# Позиции для Nexia - ближе друг к другу, выше
+		left_pos = Vector3(-0.45, 0.80, -2.0)
+		right_pos = Vector3(0.45, 0.80, -2.0)
+		print("CarLights: Creating Nexia taillights at (-0.45, 0.80, -2.0)")
+	else:
+		# Позиции для стандартной модели
+		left_pos = Vector3(-0.75, 0.35, -2.5)
+		right_pos = Vector3(0.75, 0.35, -2.5)
+
 	# Левый габарит/стоп - смещён дальше назад, чтобы не отражался в заднем стекле
 	taillight_left = OmniLight3D.new()
 	taillight_left.name = "TaillightL"
-	taillight_left.position = Vector3(-0.75, 0.35, -2.5)  # Дальше назад и ниже
+	taillight_left.position = left_pos
 	taillight_left.omni_range = 2.5
 	taillight_left.light_energy = 0.6
 	taillight_left.light_color = Color(1.0, 0.0, 0.0)
@@ -102,7 +148,7 @@ func _create_taillights() -> void:
 	# Правый габарит/стоп
 	taillight_right = OmniLight3D.new()
 	taillight_right.name = "TaillightR"
-	taillight_right.position = Vector3(0.75, 0.35, -2.5)  # Дальше назад и ниже
+	taillight_right.position = right_pos
 	taillight_right.omni_range = 2.5
 	taillight_right.light_energy = 0.6
 	taillight_right.light_color = Color(1.0, 0.0, 0.0)
@@ -146,6 +192,23 @@ func _create_underglow() -> void:
 
 
 func _create_light_meshes() -> void:
+	# Позиции в зависимости от модели
+	var headlight_left_pos: Vector3
+	var headlight_right_pos: Vector3
+	var headlight_size: Vector3
+
+	if _car_model == CarModel.NEXIA:
+		# Для Nexia - ближе к кузову
+		headlight_left_pos = Vector3(-0.55, 0.55, 1.72)
+		headlight_right_pos = Vector3(0.55, 0.55, 1.72)
+		headlight_size = Vector3(0.25, 0.12, 0.05)
+		print("CarLights: Creating Nexia headlight meshes at z=1.72")
+	else:
+		# Позиции для стандартной модели
+		headlight_left_pos = Vector3(-0.55, 0.55, 2.22)
+		headlight_right_pos = Vector3(0.55, 0.55, 2.22)
+		headlight_size = Vector3(0.25, 0.12, 0.05)
+
 	# Материал для светящихся фар
 	var headlight_mat := StandardMaterial3D.new()
 	headlight_mat.albedo_color = Color(1.0, 1.0, 0.9)
@@ -157,10 +220,10 @@ func _create_light_meshes() -> void:
 	headlight_mesh_left = MeshInstance3D.new()
 	headlight_mesh_left.name = "HeadlightMeshL"
 	var hl_mesh := BoxMesh.new()
-	hl_mesh.size = Vector3(0.25, 0.12, 0.05)
+	hl_mesh.size = headlight_size
 	headlight_mesh_left.mesh = hl_mesh
 	headlight_mesh_left.material_override = headlight_mat
-	headlight_mesh_left.position = Vector3(-0.55, 0.55, 2.22)
+	headlight_mesh_left.position = headlight_left_pos
 	headlight_mesh_left.visible = false
 	add_child(headlight_mesh_left)
 
@@ -169,9 +232,32 @@ func _create_light_meshes() -> void:
 	headlight_mesh_right.name = "HeadlightMeshR"
 	headlight_mesh_right.mesh = hl_mesh
 	headlight_mesh_right.material_override = headlight_mat
-	headlight_mesh_right.position = Vector3(0.55, 0.55, 2.22)
+	headlight_mesh_right.position = headlight_right_pos
 	headlight_mesh_right.visible = false
 	add_child(headlight_mesh_right)
+
+	# Позиции задних фонарей в зависимости от модели
+	var taillight_left_pos: Vector3
+	var taillight_right_pos: Vector3
+	var taillight_size: Vector3
+	var reverse_pos: Vector3
+	var reverse_size: Vector3
+
+	if _car_model == CarModel.NEXIA:
+		# Для Nexia - ближе друг к другу, выше, меньше размер
+		taillight_left_pos = Vector3(-0.45, 0.80, -2.02)
+		taillight_right_pos = Vector3(0.45, 0.80, -2.02)
+		taillight_size = Vector3(0.12, 0.053, 0.02)  # В 1.5 раза меньше: 0.18/1.5, 0.08/1.5, 0.03/1.5
+		reverse_pos = Vector3(0, 0.80, -1.78)
+		reverse_size = Vector3(0.08, 0.04, 0.02)  # В 1.5 раза меньше: 0.12/1.5, 0.06/1.5, 0.03/1.5
+		print("CarLights: Creating Nexia taillight meshes at (-0.45, 0.80, -2.02)")
+	else:
+		# Позиции для стандартной модели
+		taillight_left_pos = Vector3(-0.75, 0.35, -2.52)
+		taillight_right_pos = Vector3(0.75, 0.35, -2.52)
+		taillight_size = Vector3(0.18, 0.08, 0.03)
+		reverse_pos = Vector3(0, 0.35, -2.28)
+		reverse_size = Vector3(0.12, 0.06, 0.03)
 
 	# Материалы для габаритов (отдельные для каждого, чтобы менять яркость)
 	_taillight_mat_left = StandardMaterial3D.new()
@@ -186,14 +272,14 @@ func _create_light_meshes() -> void:
 	_taillight_mat_right.emission = Color(1.0, 0.0, 0.0)
 	_taillight_mat_right.emission_energy_multiplier = 1.5
 
-	# Левый габарит - дальше назад чтобы не отражался
+	# Левый габарит
 	taillight_mesh_left = MeshInstance3D.new()
 	taillight_mesh_left.name = "TaillightMeshL"
 	var tl_mesh := BoxMesh.new()
-	tl_mesh.size = Vector3(0.18, 0.08, 0.03)
+	tl_mesh.size = taillight_size
 	taillight_mesh_left.mesh = tl_mesh
 	taillight_mesh_left.material_override = _taillight_mat_left
-	taillight_mesh_left.position = Vector3(-0.75, 0.35, -2.52)  # Дальше назад
+	taillight_mesh_left.position = taillight_left_pos
 	taillight_mesh_left.visible = false
 	add_child(taillight_mesh_left)
 
@@ -202,7 +288,7 @@ func _create_light_meshes() -> void:
 	taillight_mesh_right.name = "TaillightMeshR"
 	taillight_mesh_right.mesh = tl_mesh
 	taillight_mesh_right.material_override = _taillight_mat_right
-	taillight_mesh_right.position = Vector3(0.75, 0.35, -2.52)  # Дальше назад
+	taillight_mesh_right.position = taillight_right_pos
 	taillight_mesh_right.visible = false
 	add_child(taillight_mesh_right)
 
@@ -213,14 +299,14 @@ func _create_light_meshes() -> void:
 	reverse_mat.emission = Color(1.0, 1.0, 1.0)
 	reverse_mat.emission_energy_multiplier = 2.5
 
-	# Фонарь заднего хода (по центру) - ниже
+	# Фонарь заднего хода (по центру)
 	reverse_mesh = MeshInstance3D.new()
 	reverse_mesh.name = "ReverseMesh"
 	var rv_mesh := BoxMesh.new()
-	rv_mesh.size = Vector3(0.12, 0.06, 0.03)
+	rv_mesh.size = reverse_size
 	reverse_mesh.mesh = rv_mesh
 	reverse_mesh.material_override = reverse_mat
-	reverse_mesh.position = Vector3(0, 0.35, -2.28)
+	reverse_mesh.position = reverse_pos
 	reverse_mesh.visible = false
 	add_child(reverse_mesh)
 

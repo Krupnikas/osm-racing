@@ -1,6 +1,6 @@
 [gd_scene load_steps=15 format=3 uid="uid://bmain123"]
 
-[ext_resource type="PackedScene" uid="uid://bcar123" path="res://car/car.tscn" id="2_car"]
+[ext_resource type="PackedScene" uid="uid://bcar_nexia" path="res://car/car_nexia.tscn" id="2_car"]
 [ext_resource type="Script" path="res://camera/follow_camera.gd" id="3_camera"]
 [ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="4_osm"]
 [ext_resource type="Script" path="res://ui/coordinates_display.gd" id="5_coords"]
@@ -64,7 +64,7 @@ unload_distance = 800.0
 car_path = NodePath("../Car")
 
 [node name="Car" parent="." instance=ExtResource("2_car")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.2, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
 
 [node name="TrafficManager" type="Node" parent="."]
 script = ExtResource("11_traffic")

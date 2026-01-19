@@ -1,0 +1,11 @@
+Model Information:
+* title:	Daewoo Nexia 2
+* source:	https://sketchfab.com/3d-models/daewoo-nexia-2-046bb8f994c3472393551ac7f729a477
+* author:	Q.SARDOR (https://sketchfab.com/qsardor57913)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Daewoo Nexia 2" (https://sketchfab.com/3d-models/daewoo-nexia-2-046bb8f994c3472393551ac7f729a477) by Q.SARDOR (https://sketchfab.com/qsardor57913) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

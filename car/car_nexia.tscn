@@ -1,0 +1,97 @@
+[gd_scene load_steps=7 format=3 uid="uid://bcar_nexia"]
+
+[ext_resource type="Script" path="res://car/car.gd" id="1_car"]
+[ext_resource type="Script" path="res://car/audio/engine_sound.gd" id="2_engine_sound"]
+[ext_resource type="Script" path="res://car/audio/collision_sound.gd" id="3_collision_sound"]
+[ext_resource type="Script" path="res://night_mode/car_lights.gd" id="4_car_lights"]
+[ext_resource type="PackedScene" path="res://car/models/nexia/scene.gltf" id="5_nexia_model"]
+[ext_resource type="Script" path="res://car/nexia_setup.gd" id="6_nexia_setup"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_body"]
+size = Vector3(1.68, 1.2, 4.33)
+
+[sub_resource type="BoxMesh" id="BoxMesh_debug"]
+size = Vector3(1.7, 1.4, 4.3)
+
+[sub_resource type="StandardMaterial3D" id="Material_debug"]
+albedo_color = Color(1, 0, 0, 0.3)
+transparency = 1
+
+[node name="Car" type="VehicleBody3D" groups=["car"]]
+mass = 1400.0
+collision_layer = 1
+collision_mask = 7
+center_of_mass_mode = 1
+center_of_mass = Vector3(0, -0.4, 0)
+script = ExtResource("1_car")
+
+[node name="DebugBox" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
+visible = false
+mesh = SubResource("BoxMesh_debug")
+surface_material_override/0 = SubResource("Material_debug")
+
+[node name="NexiaModel" parent="." instance=ExtResource("5_nexia_model")]
+transform = Transform3D(10.0, 0, 0, 0, 10.0, 0, 0, 0, 10.0, 0, 0, 0)
+script = ExtResource("6_nexia_setup")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)
+shape = SubResource("BoxShape3D_body")
+
+[node name="WheelFL" type="VehicleWheel3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.84, 0.5, 1.25)
+use_as_steering = true
+wheel_radius = 0.35
+wheel_rest_length = 0.5
+wheel_friction_slip = 3.0
+suspension_stiffness = 55.0
+suspension_max_force = 12000.0
+suspension_travel = 0.25
+damping_compression = 2.5
+damping_relaxation = 3.5
+
+[node name="WheelFR" type="VehicleWheel3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.84, 0.5, 1.25)
+use_as_steering = true
+wheel_radius = 0.35
+wheel_rest_length = 0.5
+wheel_friction_slip = 3.0
+suspension_stiffness = 55.0
+suspension_max_force = 12000.0
+suspension_travel = 0.25
+damping_compression = 2.5
+damping_relaxation = 3.5
+
+[node name="WheelRL" type="VehicleWheel3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.84, 0.5, -1.25)
+use_as_traction = true
+wheel_radius = 0.35
+wheel_rest_length = 0.5
+wheel_friction_slip = 3.0
+suspension_stiffness = 60.0
+suspension_max_force = 12000.0
+suspension_travel = 0.25
+damping_compression = 2.8
+damping_relaxation = 3.8
+
+[node name="WheelRR" type="VehicleWheel3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.84, 0.5, -1.25)
+use_as_traction = true
+wheel_radius = 0.35
+wheel_rest_length = 0.5
+wheel_friction_slip = 3.0
+suspension_stiffness = 60.0
+suspension_max_force = 12000.0
+suspension_travel = 0.25
+damping_compression = 2.8
+damping_relaxation = 3.8
+
+[node name="EngineSound" type="AudioStreamPlayer" parent="."]
+script = ExtResource("2_engine_sound")
+
+[node name="CollisionSound" type="Node" parent="."]
+script = ExtResource("3_collision_sound")
+
+[node name="CarLights" type="Node3D" parent="."]
+script = ExtResource("4_car_lights")
