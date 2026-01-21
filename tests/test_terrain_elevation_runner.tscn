@@ -1,0 +1,69 @@
+[gd_scene load_steps=14 format=3]
+
+[ext_resource type="PackedScene" uid="uid://bcar123" path="res://car/car.tscn" id="2_car"]
+[ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="4_osm"]
+[ext_resource type="Script" path="res://tests/test_terrain_elevation_runner.gd" id="5_test"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
+sky_top_color = Color(0.4, 0.6, 0.9, 1)
+sky_horizon_color = Color(0.7, 0.8, 0.9, 1)
+ground_bottom_color = Color(0.2, 0.2, 0.2, 1)
+ground_horizon_color = Color(0.5, 0.5, 0.5, 1)
+
+[sub_resource type="Sky" id="Sky_main"]
+sky_material = SubResource("ProceduralSkyMaterial_sky")
+
+[sub_resource type="Environment" id="Environment_main"]
+background_mode = 2
+sky = SubResource("Sky_main")
+ambient_light_source = 2
+ambient_light_color = Color(0.5, 0.5, 0.5, 1)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
+size = Vector3(10000, 1, 10000)
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
+size = Vector2(10000, 10000)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
+albedo_color = Color(0.4, 0.5, 0.4, 1)
+
+[node name="TestMain" type="Node3D"]
+
+[node name="TestRunner" type="Node" parent="."]
+script = ExtResource("5_test")
+
+[node name="StaticGround" type="StaticBody3D" parent="."]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="StaticGround"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+shape = SubResource("BoxShape3D_ground")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="StaticGround"]
+mesh = SubResource("PlaneMesh_ground")
+surface_material_override/0 = SubResource("StandardMaterial3D_ground")
+
+[node name="OSMTerrain" type="Node3D" parent="."]
+script = ExtResource("4_osm")
+start_lat = 59.149886
+start_lon = 37.94937
+chunk_size = 300.0
+load_distance = 500.0
+unload_distance = 800.0
+car_path = NodePath("../Car")
+enable_elevation = true
+elevation_scale = 1.0
+elevation_grid_resolution = 16
+
+[node name="Car" parent="." instance=ExtResource("2_car")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866025, -0.353553, 0.353553, 0, 0.707107, 0.707107, -0.5, -0.612372, 0.612372, 0, 20, 0)
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_main")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.9, 0.44, 0, -0.44, 0.9, 150, 30, 100)
+current = true
