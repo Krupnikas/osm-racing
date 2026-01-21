@@ -95,20 +95,20 @@ func _create_platform(center: Vector3, size: float, height: float) -> StaticBody
 	var body := StaticBody3D.new()
 	body.collision_layer = 1
 
-	# Коллизия
+	# Коллизия - верх платформы точно на height
 	var collision := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(size, 1.0, size)
+	box.size = Vector3(size, 0.5, size)  # Тонкая платформа
 	collision.shape = box
-	collision.position = Vector3(center.x, height - 0.5, center.z)
+	collision.position = Vector3(center.x, height - 0.25, center.z)  # Верх на height
 	body.add_child(collision)
 
 	# Визуал
 	var mesh_inst := MeshInstance3D.new()
 	var box_mesh := BoxMesh.new()
-	box_mesh.size = Vector3(size, 1.0, size)
+	box_mesh.size = Vector3(size, 0.5, size)
 	mesh_inst.mesh = box_mesh
-	mesh_inst.position = Vector3(center.x, height - 0.5, center.z)
+	mesh_inst.position = Vector3(center.x, height - 0.25, center.z)
 
 	var material := StandardMaterial3D.new()
 	material.albedo_color = Color(0.6, 0.5, 0.4)
@@ -126,7 +126,7 @@ func _create_test_road(center: Vector3, height: float) -> MeshInstance3D:
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(6.0, 1.0)
 	mesh_inst.mesh = plane
-	mesh_inst.position = Vector3(center.x, height + 0.01, center.z)  # Чуть выше платформы
+	mesh_inst.position = Vector3(center.x, height, center.z)  # Точно на height
 
 	var material := StandardMaterial3D.new()
 	material.albedo_color = Color(0.3, 0.3, 0.3)
@@ -273,7 +273,9 @@ func _test_point(point: Dictionary) -> void:
 			[road_height, expected_height, road_error])
 
 	if building:
-		var building_y: float = building.position.y  # Building base
+		# Building - это StaticBody3D, нужно получить позицию его mesh child
+		var mesh_child := building.get_child(1) if building.get_child_count() > 1 else null
+		var building_y: float = mesh_child.position.y - 2.5 if mesh_child else 0.0  # Вычитаем половину высоты
 		var building_error: float = abs(building_y - expected_height)
 		print("  Building base: %.2fm (expected: %.2fm, error: %.3fm)" %
 			[building_y, expected_height, building_error])
