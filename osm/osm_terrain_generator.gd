@@ -10,6 +10,7 @@ const ElevationLoaderScript = preload("res://osm/elevation_loader.gd")
 const TextureGeneratorScript = preload("res://textures/texture_generator.gd")
 const BuildingWallShader = preload("res://osm/building_wall.gdshader")
 const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
+const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
 
 # Кэш текстур (создаются один раз)
 var _road_textures: Dictionary = {}
@@ -3131,22 +3132,35 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 		if sign.get_child_count() == 0:
 			continue
 
-		# Размещаем вывеску
-		# Для POI-заведений (магазины в жилых домах) - на уровне первого этажа
-		# Для зданий-заведений (рестораны, банки) - на 70% высоты
+		# Размещаем вывеску и входную группу
+		# Для entrance и poi_node - добавляем входную группу (крыльцо с козырьком)
+		var has_entrance_group = placement_method in ["entrance", "poi_node"]
+
 		var sign_height: float
-		if placement_method == "poi_node":
+		if has_entrance_group:
+			# Входная группа: вывеска над козырьком
+			sign_height = base_elev + EntranceGroupGenerator.get_canopy_top_height() + 0.3
+		elif placement_method == "poi_node":
 			# Магазин на первом этаже жилого дома - вывеска на 4м
 			sign_height = base_elev + min(4.0, building_height * 0.7)
 		else:
 			sign_height = base_elev + building_height * 0.7
+
 		sign.position = Vector3(sign_position_2d.x, sign_height, sign_position_2d.y)
 		sign.position += wall_normal * 1.5  # Отступ от стены (вывеска масштабирована 3x)
 
 		# Поворачиваем вывеску перпендикулярно стене
 		sign.rotation.y = atan2(wall_normal.x, wall_normal.z)
 
-		print("BusinessSign: '%s' placed via %s at (%.1f, %.1f, %.1f)" % [sign_text, placement_method, sign.position.x, sign.position.y, sign.position.z])
+		# Добавляем входную группу (крыльцо + двери + козырёк)
+		if has_entrance_group:
+			var entrance_group = EntranceGroupGenerator.create_entrance_group(2)
+			entrance_group.position = Vector3(sign_position_2d.x, base_elev, sign_position_2d.y)
+			entrance_group.rotation.y = atan2(wall_normal.x, wall_normal.z)
+			entrance_group.name = "EntranceGroup_%s" % sign_text.substr(0, 10)
+			parent.add_child(entrance_group)
+
+		print("BusinessSign: '%s' placed via %s at (%.1f, %.1f, %.1f)%s" % [sign_text, placement_method, sign.position.x, sign.position.y, sign.position.z, " + entrance" if has_entrance_group else ""])
 
 		parent.add_child(sign)
 
