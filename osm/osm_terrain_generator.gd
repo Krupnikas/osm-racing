@@ -11,6 +11,7 @@ const TextureGeneratorScript = preload("res://textures/texture_generator.gd")
 const BuildingWallShader = preload("res://osm/building_wall.gdshader")
 const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
+const BIRCH_TREE_SCENE = preload("res://models/trees/birch/scene.gltf")
 
 # Кэш текстур (создаются один раз)
 var _road_textures: Dictionary = {}
@@ -776,8 +777,10 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		var elevation := _get_elevation_at_point(local, elev_data)
 
 		if tags.get("natural") == "tree":
-			_create_tree(local, elevation, target)
-			tree_count += 1
+			# Пропускаем деревья слишком близко к дорогам
+			if not _is_point_near_road(local, 3.0):
+				_create_tree(local, elevation, target)
+				tree_count += 1
 		elif tags.has("traffic_sign"):
 			_create_traffic_sign(local, elevation, tags, target)
 			sign_count += 1
@@ -2572,54 +2575,59 @@ func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
 	return (elevation - _base_elevation) * elevation_scale
 
 
-# Создание дерева из простых примитивов
+# Создание дерева из 3D модели берёзы
 func _create_tree(pos: Vector2, elevation: float, parent: Node3D) -> void:
-	var tree := Node3D.new()
-	tree.position = Vector3(pos.x, elevation, pos.y)
+	# Контейнер без масштабирования (для коллизии)
+	var tree_root := Node3D.new()
+	tree_root.name = "Tree"
+	tree_root.position = Vector3(pos.x, elevation, pos.y)
 
-	# Ствол - коричневый цилиндр
-	var trunk := MeshInstance3D.new()
-	var trunk_mesh := CylinderMesh.new()
-	trunk_mesh.top_radius = 0.15
-	trunk_mesh.bottom_radius = 0.2
-	trunk_mesh.height = 3.0
-	trunk.mesh = trunk_mesh
-
-	var trunk_mat := StandardMaterial3D.new()
-	trunk_mat.albedo_color = Color(0.4, 0.25, 0.15)  # Коричневый
-	trunk.material_override = trunk_mat
-	trunk.position.y = 1.5  # Половина высоты ствола
-	trunk.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	tree.add_child(trunk)
-
-	# Крона - зелёная сфера
-	var crown := MeshInstance3D.new()
-	var crown_mesh := SphereMesh.new()
-	crown_mesh.radius = 2.0
-	crown_mesh.height = 3.5
-	crown.mesh = crown_mesh
-
-	var crown_mat := StandardMaterial3D.new()
-	crown_mat.albedo_color = Color(0.2, 0.5, 0.2)  # Зелёный
-	crown.material_override = crown_mat
-	crown.position.y = 4.5  # Над стволом
-	crown.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	tree.add_child(crown)
+	# Визуальная модель дерева (масштабируется)
+	var tree_model: Node3D = BIRCH_TREE_SCENE.instantiate()
+	var scale_factor := randf_range(0.015, 0.022)
+	tree_model.scale = Vector3(scale_factor, scale_factor, scale_factor)
+	tree_root.add_child(tree_model)
 
 	# Коллизия для ствола
+	# Ствол в модели находится примерно на (200, 0, 200) в единицах модели
+	# После масштабирования: позиция = координаты_модели * scale_factor
+	# При scale 0.0185 (среднее): 200 * 0.0185 = 3.7
+	var trunk_offset_x := 195.0  # X чуть к 9 часам
+	var trunk_offset_z := 190.0  # Z чуть к 12 часам
+	var trunk_x := trunk_offset_x * scale_factor
+	var trunk_z := trunk_offset_z * scale_factor
+
 	var body := StaticBody3D.new()
-	body.collision_layer = 2
-	body.collision_mask = 1
+	body.collision_layer = 2  # Слой статических объектов
+	body.collision_mask = 1   # Сталкивается с машинами (слой 1)
+	body.name = "TreeCollision"
+
 	var collision := CollisionShape3D.new()
 	var shape := CylinderShape3D.new()
-	shape.radius = 0.2
-	shape.height = 3.0
+	shape.radius = 0.4  # Радиус ствола
+	shape.height = 8.0  # Высота коллизии 8м
 	collision.shape = shape
-	collision.position.y = 1.5
+	# Коллизия на позиции ствола (масштабируется вместе с моделью)
+	collision.position = Vector3(trunk_x, 4.0, trunk_z)
 	body.add_child(collision)
-	tree.add_child(body)
+	tree_root.add_child(body)
 
-	parent.add_child(tree)
+	# DEBUG: Визуализация коллизии (зелёный цилиндр)
+	# Раскомментировать для отладки позиции коллизии
+	#var debug_mesh := MeshInstance3D.new()
+	#var cylinder := CylinderMesh.new()
+	#cylinder.top_radius = 0.4
+	#cylinder.bottom_radius = 0.4
+	#cylinder.height = 8.0
+	#debug_mesh.mesh = cylinder
+	#var debug_mat := StandardMaterial3D.new()
+	#debug_mat.albedo_color = Color(0, 1, 0, 0.5)
+	#debug_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	#debug_mesh.material_override = debug_mat
+	#debug_mesh.position = Vector3(trunk_x, 4.0, trunk_z)
+	#tree_root.add_child(debug_mesh)
+
+	parent.add_child(tree_root)
 
 
 # Создание дорожного знака - разрушаемый при столкновении
@@ -2857,6 +2865,10 @@ func _generate_trees_in_polygon(points: PackedVector2Array, elev_data: Dictionar
 
 		# Проверяем что точка внутри полигона
 		if Geometry2D.is_point_in_polygon(test_point, points):
+			# Пропускаем деревья слишком близко к дорогам (минимум 3 метра от края дороги)
+			if _is_point_near_road(test_point, 3.0):
+				continue
+
 			var elevation := _get_elevation_at_point(test_point, elev_data)
 			_create_tree(test_point, elevation, parent)
 			tree_count += 1
@@ -3104,6 +3116,24 @@ func _is_point_in_any_parking(point: Vector2) -> bool:
 
 			if dist < PARKING_BUFFER:
 				return true
+
+	return false
+
+
+func _is_point_near_road(point: Vector2, min_distance: float) -> bool:
+	"""Проверяет, находится ли точка слишком близко к любой дороге"""
+	for seg in _road_segments:
+		var p1: Vector2 = seg.p1
+		var p2: Vector2 = seg.p2
+		var road_width: float = seg.width
+
+		# Вычисляем расстояние от точки до сегмента дороги
+		var closest := Geometry2D.get_closest_point_to_segment(point, p1, p2)
+		var dist := point.distance_to(closest)
+
+		# Учитываем ширину дороги (расстояние от центра до края + буфер)
+		if dist < (road_width / 2.0) + min_distance:
+			return true
 
 	return false
 
