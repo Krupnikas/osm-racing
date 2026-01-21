@@ -5,24 +5,76 @@ signal elevation_loaded(elevation_data: Dictionary)
 signal elevation_failed(error: String)
 
 const OPEN_ELEVATION_API := "https://api.open-elevation.com/api/v1/lookup"
+const CACHE_DIR := "user://elevation_cache/"
 
 var http_request: HTTPRequest
 var _pending_locations: Array = []
 var _grid_size: int = 0
 var _center_lat: float = 0.0
 var _center_lon: float = 0.0
+var _radius: float = 0.0
 
 func _ready() -> void:
 	http_request = HTTPRequest.new()
 	add_child(http_request)
 	http_request.request_completed.connect(_on_request_completed)
+	# Создаём папку кеша если не существует
+	DirAccess.make_dir_recursive_absolute(CACHE_DIR)
+
+# Генерирует ключ кеша для заданных параметров
+func _get_cache_key(lat: float, lon: float, radius: float, grid_resolution: int) -> String:
+	# Округляем координаты для стабильного ключа
+	var lat_key := "%.5f" % lat
+	var lon_key := "%.5f" % lon
+	var rad_key := "%.0f" % radius
+	return "elev_%s_%s_%s_%d.json" % [lat_key, lon_key, rad_key, grid_resolution]
+
+# Загружает данные из кеша если есть
+func _load_from_cache(cache_key: String) -> Dictionary:
+	var cache_path := CACHE_DIR + cache_key
+	if not FileAccess.file_exists(cache_path):
+		return {}
+
+	var file := FileAccess.open(cache_path, FileAccess.READ)
+	if not file:
+		return {}
+
+	var json_string := file.get_as_text()
+	file.close()
+
+	var json := JSON.new()
+	if json.parse(json_string) != OK:
+		return {}
+
+	return json.data
+
+# Сохраняет данные в кеш
+func _save_to_cache(cache_key: String, data: Dictionary) -> void:
+	var cache_path := CACHE_DIR + cache_key
+	var file := FileAccess.open(cache_path, FileAccess.WRITE)
+	if not file:
+		print("Elevation: Failed to save cache to %s" % cache_path)
+		return
+
+	file.store_string(JSON.stringify(data))
+	file.close()
+	print("Elevation: Cached to %s" % cache_key)
 
 # Загружает высоты для сетки точек вокруг центра
 func load_elevation_grid(lat: float, lon: float, radius: float, grid_resolution: int = 10) -> void:
 	_center_lat = lat
 	_center_lon = lon
 	_grid_size = grid_resolution
+	_radius = radius
 	_pending_locations.clear()
+
+	# Проверяем кеш
+	var cache_key := _get_cache_key(lat, lon, radius, grid_resolution)
+	var cached_data := _load_from_cache(cache_key)
+	if not cached_data.is_empty():
+		print("Elevation: Loaded from cache %s" % cache_key)
+		elevation_loaded.emit(cached_data)
+		return
 
 	# Конвертируем радиус в градусы
 	var lat_delta := radius / 111000.0
@@ -41,7 +93,7 @@ func load_elevation_grid(lat: float, lon: float, radius: float, grid_resolution:
 	var request_body := JSON.stringify({"locations": locations})
 	var headers := ["Content-Type: application/json", "Accept: application/json"]
 
-	print("Elevation: Requesting %d points..." % locations.size())
+	print("Elevation: Requesting %d points from API..." % locations.size())
 	var error := http_request.request(OPEN_ELEVATION_API, headers, HTTPClient.METHOD_POST, request_body)
 
 	if error != OK:
@@ -94,14 +146,20 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 
 	print("Elevation: Loaded grid %dx%d, range %.1f - %.1f m" % [_grid_size, _grid_size, min_elev, max_elev])
 
-	elevation_loaded.emit({
+	var elev_data := {
 		"grid": elevation_grid,
 		"grid_size": _grid_size,
 		"center_lat": _center_lat,
 		"center_lon": _center_lon,
 		"min_elevation": min_elev,
 		"max_elevation": max_elev
-	})
+	}
+
+	# Сохраняем в кеш
+	var cache_key := _get_cache_key(_center_lat, _center_lon, _radius, _grid_size)
+	_save_to_cache(cache_key, elev_data)
+
+	elevation_loaded.emit(elev_data)
 
 # Интерполирует высоту для произвольной точки на основе сетки
 static func interpolate_elevation(grid: Array, grid_size: int, x_norm: float, z_norm: float) -> float:

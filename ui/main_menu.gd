@@ -177,10 +177,32 @@ func _hide_world() -> void:
 func _show_world() -> void:
 	# Показываем машину
 	if _car:
+		# Устанавливаем машину на правильную высоту используя raycast
+		var spawn_height := _get_ground_height(Vector3.ZERO)
+		_car.global_position = Vector3(0, spawn_height + 2.0, 0)
+		_car.rotation = Vector3.ZERO
+		_car.linear_velocity = Vector3.ZERO
+		_car.angular_velocity = Vector3.ZERO
+		print("MainMenu: Car spawned at height %.1f" % (spawn_height + 2.0))
+
 		_car.visible = true
 		# Размораживаем физику машины
 		if _car is RigidBody3D:
 			_car.freeze = false
+
+# Находит высоту земли в точке используя raycast
+func _get_ground_height(pos: Vector3) -> float:
+	var space_state := get_viewport().get_world_3d().direct_space_state
+	var query := PhysicsRayQueryParameters3D.create(
+		pos + Vector3(0, 100, 0),
+		pos + Vector3(0, -100, 0)
+	)
+	query.collision_mask = 1  # Слой земли
+
+	var result := space_state.intersect_ray(query)
+	if result:
+		return result.position.y
+	return 0.0
 
 func _on_controls_pressed() -> void:
 	$ControlsPanel.visible = not $ControlsPanel.visible

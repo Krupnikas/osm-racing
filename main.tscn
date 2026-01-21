@@ -56,8 +56,8 @@ surface_material_override/0 = SubResource("StandardMaterial3D_ground")
 
 [node name="OSMTerrain" type="Node3D" parent="."]
 script = ExtResource("4_osm")
-start_lat = 59.149886
-start_lon = 37.94937
+start_lat = 41.723972
+start_lon = 44.730502
 chunk_size = 300.0
 load_distance = 500.0
 unload_distance = 800.0

@@ -24,7 +24,7 @@ var _textures_initialized := false
 @export var unload_distance := 800.0  # Дистанция выгрузки
 @export var car_path: NodePath
 @export var camera_path: NodePath
-@export var enable_elevation := false  # Включить загрузку высот (экспериментально)
+@export var enable_elevation := true  # Включить загрузку высот
 @export var elevation_scale := 1.0  # Масштаб высоты (1.0 = реальный)
 @export var elevation_grid_resolution := 16  # Разрешение сетки высот на чанк
 
@@ -187,19 +187,27 @@ func _check_initial_load_complete() -> void:
 	if not _initial_loading:
 		return
 
-	# Считаем сколько начальных чанков загружено
+	# Считаем сколько начальных чанков загружено (OSM данные + terrain готов)
 	var loaded_count := 0
+	var terrain_ready_count := 0
 	for chunk_key in _initial_chunks_needed:
 		if _loaded_chunks.has(chunk_key):
 			loaded_count += 1
+			# Проверяем что terrain тоже готов (если elevation включен)
+			if not enable_elevation or _chunk_elevations.has(chunk_key):
+				terrain_ready_count += 1
 
 	_initial_chunks_loaded = loaded_count
 	initial_load_progress.emit(loaded_count, _initial_chunks_needed.size())
 
-	# Все начальные чанки загружены?
-	if loaded_count >= _initial_chunks_needed.size():
+	# Все начальные чанки загружены И terrain готов?
+	var all_ready := loaded_count >= _initial_chunks_needed.size()
+	if enable_elevation:
+		all_ready = all_ready and terrain_ready_count >= _initial_chunks_needed.size()
+
+	if all_ready:
 		_initial_loading = false
-		print("OSM: Initial loading complete! %d chunks loaded" % loaded_count)
+		print("OSM: Initial loading complete! %d chunks loaded, terrain ready" % loaded_count)
 		initial_load_complete.emit()
 
 func _update_chunks(player_pos: Vector3) -> void:
@@ -301,6 +309,7 @@ func reset_terrain() -> void:
 	_chunk_elevations.clear()
 	_loading_elevations.clear()
 	_elevation_queue.clear()
+	_pending_osm_data.clear()
 	_active_elevation_requests = 0
 	_base_elevation = 0.0
 	_initial_loading = false
@@ -363,6 +372,15 @@ func _on_elevation_loaded(elev_data: Dictionary, chunk_key: String, loader: Node
 	if _loaded_chunks.has(chunk_key):
 		_create_terrain_mesh(chunk_key, _loaded_chunks[chunk_key])
 
+		# Если есть отложенные OSM данные - генерируем дороги теперь
+		if _pending_osm_data.has(chunk_key):
+			print("OSM: Chunk %s elevation ready, generating terrain..." % chunk_key)
+			_generate_terrain(_pending_osm_data[chunk_key], _loaded_chunks[chunk_key], chunk_key)
+			_pending_osm_data.erase(chunk_key)
+
+		# Проверяем завершение начальной загрузки
+		_check_initial_load_complete()
+
 	loader.queue_free()
 
 	# Продолжаем обработку очереди
@@ -381,6 +399,8 @@ func _on_osm_data_loaded(osm_data: Dictionary) -> void:
 	print("OSM: Initial data loaded")
 	_generate_terrain(osm_data, null)
 
+var _pending_osm_data: Dictionary = {}  # Отложенные OSM данные, ожидающие elevation
+
 func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node) -> void:
 	print("OSM: Chunk %s data loaded" % chunk_key)
 	_loading_chunks.erase(chunk_key)
@@ -391,11 +411,18 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	add_child(chunk_node)
 	_loaded_chunks[chunk_key] = chunk_node
 
-	# Если высоты уже загружены, создаём террейн
+	# Если высоты уже загружены - создаём террейн и дороги сразу
 	if _chunk_elevations.has(chunk_key):
 		_create_terrain_mesh(chunk_key, chunk_node)
+		_generate_terrain(osm_data, chunk_node, chunk_key)
+	elif enable_elevation:
+		# Сохраняем OSM данные и ждём elevation
+		_pending_osm_data[chunk_key] = osm_data
+		print("OSM: Chunk %s waiting for elevation data..." % chunk_key)
+	else:
+		# Без elevation - создаём дороги сразу на высоте 0
+		_generate_terrain(osm_data, chunk_node, chunk_key)
 
-	_generate_terrain(osm_data, chunk_node, chunk_key)
 	loader.queue_free()
 
 	# Если ночь уже включена - активируем свет в новом чанке
@@ -502,23 +529,40 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	material.albedo_color = COLORS["default"]
 	mesh.material_override = material
 
-	# Добавляем коллизию
+	# Добавляем коллизию с HeightMapShape3D (быстрее инициализируется чем trimesh)
 	var body := StaticBody3D.new()
 	body.name = "TerrainBody"
 	body.collision_layer = 1  # Слой 1 - земля, по которой едет машина
-	body.collision_mask = 1   # Реагирует на слой 1
+	body.collision_mask = 0   # Не реагирует ни на что (только машина реагирует на землю)
 	body.add_child(mesh)
 
-	# Создаём коллизию из меша
-	mesh.create_trimesh_collision()
-	# Перемещаем коллизию в body
-	for child in mesh.get_children():
-		if child is StaticBody3D:
-			var col_shape := child.get_child(0)
-			if col_shape is CollisionShape3D:
-				child.remove_child(col_shape)
-				body.add_child(col_shape)
-			child.queue_free()
+	# Создаём HeightMapShape3D для коллизии
+	var collision := CollisionShape3D.new()
+	var heightmap := HeightMapShape3D.new()
+	heightmap.map_width = grid_size
+	heightmap.map_depth = grid_size
+
+	# Создаём данные высот для коллизии
+	var map_data := PackedFloat32Array()
+	map_data.resize(grid_size * grid_size)
+
+	for z in range(grid_size):
+		for x in range(grid_size):
+			var elevation: float = grid[z][x] - _base_elevation
+			elevation *= elevation_scale
+			map_data[z * grid_size + x] = elevation
+
+	heightmap.map_data = map_data
+
+	collision.shape = heightmap
+	# HeightMapShape3D имеет размер (map_width-1) x (map_depth-1) и центрируется по своему центру
+	# После scale размер становится (grid_size-1)*cell_size = chunk_size в каждом направлении
+	# Центр коллизии должен быть в центре меша, который идёт от chunk_origin до chunk_origin+chunk_size
+	# Поэтому центр = chunk_origin + chunk_size/2
+	var half_chunk := chunk_size / 2.0
+	collision.position = chunk_origin + Vector3(half_chunk, 0, half_chunk)
+	collision.scale = Vector3(cell_size, 1.0, cell_size)
+	body.add_child(collision)
 
 	parent.add_child(body)
 
