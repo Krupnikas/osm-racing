@@ -20,7 +20,7 @@ transparency = 1
 [node name="Car" type="VehicleBody3D" groups=["car"]]
 mass = 1400.0
 collision_layer = 1
-collision_mask = 7
+collision_mask = 15
 center_of_mass_mode = 1
 center_of_mass = Vector3(0, -0.4, 0)
 script = ExtResource("1_car")
@@ -32,7 +32,7 @@ mesh = SubResource("BoxMesh_debug")
 surface_material_override/0 = SubResource("Material_debug")
 
 [node name="NexiaModel" parent="." instance=ExtResource("5_nexia_model")]
-transform = Transform3D(10.0, 0, 0, 0, 10.0, 0, 0, 0, 10.0, 0, 0, 0)
+transform = Transform3D(10.0, 0, 0, 0, 10.0, 0, 0, 0, 10.0, 0, -0.1, 0)
 script = ExtResource("6_nexia_setup")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]

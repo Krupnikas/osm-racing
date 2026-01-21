@@ -60,7 +60,7 @@ roughness = 0.2
 [node name="Car" type="VehicleBody3D" groups=["car"]]
 mass = 1400.0
 collision_layer = 1
-collision_mask = 7
+collision_mask = 15
 center_of_mass_mode = 1
 center_of_mass = Vector3(0, -0.3, 0)
 script = ExtResource("1_car")

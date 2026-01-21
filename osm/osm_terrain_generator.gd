@@ -52,6 +52,7 @@ var _poi_nodes: Array = []  # Точечные заведения (shop/amenity 
 var _parking_polygons: Array[PackedVector2Array] = []  # Полигоны парковок для исключения фонарей
 var _road_segments: Array = []  # Сегменты дорог для позиционирования знаков парковки
 var _created_lamp_positions: Dictionary = {}  # Позиции созданных фонарей для избежания дубликатов
+var _created_sign_positions: Dictionary = {}  # Позиции созданных знаков для избежания дубликатов
 var _pending_lamps: Array = []  # Отложенные фонари (создаются после загрузки всех парковок)
 var _lamps_created := false  # Флаг что фонари уже созданы
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
@@ -1643,11 +1644,35 @@ func _apply_parked_car_color(car: Node3D) -> void:
 
 
 func _create_parking_sign(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> void:
-	"""Создаёт дорожный знак парковки (P)"""
-	var sign_node := Node3D.new()
-	sign_node.name = "ParkingSign"
-	sign_node.position = Vector3(pos.x, elevation, pos.y)
-	sign_node.rotation.y = rotation_y
+	"""Создаёт дорожный знак парковки (P) - разрушаемый при столкновении"""
+	# Проверяем, не создан ли уже знак в этой позиции (избегаем дубликатов)
+	var pos_key := "%d_%d" % [int(pos.x), int(pos.y)]
+	if _created_sign_positions.has(pos_key):
+		return
+	_created_sign_positions[pos_key] = true
+
+	# RigidBody3D как корневой узел для физики
+	var body := RigidBody3D.new()
+	body.name = "ParkingSign"
+	body.position = Vector3(pos.x, elevation, pos.y)
+	body.rotation.y = rotation_y
+	body.collision_layer = 4  # Слой 4 - разрушаемые знаки (отдельный от статики)
+	body.collision_mask = 7  # Машины(1) + статика(2) + другие знаки(4)
+	body.mass = 15.0
+	body.freeze = true
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	body.contact_monitor = true
+	body.max_contacts_reported = 4  # Больше контактов для надёжности
+	body.body_entered.connect(_on_sign_hit.bind(body))
+
+	# Коллизия для столба
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.05
+	shape.height = 2.5
+	collision.shape = shape
+	collision.position.y = 1.25
+	body.add_child(collision)
 
 	# Столб - серый тонкий цилиндр
 	var pole := MeshInstance3D.new()
@@ -1663,7 +1688,7 @@ func _create_parking_sign(pos: Vector2, elevation: float, rotation_y: float, par
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
 	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	sign_node.add_child(pole)
+	body.add_child(pole)
 
 	# Знак - синий квадрат
 	var sign_plate := MeshInstance3D.new()
@@ -1676,7 +1701,7 @@ func _create_parking_sign(pos: Vector2, elevation: float, rotation_y: float, par
 	sign_plate.material_override = sign_mat
 	sign_plate.position.y = 2.3
 	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	sign_node.add_child(sign_plate)
+	body.add_child(sign_plate)
 
 	# Буква "P" - белый текст
 	var label := Label3D.new()
@@ -1688,7 +1713,7 @@ func _create_parking_sign(pos: Vector2, elevation: float, rotation_y: float, par
 	label.no_depth_test = false
 	label.pixel_size = 0.002
 	label.position = Vector3(0, 2.3, 0.02)
-	sign_node.add_child(label)
+	body.add_child(label)
 
 	# Буква "P" с обратной стороны
 	var label_back := Label3D.new()
@@ -1701,22 +1726,27 @@ func _create_parking_sign(pos: Vector2, elevation: float, rotation_y: float, par
 	label_back.pixel_size = 0.002
 	label_back.position = Vector3(0, 2.3, -0.02)
 	label_back.rotation.y = PI  # Повернуть на 180°
-	sign_node.add_child(label_back)
+	body.add_child(label_back)
 
-	# Коллизия для столба
-	var body := StaticBody3D.new()
-	body.collision_layer = 2
-	body.collision_mask = 1
-	var collision := CollisionShape3D.new()
-	var shape := CylinderShape3D.new()
-	shape.radius = 0.05
-	shape.height = 2.5
-	collision.shape = shape
-	collision.position.y = 1.25
-	body.add_child(collision)
-	sign_node.add_child(body)
+	parent.add_child(body)
 
-	parent.add_child(sign_node)
+
+# Обработчик столкновения со знаком - активирует физику
+func _on_sign_hit(other_body: Node, rigid_body: RigidBody3D) -> void:
+	# Проверяем, что столкновение с машиной (VehicleBody3D)
+	if other_body is VehicleBody3D:
+		var vehicle := other_body as VehicleBody3D
+		# Размораживаем знак - теперь он подвержен физике
+		rigid_body.freeze = false
+		# Добавляем импульс в направлении от машины
+		var impulse_dir: Vector3 = (rigid_body.global_position - vehicle.global_position).normalized()
+		impulse_dir.y = 0.3  # Немного вверх для реалистичного отлёта
+		var car_speed: float = vehicle.linear_velocity.length()
+		var impulse_strength: float = clamp(car_speed * 20.0, 100.0, 800.0)
+		rigid_body.apply_central_impulse(impulse_dir * impulse_strength)
+		# Добавляем вращение для реалистичности
+		var torque := Vector3(randf_range(-5, 5), randf_range(-2, 2), randf_range(-5, 5))
+		rigid_body.apply_torque_impulse(torque * impulse_strength * 0.1)
 
 
 func _create_natural(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
@@ -2592,10 +2622,35 @@ func _create_tree(pos: Vector2, elevation: float, parent: Node3D) -> void:
 	parent.add_child(tree)
 
 
-# Создание дорожного знака
+# Создание дорожного знака - разрушаемый при столкновении
 func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, parent: Node3D) -> void:
-	var sign_node := Node3D.new()
-	sign_node.position = Vector3(pos.x, elevation, pos.y)
+	# Проверяем на дубликаты
+	var pos_key := "ts_%d_%d" % [int(pos.x), int(pos.y)]
+	if _created_sign_positions.has(pos_key):
+		return
+	_created_sign_positions[pos_key] = true
+
+	# RigidBody3D как корневой узел для физики
+	var body := RigidBody3D.new()
+	body.name = "TrafficSign"
+	body.position = Vector3(pos.x, elevation, pos.y)
+	body.collision_layer = 4  # Слой 4 - разрушаемые знаки
+	body.collision_mask = 7  # Машины(1) + статика(2) + другие знаки(4)
+	body.mass = 15.0
+	body.freeze = true
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	body.contact_monitor = true
+	body.max_contacts_reported = 4
+	body.body_entered.connect(_on_sign_hit.bind(body))
+
+	# Коллизия для столба
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.05
+	shape.height = 2.5
+	collision.shape = shape
+	collision.position.y = 1.25
+	body.add_child(collision)
 
 	# Столб - серый тонкий цилиндр
 	var pole := MeshInstance3D.new()
@@ -2611,7 +2666,7 @@ func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, pare
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
 	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	sign_node.add_child(pole)
+	body.add_child(pole)
 
 	# Знак - красный/белый диск
 	var sign_plate := MeshInstance3D.new()
@@ -2637,22 +2692,9 @@ func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, pare
 	sign_plate.position.y = 2.3
 	sign_plate.rotation.x = PI / 2  # Повернуть горизонтально
 	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	sign_node.add_child(sign_plate)
+	body.add_child(sign_plate)
 
-	# Коллизия для столба
-	var body := StaticBody3D.new()
-	body.collision_layer = 2
-	body.collision_mask = 1
-	var collision := CollisionShape3D.new()
-	var shape := CylinderShape3D.new()
-	shape.radius = 0.05
-	shape.height = 2.5
-	collision.shape = shape
-	collision.position.y = 1.25
-	body.add_child(collision)
-	sign_node.add_child(body)
-
-	parent.add_child(sign_node)
+	parent.add_child(body)
 
 
 # Создание уличного фонаря с кронштейном в сторону дороги
@@ -3218,10 +3260,35 @@ func _create_intersection_signs(pos: Vector2, elevation: float, parent: Node3D) 
 		_create_yield_sign(sign_pos, elevation, parent)
 
 
-# Создание знака "Уступи дорогу"
+# Создание знака "Уступи дорогу" - разрушаемый при столкновении
 func _create_yield_sign(pos: Vector2, elevation: float, parent: Node3D) -> void:
-	var sign_node := Node3D.new()
-	sign_node.position = Vector3(pos.x, elevation, pos.y)
+	# Проверяем на дубликаты
+	var pos_key := "ys_%d_%d" % [int(pos.x), int(pos.y)]
+	if _created_sign_positions.has(pos_key):
+		return
+	_created_sign_positions[pos_key] = true
+
+	# RigidBody3D как корневой узел для физики
+	var body := RigidBody3D.new()
+	body.name = "YieldSign"
+	body.position = Vector3(pos.x, elevation, pos.y)
+	body.collision_layer = 4  # Слой 4 - разрушаемые знаки
+	body.collision_mask = 7  # Машины(1) + статика(2) + другие знаки(4)
+	body.mass = 12.0
+	body.freeze = true
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	body.contact_monitor = true
+	body.max_contacts_reported = 4
+	body.body_entered.connect(_on_sign_hit.bind(body))
+
+	# Коллизия
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.05
+	shape.height = 2.2
+	collision.shape = shape
+	collision.position.y = 1.1
+	body.add_child(collision)
 
 	# Столб
 	var pole := MeshInstance3D.new()
@@ -3237,7 +3304,7 @@ func _create_yield_sign(pos: Vector2, elevation: float, parent: Node3D) -> void:
 	pole.material_override = pole_mat
 	pole.position.y = 1.1
 	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	sign_node.add_child(pole)
+	body.add_child(pole)
 
 	# Треугольный знак (используем призму/цилиндр с 3 гранями)
 	var sign_plate := MeshInstance3D.new()
@@ -3252,22 +3319,9 @@ func _create_yield_sign(pos: Vector2, elevation: float, parent: Node3D) -> void:
 	sign_plate.rotation.x = PI / 2  # Поворот чтобы был вертикально
 	sign_plate.rotation.z = PI  # Вершина вниз (уступи дорогу)
 	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	sign_node.add_child(sign_plate)
+	body.add_child(sign_plate)
 
-	# Коллизия
-	var body := StaticBody3D.new()
-	body.collision_layer = 2
-	body.collision_mask = 1
-	var collision := CollisionShape3D.new()
-	var shape := CylinderShape3D.new()
-	shape.radius = 0.05
-	shape.height = 2.2
-	collision.shape = shape
-	collision.position.y = 1.1
-	body.add_child(collision)
-	sign_node.add_child(body)
-
-	parent.add_child(sign_node)
+	parent.add_child(body)
 
 # Извлечение данных дороги для навигации NPC
 func _extract_road_for_traffic(nodes: Array, tags: Dictionary, elev_data: Dictionary) -> void:
