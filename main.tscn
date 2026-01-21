@@ -1,6 +1,6 @@
 [gd_scene load_steps=15 format=3 uid="uid://bmain123"]
 
-[ext_resource type="PackedScene" uid="uid://car_nexia" path="res://car/car_nexia.tscn" id="2_car"]
+[ext_resource type="PackedScene" uid="uid://bcar_nexia" path="res://car/car_nexia.tscn" id="2_car"]
 [ext_resource type="Script" path="res://camera/follow_camera.gd" id="3_camera"]
 [ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="4_osm"]
 [ext_resource type="Script" path="res://ui/coordinates_display.gd" id="5_coords"]

@@ -48,7 +48,7 @@ var _car: VehicleBody3D
 var _lights_enabled := false
 
 # Тип модели машины
-enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109 }
+enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109, VAZ_2107 }
 var _car_model: CarModel = CarModel.DEFAULT
 
 
@@ -72,6 +72,10 @@ func _detect_car_model() -> void:
 		elif child.name == "PAZModel":
 			_car_model = CarModel.PAZ
 			print("CarLights: Detected PAZ bus model")
+			return
+		elif child.name == "VAZ2107Model":
+			_car_model = CarModel.VAZ_2107
+			print("CarLights: Detected VAZ-2107 model")
 			return
 		elif child.name == "Model":
 			# Lada 2109 (taxi, DPS) uses "Model" node name
@@ -111,6 +115,11 @@ func _create_headlights() -> void:
 		left_pos = Vector3(-0.5, 0.6, 2.15)
 		right_pos = Vector3(0.5, 0.6, 2.15)
 		print("CarLights: Creating Lada 2109 headlights at z=2.15")
+	elif _car_model == CarModel.VAZ_2107:
+		# Позиции для ВАЗ-2107 (классика) - масштаб 0.67
+		left_pos = Vector3(-0.37, 0.37, 1.33)
+		right_pos = Vector3(0.37, 0.37, 1.33)
+		print("CarLights: Creating VAZ-2107 headlights at z=1.33")
 	else:
 		# Позиции для стандартной модели
 		left_pos = Vector3(-0.55, 0.6, 2.3)
@@ -166,6 +175,11 @@ func _create_taillights() -> void:
 		left_pos = Vector3(-0.35, 0.55, -2.05)
 		right_pos = Vector3(0.35, 0.55, -2.05)
 		print("CarLights: Creating Lada 2109 taillights at (-0.35, 0.55, -2.05)")
+	elif _car_model == CarModel.VAZ_2107:
+		# Позиции для ВАЗ-2107 (классика) - масштаб 0.67
+		left_pos = Vector3(-0.37, 0.33, -1.33)
+		right_pos = Vector3(0.37, 0.33, -1.33)
+		print("CarLights: Creating VAZ-2107 taillights at (-0.37, 0.33, -1.33)")
 	else:
 		# Позиции для стандартной модели
 		left_pos = Vector3(-0.75, 0.35, -2.5)
@@ -251,6 +265,12 @@ func _create_light_meshes() -> void:
 		headlight_right_pos = Vector3(0.5, 0.55, 2.1)
 		headlight_size = Vector3(0.22, 0.1, 0.05)
 		print("CarLights: Creating Lada 2109 headlight meshes at z=2.1")
+	elif _car_model == CarModel.VAZ_2107:
+		# Для ВАЗ-2107 (классика) - масштаб 0.67
+		headlight_left_pos = Vector3(-0.37, 0.33, 1.3)
+		headlight_right_pos = Vector3(0.37, 0.33, 1.3)
+		headlight_size = Vector3(0.12, 0.12, 0.03)  # Круглые фары, уменьшенные
+		print("CarLights: Creating VAZ-2107 headlight meshes at z=1.3")
 	else:
 		# Позиции для стандартной модели
 		headlight_left_pos = Vector3(-0.55, 0.55, 2.22)
@@ -315,6 +335,14 @@ func _create_light_meshes() -> void:
 		reverse_pos = Vector3(0, 0.5, -1.9)
 		reverse_size = Vector3(0.1, 0.05, 0.03)
 		print("CarLights: Creating Lada 2109 taillight meshes at (-0.35, 0.5, -2.0)")
+	elif _car_model == CarModel.VAZ_2107:
+		# Для ВАЗ-2107 (классика) - масштаб 0.67
+		taillight_left_pos = Vector3(-0.37, 0.3, -1.3)
+		taillight_right_pos = Vector3(0.37, 0.3, -1.3)
+		taillight_size = Vector3(0.08, 0.07, 0.02)
+		reverse_pos = Vector3(0, 0.3, -1.23)
+		reverse_size = Vector3(0.07, 0.04, 0.02)
+		print("CarLights: Creating VAZ-2107 taillight meshes at (-0.37, 0.3, -1.3)")
 	else:
 		# Позиции для стандартной модели
 		taillight_left_pos = Vector3(-0.75, 0.35, -2.52)
