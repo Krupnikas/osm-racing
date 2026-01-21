@@ -3127,14 +3127,15 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 			wall_normal = longest_wall.normal
 			placement_method = "longest_wall"
 
-		# Создаём вывеску
-		var sign = BusinessSignGen.create_sign(business_tags)
-		if sign.get_child_count() == 0:
-			continue
-
 		# Размещаем вывеску и входную группу
 		# Для entrance и poi_node - добавляем входную группу (крыльцо с козырьком)
 		var has_entrance_group = placement_method in ["entrance", "poi_node"]
+
+		# Создаём вывеску (ограничиваем ширину для входных групп)
+		var max_sign_width = EntranceGroupGenerator.get_canopy_width(2) / 3.0 if has_entrance_group else 4.0
+		var sign = BusinessSignGen.create_sign(business_tags, max_sign_width)
+		if sign.get_child_count() == 0:
+			continue
 
 		var sign_height: float
 		if has_entrance_group:

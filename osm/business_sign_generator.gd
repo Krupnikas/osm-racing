@@ -106,12 +106,13 @@ const SIGN_COLORS := {
 const DEFAULT_COLOR := Color(0.3, 0.3, 0.4)  # Серо-синий
 
 
-static func create_sign(tags: Dictionary) -> Node3D:
+static func create_sign(tags: Dictionary, max_width: float = 4.0) -> Node3D:
 	"""
 	Создаёт 3D вывеску для заведения
 
 	Args:
 		tags: Словарь OSM тегов с amenity/shop и name
+		max_width: Максимальная ширина вывески в метрах (до масштабирования)
 
 	Returns:
 		Node3D с вывеской (Logo/Label3D + опционально фон + Light)
@@ -135,10 +136,10 @@ static func create_sign(tags: Dictionary) -> Node3D:
 
 	if logo_file != "":
 		# Создаём вывеску с логотипом
-		_create_logo_sign(sign_root, logo_file, sign_color)
+		_create_logo_sign(sign_root, logo_file, sign_color, max_width)
 	else:
 		# Создаём текстовую вывеску (старое поведение)
-		_create_text_sign(sign_root, sign_text, sign_color)
+		_create_text_sign(sign_root, sign_text, sign_color, max_width)
 
 	# Добавляем подсветку для ночи
 	var light = OmniLight3D.new()
@@ -191,7 +192,7 @@ static func _find_brand_logo(tags: Dictionary) -> String:
 	return ""
 
 
-static func _create_logo_sign(sign_root: Node3D, logo_path: String, sign_color: Color) -> void:
+static func _create_logo_sign(sign_root: Node3D, logo_path: String, sign_color: Color, max_width: float = 4.0) -> void:
 	"""Создаёт вывеску с логотипом"""
 	# Загружаем текстуру логотипа (с кэшированием)
 	var texture: Texture2D
@@ -213,8 +214,8 @@ static func _create_logo_sign(sign_root: Node3D, logo_path: String, sign_color: 
 	var sign_width = sign_height * aspect_ratio
 
 	# Ограничиваем максимальную ширину
-	if sign_width > 4.0:
-		sign_width = 4.0
+	if sign_width > max_width:
+		sign_width = max_width
 		sign_height = sign_width / aspect_ratio
 
 	# Создаём Sprite3D с логотипом
@@ -236,12 +237,12 @@ static func _create_logo_sign(sign_root: Node3D, logo_path: String, sign_color: 
 	# sign_root.add_child(background)
 
 
-static func _create_text_sign(sign_root: Node3D, sign_text: String, sign_color: Color) -> void:
+static func _create_text_sign(sign_root: Node3D, sign_text: String, sign_color: Color, max_width: float = 4.0) -> void:
 	"""Создаёт текстовую вывеску (оригинальное поведение)"""
 	# Вычисляем размер фона (компактный, под размер текста)
 	var text_length = sign_text.length()
-	var sign_width = max(2.0, text_length * 0.25)  # Компактная подложка
-	var sign_height = 0.8  # Компактная высота
+	var sign_width = min(max(2.0, text_length * 0.25), max_width)  # Компактная подложка, ограниченная max_width
+	var sign_height = 0.45  # Узкая высота для минимального отступа над/под буквами
 
 	# 1. Создаём фон
 	var background = create_background_quad(sign_width, sign_height, sign_color)

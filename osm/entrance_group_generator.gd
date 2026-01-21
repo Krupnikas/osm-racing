@@ -201,10 +201,15 @@ static func _add_canopy(root: Node3D, total_door_width: float) -> void:
 	root.add_child(canopy)
 
 
-# Вспомогательные константы для интеграции
+# Вспомогательные функции для интеграции
 static func get_total_height() -> float:
 	return STEP_COUNT * STEP_HEIGHT + DOOR_HEIGHT + CANOPY_HEIGHT
 
 
 static func get_canopy_top_height() -> float:
 	return STEP_COUNT * STEP_HEIGHT + DOOR_HEIGHT + CANOPY_HEIGHT
+
+
+static func get_canopy_width(door_count: int = 2) -> float:
+	var total_door_width = door_count * DOOR_WIDTH + (door_count - 1) * DOOR_GAP
+	return total_door_width + CANOPY_OVERHANG * 2
