@@ -164,7 +164,7 @@ func _test_slope(slope_data: Dictionary) -> void:
 	var road_aligned := false
 	if road:
 		var road_angle := rad_to_deg(road.rotation.z)
-		var angle_error := abs(road_angle - angle)
+		var angle_error: float = abs(road_angle - angle)
 		road_aligned = angle_error < 1.0  # Допуск 1 градус
 		print("  Road angle: %.1f° (expected: %.1f°, error: %.1f°)" %
 			[road_angle, angle, angle_error])
@@ -179,9 +179,9 @@ func _test_slope(slope_data: Dictionary) -> void:
 	# Проверяем что здание на поверхности склона
 	var building_on_slope := false
 	if building:
-		var building_pos := building.global_position
-		var expected_y := sin(deg_to_rad(angle)) * pos.x + 2.5 + 0.25  # Высота на склоне
-		var y_error := abs(building_pos.y - expected_y)
+		var building_pos: Vector3 = building.global_position
+		var expected_y: float = sin(deg_to_rad(angle)) * pos.x + 2.5 + 0.25  # Высота на склоне
+		var y_error: float = abs(building_pos.y - expected_y)
 		building_on_slope = y_error < 0.5
 		print("  Building Y: %.2fm (expected: %.2fm, error: %.2fm)" %
 			[building_pos.y, expected_y, y_error])
