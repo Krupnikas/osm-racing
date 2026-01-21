@@ -115,7 +115,33 @@ func _get_brake_input() -> float:
 - Тонировка стёкол в тёмно-серый
 - Колёса из модели используются для визуала
 
-### 2. ПАЗ-32053 (автобус)
+### 2. Lada 2109 DPS (полиция)
+- **Файлы модели**: `car/models/lada_2109_dps/scene.gltf`
+- **Сцена NPC**: `traffic/npc_lada_2109.tscn`
+- **Скрипт настройки**: `car/lada_2109_setup.gd`
+- **Физика**:
+  - Масса: 1400 кг
+  - Collision box: 1.68 × 1.2 × 4.33 м
+  - Радиус колёс: 0.32 м
+  - Позиция колёс: y=0.5
+  - Центр масс: y=-0.3
+
+**Особенности**:
+- Модель масштабируется в 0.1 раз (scale -0.1 по X и Z для разворота)
+- Использует ноду "Model" для определения типа
+
+### 3. Lada 2109 Такси
+- **Файлы модели**: `car/models/lada_2109_taxi/scene.gltf`
+- **Сцена игрока**: `car/car_taxi.tscn`
+- **Сцена NPC**: `traffic/npc_taxi.tscn`
+- **Скрипт настройки**: `car/lada_2109_setup.gd`
+- **Физика**: Идентична DPS версии
+
+**Особенности**:
+- Жёлтая текстура такси с шашечками на крыше
+- Использует ту же ноду "Model" - система освещения определяет как LADA_2109
+
+### 4. ПАЗ-32053 (автобус)
 - **Файлы модели**: `car/models/paz_32053/scene.gltf`
 - **Сцена игрока**: `car/car_paz.tscn`
 - **Сцена NPC**: `traffic/npc_paz.tscn`
@@ -142,7 +168,7 @@ func _get_brake_input() -> float:
 Система автоматически определяет тип модели по имени дочернего узла в `car_lights.gd`:
 
 ```gdscript
-enum CarModel { DEFAULT, NEXIA, PAZ }
+enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109 }
 
 func _detect_car_model() -> void:
     for child in _car.get_children():
@@ -151,6 +177,10 @@ func _detect_car_model() -> void:
             return
         elif child.name == "PAZModel":
             _car_model = CarModel.PAZ
+            return
+        elif child.name == "Model":
+            # Lada 2109 (taxi, DPS) uses "Model" node name
+            _car_model = CarModel.LADA_2109
             return
     _car_model = CarModel.DEFAULT
 ```
@@ -162,6 +192,10 @@ func _detect_car_model() -> void:
 **Nexia**:
 - Передние фары: (±0.55, 0.6, 1.8)
 - Задние фары: (±0.45, 0.80, -2.0)
+
+**Lada 2109**:
+- Передние фары: (±0.5, 0.6, 2.15)
+- Задние фары: (±0.35, 0.55, -2.05)
 
 **ПАЗ**:
 - Передние фары: (±0.55, 0.1, 2.3)
@@ -221,12 +255,56 @@ func _get_npc_from_pool():
         return npc
 ```
 
-**Соотношение моделей NPC**:
-Для баланса рекомендуется:
-- 10% ПАЗы (автобусы)
-- 90% обычные машины (Nexia и др.)
+**Соотношение моделей NPC** (текущее):
+- 5% Lada 2109 DPS (полиция)
+- 15% Lada 2109 Такси
+- 20% ПАЗы (автобусы)
+- 60% блочные машинки
 
-Для тестирования можно установить 100% одной модели.
+**На парковках**:
+- 60% блочные машинки
+- 20% Lada 2109 Такси
+- 20% Lada 2109 DPS
+
+## Система освещения NPC
+
+### Раздельные фары для реальных моделей
+
+NPC машины используют `npc_car_lights.gd` который автоматически создаёт фары.
+
+**Блочные машинки** используют одну центральную фару:
+- Одна передняя фара по центру (x=0)
+- Одна задняя фара по центру (x=0)
+
+**Реальные модели** (Nexia, PAZ, Lada 2109) используют раздельные фары:
+- Две передние фары (левая и правая)
+- Две задние фары (левая и правая)
+
+Система автоматически определяет тип по флагу `_use_split_lights`:
+```gdscript
+var _use_split_lights := false
+
+func _create_headlight() -> void:
+    if _car_model == CarModel.LADA_2109:
+        _use_split_lights = true
+        var left_pos = Vector3(-0.5, 0.6, 2.15)
+        var right_pos = Vector3(0.5, 0.6, 2.15)
+        headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+        headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+        return
+    # ... другие модели
+
+    # Блочные машинки - одна центральная фара
+    headlight = _create_single_headlight("NPCHeadlight", Vector3(0, 0.55, 2.1))
+```
+
+### Синхронизация с car_lights.gd
+
+**ВАЖНО**: Позиции фар в `npc_car_lights.gd` должны быть синхронизированы с `car_lights.gd`.
+
+При добавлении новой модели нужно обновить оба файла:
+1. `night_mode/car_lights.gd` - фары игрока
+2. `night_mode/npc_car_lights.gd` - фары NPC
 
 ## Добавление новой модели
 
@@ -393,11 +471,13 @@ suspension_stiffness = 35.0  # Мягкая для NPC (плавная для AI
 
 ### Шаг 5: Добавление в систему освещения
 
-В `night_mode/car_lights.gd` добавить:
+**ВАЖНО**: Нужно обновить ОБА файла: `car_lights.gd` и `npc_car_lights.gd`!
+
+#### В `night_mode/car_lights.gd` (фары игрока):
 
 1. В enum:
 ```gdscript
-enum CarModel { DEFAULT, NEXIA, PAZ, <НОВАЯ_МОДЕЛЬ> }
+enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109, <НОВАЯ_МОДЕЛЬ> }
 ```
 
 2. В `_detect_car_model()`:
@@ -429,6 +509,66 @@ elif _car_model == CarModel.<НОВАЯ_МОДЕЛЬ>:
     headlight_size = Vector3(<width>, <height>, <depth>)
 ```
 
+#### В `night_mode/npc_car_lights.gd` (фары NPC):
+
+1. В enum (должен совпадать с car_lights.gd):
+```gdscript
+enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109, <НОВАЯ_МОДЕЛЬ> }
+```
+
+2. В `_detect_car_model()` (аналогично car_lights.gd):
+```gdscript
+elif child.name == "<Название>Model":
+    _car_model = CarModel.<НОВАЯ_МОДЕЛЬ>
+    print("NPCCarLights: Detected <НОВАЯ_МОДЕЛЬ>")
+    return
+```
+
+3. В `_create_headlight()` (раздельные фары для реальных моделей):
+```gdscript
+if _car_model == CarModel.<НОВАЯ_МОДЕЛЬ>:
+    _use_split_lights = true
+    var left_pos = Vector3(<x>, <y>, <z>)
+    var right_pos = Vector3(<x>, <y>, <z>)
+    headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+    headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+    return
+```
+
+4. В `_create_taillight()`:
+```gdscript
+if _car_model == CarModel.<НОВАЯ_МОДЕЛЬ>:
+    var left_pos = Vector3(<x>, <y>, <z>)
+    var right_pos = Vector3(<x>, <y>, <z>)
+    taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+    taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+    return
+```
+
+5. В `_create_reverse_light()`:
+```gdscript
+elif _car_model == CarModel.<НОВАЯ_МОДЕЛЬ>:
+    pos = Vector3(0, <y>, <z>)
+```
+
+6. В `_create_split_light_meshes()` (если используются раздельные фары):
+```gdscript
+elif _car_model == CarModel.<НОВАЯ_МОДЕЛЬ>:
+    hl_left_pos = Vector3(<x>, <y>, <z>)
+    hl_right_pos = Vector3(<x>, <y>, <z>)
+    hl_size = Vector3(<width>, <height>, <depth>)
+    tl_left_pos = Vector3(<x>, <y>, <z>)
+    tl_right_pos = Vector3(<x>, <y>, <z>)
+    tl_size = Vector3(<width>, <height>, <depth>)
+```
+
+7. В `_create_light_meshes()` (позиция reverse light mesh):
+```gdscript
+elif _car_model == CarModel.<НОВАЯ_МОДЕЛЬ>:
+    reverse_pos = Vector3(0, <y>, <z>)
+    reverse_size = Vector3(<width>, <height>, <depth>)
+```
+
 ### Шаг 6: Добавление в TrafficManager
 
 В `traffic/traffic_manager.gd`:
@@ -445,14 +585,46 @@ npc_<название>_scene = preload("res://traffic/npc_<название>.tsc
 
 3. Добавить в `_get_npc_from_pool()`:
 ```gdscript
-# Пример: 10% новая модель
+# Текущее распределение: 5% DPS, 15% такси, 20% ПАЗ, 60% блочные
 var rand := randf()
-if rand < 0.1:
-    scene_to_use = npc_<название>_scene
-elif rand < 0.2:
+if rand < 0.05:
+    scene_to_use = npc_lada_scene
+    car_type = "Lada 2109 DPS"
+elif rand < 0.20:
+    scene_to_use = npc_taxi_scene
+    car_type = "Taxi"
+elif rand < 0.40:
     scene_to_use = npc_paz_scene
+    car_type = "PAZ bus"
 else:
     scene_to_use = npc_car_scene
+    car_type = "box car"
+```
+
+### Шаг 7: Добавление на парковки (опционально)
+
+В `osm/osm_terrain_generator.gd`:
+
+1. Добавить переменную:
+```gdscript
+var _parked_<название>_scene: PackedScene
+```
+
+2. Загрузить в `_ready()`:
+```gdscript
+_parked_<название>_scene = preload("res://traffic/npc_<название>.tscn")
+```
+
+3. Добавить в `_spawn_parked_cars()`:
+```gdscript
+# Текущее распределение: 60% блочные, 20% такси, 20% DPS
+var rand := randf()
+if rand < 0.6:
+    car = _parked_car_scene.instantiate()
+elif rand < 0.8:
+    car = _parked_taxi_scene.instantiate()
+else:
+    car = _parked_lada_scene.instantiate()
 ```
 
 ## Настройка физики колёс
