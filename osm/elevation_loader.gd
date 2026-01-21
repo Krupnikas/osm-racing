@@ -136,7 +136,10 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 			row[x] = elevation
 		elevation_grid[y] = row
 
-	# Находим мин/макс для нормализации
+	# Применяем гауссово сглаживание для плавного рельефа
+	elevation_grid = _apply_gaussian_blur(elevation_grid, _grid_size, 1.5)
+
+	# Находим мин/макс после сглаживания
 	var min_elev := 99999.0
 	var max_elev := -99999.0
 	for row in elevation_grid:
@@ -144,7 +147,7 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 			min_elev = min(min_elev, elev)
 			max_elev = max(max_elev, elev)
 
-	print("Elevation: Loaded grid %dx%d, range %.1f - %.1f m" % [_grid_size, _grid_size, min_elev, max_elev])
+	print("Elevation: Loaded grid %dx%d, range %.1f - %.1f m (smoothed)" % [_grid_size, _grid_size, min_elev, max_elev])
 
 	var elev_data := {
 		"grid": elevation_grid,
@@ -160,6 +163,48 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 	_save_to_cache(cache_key, elev_data)
 
 	elevation_loaded.emit(elev_data)
+
+# Применяет гауссово размытие к сетке высот
+static func _apply_gaussian_blur(grid: Array, grid_size: int, sigma: float) -> Array:
+	# Создаём гауссово ядро 5x5
+	var kernel_size := 5
+	var kernel: Array = []
+	var kernel_sum := 0.0
+	var half := kernel_size / 2
+
+	for y in range(kernel_size):
+		var row: Array = []
+		for x in range(kernel_size):
+			var dx := x - half
+			var dy := y - half
+			var value := exp(-(dx * dx + dy * dy) / (2.0 * sigma * sigma))
+			row.append(value)
+			kernel_sum += value
+		kernel.append(row)
+
+	# Нормализуем ядро
+	for y in range(kernel_size):
+		for x in range(kernel_size):
+			kernel[y][x] /= kernel_sum
+
+	# Применяем свёртку
+	var result: Array = []
+	result.resize(grid_size)
+
+	for z in range(grid_size):
+		var row: Array = []
+		row.resize(grid_size)
+		for x in range(grid_size):
+			var sum := 0.0
+			for ky in range(kernel_size):
+				for kx in range(kernel_size):
+					var sx := clampi(x + kx - half, 0, grid_size - 1)
+					var sz := clampi(z + ky - half, 0, grid_size - 1)
+					sum += float(grid[sz][sx]) * kernel[ky][kx]
+			row[x] = sum
+		result[z] = row
+
+	return result
 
 # Интерполирует высоту для произвольной точки на основе сетки
 static func interpolate_elevation(grid: Array, grid_size: int, x_norm: float, z_norm: float) -> float:

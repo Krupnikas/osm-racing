@@ -448,6 +448,9 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	var chunk_x := int(coords[0])
 	var chunk_z := int(coords[1])
 
+	# Сглаживаем границы с соседними чанками
+	grid = _blend_chunk_edges(grid, grid_size, chunk_x, chunk_z)
+
 	# Позиция чанка в мире
 	var chunk_origin := Vector3(chunk_x * chunk_size, 0, chunk_z * chunk_size)
 	var cell_size := chunk_size / (grid_size - 1)
@@ -565,6 +568,74 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	body.add_child(collision)
 
 	parent.add_child(body)
+
+# Сглаживает границы чанка с соседними чанками для плавных переходов
+func _blend_chunk_edges(grid: Array, grid_size: int, chunk_x: int, chunk_z: int) -> Array:
+	# Создаём копию сетки
+	var blended: Array = []
+	for row in grid:
+		blended.append(row.duplicate())
+
+	var blend_width := 2  # Количество точек для сглаживания на каждой границе
+
+	# Проверяем соседей и сглаживаем границы
+	var neighbors := {
+		"left": "%d,%d" % [chunk_x - 1, chunk_z],
+		"right": "%d,%d" % [chunk_x + 1, chunk_z],
+		"top": "%d,%d" % [chunk_x, chunk_z - 1],
+		"bottom": "%d,%d" % [chunk_x, chunk_z + 1]
+	}
+
+	# Левая граница (x = 0)
+	if _chunk_elevations.has(neighbors.left):
+		var neighbor_grid: Array = _chunk_elevations[neighbors.left].get("grid", [])
+		if neighbor_grid.size() == grid_size:
+			for z in range(grid_size):
+				var neighbor_edge: float = neighbor_grid[z][grid_size - 1]
+				var our_edge: float = grid[z][0]
+				# Интерполируем несколько точек от границы
+				for bx in range(blend_width):
+					var t: float = float(bx) / float(blend_width)
+					var blended_val: float = lerpf(neighbor_edge, float(grid[z][bx]), t)
+					blended[z][bx] = lerpf(blended_val, float(grid[z][bx]), t)
+
+	# Правая граница (x = grid_size - 1)
+	if _chunk_elevations.has(neighbors.right):
+		var neighbor_grid: Array = _chunk_elevations[neighbors.right].get("grid", [])
+		if neighbor_grid.size() == grid_size:
+			for z in range(grid_size):
+				var neighbor_edge: float = neighbor_grid[z][0]
+				var our_edge: float = grid[z][grid_size - 1]
+				for bx in range(blend_width):
+					var x := grid_size - 1 - bx
+					var t: float = float(bx) / float(blend_width)
+					var blended_val: float = lerpf(neighbor_edge, float(grid[z][x]), t)
+					blended[z][x] = lerpf(blended_val, float(grid[z][x]), t)
+
+	# Верхняя граница (z = 0)
+	if _chunk_elevations.has(neighbors.top):
+		var neighbor_grid: Array = _chunk_elevations[neighbors.top].get("grid", [])
+		if neighbor_grid.size() == grid_size:
+			for x in range(grid_size):
+				var neighbor_edge: float = neighbor_grid[grid_size - 1][x]
+				for bz in range(blend_width):
+					var t: float = float(bz) / float(blend_width)
+					var blended_val: float = lerpf(neighbor_edge, float(grid[bz][x]), t)
+					blended[bz][x] = lerpf(blended_val, float(blended[bz][x]), t)
+
+	# Нижняя граница (z = grid_size - 1)
+	if _chunk_elevations.has(neighbors.bottom):
+		var neighbor_grid: Array = _chunk_elevations[neighbors.bottom].get("grid", [])
+		if neighbor_grid.size() == grid_size:
+			for x in range(grid_size):
+				var neighbor_edge: float = neighbor_grid[0][x]
+				for bz in range(blend_width):
+					var z := grid_size - 1 - bz
+					var t: float = float(bz) / float(blend_width)
+					var blended_val: float = lerpf(neighbor_edge, float(grid[z][x]), t)
+					blended[z][x] = lerpf(blended_val, float(blended[z][x]), t)
+
+	return blended
 
 func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String = "") -> void:
 	var target: Node3D = parent if parent else self
