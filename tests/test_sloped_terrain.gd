@@ -136,32 +136,49 @@ func _create_sloped_building(center: Vector3, angle_deg: float, building_height:
 
 func _position_buildings() -> void:
 	# Позиционируем здания используя raycast после того как платформы созданы
+	# Здание должно быть на МИНИМАЛЬНОЙ высоте под ним, чтобы не было щелей
 	for child in get_children():
 		if child.has_meta("pending_position"):
 			var center: Vector3 = child.get_meta("pending_position")
 			var building_height: float = child.get_meta("building_height")
 
-			# Raycast вниз чтобы найти поверхность
-			var space_state := get_world_3d().direct_space_state
-			var query := PhysicsRayQueryParameters3D.create(
-				Vector3(center.x, 100.0, center.z),
-				Vector3(center.x, -100.0, center.z)
-			)
-			query.collision_mask = 1  # Платформы
+			# Находим минимальную высоту под зданием (проверяем углы)
+			var building_size := 3.0  # Размер здания
+			var half_size := building_size / 2.0
+			var corners := [
+				Vector2(center.x - half_size, center.z - half_size),
+				Vector2(center.x + half_size, center.z - half_size),
+				Vector2(center.x - half_size, center.z + half_size),
+				Vector2(center.x + half_size, center.z + half_size),
+				Vector2(center.x, center.z),  # Центр тоже
+			]
 
-			var result := space_state.intersect_ray(query)
-			if result:
-				var ground_y: float = result.position.y
-				# Позиционируем collision и mesh
+			var min_ground_y := 1000.0
+			var space_state := get_world_3d().direct_space_state
+
+			for corner in corners:
+				var query := PhysicsRayQueryParameters3D.create(
+					Vector3(corner.x, 100.0, corner.y),
+					Vector3(corner.x, -100.0, corner.y)
+				)
+				query.collision_mask = 1  # Платформы
+
+				var result := space_state.intersect_ray(query)
+				if result:
+					min_ground_y = min(min_ground_y, result.position.y)
+
+			if min_ground_y < 999.0:
+				# Позиционируем здание на минимальной высоте (чтобы не было щелей)
+				var base_y: float = min_ground_y
 				if child.get_child_count() > 0:
 					var collision := child.get_child(0)
-					collision.position = Vector3(center.x, ground_y + building_height / 2 + 0.25, center.z)
+					collision.position = Vector3(center.x, base_y + building_height / 2, center.z)
 
 				if child.get_child_count() > 1:
 					var mesh := child.get_child(1)
-					mesh.position = Vector3(center.x, ground_y + building_height / 2 + 0.25, center.z)
+					mesh.position = Vector3(center.x, base_y + building_height / 2, center.z)
 
-				print("[DEBUG] Building at x=%.1f positioned at y=%.2fm" % [center.x, ground_y])
+				print("[DEBUG] Building at x=%.1f positioned at min_y=%.2fm" % [center.x, min_ground_y])
 			else:
 				print("[WARN] No ground found for building at x=%.1f" % center.x)
 
