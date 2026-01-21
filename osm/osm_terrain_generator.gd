@@ -58,6 +58,20 @@ var _pending_lamps: Array = []  # Отложенные фонари (созда�
 var _lamps_created := false  # Флаг что фонари уже созданы
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
 
+# Предиктивная загрузка чанков
+@export_group("Predictive Loading")
+@export var prediction_time_horizon := 15.0  # Горизонт предсказания (секунд)
+@export var forward_load_multiplier := 2.0   # Множитель дистанции вперёд
+@export var side_load_multiplier := 0.5      # Множитель дистанции сбоку
+@export var min_speed_for_prediction := 5.0  # м/с - ниже этого радиальная загрузка
+
+var _smoothed_velocity := Vector3.ZERO
+var _velocity_smoothing := 0.7  # Фактор сглаживания скорости
+var _chunk_load_queue: Array[Dictionary] = []  # Очередь загрузки {key, priority, distance}
+var _current_load_count := 0
+const MAX_CONCURRENT_LOADS := 3  # Макс параллельных запросов к OSM API
+const PREDICTION_INTERVALS := 3  # Точки предсказания (5с, 10с, 15с)
+
 # Сцены для припаркованных машин
 var _parked_car_scene: PackedScene
 var _parked_lada_scene: PackedScene
@@ -290,6 +304,278 @@ func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 
 	return result
 
+
+## Простая предиктивная загрузка - загружаем чанки впереди по движению
+func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) -> void:
+	var speed := velocity.length()
+
+	# Базовые чанки вокруг игрока (всегда)
+	var needed_chunks := _get_needed_chunks(player_pos)
+
+	# При быстром движении добавляем чанки впереди
+	if speed > min_speed_for_prediction:
+		var look_ahead := velocity.normalized() * load_distance * forward_load_multiplier
+		var ahead_pos := player_pos + look_ahead
+		var ahead_chunks := _get_needed_chunks(ahead_pos)
+		for chunk_key in ahead_chunks:
+			if chunk_key not in needed_chunks:
+				needed_chunks.append(chunk_key)
+
+	# Загружаем недостающие
+	for chunk_key in needed_chunks:
+		if not _loaded_chunks.has(chunk_key) and not _loading_chunks.has(chunk_key):
+			var coords: Array = chunk_key.split(",")
+			var chunk_x := int(coords[0])
+			var chunk_z := int(coords[1])
+			_load_chunk(chunk_x, chunk_z)
+
+	# Выгружаем далёкие чанки (простая радиальная выгрузка)
+	var chunks_to_unload: Array[String] = []
+	for chunk_key in _loaded_chunks:
+		var coords: Array = chunk_key.split(",")
+		var chunk_x := int(coords[0])
+		var chunk_z := int(coords[1])
+		var chunk_center := Vector3(chunk_x * chunk_size + chunk_size / 2, 0, chunk_z * chunk_size + chunk_size / 2)
+		var dist := player_pos.distance_to(chunk_center)
+		if dist > unload_distance:
+			chunks_to_unload.append(chunk_key)
+
+	for chunk_key in chunks_to_unload:
+		_unload_chunk(chunk_key)
+
+
+## Старая сложная предиктивная загрузка (отключена)
+func _update_chunks_predictive(player_pos: Vector3, velocity: Vector3) -> void:
+	# Получаем приоритизированный список чанков
+	var predicted_chunks := _get_predicted_chunks(player_pos, velocity)
+
+	# Добавляем новые чанки в очередь
+	for chunk_data in predicted_chunks:
+		var chunk_key: String = chunk_data["key"]
+
+		# Пропускаем уже загруженные/загружающиеся
+		if _loaded_chunks.has(chunk_key) or _loading_chunks.has(chunk_key):
+			continue
+
+		# Проверяем, есть ли уже в очереди
+		var in_queue := false
+		for queued in _chunk_load_queue:
+			if queued["key"] == chunk_key:
+				# Обновляем приоритет если выше
+				if chunk_data["priority"] > queued["priority"]:
+					queued["priority"] = chunk_data["priority"]
+				in_queue = true
+				break
+
+		if not in_queue:
+			_chunk_load_queue.append(chunk_data)
+
+	# Сортируем очередь по приоритету (убывание)
+	_chunk_load_queue.sort_custom(func(a, b): return a["priority"] > b["priority"])
+
+	# Обрабатываем очередь (ограничиваем параллельные загрузки)
+	while _current_load_count < MAX_CONCURRENT_LOADS and _chunk_load_queue.size() > 0:
+		var next_chunk: Dictionary = _chunk_load_queue.pop_front()
+		var chunk_key: String = next_chunk["key"]
+
+		# Повторная проверка (могло загрузиться пока ждало в очереди)
+		if _loaded_chunks.has(chunk_key) or _loading_chunks.has(chunk_key):
+			continue
+
+		var coords: Array = chunk_key.split(",")
+		var chunk_x := int(coords[0])
+		var chunk_z := int(coords[1])
+		_load_chunk_tracked(chunk_x, chunk_z)
+
+	# Направленная выгрузка
+	_unload_distant_chunks(player_pos, velocity)
+
+
+## Загрузка чанка с отслеживанием количества
+func _load_chunk_tracked(chunk_x: int, chunk_z: int) -> void:
+	_current_load_count += 1
+	_load_chunk(chunk_x, chunk_z)
+
+
+## Получает приоритизированный список чанков на основе предсказания
+func _get_predicted_chunks(player_pos: Vector3, velocity: Vector3) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	var added_chunks: Dictionary = {}
+	var speed := velocity.length()
+
+	# При низкой скорости - радиальная загрузка
+	if speed < min_speed_for_prediction:
+		var radial_chunks := _get_needed_chunks(player_pos)
+		for chunk_key in radial_chunks:
+			result.append({
+				"key": chunk_key,
+				"priority": 1.0,
+				"distance": _get_chunk_distance(chunk_key, player_pos)
+			})
+		return result
+
+	# Направление движения (XZ плоскость)
+	var move_dir := Vector3(velocity.x, 0, velocity.z).normalized()
+
+	# 1. Сначала добавляем ближайшие чанки (безопасность)
+	var immediate_chunks := _get_needed_chunks(player_pos)
+	for chunk_key in immediate_chunks:
+		if not added_chunks.has(chunk_key):
+			added_chunks[chunk_key] = true
+			result.append({
+				"key": chunk_key,
+				"priority": 10.0,  # Высший приоритет
+				"distance": _get_chunk_distance(chunk_key, player_pos)
+			})
+
+	# 2. Добавляем чанки по предсказанным позициям
+	for i in range(PREDICTION_INTERVALS):
+		var t := (i + 1) * (prediction_time_horizon / PREDICTION_INTERVALS)
+		var predicted_pos := player_pos + velocity * t
+
+		# Чанки вокруг предсказанной позиции с направленным смещением
+		var predicted_chunks := _get_directional_chunks(predicted_pos, move_dir, speed)
+
+		for chunk_data in predicted_chunks:
+			var chunk_key: String = chunk_data["key"]
+			if not added_chunks.has(chunk_key):
+				added_chunks[chunk_key] = true
+				# Приоритет уменьшается с временем предсказания
+				chunk_data["priority"] = 5.0 / (i + 1)
+				result.append(chunk_data)
+
+	# Сортируем по приоритету
+	result.sort_custom(func(a, b): return a["priority"] > b["priority"])
+
+	return result
+
+
+## Чанки вокруг позиции с учётом направления движения
+func _get_directional_chunks(center_pos: Vector3, move_dir: Vector3, speed: float) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	var center_chunk_x := int(floor(center_pos.x / chunk_size))
+	var center_chunk_z := int(floor(center_pos.z / chunk_size))
+
+	# Эффективные радиусы
+	var forward_radius := load_distance * forward_load_multiplier
+	var side_radius := load_distance * side_load_multiplier
+
+	# Адаптация по скорости (быстрее = дальше смотрим)
+	var speed_factor: float = clampf(speed / 30.0, 1.0, 2.0)  # 30 м/с = 108 км/ч
+	forward_radius *= speed_factor
+
+	var radius_chunks := int(ceil(forward_radius / chunk_size))
+
+	for dx in range(-radius_chunks, radius_chunks + 1):
+		for dz in range(-radius_chunks, radius_chunks + 1):
+			var cx := center_chunk_x + dx
+			var cz := center_chunk_z + dz
+			var chunk_center := Vector3(
+				cx * chunk_size + chunk_size / 2,
+				0,
+				cz * chunk_size + chunk_size / 2
+			)
+
+			var to_chunk := chunk_center - center_pos
+			to_chunk.y = 0
+			var dist := to_chunk.length()
+
+			if dist < 0.01:
+				# Чанк в центре
+				result.append({
+					"key": "%d,%d" % [cx, cz],
+					"priority": 1.0,
+					"distance": dist
+				})
+				continue
+
+			var dir_to_chunk := to_chunk.normalized()
+
+			# Выравнивание с направлением движения (-1 до 1)
+			var alignment := move_dir.dot(dir_to_chunk)
+
+			# Эффективный радиус по направлению
+			var effective_radius: float
+			if alignment > 0:
+				effective_radius = lerpf(side_radius, forward_radius, alignment)
+			else:
+				effective_radius = side_radius * (1.0 + alignment * 0.5)  # Сжимаем сзади
+
+			if dist <= effective_radius:
+				var dist_factor := 1.0 - (dist / forward_radius)
+				var priority := (alignment + 1.0) * 0.5 * dist_factor
+
+				result.append({
+					"key": "%d,%d" % [cx, cz],
+					"priority": priority,
+					"distance": dist
+				})
+
+	return result
+
+
+## Выгрузка чанков с учётом направления движения
+func _unload_distant_chunks(player_pos: Vector3, velocity: Vector3) -> void:
+	var speed := velocity.length()
+	var move_dir := Vector3(velocity.x, 0, velocity.z).normalized() if speed > 0.1 else Vector3.ZERO
+
+	var chunks_to_unload: Array[String] = []
+
+	for chunk_key in _loaded_chunks:
+		var coords: Array = chunk_key.split(",")
+		var chunk_x := int(coords[0])
+		var chunk_z := int(coords[1])
+		var chunk_center := Vector3(
+			chunk_x * chunk_size + chunk_size / 2,
+			0,
+			chunk_z * chunk_size + chunk_size / 2
+		)
+
+		var dist := player_pos.distance_to(chunk_center)
+
+		# При низкой скорости - стандартная радиальная выгрузка
+		if speed < min_speed_for_prediction:
+			if dist > unload_distance:
+				chunks_to_unload.append(chunk_key)
+			continue
+
+		# Направленная выгрузка
+		var to_chunk := chunk_center - player_pos
+		to_chunk.y = 0
+		var dir_to_chunk := to_chunk.normalized() if to_chunk.length() > 0.01 else Vector3.ZERO
+		var alignment := move_dir.dot(dir_to_chunk)
+
+		# Пороги выгрузки по направлению
+		var effective_unload_dist: float
+		if alignment > 0.3:  # Впереди
+			effective_unload_dist = unload_distance * 1.5
+		elif alignment < -0.3:  # Сзади
+			effective_unload_dist = unload_distance * 0.7
+		else:  # Сбоку
+			effective_unload_dist = unload_distance
+
+		if dist > effective_unload_dist:
+			chunks_to_unload.append(chunk_key)
+
+	for chunk_key in chunks_to_unload:
+		_unload_chunk(chunk_key)
+		# Удаляем из очереди если там есть
+		_chunk_load_queue = _chunk_load_queue.filter(func(c): return c["key"] != chunk_key)
+
+
+## Расстояние до центра чанка
+func _get_chunk_distance(chunk_key: String, pos: Vector3) -> float:
+	var coords: Array = chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+	var chunk_center := Vector3(
+		chunk_x * chunk_size + chunk_size / 2,
+		0,
+		chunk_z * chunk_size + chunk_size / 2
+	)
+	return pos.distance_to(chunk_center)
+
+
 func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 	var chunk_key := "%d,%d" % [chunk_x, chunk_z]
 	_loading_chunks[chunk_key] = true
@@ -351,6 +637,10 @@ func reset_terrain() -> void:
 	_initial_chunks_needed.clear()
 	_initial_chunks_loaded = 0
 	_loading_paused = true
+	# Предиктивная загрузка
+	_chunk_load_queue.clear()
+	_current_load_count = 0
+	_smoothed_velocity = Vector3.ZERO
 	print("OSM: Terrain reset complete")
 
 func _on_osm_load_failed(error: String) -> void:
@@ -359,6 +649,7 @@ func _on_osm_load_failed(error: String) -> void:
 func _on_chunk_load_failed(error: String, chunk_key: String, loader: Node) -> void:
 	push_error("OSM chunk %s load failed: %s" % [chunk_key, error])
 	_loading_chunks.erase(chunk_key)
+	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
 	loader.queue_free()
 
 # Обработка очереди загрузки высот (ограничение параллельных запросов)
@@ -428,6 +719,7 @@ func _on_osm_data_loaded(osm_data: Dictionary) -> void:
 func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node) -> void:
 	print("OSM: Chunk %s data loaded" % chunk_key)
 	_loading_chunks.erase(chunk_key)
+	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
 
 	# Создаём контейнер для чанка
 	var chunk_node := Node3D.new()
