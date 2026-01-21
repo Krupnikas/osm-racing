@@ -52,8 +52,9 @@ func _create_sloped_terrain() -> void:
 
 	print("[TEST] Created %d sloped surfaces" % _test_slopes.size())
 
-	# Позиционируем здания после того как все объекты в сцене
+	# Позиционируем объекты после того как все объекты в сцене
 	await get_tree().process_frame
+	_position_roads()
 	_position_buildings()
 
 func _create_sloped_platform(center: Vector3, length: float, width: float, angle_deg: float) -> StaticBody3D:
@@ -85,23 +86,19 @@ func _create_sloped_platform(center: Vector3, length: float, width: float, angle
 
 	return body
 
-func _create_sloped_road(center: Vector3, angle_deg: float) -> MeshInstance3D:
-	var mesh_inst := MeshInstance3D.new()
-	mesh_inst.name = "Road"
+func _create_sloped_road(center: Vector3, angle_deg: float) -> Node3D:
+	# Создаём контейнер для дороги
+	var road_container := Node3D.new()
+	road_container.name = "Road"
 
-	# Дорога вдоль склона
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(8.0, 2.0)
-	mesh_inst.mesh = plane
-	mesh_inst.position = center
-	mesh_inst.rotation.z = deg_to_rad(angle_deg)
-	mesh_inst.position.y += 0.26  # Чуть выше платформы
+	# Сохраняем данные для позиционирования после добавления в сцену
+	road_container.set_meta("road_center", center)
+	road_container.set_meta("road_angle", angle_deg)
+	road_container.set_meta("road_length", 8.0)
+	road_container.set_meta("road_width", 2.0)
+	road_container.set_meta("road_segments", 8)  # Количество сегментов
 
-	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.3, 0.3, 0.3)
-	mesh_inst.material_override = material
-
-	return mesh_inst
+	return road_container
 
 func _create_sloped_building(center: Vector3, angle_deg: float, building_height: float) -> StaticBody3D:
 	var body := StaticBody3D.new()
@@ -133,6 +130,96 @@ func _create_sloped_building(center: Vector3, angle_deg: float, building_height:
 	body.add_child(mesh_inst)
 
 	return body
+
+func _position_roads() -> void:
+	# Создаём меши дорог следуя рельефу
+	var space_state := get_world_3d().direct_space_state
+
+	for child in get_children():
+		if child.has_meta("road_center"):
+			var center: Vector3 = child.get_meta("road_center")
+			var angle_deg: float = child.get_meta("road_angle")
+			var road_length: float = child.get_meta("road_length")
+			var road_width: float = child.get_meta("road_width")
+			var num_segments: int = child.get_meta("road_segments")
+
+			# Направление дороги (вдоль X с наклоном)
+			var segment_length := road_length / num_segments
+			var start_x := center.x - road_length / 2
+
+			# Создаём меш дороги с сегментами
+			var arrays := []
+			arrays.resize(Mesh.ARRAY_MAX)
+
+			var vertices := PackedVector3Array()
+			var normals := PackedVector3Array()
+			var uvs := PackedVector2Array()
+			var indices := PackedInt32Array()
+
+			var half_width := road_width / 2.0
+
+			for i in range(num_segments + 1):
+				var x := start_x + i * segment_length
+				var z := center.z
+
+				# Raycast для получения высоты в этой точке
+				var height_left := _raycast_height(space_state, Vector2(x, z - half_width))
+				var height_right := _raycast_height(space_state, Vector2(x, z + half_width))
+
+				# Добавляем вершины (левая и правая сторона дороги)
+				vertices.append(Vector3(x, height_left + 0.02, z - half_width))
+				vertices.append(Vector3(x, height_right + 0.02, z + half_width))
+
+				normals.append(Vector3.UP)
+				normals.append(Vector3.UP)
+
+				var u := float(i) / num_segments
+				uvs.append(Vector2(u, 0))
+				uvs.append(Vector2(u, 1))
+
+			# Создаём треугольники
+			for i in range(num_segments):
+				var base := i * 2
+				# Первый треугольник
+				indices.append(base)
+				indices.append(base + 1)
+				indices.append(base + 2)
+				# Второй треугольник
+				indices.append(base + 1)
+				indices.append(base + 3)
+				indices.append(base + 2)
+
+			arrays[Mesh.ARRAY_VERTEX] = vertices
+			arrays[Mesh.ARRAY_NORMAL] = normals
+			arrays[Mesh.ARRAY_TEX_UV] = uvs
+			arrays[Mesh.ARRAY_INDEX] = indices
+
+			var arr_mesh := ArrayMesh.new()
+			arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+			var mesh_inst := MeshInstance3D.new()
+			mesh_inst.mesh = arr_mesh
+
+			var material := StandardMaterial3D.new()
+			material.albedo_color = Color(0.3, 0.3, 0.3)
+			material.cull_mode = BaseMaterial3D.CULL_DISABLED
+			mesh_inst.material_override = material
+
+			child.add_child(mesh_inst)
+
+			print("[DEBUG] Road at x=%.1f created with %d segments following terrain" % [center.x, num_segments])
+
+func _raycast_height(space_state: PhysicsDirectSpaceState3D, pos: Vector2) -> float:
+	var query := PhysicsRayQueryParameters3D.create(
+		Vector3(pos.x, 100.0, pos.y),
+		Vector3(pos.x, -100.0, pos.y)
+	)
+	query.collision_mask = 1  # Платформы
+
+	var result := space_state.intersect_ray(query)
+	if result:
+		return result.position.y
+	return 0.0
 
 func _position_buildings() -> void:
 	# Позиционируем здания используя raycast после того как платформы созданы
@@ -211,14 +298,30 @@ func _test_slope(slope_data: Dictionary) -> void:
 	var road_ok := road != null
 	var building_ok := building != null
 
-	# Проверяем что дорога на склоне
+	# Проверяем что дорога следует рельефу
 	var road_aligned := false
-	if road:
-		var road_angle := rad_to_deg(road.rotation.z)
-		var angle_error: float = abs(road_angle - angle)
-		road_aligned = angle_error < 1.0  # Допуск 1 градус
-		print("  Road angle: %.1f° (expected: %.1f°, error: %.1f°)" %
-			[road_angle, angle, angle_error])
+	if road and road.has_meta("road_center"):
+		# Проверяем что дорога имеет меш (была создана)
+		var has_mesh := road.get_child_count() > 0
+		if has_mesh:
+			# Проверяем разницу высот вдоль дороги
+			var road_center: Vector3 = road.get_meta("road_center")
+			var road_length: float = road.get_meta("road_length")
+			var start_x := road_center.x - road_length / 2
+			var end_x := road_center.x + road_length / 2
+
+			var space_state := get_world_3d().direct_space_state
+			var start_height := _raycast_height(space_state, Vector2(start_x, road_center.z))
+			var end_height := _raycast_height(space_state, Vector2(end_x, road_center.z))
+			var height_diff := end_height - start_height
+			var expected_diff := tan(deg_to_rad(angle)) * road_length
+
+			var diff_error: float = abs(height_diff - expected_diff)
+			road_aligned = diff_error < 1.0  # Допуск 1м
+			print("  Road height diff: %.2fm (expected: %.2fm, error: %.2fm)" %
+				[height_diff, expected_diff, diff_error])
+		else:
+			print("  Road has no mesh!")
 
 	# Проверяем что здание стоит вертикально (не наклонено)
 	var building_vertical := false
