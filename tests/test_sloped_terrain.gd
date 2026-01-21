@@ -179,12 +179,17 @@ func _test_slope(slope_data: Dictionary) -> void:
 	# Проверяем что здание на поверхности склона
 	var building_on_slope := false
 	if building:
-		var building_pos: Vector3 = building.global_position
-		var expected_y: float = sin(deg_to_rad(angle)) * pos.x + 2.5 + 0.25  # Высота на склоне
-		var y_error: float = abs(building_pos.y - expected_y)
-		building_on_slope = y_error < 0.5
-		print("  Building Y: %.2fm (expected: %.2fm, error: %.2fm)" %
-			[building_pos.y, expected_y, y_error])
+		# Получаем позицию первого child (collision или mesh)
+		var child := building.get_child(0) if building.get_child_count() > 0 else null
+		if child:
+			var building_pos: Vector3 = child.global_position
+			var expected_y: float = sin(deg_to_rad(angle)) * pos.x + 2.5 + 0.25  # Высота на склоне
+			var y_error: float = abs(building_pos.y - expected_y)
+			building_on_slope = y_error < 0.5
+			print("  Building Y: %.2fm (expected: %.2fm, error: %.2fm)" %
+				[building_pos.y, expected_y, y_error])
+		else:
+			print("  Building has no children!")
 
 	var passed := platform_ok and road_ok and building_ok and road_aligned and building_vertical and building_on_slope
 
