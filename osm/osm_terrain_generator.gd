@@ -56,6 +56,21 @@ var _pending_lamps: Array = []  # Отложенные фонари (созда�
 var _lamps_created := false  # Флаг что фонари уже созданы
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
 
+# Сцены для припаркованных машин
+var _parked_car_scene: PackedScene
+var _parked_lada_scene: PackedScene
+
+# Цвета для припаркованных машин
+const PARKED_CAR_COLORS := [
+	Color(0.8, 0.1, 0.1),  # Красный
+	Color(0.1, 0.3, 0.8),  # Синий
+	Color(0.9, 0.9, 0.9),  # Белый
+	Color(0.1, 0.1, 0.1),  # Чёрный
+	Color(0.5, 0.5, 0.5),  # Серый
+	Color(0.2, 0.5, 0.2),  # Зелёный
+	Color(0.9, 0.7, 0.1),  # Жёлтый
+]
+
 # Цвета для разных типов поверхностей
 const COLORS := {
 	"road_primary": Color(0.3, 0.3, 0.3),
@@ -93,6 +108,10 @@ func _ready() -> void:
 
 	# Инициализируем текстуры
 	_init_textures()
+
+	# Загружаем сцены для припаркованных машин
+	_parked_car_scene = preload("res://traffic/npc_car.tscn")
+	_parked_lada_scene = preload("res://traffic/npc_lada_2109.tscn")
 
 	# Найти машину
 	if car_path:
@@ -1343,7 +1362,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 
 
 func _create_parking(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
-	"""Создаёт парковку: асфальтовую поверхность + знак P (знак отложен)"""
+	"""Создаёт парковку: асфальтовую поверхность + знак P (знак отложен) + припаркованные машины"""
 	if points.size() < 3:
 		return
 
@@ -1359,6 +1378,9 @@ func _create_parking(points: PackedVector2Array, elev_data: Dictionary, parent: 
 		"elev_data": elev_data,
 		"parent": parent
 	})
+
+	# 3. Добавляем припаркованные машины (0-2 штуки)
+	_spawn_parked_cars(points, elev_data, parent)
 
 
 func _find_parking_sign_position(parking_points: PackedVector2Array) -> Dictionary:
@@ -1453,6 +1475,166 @@ func _create_parking_surface(points: PackedVector2Array, elev_data: Dictionary, 
 
 	mesh.mesh = st.commit()
 	parent.add_child(mesh)
+
+
+func _spawn_parked_cars(parking_points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
+	"""Спавнит 0-2 припаркованных машины на парковке"""
+	if parking_points.size() < 3:
+		return
+
+	# Количество машин: 0, 1 или 2 (случайно)
+	var car_count: int = randi() % 3
+	if car_count == 0:
+		return
+
+	# Вычисляем центр парковки
+	var center := Vector2.ZERO
+	for pt in parking_points:
+		center += pt
+	center /= parking_points.size()
+
+	# Направление "вдоль" парковки (параллельно ближайшей дороге)
+	var parking_dir := _get_parking_direction(parking_points, center)
+
+	# Позиции для машин (разнесённые)
+	var spawned_positions: Array[Vector2] = []
+
+	for i in range(car_count):
+		var pos := _find_parking_spot(parking_points, center, i, spawned_positions)
+		if pos == Vector2.ZERO:
+			continue
+
+		spawned_positions.append(pos)
+
+		# Выбираем случайную модель (70% коробка, 30% лада)
+		var car: Node3D
+		if randf() < 0.7:
+			car = _parked_car_scene.instantiate()
+		else:
+			car = _parked_lada_scene.instantiate()
+
+		# Получаем высоту
+		var elevation: float = _get_elevation_at_point(pos, elev_data)
+
+		# Позиционируем
+		car.position = Vector3(pos.x, elevation, pos.y)
+
+		# Поворот вдоль парковки (+ небольшая вариация ±5°)
+		var rotation_variation: float = (randf() - 0.5) * deg_to_rad(10)
+		car.rotation.y = atan2(parking_dir.x, parking_dir.y) + rotation_variation
+
+		# Отключаем только AI/управление, физика остаётся для столкновений
+		# freeze = false - машина реагирует на удары
+		car.set_process(false)  # Отключаем _process (AI логику)
+		# Оставляем physics_process для физики столкновений
+
+		# Применяем случайный цвет
+		_apply_parked_car_color(car)
+
+		parent.add_child(car)
+
+
+func _find_parking_spot(parking_points: PackedVector2Array, center: Vector2, index: int, existing: Array[Vector2]) -> Vector2:
+	"""Находит свободное место на парковке"""
+	# Смещения от центра для разных машин
+	var offsets := [
+		Vector2(-4, -3), Vector2(4, 3),
+		Vector2(-3, 4), Vector2(3, -4),
+		Vector2(0, -5), Vector2(0, 5),
+	]
+
+	for attempt in range(15):
+		var offset = offsets[index % offsets.size()]
+		# Добавляем случайность
+		offset += Vector2(randf() - 0.5, randf() - 0.5) * (attempt * 0.5)
+		var test_pos = center + offset * (1.0 + attempt * 0.2)
+
+		# Проверяем что точка внутри парковки
+		if not Geometry2D.is_point_in_polygon(test_pos, parking_points):
+			continue
+
+		# Проверяем минимальное расстояние до других машин (4м)
+		var too_close := false
+		for other in existing:
+			if test_pos.distance_to(other) < 4.0:
+				too_close = true
+				break
+		if too_close:
+			continue
+
+		return test_pos
+
+	return Vector2.ZERO
+
+
+func _get_parking_direction(parking_points: PackedVector2Array, center: Vector2) -> Vector2:
+	"""Определяет направление 'вдоль' парковки (параллельно ближайшей дороге)"""
+	if _road_segments.is_empty():
+		# Если дорог нет, используем самую длинную сторону полигона
+		return _get_longest_edge_direction(parking_points)
+
+	# Находим ближайший сегмент дороги
+	var min_dist := INF
+	var best_road_dir := Vector2(1, 0)
+
+	for seg in _road_segments:
+		var road_p1: Vector2 = seg.p1
+		var road_p2: Vector2 = seg.p2
+		var road_vec: Vector2 = road_p2 - road_p1
+		var road_len: float = road_vec.length()
+		if road_len < 0.1:
+			continue
+
+		var t: float = clamp((center - road_p1).dot(road_vec) / (road_len * road_len), 0.0, 1.0)
+		var closest: Vector2 = road_p1 + road_vec * t
+		var dist: float = center.distance_to(closest)
+
+		if dist < min_dist:
+			min_dist = dist
+			best_road_dir = road_vec.normalized()
+
+	return best_road_dir
+
+
+func _get_longest_edge_direction(points: PackedVector2Array) -> Vector2:
+	"""Находит направление самой длинной стороны полигона"""
+	var max_len := 0.0
+	var best_dir := Vector2(1, 0)
+
+	for i in range(points.size()):
+		var p1 = points[i]
+		var p2 = points[(i + 1) % points.size()]
+		var edge = p2 - p1
+		var length = edge.length()
+
+		if length > max_len:
+			max_len = length
+			best_dir = edge.normalized()
+
+	return best_dir
+
+
+func _apply_parked_car_color(car: Node3D) -> void:
+	"""Применяет случайный цвет к припаркованной машине"""
+	var color: Color = PARKED_CAR_COLORS[randi() % PARKED_CAR_COLORS.size()]
+
+	# Ищем меши с материалами кузова
+	for child in car.get_children():
+		if child is MeshInstance3D:
+			var mesh_name: String = child.name.to_lower()
+			# Пропускаем колёса, стёкла, фары
+			if "wheel" in mesh_name or "glass" in mesh_name or "light" in mesh_name:
+				continue
+			if "tire" in mesh_name or "rim" in mesh_name or "brake" in mesh_name:
+				continue
+
+			# Применяем цвет к кузову
+			if child.mesh and child.mesh.get_surface_count() > 0:
+				var mat = child.get_active_material(0)
+				if mat and mat is StandardMaterial3D:
+					var new_mat = mat.duplicate()
+					new_mat.albedo_color = color
+					child.material_override = new_mat
 
 
 func _create_parking_sign(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> void:
