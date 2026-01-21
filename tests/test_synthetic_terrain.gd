@@ -95,20 +95,20 @@ func _create_platform(center: Vector3, size: float, height: float) -> StaticBody
 	var body := StaticBody3D.new()
 	body.collision_layer = 1
 
-	# Коллизия - верх платформы точно на height
+	# Коллизия - плоская поверхность точно на height
 	var collision := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(size, 0.5, size)  # Тонкая платформа
+	box.size = Vector3(size, 0.01, size)  # Очень тонкая платформа
 	collision.shape = box
-	collision.position = Vector3(center.x, height - 0.25, center.z)  # Верх на height
+	collision.position = Vector3(center.x, height, center.z)
 	body.add_child(collision)
 
 	# Визуал
 	var mesh_inst := MeshInstance3D.new()
-	var box_mesh := BoxMesh.new()
-	box_mesh.size = Vector3(size, 0.5, size)
-	mesh_inst.mesh = box_mesh
-	mesh_inst.position = Vector3(center.x, height - 0.25, center.z)
+	var plane_mesh := PlaneMesh.new()
+	plane_mesh.size = Vector2(size, size)
+	mesh_inst.mesh = plane_mesh
+	mesh_inst.position = Vector3(center.x, height, center.z)
 
 	var material := StandardMaterial3D.new()
 	material.albedo_color = Color(0.6, 0.5, 0.4)
