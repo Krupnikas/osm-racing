@@ -52,6 +52,10 @@ func _create_sloped_terrain() -> void:
 
 	print("[TEST] Created %d sloped surfaces" % _test_slopes.size())
 
+	# Позиционируем здания после того как все объекты в сцене
+	await get_tree().process_frame
+	_position_buildings()
+
 func _create_sloped_platform(center: Vector3, length: float, width: float, angle_deg: float) -> StaticBody3D:
 	var body := StaticBody3D.new()
 	body.collision_layer = 1
@@ -110,10 +114,10 @@ func _create_sloped_building(center: Vector3, angle_deg: float, building_height:
 	box.size = Vector3(3.0, building_height, 3.0)
 	collision.shape = box
 
-	# Позиционируем здание на склоне
-	var angle_rad := deg_to_rad(angle_deg)
-	var offset_y := sin(angle_rad) * center.x
-	collision.position = Vector3(center.x, offset_y + building_height / 2 + 0.25, center.z)
+	# Сохраняем позицию для использования после добавления в сцену
+	body.set_meta("pending_position", center)
+	body.set_meta("building_height", building_height)
+
 	body.add_child(collision)
 
 	# Визуал
@@ -121,7 +125,6 @@ func _create_sloped_building(center: Vector3, angle_deg: float, building_height:
 	var box_mesh := BoxMesh.new()
 	box_mesh.size = Vector3(3.0, building_height, 3.0)
 	mesh_inst.mesh = box_mesh
-	mesh_inst.position = Vector3(center.x, offset_y + building_height / 2 + 0.25, center.z)
 
 	var material := StandardMaterial3D.new()
 	material.albedo_color = Color(0.7, 0.6, 0.5)
@@ -130,6 +133,37 @@ func _create_sloped_building(center: Vector3, angle_deg: float, building_height:
 	body.add_child(mesh_inst)
 
 	return body
+
+func _position_buildings() -> void:
+	# Позиционируем здания используя raycast после того как платформы созданы
+	for child in get_children():
+		if child.has_meta("pending_position"):
+			var center: Vector3 = child.get_meta("pending_position")
+			var building_height: float = child.get_meta("building_height")
+
+			# Raycast вниз чтобы найти поверхность
+			var space_state := get_world_3d().direct_space_state
+			var query := PhysicsRayQueryParameters3D.create(
+				Vector3(center.x, 100.0, center.z),
+				Vector3(center.x, -100.0, center.z)
+			)
+			query.collision_mask = 1  # Платформы
+
+			var result := space_state.intersect_ray(query)
+			if result:
+				var ground_y: float = result.position.y
+				# Позиционируем collision и mesh
+				if child.get_child_count() > 0:
+					var collision := child.get_child(0)
+					collision.position = Vector3(center.x, ground_y + building_height / 2 + 0.25, center.z)
+
+				if child.get_child_count() > 1:
+					var mesh := child.get_child(1)
+					mesh.position = Vector3(center.x, ground_y + building_height / 2 + 0.25, center.z)
+
+				print("[DEBUG] Building at x=%.1f positioned at y=%.2fm" % [center.x, ground_y])
+			else:
+				print("[WARN] No ground found for building at x=%.1f" % center.x)
 
 func _start_test() -> void:
 	print("[TEST] Starting sloped terrain tests...\n")
