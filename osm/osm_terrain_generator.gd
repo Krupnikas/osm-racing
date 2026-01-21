@@ -49,6 +49,12 @@ var _initial_chunks_loaded: int = 0  # Количество загруженны
 var _loading_paused := true  # Загрузка на паузе до команды
 var _entrance_nodes: Array = []  # Входы в здания/заведения из OSM
 var _poi_nodes: Array = []  # Точечные заведения (shop/amenity как node)
+var _parking_polygons: Array[PackedVector2Array] = []  # Полигоны парковок для исключения фонарей
+var _road_segments: Array = []  # Сегменты дорог для позиционирования знаков парковки
+var _created_lamp_positions: Dictionary = {}  # Позиции созданных фонарей для избежания дубликатов
+var _pending_lamps: Array = []  # Отложенные фонари (создаются после загрузки всех парковок)
+var _lamps_created := false  # Флаг что фонари уже созданы
+var _pending_parking_signs: Array = []  # Отложенные знаки парковки
 
 # Цвета для разных типов поверхностей
 const COLORS := {
@@ -170,6 +176,11 @@ func start_loading() -> void:
 	_loading_paused = false
 	_initial_loading = true
 	_initial_chunks_loaded = 0
+	_parking_polygons.clear()  # Очищаем парковки при новой загрузке
+	_created_lamp_positions.clear()  # Очищаем позиции фонарей
+	_pending_lamps.clear()  # Очищаем отложенные фонари
+	_pending_parking_signs.clear()  # Очищаем отложенные знаки парковки
+	_lamps_created = false  # Сбрасываем флаг
 
 	# Определяем какие чанки нужны для старта (вокруг точки спавна)
 	_initial_chunks_needed = _get_needed_chunks(Vector3.ZERO)
@@ -203,6 +214,13 @@ func _check_initial_load_complete() -> void:
 	if loaded_count >= _initial_chunks_needed.size():
 		_initial_loading = false
 		print("OSM: Initial loading complete! %d chunks loaded" % loaded_count)
+
+		# Создаём отложенные фонари (теперь все парковки известны)
+		_create_pending_lamps()
+
+		# Создаём отложенные знаки парковки (теперь все дороги известны)
+		_create_pending_parking_signs()
+
 		initial_load_complete.emit()
 
 func _update_chunks(player_pos: Vector3) -> void:
@@ -568,12 +586,26 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 	# POI используют систему координат текущего loader'а
 	_entrance_nodes = osm_data.get("entrance_nodes", [])
 	_poi_nodes = osm_data.get("poi_nodes", [])
+	# НЕ очищаем _parking_polygons и _road_segments - накапливаем из всех чанков
+	# _road_segments нужны для позиционирования знаков парковки
 
 	if not _entrance_nodes.is_empty():
 		print("OSM: Found %d entrance nodes in chunk" % _entrance_nodes.size())
 	if not _poi_nodes.is_empty():
 		print("OSM: Found %d POI nodes in chunk" % _poi_nodes.size())
 
+	# Первый проход: собираем полигоны парковок (для исключения фонарей)
+	for way in ways:
+		var tags: Dictionary = way.get("tags", {})
+		var nodes: Array = way.get("nodes", [])
+		if tags.get("amenity") == "parking" and nodes.size() >= 3:
+			var points: PackedVector2Array = []
+			for node in nodes:
+				var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+				points.append(local)
+			_parking_polygons.append(points)
+
+	# Второй проход: создаём все объекты
 	var skipped_buildings := 0
 	for way in ways:
 		var tags: Dictionary = way.get("tags", {})
@@ -728,8 +760,10 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			_create_traffic_sign(local, elevation, tags, target)
 			sign_count += 1
 		elif tags.get("highway") == "street_lamp":
-			_create_street_lamp(local, elevation, target)
-			lamp_count += 1
+			# Не ставим фонари на парковках
+			if not _is_point_in_any_parking(local):
+				_create_street_lamp(local, elevation, target)
+				lamp_count += 1
 
 	print("OSM: Generated %d roads, %d buildings, %d trees, %d signs, %d lamps, %d intersections" % [road_count, building_count, tree_count, sign_count, lamp_count, intersection_count])
 
@@ -772,11 +806,17 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, 
 
 	_create_road_mesh_with_texture(nodes, width, texture_key, height_offset, parent, elev_data)
 
+	# Сохраняем сегменты дорог для позиционирования знаков парковки
+	for i in range(nodes.size() - 1):
+		var p1 = _latlon_to_local(nodes[i].lat, nodes[i].lon)
+		var p2 = _latlon_to_local(nodes[i + 1].lat, nodes[i + 1].lon)
+		_road_segments.append({"p1": p1, "p2": p2, "width": width})
+
 	# Создаём бордюры если нужно
 	if curb_height > 0.0:
 		_create_curbs(nodes, width, height_offset, curb_height, parent, elev_data)
 
-	# Процедурная генерация фонарей вдоль дорог
+	# Процедурная генерация фонарей вдоль дорог (позиции сохраняются для отложенного создания)
 	if highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary"]:
 		_generate_street_lamps_along_road(nodes, width, elev_data, parent)
 
@@ -1301,6 +1341,197 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	_add_business_signs_simple(points, tags, parent, building_height, base_elev, loader)
 
+
+func _create_parking(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
+	"""Создаёт парковку: асфальтовую поверхность + знак P (знак отложен)"""
+	if points.size() < 3:
+		return
+
+	# Примечание: полигон уже добавлен в _parking_polygons в первом проходе
+
+	# 1. Создаём асфальтовую поверхность
+	_create_parking_surface(points, elev_data, parent)
+
+	# 2. Сохраняем данные для отложенного создания знака
+	# (знак создаётся после загрузки всех чанков, когда все дороги известны)
+	_pending_parking_signs.append({
+		"points": points,
+		"elev_data": elev_data,
+		"parent": parent
+	})
+
+
+func _find_parking_sign_position(parking_points: PackedVector2Array) -> Dictionary:
+	"""Находит позицию для знака парковки: в дальнем от дороги углу"""
+	if parking_points.size() < 3 or _road_segments.is_empty():
+		return {}
+
+	# Сначала находим ближайшую дорогу к парковке (по центру)
+	var parking_center := Vector2.ZERO
+	for pt in parking_points:
+		parking_center += pt
+	parking_center /= parking_points.size()
+
+	var nearest_road_point := Vector2.ZERO
+	var min_center_dist := INF
+
+	for seg in _road_segments:
+		var road_p1: Vector2 = seg.p1
+		var road_p2: Vector2 = seg.p2
+		var road_vec: Vector2 = road_p2 - road_p1
+		var road_len: float = road_vec.length()
+		if road_len < 0.1:
+			continue
+		var t: float = clamp((parking_center - road_p1).dot(road_vec) / (road_len * road_len), 0.0, 1.0)
+		var closest: Vector2 = road_p1 + road_vec * t
+		var dist: float = parking_center.distance_to(closest)
+		if dist < min_center_dist:
+			min_center_dist = dist
+			nearest_road_point = closest
+
+	if min_center_dist > 100.0:
+		return {}
+
+	# Теперь ищем угол парковки, ДАЛЬНИЙ от этой точки дороги
+	var max_dist := 0.0
+	var best_corner := Vector2.ZERO
+
+	for corner in parking_points:
+		var dist: float = corner.distance_to(nearest_road_point)
+		if dist > max_dist:
+			max_dist = dist
+			best_corner = corner
+
+	# Знак ставим в этом дальнем углу
+	var to_road: Vector2 = (nearest_road_point - best_corner).normalized()
+	var sign_pos: Vector2 = best_corner + to_road * 0.5  # 0.5м от угла к дороге
+
+	# Знак смотрит в сторону дороги
+	var rotation: float = atan2(to_road.x, to_road.y)
+
+	return {"position": sign_pos, "rotation": rotation}
+
+
+func _create_parking_surface(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
+	"""Создаёт асфальтовую поверхность парковки"""
+	# Триангулируем полигон
+	var indices := Geometry2D.triangulate_polygon(points)
+	if indices.is_empty():
+		return
+
+	var mesh := MeshInstance3D.new()
+	mesh.name = "ParkingSurface"
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	# Создаём материал с текстурой асфальта
+	var material := StandardMaterial3D.new()
+	material.albedo_texture = _road_textures.get("residential", null)
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.uv1_scale = Vector3(0.1, 0.1, 1.0)  # Масштаб UV для текстуры
+
+	if _is_wet_mode:
+		WetRoadMaterial.apply_wet_properties(material, true)
+
+	st.set_material(material)
+
+	# Высота поверхности чуть выше земли
+	var height_offset := 0.03
+
+	# Добавляем вершины треугольников
+	for i in range(0, indices.size(), 3):
+		for j in range(3):
+			var idx = indices[i + j]
+			var p = points[idx]
+			var h = _get_elevation_at_point(p, elev_data) + height_offset
+
+			# UV координаты для текстуры
+			st.set_uv(Vector2(p.x * 0.1, p.y * 0.1))
+			st.set_normal(Vector3.UP)
+			st.add_vertex(Vector3(p.x, h, p.y))
+
+	mesh.mesh = st.commit()
+	parent.add_child(mesh)
+
+
+func _create_parking_sign(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> void:
+	"""Создаёт дорожный знак парковки (P)"""
+	var sign_node := Node3D.new()
+	sign_node.name = "ParkingSign"
+	sign_node.position = Vector3(pos.x, elevation, pos.y)
+	sign_node.rotation.y = rotation_y
+
+	# Столб - серый тонкий цилиндр
+	var pole := MeshInstance3D.new()
+	var pole_mesh := CylinderMesh.new()
+	pole_mesh.top_radius = 0.03
+	pole_mesh.bottom_radius = 0.04
+	pole_mesh.height = 2.5
+	pole.mesh = pole_mesh
+
+	var pole_mat := StandardMaterial3D.new()
+	pole_mat.albedo_color = Color(0.5, 0.5, 0.5)
+	pole_mat.metallic = 0.8
+	pole.material_override = pole_mat
+	pole.position.y = 1.25
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_node.add_child(pole)
+
+	# Знак - синий квадрат
+	var sign_plate := MeshInstance3D.new()
+	var sign_mesh := BoxMesh.new()
+	sign_mesh.size = Vector3(0.6, 0.6, 0.02)
+	sign_plate.mesh = sign_mesh
+
+	var sign_mat := StandardMaterial3D.new()
+	sign_mat.albedo_color = Color(0.1, 0.3, 0.7)  # Синий
+	sign_plate.material_override = sign_mat
+	sign_plate.position.y = 2.3
+	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_node.add_child(sign_plate)
+
+	# Буква "P" - белый текст
+	var label := Label3D.new()
+	label.text = "P"
+	label.font_size = 200
+	label.modulate = Color.WHITE
+	label.outline_size = 0
+	label.billboard = BaseMaterial3D.BILLBOARD_DISABLED
+	label.no_depth_test = false
+	label.pixel_size = 0.002
+	label.position = Vector3(0, 2.3, 0.02)
+	sign_node.add_child(label)
+
+	# Буква "P" с обратной стороны
+	var label_back := Label3D.new()
+	label_back.text = "P"
+	label_back.font_size = 200
+	label_back.modulate = Color.WHITE
+	label_back.outline_size = 0
+	label_back.billboard = BaseMaterial3D.BILLBOARD_DISABLED
+	label_back.no_depth_test = false
+	label_back.pixel_size = 0.002
+	label_back.position = Vector3(0, 2.3, -0.02)
+	label_back.rotation.y = PI  # Повернуть на 180°
+	sign_node.add_child(label_back)
+
+	# Коллизия для столба
+	var body := StaticBody3D.new()
+	body.collision_layer = 2
+	body.collision_mask = 1
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.05
+	shape.height = 2.5
+	collision.shape = shape
+	collision.position.y = 1.25
+	body.add_child(collision)
+	sign_node.add_child(body)
+
+	parent.add_child(sign_node)
+
+
 func _create_natural(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 3:
 		return
@@ -1419,8 +1650,13 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 		_create_fence(points, parent, elev_data)
 		return
 
-	# Парковки и заправки не создаём как здания и не обносим забором
-	if amenity_type in ["parking", "fuel"]:
+	# Заправки не создаём как здания
+	if amenity_type == "fuel":
+		return
+
+	# Парковки обрабатываем отдельно
+	if amenity_type == "parking":
+		_create_parking(points, elev_data, parent)
 		return
 
 	# Остальные amenity - создаём как маленькие здания
@@ -2234,6 +2470,12 @@ func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, pare
 
 # Создание уличного фонаря с кронштейном в сторону дороги
 func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, direction_to_road: Vector2 = Vector2.ZERO) -> void:
+	# Проверяем, не создан ли уже фонарь в этой позиции (округляем до метров)
+	var pos_key := "%d_%d" % [int(pos.x), int(pos.y)]
+	if _created_lamp_positions.has(pos_key):
+		return  # Фонарь уже есть
+	_created_lamp_positions[pos_key] = true
+
 	var lamp := Node3D.new()
 	lamp.position = Vector3(pos.x, elevation, pos.y)
 
@@ -2477,7 +2719,7 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 	if nodes.size() < 2:
 		return
 
-	var lamp_spacing := 25.0  # Расстояние между фонарями (метры) - чаще для лучшего освещения
+	var lamp_spacing := 25.0  # Расстояние между фонарями (метры)
 	var lamp_offset := road_width / 2 + 1.5  # Смещение от края дороги
 
 	var accumulated_distance := 0.0
@@ -2505,6 +2747,10 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 				var lamp_pos_left := road_pos + perp * lamp_offset
 				var lamp_pos_right := road_pos - perp * lamp_offset
 
+				# Проверяем, не попадают ли фонари на парковку
+				var left_on_parking := _is_point_in_any_parking(lamp_pos_left)
+				var right_on_parking := _is_point_in_any_parking(lamp_pos_right)
+
 				var elev_left := _get_elevation_at_point(lamp_pos_left, elev_data)
 				var elev_right := _get_elevation_at_point(lamp_pos_right, elev_data)
 
@@ -2512,14 +2758,169 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 				var dir_to_road_left := -perp  # Левый фонарь смотрит вправо (к дороге)
 				var dir_to_road_right := perp   # Правый фонарь смотрит влево (к дороге)
 
-				_create_street_lamp(lamp_pos_left, elev_left, parent, dir_to_road_left)
-				_create_street_lamp(lamp_pos_right, elev_right, parent, dir_to_road_right)
+				# Сохраняем позиции фонарей для отложенного создания
+				# (после загрузки всех чанков когда все парковки известны)
+				_pending_lamps.append({
+					"pos": lamp_pos_left,
+					"elev": elev_left,
+					"parent": parent,
+					"dir": dir_to_road_left
+				})
+				_pending_lamps.append({
+					"pos": lamp_pos_right,
+					"elev": elev_right,
+					"parent": parent,
+					"dir": dir_to_road_right
+				})
 
 				last_lamp_distance = accumulated_distance + pos_along
 
 			pos_along += lamp_spacing / 4  # Проверяем чаще для точности
 
 		accumulated_distance += segment_length
+
+
+func _create_pending_lamps() -> void:
+	"""Создаёт отложенные фонари, фильтруя те что на парковках"""
+	if _lamps_created:
+		return
+	_lamps_created = true
+
+	var created := 0
+	var skipped := 0
+
+	for lamp_data in _pending_lamps:
+		var pos: Vector2 = lamp_data.pos
+		var elev: float = lamp_data.elev
+		var parent: Node3D = lamp_data.parent
+		var dir: Vector2 = lamp_data.dir
+
+		# Теперь проверяем с полным списком парковок
+		if _is_point_in_any_parking(pos):
+			skipped += 1
+			continue
+
+		_create_street_lamp(pos, elev, parent, dir)
+		created += 1
+
+	print("OSM: Created %d lamps, skipped %d (on parking)" % [created, skipped])
+	_pending_lamps.clear()
+
+
+func _create_pending_parking_signs() -> void:
+	"""Создаёт отложенные знаки парковки (теперь все дороги известны)"""
+	print("OSM: Creating parking signs, have %d road segments" % _road_segments.size())
+
+	var created := 0
+	for sign_data in _pending_parking_signs:
+		var points: PackedVector2Array = sign_data.points
+		var elev_data: Dictionary = sign_data.elev_data
+		var parent: Node3D = sign_data.parent
+
+		var sign_result = _find_parking_sign_position(points)
+		if sign_result.is_empty():
+			continue
+
+		var sign_pos: Vector2 = sign_result.position
+		var sign_rotation: float = sign_result.rotation
+		var base_elev = _get_elevation_at_point(sign_pos, elev_data)
+
+		_create_parking_sign(sign_pos, base_elev, sign_rotation, parent)
+		created += 1
+
+	print("OSM: Created %d parking signs" % created)
+	_pending_parking_signs.clear()
+
+
+func _is_point_in_any_parking(point: Vector2) -> bool:
+	"""Проверяет, находится ли точка внутри или рядом с любой парковкой"""
+	const PARKING_BUFFER := 10.0  # Буфер вокруг парковки (метры) - увеличен
+
+	for parking in _parking_polygons:
+		if parking.size() < 3:
+			continue
+
+		# Вычисляем центр и максимальный радиус парковки для быстрой отсечки
+		var center := Vector2.ZERO
+		for p in parking:
+			center += p
+		center /= parking.size()
+
+		var max_radius := 0.0
+		for p in parking:
+			max_radius = max(max_radius, center.distance_to(p))
+
+		# Быстрая отсечка - если точка слишком далеко от центра
+		if point.distance_to(center) > max_radius + PARKING_BUFFER + 5.0:
+			continue
+
+		# 1. Проверка - внутри полигона
+		if Geometry2D.is_point_in_polygon(point, parking):
+			return true
+
+		# 2. Проверяем расстояние до ближайшего ребра парковки
+		for i in range(parking.size()):
+			var p1: Vector2 = parking[i]
+			var p2: Vector2 = parking[(i + 1) % parking.size()]
+
+			# Ближайшая точка на отрезке к нашей точке
+			var edge: Vector2 = p2 - p1
+			var edge_len_sq: float = edge.length_squared()
+			if edge_len_sq < 0.0001:
+				continue
+
+			var t: float = clamp((point - p1).dot(edge) / edge_len_sq, 0.0, 1.0)
+			var closest: Vector2 = p1 + edge * t
+			var dist: float = point.distance_to(closest)
+
+			if dist < PARKING_BUFFER:
+				return true
+
+	return false
+
+
+func _is_point_near_any_parking(point: Vector2, max_distance: float) -> bool:
+	"""Проверяет, находится ли точка близко к любой парковке"""
+	for parking in _parking_polygons:
+		if parking.size() < 3:
+			continue
+
+		# Вычисляем центр парковки
+		var center := Vector2.ZERO
+		for p in parking:
+			center += p
+		center /= parking.size()
+
+		# Максимальное расстояние от центра до угла
+		var max_radius := 0.0
+		for p in parking:
+			max_radius = max(max_radius, center.distance_to(p))
+
+		# Быстрая отсечка
+		if point.distance_to(center) > max_radius + max_distance + 5.0:
+			continue
+
+		# Проверяем внутри
+		if Geometry2D.is_point_in_polygon(point, parking):
+			return true
+
+		# Проверяем расстояние до каждого ребра
+		for i in range(parking.size()):
+			var p1: Vector2 = parking[i]
+			var p2: Vector2 = parking[(i + 1) % parking.size()]
+
+			var edge: Vector2 = p2 - p1
+			var edge_len_sq: float = edge.length_squared()
+			if edge_len_sq < 0.0001:
+				continue
+
+			var t: float = clamp((point - p1).dot(edge) / edge_len_sq, 0.0, 1.0)
+			var closest: Vector2 = p1 + edge * t
+
+			if point.distance_to(closest) < max_distance:
+				return true
+
+	return false
 
 
 # Создание светофора на перекрёстке
