@@ -15,6 +15,7 @@ const NPCS_PER_CHUNK := 3  # Машин на чанк (было 4)
 var npc_car_scene: PackedScene
 var npc_paz_scene: PackedScene
 var npc_lada_scene: PackedScene
+var npc_taxi_scene: PackedScene
 var road_network: Node  # RoadNetwork
 var terrain_generator: Node  # OSMTerrainGenerator
 var player_car: Node3D
@@ -39,6 +40,7 @@ func _ready() -> void:
 	npc_car_scene = preload("res://traffic/npc_car.tscn")
 	npc_paz_scene = preload("res://traffic/npc_paz.tscn")
 	npc_lada_scene = preload("res://traffic/npc_lada_2109.tscn")
+	npc_taxi_scene = preload("res://traffic/npc_taxi.tscn")
 
 	# Создаём RoadNetwork
 	var RoadNetworkScript = preload("res://traffic/road_network.gd")
@@ -213,21 +215,25 @@ func _get_npc_from_pool():
 		return npc
 
 	if active_npcs.size() < MAX_NPCS:
-		# Распределение: 10% Lada 2109, 20% ПАЗ, 70% блочные
+		# Распределение: 5% Lada 2109 DPS, 15% Такси, 20% ПАЗ, 60% блочные
 		var rand := randf()
 		var scene_to_use: PackedScene
 		var car_type: String
 
-		if rand < 0.1:
-			# 10% - Lada 2109 DPS
+		if rand < 0.05:
+			# 5% - Lada 2109 DPS
 			scene_to_use = npc_lada_scene
 			car_type = "Lada 2109 DPS"
-		elif rand < 0.3:
+		elif rand < 0.20:
+			# 15% - Такси
+			scene_to_use = npc_taxi_scene
+			car_type = "Taxi"
+		elif rand < 0.40:
 			# 20% - ПАЗ
 			scene_to_use = npc_paz_scene
 			car_type = "PAZ bus"
 		else:
-			# 70% - блочные машинки
+			# 60% - блочные машинки
 			scene_to_use = npc_car_scene
 			car_type = "box car"
 

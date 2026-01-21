@@ -1,0 +1,11 @@
+Model Information:
+* title:	Lada 2109 Taxi
+* source:	https://sketchfab.com/3d-models/lada-2109-taxi-5520531b380445b8a3b37a3536ae8f51
+* author:	DeadLink (https://sketchfab.com/hell3879)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Lada 2109 Taxi" (https://sketchfab.com/3d-models/lada-2109-taxi-5520531b380445b8a3b37a3536ae8f51) by DeadLink (https://sketchfab.com/hell3879) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

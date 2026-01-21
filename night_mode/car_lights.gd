@@ -2,6 +2,13 @@ extends Node3D
 class_name CarLights
 
 ## Освещение машины игрока: фары, габариты, стоп-сигналы, неоновая подсветка
+##
+## ВАЖНО: При добавлении новой модели машины нужно:
+## 1. Добавить тип в enum CarModel (строка ~44)
+## 2. Добавить определение в _detect_car_model() по имени ноды модели
+## 3. Добавить позиции в _create_headlights() - передние фары
+## 4. Добавить позиции в _create_taillights() - задние фонари
+## 5. Добавить позиции в _create_light_meshes() - визуальные меши фар (2 места: headlight и taillight)
 
 # Настройки неона
 @export var underglow_enabled := true  # По умолчанию включен (тусклый)
@@ -41,7 +48,7 @@ var _car: VehicleBody3D
 var _lights_enabled := false
 
 # Тип модели машины
-enum CarModel { DEFAULT, NEXIA, PAZ }
+enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109 }
 var _car_model: CarModel = CarModel.DEFAULT
 
 
@@ -65,6 +72,11 @@ func _detect_car_model() -> void:
 		elif child.name == "PAZModel":
 			_car_model = CarModel.PAZ
 			print("CarLights: Detected PAZ bus model")
+			return
+		elif child.name == "Model":
+			# Lada 2109 (taxi, DPS) uses "Model" node name
+			_car_model = CarModel.LADA_2109
+			print("CarLights: Detected Lada 2109 model")
 			return
 
 	_car_model = CarModel.DEFAULT
@@ -94,6 +106,11 @@ func _create_headlights() -> void:
 		left_pos = Vector3(-0.55, 0.1, 2.3)
 		right_pos = Vector3(0.55, 0.1, 2.3)
 		print("CarLights: Creating PAZ headlights - closer to body and together")
+	elif _car_model == CarModel.LADA_2109:
+		# Позиции для Lada 2109 (такси, DPS)
+		left_pos = Vector3(-0.5, 0.6, 2.15)
+		right_pos = Vector3(0.5, 0.6, 2.15)
+		print("CarLights: Creating Lada 2109 headlights at z=2.15")
 	else:
 		# Позиции для стандартной модели
 		left_pos = Vector3(-0.55, 0.6, 2.3)
@@ -144,6 +161,11 @@ func _create_taillights() -> void:
 		left_pos = Vector3(-0.55, -0.4, -2.4)
 		right_pos = Vector3(0.55, -0.4, -2.4)
 		print("CarLights: Creating PAZ taillights - very low")
+	elif _car_model == CarModel.LADA_2109:
+		# Позиции для Lada 2109 (такси, DPS) - ближе друг к другу
+		left_pos = Vector3(-0.35, 0.55, -2.05)
+		right_pos = Vector3(0.35, 0.55, -2.05)
+		print("CarLights: Creating Lada 2109 taillights at (-0.35, 0.55, -2.05)")
 	else:
 		# Позиции для стандартной модели
 		left_pos = Vector3(-0.75, 0.35, -2.5)
@@ -223,6 +245,12 @@ func _create_light_meshes() -> void:
 		headlight_right_pos = Vector3(0.55, 0.05, 2.22)
 		headlight_size = Vector3(0.35, 0.18, 0.08)
 		print("CarLights: Creating PAZ headlight meshes - closer")
+	elif _car_model == CarModel.LADA_2109:
+		# Для Lada 2109 (такси, DPS)
+		headlight_left_pos = Vector3(-0.5, 0.55, 2.1)
+		headlight_right_pos = Vector3(0.5, 0.55, 2.1)
+		headlight_size = Vector3(0.22, 0.1, 0.05)
+		print("CarLights: Creating Lada 2109 headlight meshes at z=2.1")
 	else:
 		# Позиции для стандартной модели
 		headlight_left_pos = Vector3(-0.55, 0.55, 2.22)
@@ -279,6 +307,14 @@ func _create_light_meshes() -> void:
 		reverse_pos = Vector3(0, -0.45, -2.18)
 		reverse_size = Vector3(0.18, 0.09, 0.04)
 		print("CarLights: Creating PAZ taillight meshes - very low")
+	elif _car_model == CarModel.LADA_2109:
+		# Для Lada 2109 (такси, DPS) - ближе друг к другу
+		taillight_left_pos = Vector3(-0.35, 0.5, -2.0)
+		taillight_right_pos = Vector3(0.35, 0.5, -2.0)
+		taillight_size = Vector3(0.15, 0.08, 0.03)
+		reverse_pos = Vector3(0, 0.5, -1.9)
+		reverse_size = Vector3(0.1, 0.05, 0.03)
+		print("CarLights: Creating Lada 2109 taillight meshes at (-0.35, 0.5, -2.0)")
 	else:
 		# Позиции для стандартной модели
 		taillight_left_pos = Vector3(-0.75, 0.35, -2.52)

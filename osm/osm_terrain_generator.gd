@@ -59,6 +59,7 @@ var _pending_parking_signs: Array = []  # Отложенные знаки пар
 # Сцены для припаркованных машин
 var _parked_car_scene: PackedScene
 var _parked_lada_scene: PackedScene
+var _parked_taxi_scene: PackedScene
 
 # Цвета для припаркованных машин
 const PARKED_CAR_COLORS := [
@@ -112,6 +113,7 @@ func _ready() -> void:
 	# Загружаем сцены для припаркованных машин
 	_parked_car_scene = preload("res://traffic/npc_car.tscn")
 	_parked_lada_scene = preload("res://traffic/npc_lada_2109.tscn")
+	_parked_taxi_scene = preload("res://traffic/npc_taxi.tscn")
 
 	# Найти машину
 	if car_path:
@@ -1506,10 +1508,13 @@ func _spawn_parked_cars(parking_points: PackedVector2Array, elev_data: Dictionar
 
 		spawned_positions.append(pos)
 
-		# Выбираем случайную модель (70% коробка, 30% лада)
+		# Выбираем случайную модель (60% коробка, 20% такси, 20% лада ДПС)
 		var car: Node3D
-		if randf() < 0.7:
+		var rand := randf()
+		if rand < 0.6:
 			car = _parked_car_scene.instantiate()
+		elif rand < 0.8:
+			car = _parked_taxi_scene.instantiate()
 		else:
 			car = _parked_lada_scene.instantiate()
 
