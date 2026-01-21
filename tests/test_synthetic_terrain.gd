@@ -38,11 +38,7 @@ func _ready() -> void:
 func _create_synthetic_terrain() -> void:
 	print("[TEST] Creating synthetic terrain...")
 
-	# Создаём базовую землю далеко внизу (чтобы не мешала raycast)
-	var ground := _create_ground_mesh(Vector3(0, 0, 0), 100.0, -100.0)
-	add_child(ground)
-
-	# Создаём холмы на разных высотах
+	# Создаём холмы на разных высотах (без базовой земли)
 	for point in _test_points:
 		var pos: Vector3 = point.position
 		var height: float = point.expected_height
