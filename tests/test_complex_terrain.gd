@@ -246,10 +246,14 @@ func _create_terrain_following_building(space_state: PhysicsDirectSpaceState3D, 
 	var min_height := 1000.0
 	for corner in corners:
 		var h := _raycast_height(space_state, corner)
-		min_height = min(min_height, h)
+		if h < 999.0:
+			min_height = min(min_height, h)
 
 	if min_height > 999.0:
 		min_height = 0.0
+		print("[WARN] Building at (%.1f, %.1f) - no terrain found!" % [center.x, center.y])
+	else:
+		print("[DEBUG] Building at (%.1f, %.1f) - terrain height: %.2fm" % [center.x, center.y, min_height])
 
 	# Коллизия
 	var collision := CollisionShape3D.new()
@@ -288,7 +292,9 @@ func _raycast_height(space_state: PhysicsDirectSpaceState3D, pos: Vector2) -> fl
 	var result := space_state.intersect_ray(query)
 	if result:
 		return result.position.y
-	return 0.0
+
+	# Fallback: используем функцию высоты напрямую
+	return _get_terrain_height_function(pos.x, pos.y)
 
 func _start_test() -> void:
 	print("[TEST] Starting complex terrain tests...\n")
@@ -417,9 +423,9 @@ func _complete_test() -> void:
 
 	if failed == 0:
 		print("[PASS] All complex terrain tests passed!")
-		await get_tree().create_timer(0.5).timeout
+		await get_tree().create_timer(10.0).timeout  # Больше времени для просмотра
 		get_tree().quit(0)
 	else:
 		print("[FAIL] %d complex terrain tests failed" % failed)
-		await get_tree().create_timer(0.5).timeout
+		await get_tree().create_timer(10.0).timeout
 		get_tree().quit(1)
