@@ -46,6 +46,8 @@ var _initial_loading := false  # Флаг начальной загрузки
 var _initial_chunks_needed: Array[String] = []  # Чанки нужные для старта
 var _initial_chunks_loaded: int = 0  # Количество загруженных начальных чанков
 var _loading_paused := true  # Загрузка на паузе до команды
+var _entrance_nodes: Array = []  # Входы в здания/заведения из OSM
+var _poi_nodes: Array = []  # Точечные заведения (shop/amenity как node)
 
 # Цвета для разных типов поверхностей
 const COLORS := {
@@ -559,6 +561,17 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		chunk_min_z = chunk_z * chunk_size
 		chunk_max_z = chunk_min_z + chunk_size
 		filter_by_chunk = true
+
+	# Получаем входы и POI для ТЕКУЩЕГО чанка
+	# ВАЖНО: Сбрасываем POI перед обработкой каждого чанка!
+	# POI используют систему координат текущего loader'а
+	_entrance_nodes = osm_data.get("entrance_nodes", [])
+	_poi_nodes = osm_data.get("poi_nodes", [])
+
+	if not _entrance_nodes.is_empty():
+		print("OSM: Found %d entrance nodes in chunk" % _entrance_nodes.size())
+	if not _poi_nodes.is_empty():
+		print("OSM: Found %d POI nodes in chunk" % _poi_nodes.size())
 
 	var skipped_buildings := 0
 	for way in ways:
@@ -1283,6 +1296,9 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		texture_type = "brick"  # Остальное - кирпич
 
 	_create_3d_building_with_texture(points, building_height, texture_type, parent, base_elev, debug_name)
+
+	# Добавляем вывески для заведений (amenity/shop с названием)
+	_add_business_signs_simple(points, tags, parent, building_height, base_elev, loader)
 
 func _create_natural(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 3:
@@ -3034,3 +3050,303 @@ func _add_window_lights(center: Vector2, height: float, width: float, depth: flo
 
 	container.visible = false  # Включается ночью
 	parent.add_child(container)
+
+
+## ============================================================================
+## BUSINESS SIGNS (вывески для заведений)
+## ============================================================================
+
+func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, parent: Node3D, building_height: float, base_elev: float = 0.0, loader: Node = null) -> void:
+	"""
+	Добавление вывесок для заведений
+	Приоритет: вход (entrance) > POI node > самая длинная стена
+
+	Также ищет POI nodes (точечные заведения) внутри здания и создаёт для них вывески
+	"""
+	var BusinessSignGen = preload("res://osm/business_sign_generator.gd")
+
+	# Список заведений для создания вывесок
+	var businesses_to_process: Array = []
+
+	# 1. Если само здание - заведение с названием
+	if (tags.has("amenity") or tags.has("shop")) and (tags.has("name") or tags.has("brand")):
+		businesses_to_process.append({"tags": tags, "poi_position": null})
+
+	# 2. Ищем POI nodes внутри здания
+	if loader != null:
+		var pois_inside = _find_pois_inside_building(points, loader)
+		for poi in pois_inside:
+			businesses_to_process.append({"tags": poi.tags, "poi_position": poi.position})
+	else:
+		print("BusinessSign WARNING: loader is null, cannot search for POIs")
+
+	if businesses_to_process.is_empty():
+		return
+
+	# Обрабатываем каждое заведение
+	for business in businesses_to_process:
+		var business_tags: Dictionary = business.tags
+		var poi_pos = business.poi_position  # Vector2 или null
+
+		var sign_text = BusinessSignGen.get_sign_text(business_tags)
+		if sign_text == "":
+			continue
+
+		var sign_width = _calculate_sign_width(sign_text)
+
+		var sign_position_2d: Vector2
+		var wall_normal: Vector3
+		var placement_method: String
+
+		# Приоритет 1: Ищем вход для этого здания
+		var entrance = {}
+		if not _entrance_nodes.is_empty() and loader != null:
+			entrance = _find_entrance_for_building(points, loader)
+
+		if not entrance.is_empty():
+			# Размещаем вывеску над входом
+			sign_position_2d = entrance.position
+			var wall_dir = (entrance.wall_p2 - entrance.wall_p1).normalized()
+			wall_normal = Vector3(wall_dir.y, 0, -wall_dir.x)
+			placement_method = "entrance"
+		elif poi_pos != null:
+			# Приоритет 2: POI node - ищем ближайшую стену к точке
+			var closest_wall = _find_closest_wall_to_point(points, poi_pos, sign_width)
+			if closest_wall.is_empty():
+				continue
+			sign_position_2d = closest_wall.closest_point
+			wall_normal = closest_wall.normal
+			placement_method = "poi_node"
+		else:
+			# Fallback: самая длинная стена
+			var longest_wall = _find_longest_wall_simple(points, sign_width)
+			if longest_wall.is_empty():
+				continue
+			sign_position_2d = (longest_wall.p1 + longest_wall.p2) / 2.0
+			wall_normal = longest_wall.normal
+			placement_method = "longest_wall"
+
+		# Создаём вывеску
+		var sign = BusinessSignGen.create_sign(business_tags)
+		if sign.get_child_count() == 0:
+			continue
+
+		# Размещаем вывеску
+		var sign_height = base_elev + building_height * 0.7
+		sign.position = Vector3(sign_position_2d.x, sign_height, sign_position_2d.y)
+		sign.position += wall_normal * 1.0
+
+		# Поворачиваем вывеску перпендикулярно стене
+		sign.rotation.y = atan2(wall_normal.x, wall_normal.z)
+
+		print("BusinessSign: '%s' placed via %s at (%.1f, %.1f, %.1f)" % [sign_text, placement_method, sign.position.x, sign.position.y, sign.position.z])
+
+		parent.add_child(sign)
+
+
+func _calculate_sign_width(text: String) -> float:
+	"""Точно рассчитывает ширину вывески по тексту"""
+	var char_count = text.length()
+	var avg_char_width = 1.2  # Средняя ширина русского символа для font_size=256 (увеличено с 0.75)
+	var text_width = char_count * avg_char_width
+	var padding = 2.0  # Отступы (1м с каждой стороны, увеличено с 1.0)
+	return text_width + padding
+
+
+func _find_longest_wall_simple(points: PackedVector2Array, min_width: float) -> Dictionary:
+	"""Находит самую длинную стену, достаточную для вывески"""
+	if points.size() < 3:
+		return {}
+
+	var longest = null
+	var max_length = 0.0
+
+	for i in range(points.size()):
+		var p1 = points[i]
+		var p2 = points[(i + 1) % points.size()]
+
+		var length = p1.distance_to(p2)
+
+		# Проверяем, что стена достаточно длинная для вывески (+ отступы)
+		if length < min_width + 1.0:  # 1.0м - запас с обеих сторон
+			continue
+
+		if length > max_length:
+			max_length = length
+			var wall_dir = (p2 - p1).normalized()
+			# Нормаль наружу = поворот ВПРАВО (по часовой) от направления стены
+			# В 2D: право от (x, y) = (y, -x)
+			# В 3D с Y вверх: право от (x, z) = (z, -x)
+			var wall_normal = Vector3(wall_dir.y, 0, -wall_dir.x)
+
+			longest = {
+				"p1": p1,
+				"p2": p2,
+				"center": (p1 + p2) / 2.0,
+				"length": length,
+				"normal": wall_normal
+			}
+
+	return longest if longest != null else {}
+
+
+func _point_to_segment_distance(point: Vector2, seg_start: Vector2, seg_end: Vector2) -> float:
+	"""Вычисляет расстояние от точки до отрезка"""
+	var seg = seg_end - seg_start
+	var seg_length_sq = seg.length_squared()
+
+	if seg_length_sq < 0.0001:
+		return point.distance_to(seg_start)
+
+	# Проекция точки на линию отрезка
+	var t = clamp((point - seg_start).dot(seg) / seg_length_sq, 0.0, 1.0)
+	var projection = seg_start + t * seg
+
+	return point.distance_to(projection)
+
+
+func _find_entrance_for_building(building_points: PackedVector2Array, _loader: Node) -> Dictionary:
+	"""
+	Ищет вход, принадлежащий данному зданию.
+	Вход считается принадлежащим, если он находится на контуре здания
+	или в пределах небольшого расстояния от контура.
+
+	ВАЖНО: Использует _latlon_to_local() (глобальная система координат),
+	т.к. building_points уже конвертированы через неё в _create_building()
+
+	Returns: {position: Vector2, wall_p1: Vector2, wall_p2: Vector2, tags: Dictionary} или пустой словарь
+	"""
+	const MAX_DISTANCE := 2.0  # Максимальное расстояние от контура (2 метра)
+
+	for entrance in _entrance_nodes:
+		# Используем _latlon_to_local(), т.к. building_points в той же системе координат
+		var entrance_pos: Vector2 = _latlon_to_local(entrance.lat, entrance.lon)
+
+		# Проверяем расстояние до каждой стены здания
+		for i in range(building_points.size()):
+			var p1 = building_points[i]
+			var p2 = building_points[(i + 1) % building_points.size()]
+
+			var distance = _point_to_segment_distance(entrance_pos, p1, p2)
+
+			if distance <= MAX_DISTANCE:
+				return {
+					"position": entrance_pos,
+					"wall_p1": p1,
+					"wall_p2": p2,
+					"tags": entrance.tags
+				}
+
+	return {}
+
+
+func _find_pois_inside_building(building_points: PackedVector2Array, _loader: Node) -> Array:
+	"""
+	Ищет POI nodes (точечные заведения) внутри полигона здания.
+	Использует алгоритм ray casting для проверки принадлежности точки полигону.
+
+	ВАЖНО: Использует _latlon_to_local() (глобальная система координат),
+	т.к. building_points уже конвертированы через неё в _create_building()
+
+	Returns: Array of {position: Vector2, tags: Dictionary}
+	"""
+	var result: Array = []
+
+	# Вычисляем bbox здания для быстрой фильтрации
+	var min_x = INF
+	var max_x = -INF
+	var min_y = INF
+	var max_y = -INF
+	for p in building_points:
+		min_x = min(min_x, p.x)
+		max_x = max(max_x, p.x)
+		min_y = min(min_y, p.y)
+		max_y = max(max_y, p.y)
+
+	for poi in _poi_nodes:
+		# Используем _latlon_to_local(), т.к. building_points в той же системе координат
+		var poi_pos: Vector2 = _latlon_to_local(poi.lat, poi.lon)
+
+		# Быстрая проверка bbox
+		if poi_pos.x < min_x or poi_pos.x > max_x or poi_pos.y < min_y or poi_pos.y > max_y:
+			continue
+
+		# Точная проверка point-in-polygon
+		if _point_in_polygon(poi_pos, building_points):
+			var name = poi.tags.get("name", "unknown")
+			print("POI_DEBUG: Found '%s' inside building at local (%.1f, %.1f)" % [name, poi_pos.x, poi_pos.y])
+			result.append({
+				"position": poi_pos,
+				"tags": poi.tags
+			})
+
+	return result
+
+
+func _point_in_polygon(point: Vector2, polygon: PackedVector2Array) -> bool:
+	"""Проверяет, находится ли точка внутри полигона (ray casting algorithm)"""
+	var n = polygon.size()
+	if n < 3:
+		return false
+
+	var inside = false
+	var j = n - 1
+
+	for i in range(n):
+		var pi = polygon[i]
+		var pj = polygon[j]
+
+		if ((pi.y > point.y) != (pj.y > point.y)) and \
+		   (point.x < (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x):
+			inside = not inside
+
+		j = i
+
+	return inside
+
+
+func _find_closest_wall_to_point(building_points: PackedVector2Array, target_point: Vector2, min_width: float) -> Dictionary:
+	"""
+	Находит стену здания, ближайшую к указанной точке.
+	Возвращает точку на стене, ближайшую к target_point.
+
+	Returns: {closest_point: Vector2, normal: Vector3, p1: Vector2, p2: Vector2} или пустой словарь
+	"""
+	var closest_wall = {}
+	var min_distance = INF
+
+	for i in range(building_points.size()):
+		var p1 = building_points[i]
+		var p2 = building_points[(i + 1) % building_points.size()]
+
+		var wall_length = p1.distance_to(p2)
+
+		# Пропускаем слишком короткие стены
+		if wall_length < min_width + 1.0:
+			continue
+
+		# Находим ближайшую точку на отрезке
+		var seg = p2 - p1
+		var seg_length_sq = seg.length_squared()
+
+		var t = 0.0
+		if seg_length_sq > 0.0001:
+			t = clamp((target_point - p1).dot(seg) / seg_length_sq, 0.0, 1.0)
+
+		var closest_on_wall = p1 + t * seg
+		var distance = target_point.distance_to(closest_on_wall)
+
+		if distance < min_distance:
+			min_distance = distance
+			var wall_dir = seg.normalized()
+			var wall_normal = Vector3(wall_dir.y, 0, -wall_dir.x)
+
+			closest_wall = {
+				"closest_point": closest_on_wall,
+				"normal": wall_normal,
+				"p1": p1,
+				"p2": p2,
+				"distance": distance
+			}
+
+	return closest_wall
