@@ -20,9 +20,11 @@ func _ready() -> void:
 	# Создаём сложный террейн
 	_create_complex_terrain()
 
-	# Ждём физику
+	# Ждём несколько кадров чтобы физика обновилась
 	await get_tree().process_frame
-	await get_tree().process_frame
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	await get_tree().physics_frame
 
 	# Создаём объекты на террейне
 	_create_test_objects()
@@ -357,8 +359,8 @@ func _test_object(obj_name: String, space_state: PhysicsDirectSpaceState3D) -> v
 		]:
 			terrain_heights.append(_raycast_height(space_state, corner))
 
-		var min_terrain := terrain_heights.min()
-		var max_terrain := terrain_heights.max()
+		var min_terrain: float = terrain_heights.min()
+		var max_terrain: float = terrain_heights.max()
 		var height_range: float = max_terrain - min_terrain
 
 		# Здание должно быть на минимальной высоте
