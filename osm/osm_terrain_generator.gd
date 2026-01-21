@@ -853,6 +853,7 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 
 	var mesh := MeshInstance3D.new()
 	mesh.mesh = arr_mesh
+	mesh.name = "Road"  # Помечаем для тестов
 
 	# Материал с текстурой
 	var material := StandardMaterial3D.new()
@@ -1878,6 +1879,7 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 
 	# Создаём физическое тело
 	var body := StaticBody3D.new()
+	body.name = "Building"  # Помечаем для тестов
 	body.collision_layer = 2  # Слой 2 для зданий
 	body.collision_mask = 1   # Реагирует на слой 1 (машина)
 	body.add_child(wall_mesh_instance)
