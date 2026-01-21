@@ -14,6 +14,7 @@ const NPCS_PER_CHUNK := 3  # Машин на чанк (было 4)
 # Ссылки
 var npc_car_scene: PackedScene
 var npc_paz_scene: PackedScene
+var npc_lada_scene: PackedScene
 var road_network: Node  # RoadNetwork
 var terrain_generator: Node  # OSMTerrainGenerator
 var player_car: Node3D
@@ -37,6 +38,7 @@ func _ready() -> void:
 	# Загружаем сцены NPC машин
 	npc_car_scene = preload("res://traffic/npc_car.tscn")
 	npc_paz_scene = preload("res://traffic/npc_paz.tscn")
+	npc_lada_scene = preload("res://traffic/npc_lada_2109.tscn")
 
 	# Создаём RoadNetwork
 	var RoadNetworkScript = preload("res://traffic/road_network.gd")
@@ -211,9 +213,25 @@ func _get_npc_from_pool():
 		return npc
 
 	if active_npcs.size() < MAX_NPCS:
-		# 100% ПАЗов для теста
-		var scene_to_use: PackedScene = npc_paz_scene
-		print("TrafficManager: Spawning PAZ bus")
+		# Распределение: 10% Lada 2109, 20% ПАЗ, 70% блочные
+		var rand := randf()
+		var scene_to_use: PackedScene
+		var car_type: String
+
+		if rand < 0.1:
+			# 10% - Lada 2109 DPS
+			scene_to_use = npc_lada_scene
+			car_type = "Lada 2109 DPS"
+		elif rand < 0.3:
+			# 20% - ПАЗ
+			scene_to_use = npc_paz_scene
+			car_type = "PAZ bus"
+		else:
+			# 70% - блочные машинки
+			scene_to_use = npc_car_scene
+			car_type = "box car"
+
+		print("TrafficManager: Spawning %s" % car_type)
 
 		var npc = scene_to_use.instantiate()
 		get_parent().add_child(npc)

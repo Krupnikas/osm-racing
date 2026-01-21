@@ -3132,9 +3132,16 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 			continue
 
 		# Размещаем вывеску
-		var sign_height = base_elev + building_height * 0.7
+		# Для POI-заведений (магазины в жилых домах) - на уровне первого этажа
+		# Для зданий-заведений (рестораны, банки) - на 70% высоты
+		var sign_height: float
+		if placement_method == "poi_node":
+			# Магазин на первом этаже жилого дома - вывеска на 4м
+			sign_height = base_elev + min(4.0, building_height * 0.7)
+		else:
+			sign_height = base_elev + building_height * 0.7
 		sign.position = Vector3(sign_position_2d.x, sign_height, sign_position_2d.y)
-		sign.position += wall_normal * 1.0
+		sign.position += wall_normal * 1.5  # Отступ от стены (вывеска масштабирована 3x)
 
 		# Поворачиваем вывеску перпендикулярно стене
 		sign.rotation.y = atan2(wall_normal.x, wall_normal.z)
@@ -3309,11 +3316,18 @@ func _find_closest_wall_to_point(building_points: PackedVector2Array, target_poi
 	"""
 	Находит стену здания, ближайшую к указанной точке.
 	Возвращает точку на стене, ближайшую к target_point.
+	Нормаль всегда направлена НАРУЖУ от центра здания.
 
 	Returns: {closest_point: Vector2, normal: Vector3, p1: Vector2, p2: Vector2} или пустой словарь
 	"""
 	var closest_wall = {}
 	var min_distance = INF
+
+	# Вычисляем центр здания для проверки направления нормали
+	var center = Vector2.ZERO
+	for p in building_points:
+		center += p
+	center /= building_points.size()
 
 	for i in range(building_points.size()):
 		var p1 = building_points[i]
@@ -3339,7 +3353,17 @@ func _find_closest_wall_to_point(building_points: PackedVector2Array, target_poi
 		if distance < min_distance:
 			min_distance = distance
 			var wall_dir = seg.normalized()
-			var wall_normal = Vector3(wall_dir.y, 0, -wall_dir.x)
+			# Нормаль перпендикулярна стене
+			var normal_2d = Vector2(wall_dir.y, -wall_dir.x)
+
+			# Проверяем направление: нормаль должна быть НАРУЖУ от центра
+			var wall_center = (p1 + p2) / 2.0
+			var to_center = center - wall_center
+			if normal_2d.dot(to_center) > 0:
+				# Нормаль направлена к центру - инвертируем
+				normal_2d = -normal_2d
+
+			var wall_normal = Vector3(normal_2d.x, 0, normal_2d.y)
 
 			closest_wall = {
 				"closest_point": closest_on_wall,
