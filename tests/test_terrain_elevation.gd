@@ -126,8 +126,8 @@ func _collect_nodes_by_name(node: Node, name_pattern: String, result: Array[Node
 func _check_road_height(road: Node3D) -> float:
 	# Проверяем что дорога находится на уровне земли
 	var pos := road.global_position
-	var expected_height := _get_terrain_height_at(Vector2(pos.x, pos.z))
-	var error := abs(pos.y - expected_height)
+	var expected_height: float = _get_terrain_height_at(Vector2(pos.x, pos.z))
+	var error: float = abs(pos.y - expected_height)
 
 	if error > 0.5:
 		print("[WARN] Road at (%.1f, %.1f) has height error: %.2fm (actual=%.2f, expected=%.2f)" %
@@ -138,8 +138,8 @@ func _check_road_height(road: Node3D) -> float:
 func _check_building_height(building: Node3D) -> float:
 	# Проверяем что здание стоит на земле
 	var pos := building.global_position
-	var expected_height := _get_terrain_height_at(Vector2(pos.x, pos.z))
-	var error := abs(pos.y - expected_height)
+	var expected_height: float = _get_terrain_height_at(Vector2(pos.x, pos.z))
+	var error: float = abs(pos.y - expected_height)
 
 	if error > 0.5:
 		print("[WARN] Building at (%.1f, %.1f) has height error: %.2fm (actual=%.2f, expected=%.2f)" %

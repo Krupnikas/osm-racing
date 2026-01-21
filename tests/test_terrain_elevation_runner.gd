@@ -8,9 +8,7 @@ const TestTerrainElevationScript = preload("res://tests/test_terrain_elevation.g
 var _terrain_generator: Node3D
 var _car: VehicleBody3D
 var _test_runner: Node
-var _spawn_timeout := 30.0
-var _spawn_timer := 0.0
-var _spawn_ready := false
+var _load_wait_time := 15.0  # Ждём загрузки местности
 var _test_started := false
 
 func _ready() -> void:
@@ -40,36 +38,29 @@ func _ready() -> void:
 		_fail("Car not found")
 		return
 
-	# Подписываемся на spawn_ready
-	_terrain_generator.spawn_ready.connect(_on_spawn_ready)
-
 	# Запускаем загрузку
 	print("[TEST] Starting terrain loading...")
 	_terrain_generator.start_loading()
 
-func _process(delta: float) -> void:
-	if _test_started:
-		return
+	# Ждём загрузки и запускаем тест
+	_wait_and_start_test()
 
-	if not _spawn_ready:
-		_spawn_timer += delta
-		if _spawn_timer >= _spawn_timeout:
-			_fail("Spawn timeout after %.0f seconds" % _spawn_timeout)
+func _wait_and_start_test() -> void:
+	print("[TEST] Waiting %.1f seconds for terrain to load..." % _load_wait_time)
+	await get_tree().create_timer(_load_wait_time).timeout
 
-func _on_spawn_ready(spawn_position: Vector3) -> void:
-	_spawn_ready = true
-	print("[TEST] Spawn ready at position: (%.1f, %.1f, %.1f)" % [spawn_position.x, spawn_position.y, spawn_position.z])
+	if not _test_started:
+		print("[TEST] Terrain loaded, positioning car...")
+		# Ставим машину немного выше земли
+		_car.global_position = Vector3(_car.global_position.x, 10, _car.global_position.z)
+		_car.linear_velocity = Vector3.ZERO
+		_car.angular_velocity = Vector3.ZERO
 
-	# Ставим машину на позицию
-	_car.global_position = spawn_position
-	_car.linear_velocity = Vector3.ZERO
-	_car.angular_velocity = Vector3.ZERO
+		# Ждём стабилизации физики
+		await get_tree().create_timer(2.0).timeout
 
-	# Ждём стабилизации физики
-	await get_tree().create_timer(1.0).timeout
-
-	# Запускаем тест
-	_start_elevation_test()
+		# Запускаем тест
+		_start_elevation_test()
 
 func _start_elevation_test() -> void:
 	_test_started = true
