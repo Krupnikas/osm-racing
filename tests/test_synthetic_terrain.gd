@@ -234,10 +234,16 @@ func _test_point(point: Dictionary) -> void:
 	# Ждём физику
 	await get_tree().create_timer(1.0).timeout
 
-	# Проверяем высоту
+	# Проверяем высоту (перемещаем машину в сторону чтобы не мешала raycast)
 	var final_y := _car.position.y
+	var saved_car_pos := _car.position
+	_car.position = Vector3(1000, 1000, 1000)  # Убираем машину
+	await get_tree().process_frame  # Ждём обновления физики
+
 	var terrain_height := _get_terrain_height_at(Vector2(pos.x, pos.z))
 	var error: float = abs(terrain_height - expected_height)
+
+	_car.position = saved_car_pos  # Возвращаем машину
 
 	var result := {
 		"name": name,
