@@ -241,7 +241,7 @@ func _test_point(point: Dictionary) -> void:
 	# Проверяем высоту
 	var final_y := _car.position.y
 	var terrain_height := _get_terrain_height_at(Vector2(pos.x, pos.z))
-	var error := abs(terrain_height - expected_height)
+	var error: float = abs(terrain_height - expected_height)
 
 	var result := {
 		"name": name,
@@ -267,14 +267,14 @@ func _test_point(point: Dictionary) -> void:
 	var building := get_node_or_null("Building_" + name)
 
 	if road:
-		var road_height := road.position.y
-		var road_error := abs(road_height - expected_height)
+		var road_height: float = road.position.y
+		var road_error: float = abs(road_height - expected_height)
 		print("  Road height: %.2fm (expected: %.2fm, error: %.3fm)" %
 			[road_height, expected_height, road_error])
 
 	if building:
-		var building_y := building.position.y  # Building base
-		var building_error := abs(building_y - expected_height)
+		var building_y: float = building.position.y  # Building base
+		var building_error: float = abs(building_y - expected_height)
 		print("  Building base: %.2fm (expected: %.2fm, error: %.3fm)" %
 			[building_y, expected_height, building_error])
 
