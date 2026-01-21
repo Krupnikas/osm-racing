@@ -52,7 +52,7 @@ var _entrance_nodes: Array = []  # Входы в здания/заведения
 var _poi_nodes: Array = []  # Точечные заведения (shop/amenity как node)
 var _parking_polygons: Array[PackedVector2Array] = []  # Полигоны парковок для исключения фонарей
 var _road_segments: Array = []  # Сегменты дорог для позиционирования знаков парковки
-var _created_lamp_positions: Dictionary = {}  # Позиции созданных фонарей для избежания дубликатов
+var _created_lamp_positions: Dictionary = {}  # Позиции созданных фонарей для избежания дубликатов (ключ: chunk_key)
 var _created_sign_positions: Dictionary = {}  # Позиции созданных знаков для избежания дубликатов
 var _pending_lamps: Array = []  # Отложенные фонари (создаются после загрузки всех парковок)
 var _lamps_created := false  # Флаг что фонари уже созданы
@@ -614,7 +614,51 @@ func _unload_chunk(chunk_key: String) -> void:
 		chunk_node.queue_free()
 		_loaded_chunks.erase(chunk_key)
 		_chunk_elevations.erase(chunk_key)
+
+		# Очищаем позиции фонарей и знаков в выгруженном чанке
+		_clear_chunk_objects_positions(chunk_key)
+
 		print("OSM: Unloaded chunk %s" % chunk_key)
+
+
+## Очищает позиции объектов (фонарей, знаков) в границах чанка
+func _clear_chunk_objects_positions(chunk_key: String) -> void:
+	var coords := chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+
+	# Границы чанка в мировых координатах
+	var min_x := chunk_x * chunk_size
+	var max_x := min_x + chunk_size
+	var min_z := chunk_z * chunk_size
+	var max_z := min_z + chunk_size
+
+	# Очищаем позиции фонарей в этом чанке
+	var lamps_to_remove: Array = []
+	for pos_key in _created_lamp_positions.keys():
+		var parts: PackedStringArray = pos_key.split("_")
+		if parts.size() >= 2:
+			var x := int(parts[0])
+			var z := int(parts[1])
+			if x >= min_x and x < max_x and z >= min_z and z < max_z:
+				lamps_to_remove.append(pos_key)
+
+	for key in lamps_to_remove:
+		_created_lamp_positions.erase(key)
+
+	# Очищаем позиции знаков в этом чанке
+	var signs_to_remove: Array = []
+	for pos_key in _created_sign_positions.keys():
+		var parts: PackedStringArray = pos_key.split("_")
+		if parts.size() >= 2:
+			var x := int(parts[0])
+			var z := int(parts[1])
+			if x >= min_x and x < max_x and z >= min_z and z < max_z:
+				signs_to_remove.append(pos_key)
+
+	for key in signs_to_remove:
+		_created_sign_positions.erase(key)
+
 
 # Сбрасывает все загруженные чанки (для смены локации)
 func reset_terrain() -> void:
@@ -733,6 +777,11 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 
 	_generate_terrain(osm_data, chunk_node, chunk_key)
 	loader.queue_free()
+
+	# Создаём фонари для этого чанка (если не начальная загрузка)
+	if not _initial_loading:
+		print("OSM: Post-initial chunk loaded, pending_lamps=%d" % _pending_lamps.size())
+		_create_pending_lamps()
 
 	# Если ночь уже включена - активируем свет в новом чанке
 	_apply_night_mode_to_chunk(chunk_node)
@@ -3315,9 +3364,8 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 
 func _create_pending_lamps() -> void:
 	"""Создаёт отложенные фонари, фильтруя те что на парковках"""
-	if _lamps_created:
+	if _pending_lamps.is_empty():
 		return
-	_lamps_created = true
 
 	var created := 0
 	var skipped := 0
@@ -3325,8 +3373,19 @@ func _create_pending_lamps() -> void:
 	for lamp_data in _pending_lamps:
 		var pos: Vector2 = lamp_data.pos
 		var elev: float = lamp_data.elev
-		var parent: Node3D = lamp_data.parent
 		var dir: Vector2 = lamp_data.dir
+
+		# Находим ПРАВИЛЬНЫЙ чанк для этого фонаря по его позиции
+		var chunk_x := int(floor(pos.x / chunk_size))
+		var chunk_z := int(floor(pos.y / chunk_size))
+		var chunk_key := "%d,%d" % [chunk_x, chunk_z]
+
+		# Проверяем что чанк загружен
+		if not _loaded_chunks.has(chunk_key):
+			skipped += 1
+			continue
+
+		var parent: Node3D = _loaded_chunks[chunk_key]
 
 		# Теперь проверяем с полным списком парковок
 		if _is_point_in_any_parking(pos):
@@ -3336,8 +3395,10 @@ func _create_pending_lamps() -> void:
 		_create_street_lamp(pos, elev, parent, dir)
 		created += 1
 
-	print("OSM: Created %d lamps, skipped %d (on parking)" % [created, skipped])
+	if created > 0:
+		print("OSM: Created %d lamps, skipped %d (on parking or chunk not loaded)" % [created, skipped])
 	_pending_lamps.clear()
+	_lamps_created = true  # Флаг только для начальной загрузки
 
 
 func _create_pending_parking_signs() -> void:
