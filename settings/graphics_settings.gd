@@ -19,9 +19,9 @@ var taa_enabled := true  # TAA легче и лучше сглаживает
 
 # Дополнительные эффекты
 var motion_blur_enabled := false
-var dof_enabled := true  # Размытие от расстояния
+var dof_enabled := false  # Размытие от расстояния
 var chromatic_aberration_enabled := false
-var vignette_enabled := true  # Виньетка
+var vignette_enabled := false  # Виньетка
 
 # Дальность прорисовки
 var render_distance := 600.0  # Метры
