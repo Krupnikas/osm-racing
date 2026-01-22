@@ -58,6 +58,27 @@ var _pending_lamps: Array = []  # Отложенные фонари (созда�
 var _lamps_created := false  # Флаг что фонари уже созданы
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
 
+# Многопоточная генерация зданий
+var _building_queue: Array = []  # Очередь данных зданий для генерации
+var _building_results: Array = []  # Готовые данные мешей из потоков
+var _building_mutex: Mutex  # Для синхронизации доступа к результатам
+var _pending_building_tasks: int = 0  # Счётчик активных задач в пуле
+
+# Отложенная генерация инфраструктуры (фонари, знаки, светофоры)
+var _infrastructure_queue: Array = []  # Очередь {type, pos, elevation, parent, ...}
+
+# Отложенная генерация дорог и других тяжёлых объектов
+var _road_queue: Array = []  # Очередь {nodes, tags, parent, elev_data}
+
+# Отложенная генерация terrain объектов (natural, landuse, leisure)
+var _terrain_objects_queue: Array = []  # Очередь {type, nodes, tags, parent, elev_data}
+
+# FPS статистика для отображения на экране
+var _fps_samples: Array[float] = []
+var _fps_update_timer := 0.0
+var _debug_label: Label = null
+@export var show_debug_stats := true  # Показывать статистику на экране
+
 # Предиктивная загрузка чанков
 @export_group("Predictive Loading")
 @export var prediction_time_horizon := 15.0  # Горизонт предсказания (секунд)
@@ -118,10 +139,17 @@ const ROAD_WIDTHS := {
 }
 
 func _ready() -> void:
+	# Инициализируем mutex для многопоточности
+	_building_mutex = Mutex.new()
+
 	osm_loader = OSMLoaderScript.new()
 	add_child(osm_loader)
 	osm_loader.data_loaded.connect(_on_osm_data_loaded)
 	osm_loader.load_failed.connect(_on_osm_load_failed)
+
+	# Создаём debug label для статистики
+	if show_debug_stats:
+		_create_debug_label()
 
 	# Инициализируем текстуры
 	_init_textures()
@@ -182,6 +210,31 @@ func _init_textures() -> void:
 	print("OSM: Textures initialized in %d ms" % elapsed)
 
 func _process(delta: float) -> void:
+	var _frame_start := Time.get_ticks_msec()
+
+	# Обрабатываем готовые здания из worker threads (даже на паузе)
+	_process_building_results()
+
+	# Обрабатываем очередь дорог (3 дороги за кадр)
+	_process_road_queue()
+
+	# Обрабатываем очередь terrain объектов (2 за кадр)
+	_process_terrain_objects_queue()
+
+	# Обрабатываем очередь инфраструктуры (1 объект за кадр)
+	_process_infrastructure_queue()
+
+	var _frame_time := Time.get_ticks_msec() - _frame_start
+	if _frame_time > 10:
+		print("PROFILE: _process took %d ms (delta=%.1f ms, fps=%.0f)" % [_frame_time, delta * 1000, 1.0 / delta])
+
+	# Обновляем debug статистику
+	_update_debug_stats(delta)
+
+	# Проверяем завершение начальной загрузки (когда очереди опустошились)
+	if _initial_loading:
+		_check_initial_load_complete()
+
 	# Не обновляем чанки если загрузка на паузе
 	if _loading_paused:
 		return
@@ -249,6 +302,12 @@ func _check_initial_load_complete() -> void:
 
 	# Все начальные чанки загружены?
 	if loaded_count >= _initial_chunks_needed.size():
+		# Проверяем что все очереди обработаны (для плавности старта)
+		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks == 0
+		if not queues_empty:
+			# Очереди ещё не пусты - ждём следующего кадра
+			return
+
 		_initial_loading = false
 		print("OSM: Initial loading complete! %d chunks loaded" % loaded_count)
 
@@ -758,6 +817,7 @@ func _on_elevation_failed(error: String, chunk_key: String, loader: Node) -> voi
 
 func _on_osm_data_loaded(osm_data: Dictionary) -> void:
 	print("OSM: Initial data loaded")
+	# Запускаем генерацию асинхронно (не блокируя callback)
 	_generate_terrain(osm_data, null)
 
 func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node) -> void:
@@ -775,7 +835,12 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	if _chunk_elevations.has(chunk_key):
 		_create_terrain_mesh(chunk_key, chunk_node)
 
-	_generate_terrain(osm_data, chunk_node, chunk_key)
+	# Генерируем объекты асинхронно (с frame budgeting)
+	_generate_chunk_async(osm_data, chunk_node, chunk_key, loader)
+
+# Асинхронная генерация чанка с frame budgeting
+func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: String, loader: Node) -> void:
+	await _generate_terrain(osm_data, chunk_node, chunk_key)
 	loader.queue_free()
 
 	# Создаём фонари для этого чанка (если не начальная загрузка)
@@ -908,6 +973,12 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	parent.add_child(body)
 
 func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String = "") -> void:
+	var _profile_start := Time.get_ticks_msec()
+	var _profile_last := _profile_start
+
+	# Frame budgeting counter - yield каждые N объектов для предотвращения фризов
+	var objects_this_frame := 0
+	const OBJECTS_PER_FRAME := 3  # Количество лёгких объектов перед yield
 	var target: Node3D = parent if parent else self
 	var ways: Array = osm_data.get("ways", [])
 	var road_count := 0
@@ -1017,24 +1088,68 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 					skipped_buildings += 1
 				continue
 
+		var _t0 := Time.get_ticks_msec()
 		if tags.has("highway"):
 			_create_road(nodes, tags, target, loader, elev_data)
+			var _dt := Time.get_ticks_msec() - _t0
+			if _dt > 5:
+				print("PROFILE: _create_road took %d ms (nodes=%d)" % [_dt, nodes.size()])
 			road_count += 1
+			objects_this_frame += 1
 		elif tags.has("building"):
 			_create_building(nodes, tags, target, loader, elev_data)
+			var _dt := Time.get_ticks_msec() - _t0
+			if _dt > 5:
+				print("PROFILE: _create_building took %d ms (nodes=%d)" % [_dt, nodes.size()])
 			building_count += 1
+			# Здания теперь в thread pool - не нужен await
 		elif tags.has("amenity") and not tags.has("building"):
 			# Amenity без building тега - создаём как здание
 			_create_amenity_building(nodes, tags, target, loader, elev_data)
+			var _dt := Time.get_ticks_msec() - _t0
+			if _dt > 5:
+				print("PROFILE: _create_amenity_building took %d ms" % _dt)
 			building_count += 1
 		elif tags.has("natural"):
-			_create_natural(nodes, tags, target, loader, elev_data)
+			# Добавляем в очередь для отложенного создания
+			_terrain_objects_queue.append({
+				"type": "natural",
+				"nodes": nodes,
+				"tags": tags,
+				"parent": target,
+				"elev_data": elev_data
+			})
 		elif tags.has("landuse"):
-			_create_landuse(nodes, tags, target, loader, elev_data)
+			# Добавляем в очередь для отложенного создания
+			_terrain_objects_queue.append({
+				"type": "landuse",
+				"nodes": nodes,
+				"tags": tags,
+				"parent": target,
+				"elev_data": elev_data
+			})
 		elif tags.has("leisure"):
-			_create_leisure(nodes, tags, target, loader, elev_data)
+			# Добавляем в очередь для отложенного создания
+			_terrain_objects_queue.append({
+				"type": "leisure",
+				"nodes": nodes,
+				"tags": tags,
+				"parent": target,
+				"elev_data": elev_data
+			})
 		elif tags.has("waterway"):
 			_create_waterway(nodes, tags, target, loader, elev_data)
+			var _dt := Time.get_ticks_msec() - _t0
+			if _dt > 5:
+				print("PROFILE: _create_waterway took %d ms" % _dt)
+			objects_this_frame += 1
+
+		# Frame budgeting для лёгких объектов
+		if objects_this_frame >= OBJECTS_PER_FRAME:
+			objects_this_frame = 0
+			await get_tree().process_frame
+
+	print("PROFILE: Main loop done in %d ms (roads=%d, buildings=%d)" % [Time.get_ticks_msec() - _profile_start, road_count, building_count])
 
 	if skipped_buildings > 0:
 		print("OSM: Skipped %d buildings (outside chunk bounds)" % skipped_buildings)
@@ -1134,21 +1249,43 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 	print("OSM: Generated %d roads, %d buildings, %d trees, %d signs, %d lamps, %d intersections" % [road_count, building_count, tree_count, sign_count, lamp_count, intersection_count])
 
 func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
+	# Добавляем в очередь для отложенного создания
+	_road_queue.append({
+		"nodes": nodes,
+		"tags": tags,
+		"parent": parent,
+		"elev_data": elev_data
+	})
+
+	# Сегменты дорог сохраняем сразу (нужны для знаков парковки)
+	var highway_type: String = tags.get("highway", "residential")
+	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
+	for i in range(nodes.size() - 1):
+		var p1 = _latlon_to_local(nodes[i].lat, nodes[i].lon)
+		var p2 = _latlon_to_local(nodes[i + 1].lat, nodes[i + 1].lon)
+		_road_segments.append({"p1": p1, "p2": p2, "width": width})
+
+
+## Немедленное создание дороги (вызывается из очереди)
+func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
+	if not is_instance_valid(parent):
+		return
+
 	var highway_type: String = tags.get("highway", "residential")
 	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
 
 	var texture_key: String
-	var height_offset: float  # Высота дороги
-	var curb_height: float    # Высота бордюра над дорогой
+	var height_offset: float
+	var curb_height: float
 	match highway_type:
 		"motorway", "trunk":
 			texture_key = "highway"
 			height_offset = 0.02
-			curb_height = 0.12  # Высокие бордюры для магистралей
+			curb_height = 0.12
 		"primary":
 			texture_key = "primary"
 			height_offset = 0.02
-			curb_height = 0.10  # 10 см бордюр
+			curb_height = 0.10
 		"secondary", "tertiary":
 			texture_key = "primary"
 			height_offset = 0.02
@@ -1163,8 +1300,8 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, 
 			curb_height = 0.04
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
-			height_offset = 0.08  # Пешеходные на уровне тротуара
-			curb_height = 0.0    # Без бордюра
+			height_offset = 0.08
+			curb_height = 0.0
 		_:
 			texture_key = "residential"
 			height_offset = 0.02
@@ -1172,13 +1309,6 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, 
 
 	_create_road_mesh_with_texture(nodes, width, texture_key, height_offset, parent, elev_data)
 
-	# Сохраняем сегменты дорог для позиционирования знаков парковки
-	for i in range(nodes.size() - 1):
-		var p1 = _latlon_to_local(nodes[i].lat, nodes[i].lon)
-		var p2 = _latlon_to_local(nodes[i + 1].lat, nodes[i + 1].lon)
-		_road_segments.append({"p1": p1, "p2": p2, "width": width})
-
-	# Создаём бордюры если нужно
 	if curb_height > 0.0:
 		_create_curbs(nodes, width, height_offset, curb_height, parent, elev_data)
 
@@ -1702,9 +1832,11 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	else:
 		texture_type = "brick"  # Остальное - кирпич
 
-	_create_3d_building_with_texture(points, building_height, texture_type, parent, base_elev, debug_name)
+	# Используем многопоточную генерацию зданий
+	_queue_building_for_thread(points, building_height, texture_type, parent, base_elev)
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
+	# Вывески создаются синхронно т.к. они лёгкие
 	_add_business_signs_simple(points, tags, parent, building_height, base_elev, loader)
 
 
@@ -1988,12 +2120,27 @@ func _apply_parked_car_color(car: Node3D) -> void:
 
 
 func _create_parking_sign(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> void:
-	"""Создаёт дорожный знак парковки (P) - разрушаемый при столкновении"""
+	"""Добавляет знак парковки в очередь для отложенного создания"""
 	# Проверяем, не создан ли уже знак в этой позиции (избегаем дубликатов)
 	var pos_key := "%d_%d" % [int(pos.x), int(pos.y)]
 	if _created_sign_positions.has(pos_key):
 		return
 	_created_sign_positions[pos_key] = true
+
+	# Добавляем в очередь для отложенного создания
+	_infrastructure_queue.append({
+		"type": "parking_sign",
+		"pos": pos,
+		"elevation": elevation,
+		"parent": parent,
+		"rotation": rotation_y
+	})
+
+
+# Немедленное создание знака парковки (вызывается из очереди)
+func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> void:
+	if not is_instance_valid(parent):
+		return
 
 	# RigidBody3D как корневой узел для физики
 	var body := RigidBody3D.new()
@@ -2093,7 +2240,10 @@ func _on_sign_hit(other_body: Node, rigid_body: RigidBody3D) -> void:
 		rigid_body.apply_torque_impulse(torque * impulse_strength * 0.1)
 
 
-func _create_natural(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
+## Немедленное создание природного объекта (вызывается из очереди)
+func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
+	if not is_instance_valid(parent):
+		return
 	if nodes.size() < 3:
 		return
 
@@ -2123,7 +2273,11 @@ func _create_natural(nodes: Array, tags: Dictionary, parent: Node3D, loader: Nod
 	if natural_type in ["wood"]:
 		_generate_trees_in_polygon(points, elev_data, parent, true)  # dense=true для леса
 
-func _create_landuse(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
+
+## Немедленное создание землепользования (вызывается из очереди)
+func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
+	if not is_instance_valid(parent):
+		return
 	if nodes.size() < 3:
 		return
 
@@ -2163,7 +2317,11 @@ func _create_landuse(nodes: Array, tags: Dictionary, parent: Node3D, loader: Nod
 	if landuse_type == "forest":
 		_generate_trees_in_polygon(points, elev_data, parent, true)  # dense=true для леса
 
-func _create_leisure(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
+
+## Немедленное создание объекта отдыха (вызывается из очереди)
+func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
+	if not is_instance_valid(parent):
+		return
 	if nodes.size() < 3:
 		return
 
@@ -2506,6 +2664,493 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 
 	parent.add_child(body)
 
+
+# === МНОГОПОТОЧНАЯ ГЕНЕРАЦИЯ ЗДАНИЙ ===
+
+## Добавляет здание в очередь для генерации в worker thread
+func _queue_building_for_thread(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float) -> void:
+	var task_data := {
+		"points": points,
+		"building_height": building_height,
+		"texture_type": texture_type,
+		"parent": parent,
+		"base_elev": base_elev
+	}
+
+	# Добавляем задачу в пул потоков
+	_pending_building_tasks += 1
+	WorkerThreadPool.add_task(_compute_building_mesh_thread.bind(task_data))
+
+
+## Вычисляет геометрию здания в worker thread (без создания Node)
+func _compute_building_mesh_thread(task_data: Dictionary) -> void:
+	var points: PackedVector2Array = task_data.points
+	var building_height: float = task_data.building_height
+	var base_elev: float = task_data.base_elev
+
+	# Валидация (повторяем проверки без раннего выхода - просто отмечаем как invalid)
+	var valid := true
+
+	if points.size() < 4:
+		valid = false
+
+	# Убираем дубликат последней точки
+	if valid and points.size() > 1 and points[0].distance_to(points[points.size() - 1]) < 0.1:
+		points = points.duplicate()
+		points.remove_at(points.size() - 1)
+
+	if valid and points.size() < 3:
+		valid = false
+
+	# Проверка размеров
+	if valid:
+		var min_x := points[0].x
+		var max_x := points[0].x
+		var min_z := points[0].y
+		var max_z := points[0].y
+		for p in points:
+			min_x = min(min_x, p.x)
+			max_x = max(max_x, p.x)
+			min_z = min(min_z, p.y)
+			max_z = max(max_z, p.y)
+		var size_x := max_x - min_x
+		var size_z := max_z - min_z
+		if size_x < 3.0 or size_z < 3.0 or size_x > 200.0 or size_z > 200.0:
+			valid = false
+		var min_size: float = min(size_x, size_z)
+		if min_size < 0.1 or max(size_x, size_z) / min_size > 20.0:
+			valid = false
+		# Площадь (inline расчёт для thread-safety)
+		if valid:
+			var area := 0.0
+			var n := points.size()
+			for i in range(n):
+				var j := (i + 1) % n
+				area += points[i].x * points[j].y
+				area -= points[j].x * points[i].y
+			area = abs(area) / 2.0
+			if area < 10.0:
+				valid = false
+
+	if not valid:
+		# Добавляем пустой результат чтобы уменьшить счётчик
+		_building_mutex.lock()
+		_building_results.append({"valid": false})
+		_pending_building_tasks -= 1
+		_building_mutex.unlock()
+		return
+
+	# === ВЫЧИСЛЕНИЕ ГЕОМЕТРИИ СТЕН ===
+	var floor_y := base_elev + 0.1
+	var roof_y := base_elev + building_height
+
+	var wall_vertices := PackedVector3Array()
+	var wall_uvs := PackedVector2Array()
+	var wall_normals := PackedVector3Array()
+	var wall_indices := PackedInt32Array()
+
+	var uv_scale_x := 0.1
+	var uv_scale_y := 0.1
+	var accumulated_width := 0.0
+
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
+		var wall_width := p1.distance_to(p2)
+
+		var v1 := Vector3(p1.x, floor_y, p1.y)
+		var v2 := Vector3(p2.x, floor_y, p2.y)
+		var v3 := Vector3(p2.x, roof_y, p2.y)
+		var v4 := Vector3(p1.x, roof_y, p1.y)
+
+		var dir := (p2 - p1).normalized()
+		var normal := Vector3(-dir.y, 0, dir.x)
+
+		var u1 := accumulated_width * uv_scale_x
+		var u2 := (accumulated_width + wall_width) * uv_scale_x
+		var v_bottom := 0.0
+		var v_top := building_height * uv_scale_y
+
+		var idx := wall_vertices.size()
+
+		wall_vertices.append(v1)
+		wall_vertices.append(v2)
+		wall_vertices.append(v3)
+		wall_vertices.append(v4)
+
+		wall_uvs.append(Vector2(u1, v_bottom))
+		wall_uvs.append(Vector2(u2, v_bottom))
+		wall_uvs.append(Vector2(u2, v_top))
+		wall_uvs.append(Vector2(u1, v_top))
+
+		wall_normals.append(normal)
+		wall_normals.append(normal)
+		wall_normals.append(normal)
+		wall_normals.append(normal)
+
+		wall_indices.append(idx + 0)
+		wall_indices.append(idx + 1)
+		wall_indices.append(idx + 2)
+		wall_indices.append(idx + 0)
+		wall_indices.append(idx + 2)
+		wall_indices.append(idx + 3)
+
+		accumulated_width += wall_width
+
+	# === ТРИАНГУЛЯЦИЯ КРЫШИ (тяжёлая операция) ===
+	var roof_indices_2d := Geometry2D.triangulate_polygon(points)
+
+	var roof_vertices := PackedVector3Array()
+	var roof_uvs := PackedVector2Array()
+	var roof_normals := PackedVector3Array()
+	var roof_indices := PackedInt32Array()
+
+	if roof_indices_2d.size() >= 3:
+		for p in points:
+			roof_vertices.append(Vector3(p.x, roof_y, p.y))
+			roof_uvs.append(Vector2(p.x * 0.1, p.y * 0.1))
+			roof_normals.append(Vector3.UP)
+		for idx in roof_indices_2d:
+			roof_indices.append(idx)
+
+	# Сохраняем результат
+	var result := {
+		"valid": true,
+		"points": points,
+		"building_height": building_height,
+		"texture_type": task_data.texture_type,
+		"parent": task_data.parent,
+		"base_elev": base_elev,
+		"wall_vertices": wall_vertices,
+		"wall_uvs": wall_uvs,
+		"wall_normals": wall_normals,
+		"wall_indices": wall_indices,
+		"roof_vertices": roof_vertices,
+		"roof_uvs": roof_uvs,
+		"roof_normals": roof_normals,
+		"roof_indices": roof_indices
+	}
+
+	_building_mutex.lock()
+	_building_results.append(result)
+	_pending_building_tasks -= 1
+	_building_mutex.unlock()
+
+
+## Применяет результат вычислений на главном потоке (создаёт Node)
+func _apply_building_mesh_result(result: Dictionary) -> void:
+	if not result.valid:
+		return
+
+	var parent: Node3D = result.parent
+	if not is_instance_valid(parent):
+		return
+
+	var texture_type: String = result.texture_type
+	var building_height: float = result.building_height
+	var base_elev: float = result.base_elev
+	var points: PackedVector2Array = result.points
+
+	# === СОЗДАНИЕ МЕША СТЕН ===
+	var wall_arrays := []
+	wall_arrays.resize(Mesh.ARRAY_MAX)
+	wall_arrays[Mesh.ARRAY_VERTEX] = result.wall_vertices
+	wall_arrays[Mesh.ARRAY_TEX_UV] = result.wall_uvs
+	wall_arrays[Mesh.ARRAY_NORMAL] = result.wall_normals
+	wall_arrays[Mesh.ARRAY_INDEX] = result.wall_indices
+
+	var wall_mesh := ArrayMesh.new()
+	wall_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, wall_arrays)
+
+	var wall_mesh_instance := MeshInstance3D.new()
+	wall_mesh_instance.mesh = wall_mesh
+	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+	# Материал стен
+	var wall_material := ShaderMaterial.new()
+	wall_material.shader = BuildingWallShader
+	if _building_textures.has(texture_type):
+		wall_material.set_shader_parameter("albedo_texture", _building_textures[texture_type])
+		wall_material.set_shader_parameter("use_texture", true)
+	else:
+		wall_material.set_shader_parameter("albedo_color", Color(0.7, 0.6, 0.5))
+		wall_material.set_shader_parameter("use_texture", false)
+	wall_mesh_instance.material_override = wall_material
+
+	# === СОЗДАНИЕ МЕША КРЫШИ ===
+	if result.roof_indices.size() >= 3:
+		var roof_arrays := []
+		roof_arrays.resize(Mesh.ARRAY_MAX)
+		roof_arrays[Mesh.ARRAY_VERTEX] = result.roof_vertices
+		roof_arrays[Mesh.ARRAY_TEX_UV] = result.roof_uvs
+		roof_arrays[Mesh.ARRAY_NORMAL] = result.roof_normals
+		roof_arrays[Mesh.ARRAY_INDEX] = result.roof_indices
+
+		var roof_mesh := ArrayMesh.new()
+		roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, roof_arrays)
+
+		var roof_mesh_instance := MeshInstance3D.new()
+		roof_mesh_instance.mesh = roof_mesh
+		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+		var roof_material := StandardMaterial3D.new()
+		roof_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		if _building_textures.has("roof"):
+			roof_material.albedo_texture = _building_textures["roof"]
+			roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		else:
+			roof_material.albedo_color = Color(0.4, 0.35, 0.3)
+		roof_mesh_instance.material_override = roof_material
+
+		wall_mesh_instance.add_child(roof_mesh_instance)
+
+	# Физическое тело
+	var body := StaticBody3D.new()
+	body.collision_layer = 2
+	body.collision_mask = 1
+	body.add_child(wall_mesh_instance)
+	parent.add_child(body)
+
+	# Коллизии и декорации - отложенно
+	_create_building_collisions_deferred.call_deferred(body, points, base_elev, building_height)
+	_add_building_night_decorations.call_deferred(wall_mesh_instance, points, building_height, parent)
+
+
+## Обрабатывает готовые результаты из worker threads (вызывается из _process)
+func _process_building_results() -> void:
+	if _building_results.is_empty():
+		return
+
+	var _t0 := Time.get_ticks_msec()
+
+	_building_mutex.lock()
+	var results_to_process := _building_results.duplicate()
+	_building_results.clear()
+	_building_mutex.unlock()
+
+	# Сортируем здания по близости к игроку (если много в очереди)
+	if results_to_process.size() > 10 and _car:
+		_sort_building_results_by_distance(results_to_process, _car.global_position)
+
+	# Применяем 1 здание за кадр для максимальной плавности
+	_apply_building_mesh_result(results_to_process[0])
+
+	var _dt := Time.get_ticks_msec() - _t0
+	if _dt > 5:
+		print("PROFILE: _apply_building_mesh_result took %d ms (queue=%d)" % [_dt, results_to_process.size()])
+
+	# Возвращаем оставшиеся обратно в очередь
+	if results_to_process.size() > 1:
+		_building_mutex.lock()
+		for i in range(1, results_to_process.size()):
+			_building_results.append(results_to_process[i])
+		_building_mutex.unlock()
+
+
+## Создаёт debug label для отображения статистики
+func _create_debug_label() -> void:
+	var canvas := CanvasLayer.new()
+	canvas.layer = 100
+	add_child(canvas)
+
+	_debug_label = Label.new()
+	_debug_label.position = Vector2(10, 100)
+	_debug_label.add_theme_font_size_override("font_size", 14)
+	_debug_label.add_theme_color_override("font_color", Color.WHITE)
+	_debug_label.add_theme_color_override("font_shadow_color", Color.BLACK)
+	_debug_label.add_theme_constant_override("shadow_offset_x", 1)
+	_debug_label.add_theme_constant_override("shadow_offset_y", 1)
+	canvas.add_child(_debug_label)
+
+
+## Обновляет debug статистику на экране
+func _update_debug_stats(delta: float) -> void:
+	if not show_debug_stats or not _debug_label:
+		return
+
+	# Собираем FPS samples
+	var fps := 1.0 / delta if delta > 0 else 0.0
+	_fps_samples.append(fps)
+	if _fps_samples.size() > 120:  # Храним 2 секунды при 60 FPS
+		_fps_samples.remove_at(0)
+
+	# Обновляем label каждые 0.25 сек
+	_fps_update_timer += delta
+	if _fps_update_timer < 0.25:
+		return
+	_fps_update_timer = 0.0
+
+	# Вычисляем статистику
+	var sorted_fps := _fps_samples.duplicate()
+	sorted_fps.sort()
+	var avg_fps := 0.0
+	for f in _fps_samples:
+		avg_fps += f
+	avg_fps /= max(1, _fps_samples.size())
+
+	var min_fps: float = sorted_fps[0] if sorted_fps.size() > 0 else 0.0
+	var p1_idx := int(sorted_fps.size() * 0.01)
+	var fps_1pct: float = sorted_fps[p1_idx] if p1_idx < sorted_fps.size() else 0.0
+
+	# Размеры очередей
+	var road_q := _road_queue.size()
+	var terrain_q := _terrain_objects_queue.size()
+	var infra_q := _infrastructure_queue.size()
+	var building_q := _building_results.size()
+
+	_debug_label.text = """FPS: %.0f (avg: %.0f, 1%%: %.0f, min: %.0f)
+Queues:
+  Roads: %d
+  Terrain: %d
+  Infra: %d
+  Buildings: %d
+Chunks: %d loaded""" % [fps, avg_fps, fps_1pct, min_fps, road_q, terrain_q, infra_q, building_q, _loaded_chunks.size()]
+
+
+## Обрабатывает очередь дорог (3 дороги за кадр)
+func _process_road_queue() -> void:
+	if _road_queue.is_empty():
+		return
+
+	var _t0 := Time.get_ticks_msec()
+
+	# Сортируем очередь по расстоянию до игрока (каждые 30 элементов)
+	if _road_queue.size() > 30 and _car:
+		_sort_queue_by_distance(_road_queue, _car.global_position)
+
+	# Обрабатываем 3 дороги за кадр (фиксированное количество для предсказуемости)
+	var max_per_frame := 3
+	var processed := 0
+
+	while not _road_queue.is_empty() and processed < max_per_frame:
+		var item: Dictionary = _road_queue.pop_front()
+		_create_road_immediate(item.nodes, item.tags, item.parent, item.elev_data)
+		processed += 1
+
+	var _dt := Time.get_ticks_msec() - _t0
+	if _dt > 16:
+		print("PROFILE: _process_road_queue took %d ms, processed %d (queue=%d)" % [_dt, processed, _road_queue.size()])
+
+
+## Сортирует очередь по расстоянию до игрока (ближайшие первые)
+func _sort_queue_by_distance(queue: Array, player_pos: Vector3) -> void:
+	var player_pos_2d := Vector2(player_pos.x, player_pos.z)
+
+	# Вычисляем расстояние для каждого элемента
+	for item in queue:
+		var first_node = item.nodes[0] if item.nodes.size() > 0 else null
+		if first_node:
+			var pos_2d := _latlon_to_local(first_node.lat, first_node.lon)
+			item["_dist"] = pos_2d.distance_squared_to(player_pos_2d)
+		else:
+			item["_dist"] = 999999.0
+
+	# Сортируем по расстоянию
+	queue.sort_custom(func(a, b): return a.get("_dist", 999999.0) < b.get("_dist", 999999.0))
+
+
+## Сортирует очередь инфраструктуры по расстоянию до игрока
+func _sort_infrastructure_by_distance(queue: Array, player_pos: Vector3) -> void:
+	var player_pos_2d := Vector2(player_pos.x, player_pos.z)
+
+	# Вычисляем расстояние для каждого элемента
+	for item in queue:
+		var pos = item.get("pos")
+		if pos is Vector2:
+			item["_dist"] = pos.distance_squared_to(player_pos_2d)
+		else:
+			item["_dist"] = 999999.0
+
+	# Сортируем по расстоянию
+	queue.sort_custom(func(a, b): return a.get("_dist", 999999.0) < b.get("_dist", 999999.0))
+
+
+## Сортирует результаты зданий по расстоянию до игрока
+func _sort_building_results_by_distance(results: Array, player_pos: Vector3) -> void:
+	var player_pos_2d := Vector2(player_pos.x, player_pos.z)
+
+	# Вычисляем расстояние для каждого здания
+	for result in results:
+		if not result.get("valid", false):
+			result["_dist"] = 999999.0
+			continue
+
+		var points = result.get("points")
+		if points is PackedVector2Array and points.size() > 0:
+			# Вычисляем центр здания
+			var center := Vector2.ZERO
+			for p in points:
+				center += p
+			center /= points.size()
+			result["_dist"] = center.distance_squared_to(player_pos_2d)
+		else:
+			result["_dist"] = 999999.0
+
+	# Сортируем по расстоянию
+	results.sort_custom(func(a, b): return a.get("_dist", 999999.0) < b.get("_dist", 999999.0))
+
+
+## Обрабатывает очередь terrain объектов (фиксированное количество за кадр)
+func _process_terrain_objects_queue() -> void:
+	if _terrain_objects_queue.is_empty():
+		return
+
+	var _t0 := Time.get_ticks_msec()
+
+	# Сортируем по расстоянию до игрока
+	if _terrain_objects_queue.size() > 20 and _car:
+		_sort_queue_by_distance(_terrain_objects_queue, _car.global_position)
+
+	var max_per_frame := 2  # Terrain objects могут быть тяжёлыми (деревья)
+	var processed := 0
+
+	while not _terrain_objects_queue.is_empty() and processed < max_per_frame:
+		var item: Dictionary = _terrain_objects_queue.pop_front()
+		var obj_type: String = item.get("type", "")
+
+		match obj_type:
+			"natural":
+				_create_natural_immediate(item.nodes, item.tags, item.parent, item.elev_data)
+			"landuse":
+				_create_landuse_immediate(item.nodes, item.tags, item.parent, item.elev_data)
+			"leisure":
+				_create_leisure_immediate(item.nodes, item.tags, item.parent, item.elev_data)
+
+		processed += 1
+
+	var _dt := Time.get_ticks_msec() - _t0
+	if _dt > 16:
+		print("PROFILE: _process_terrain_objects_queue took %d ms, processed %d (queue=%d)" % [_dt, processed, _terrain_objects_queue.size()])
+
+
+## Обрабатывает очередь инфраструктуры (1 объект за кадр)
+func _process_infrastructure_queue() -> void:
+	if _infrastructure_queue.is_empty():
+		return
+
+	# Сортируем по расстоянию до игрока
+	if _infrastructure_queue.size() > 20 and _car:
+		_sort_infrastructure_by_distance(_infrastructure_queue, _car.global_position)
+
+	var _t0 := Time.get_ticks_msec()
+	var item: Dictionary = _infrastructure_queue.pop_front()
+	var item_type: String = item.get("type", "")
+
+	match item_type:
+		"lamp":
+			_create_street_lamp_immediate(item.pos, item.elevation, item.parent, item.get("direction", Vector2.ZERO))
+		"traffic_light":
+			_create_traffic_light_immediate(item.pos, item.elevation, item.parent)
+		"yield_sign":
+			_create_yield_sign_immediate(item.pos, item.elevation, item.parent)
+		"parking_sign":
+			_create_parking_sign_immediate(item.pos, item.elevation, item.parent, item.rotation)
+
+	var _dt := Time.get_ticks_msec() - _t0
+	if _dt > 3:
+		print("PROFILE: _process_infrastructure_queue %s took %d ms (queue=%d)" % [item_type, _dt, _infrastructure_queue.size()])
+
+
 func _create_3d_building_with_texture(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
 	# Минимум 4 точки для нормального здания (3 - треугольник, плохо)
 	if points.size() < 4:
@@ -2696,7 +3341,19 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	body.collision_mask = 1   # Реагирует на слой 1 (машина)
 	body.add_child(wall_mesh_instance)
 
-	# Создаём коллизию для каждой стены отдельно
+	# Добавляем тело в сцену сразу (визуал появится)
+	parent.add_child(body)
+
+	# Создаём коллизии и декорации отложенно (deferred) чтобы не блокировать кадр
+	_create_building_collisions_deferred.call_deferred(body, points, base_elev, building_height)
+	_add_building_night_decorations.call_deferred(wall_mesh_instance, points, building_height, parent)
+
+
+# Отложенное создание коллизий зданий (вызывается через call_deferred)
+func _create_building_collisions_deferred(body: StaticBody3D, points: PackedVector2Array, base_elev: float, building_height: float) -> void:
+	if not is_instance_valid(body):
+		return
+
 	for i in range(points.size()):
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
@@ -2717,11 +3374,6 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 		collision.rotation.y = -wall_angle
 
 		body.add_child(collision)
-
-	parent.add_child(body)
-
-	# Добавляем ночные декорации (неоновые вывески и окна)
-	_add_building_night_decorations(wall_mesh_instance, points, building_height, parent)
 
 func _create_polygon_mesh(points: PackedVector2Array, color: Color, height_offset: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
 	if points.size() < 3:
@@ -3046,13 +3698,28 @@ func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, pare
 	parent.add_child(body)
 
 
-# Создание уличного фонаря с кронштейном в сторону дороги
+# Создание уличного фонаря - добавляет в очередь
 func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, direction_to_road: Vector2 = Vector2.ZERO) -> void:
 	# Проверяем, не создан ли уже фонарь в этой позиции (округляем до метров)
 	var pos_key := "%d_%d" % [int(pos.x), int(pos.y)]
 	if _created_lamp_positions.has(pos_key):
-		return  # Фонарь уже есть
+		return
 	_created_lamp_positions[pos_key] = true
+
+	# Добавляем в очередь для отложенного создания
+	_infrastructure_queue.append({
+		"type": "lamp",
+		"pos": pos,
+		"elevation": elevation,
+		"parent": parent,
+		"direction": direction_to_road
+	})
+
+
+# Немедленное создание фонаря (вызывается из очереди)
+func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3D, direction_to_road: Vector2 = Vector2.ZERO) -> void:
+	if not is_instance_valid(parent):
+		return
 
 	var lamp := Node3D.new()
 	lamp.position = Vector3(pos.x, elevation, pos.y)
@@ -3537,6 +4204,20 @@ func _is_point_near_any_parking(point: Vector2, max_distance: float) -> bool:
 
 # Создание светофора на перекрёстке
 func _create_traffic_light(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	# Добавляем в очередь для отложенного создания
+	_infrastructure_queue.append({
+		"type": "traffic_light",
+		"pos": pos,
+		"elevation": elevation,
+		"parent": parent
+	})
+
+
+# Немедленное создание светофора (вызывается из очереди)
+func _create_traffic_light_immediate(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	if not is_instance_valid(parent):
+		return
+
 	var traffic_light := Node3D.new()
 	traffic_light.position = Vector3(pos.x, elevation, pos.y)
 
@@ -3650,6 +4331,20 @@ func _create_yield_sign(pos: Vector2, elevation: float, parent: Node3D) -> void:
 	if _created_sign_positions.has(pos_key):
 		return
 	_created_sign_positions[pos_key] = true
+
+	# Добавляем в очередь для отложенного создания
+	_infrastructure_queue.append({
+		"type": "yield_sign",
+		"pos": pos,
+		"elevation": elevation,
+		"parent": parent
+	})
+
+
+# Немедленное создание знака (вызывается из очереди)
+func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	if not is_instance_valid(parent):
+		return
 
 	# RigidBody3D как корневой узел для физики
 	var body := RigidBody3D.new()

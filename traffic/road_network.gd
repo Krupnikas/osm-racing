@@ -23,8 +23,12 @@ class Waypoint:
 var waypoints_by_chunk: Dictionary = {}  # "x,z" -> Array[Waypoint]
 var all_waypoints: Array[Waypoint] = []
 
+# Пространственный индекс для быстрого поиска пересечений
+var _spatial_grid: Dictionary = {}  # "gx,gz" -> Array[Waypoint]
+const GRID_CELL_SIZE := 20.0  # Размер ячейки сетки в метрах
+
 # Константы
-const WAYPOINT_SPACING := 4.0  # Расстояние между waypoints в метрах (было 8.0, изначально 15.0)
+const WAYPOINT_SPACING := 8.0  # Расстояние между waypoints в метрах
 const INTERSECTION_THRESHOLD := 8.0  # Расстояние для определения пересечений
 const RIGHT_SIDE_OFFSET := 0.75  # Смещение вправо (75% от половины ширины дороги для встречного движения)
 
@@ -96,6 +100,9 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, chunk_ke
 			all_waypoints.append(waypoint)
 			waypoints_by_chunk[chunk_key].append(waypoint)
 
+			# Добавляем в пространственный индекс
+			_add_to_spatial_grid(waypoint)
+
 		# Связываем waypoints последовательно
 		for j in range(segment_waypoints.size() - 1):
 			segment_waypoints[j].next_waypoints.append(segment_waypoints[j + 1])
@@ -103,21 +110,62 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, chunk_ke
 		i += 1
 
 	# Проверяем пересечения с другими дорогами для создания связей
-	_connect_intersections(segment_waypoints)
+	_connect_intersections_fast(segment_waypoints)
 
 
-func _connect_intersections(new_waypoints: Array) -> void:
-	"""Находит пересечения дорог и создаёт связи между waypoints"""
-	for new_wp in new_waypoints:
-		for existing_wp in all_waypoints:
+## Получает ключ ячейки пространственной сетки
+func _get_grid_key(pos: Vector3) -> String:
+	var gx := int(floor(pos.x / GRID_CELL_SIZE))
+	var gz := int(floor(pos.z / GRID_CELL_SIZE))
+	return "%d,%d" % [gx, gz]
+
+
+## Добавляет waypoint в пространственный индекс
+func _add_to_spatial_grid(waypoint: Waypoint) -> void:
+	var key := _get_grid_key(waypoint.position)
+	if not _spatial_grid.has(key):
+		_spatial_grid[key] = []
+	_spatial_grid[key].append(waypoint)
+
+
+## Получает waypoints в соседних ячейках
+func _get_nearby_waypoints(pos: Vector3) -> Array:
+	var result := []
+	var gx := int(floor(pos.x / GRID_CELL_SIZE))
+	var gz := int(floor(pos.z / GRID_CELL_SIZE))
+
+	# Проверяем 9 ячеек (текущая + 8 соседних)
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			var key := "%d,%d" % [gx + dx, gz + dz]
+			if _spatial_grid.has(key):
+				result.append_array(_spatial_grid[key])
+	return result
+
+
+## Быстрый поиск пересечений с использованием пространственного индекса
+func _connect_intersections_fast(new_waypoints: Array) -> void:
+	"""Находит пересечения используя пространственный индекс O(1) вместо O(n)"""
+	# Проверяем только концы сегмента
+	var endpoints := []
+	if new_waypoints.size() > 0:
+		endpoints.append(new_waypoints[0])
+	if new_waypoints.size() > 1:
+		endpoints.append(new_waypoints[new_waypoints.size() - 1])
+
+	for new_wp in endpoints:
+		# Ищем только в соседних ячейках
+		var nearby := _get_nearby_waypoints(new_wp.position)
+
+		for existing_wp in nearby:
 			if existing_wp == new_wp:
+				continue
+			if existing_wp in new_waypoints:
 				continue
 
 			var distance: float = new_wp.position.distance_to(existing_wp.position)
 
-			# Если waypoints близко друг к другу - это пересечение
 			if distance < INTERSECTION_THRESHOLD:
-				# Создаём двусторонние связи
 				if not new_wp.next_waypoints.has(existing_wp):
 					new_wp.next_waypoints.append(existing_wp)
 				if not existing_wp.next_waypoints.has(new_wp):

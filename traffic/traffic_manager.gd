@@ -86,6 +86,10 @@ func _update_spawning() -> void:
 	if not terrain_generator:
 		return
 
+	# Проверяем что terrain_generator это OSMTerrainGenerator
+	if not terrain_generator is OSMTerrainGenerator:
+		return
+
 	var player_pos := _get_player_position()
 	var loaded_chunks: Dictionary = terrain_generator._loaded_chunks
 

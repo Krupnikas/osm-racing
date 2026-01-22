@@ -3,7 +3,7 @@ class_name CollisionSound
 
 ## Звук и эффект столкновения
 
-@export var min_impact_velocity := 2.0
+@export var min_impact_velocity := 5.0
 @export var max_volume := 5.0
 @export var min_volume := -5.0
 
@@ -58,7 +58,7 @@ func _physics_process(delta: float) -> void:
 	if velocity_change > min_impact_velocity and _cooldown <= 0:
 		_play_crash(velocity_change)
 		_spawn_sparks(velocity_change)
-		_cooldown = 0.25
+		_cooldown = 0.5
 
 func _play_crash(impact: float) -> void:
 	var sound := _crash_sounds[randi() % _crash_sounds.size()]
@@ -77,12 +77,12 @@ func _spawn_sparks(impact: float) -> void:
 	var forward_dir := _car.global_transform.basis.z
 	var collision_pos := _car.global_position + forward_dir * 2.0 + Vector3(0, 0.5, 0)
 
-	# === ГЛАВНЫЙ ВЗРЫВ - много больших ярких искр ===
+	# === ГЛАВНЫЙ ВЗРЫВ - искры ===
 	var explosion := GPUParticles3D.new()
 	explosion.emitting = true
 	explosion.one_shot = true
-	explosion.explosiveness = 1.0
-	explosion.amount = int(300 + impact_factor * 700)  # 300-1000 искр
+	explosion.explosiveness = 0.3  # Растянуть спавн для производительности
+	explosion.amount = int(30 + impact_factor * 70)  # 30-100 искр
 	explosion.lifetime = 1.0 + impact_factor * 0.5
 
 	var exp_mat := ParticleProcessMaterial.new()
@@ -112,12 +112,12 @@ func _spawn_sparks(impact: float) -> void:
 	explosion.global_position = collision_pos
 	get_tree().current_scene.add_child(explosion)
 
-	# === ОГНЕННОЕ ЯДРО - яркая вспышка в центре ===
+	# === ОГНЕННОЕ ЯДРО - вспышка в центре ===
 	var core := GPUParticles3D.new()
 	core.emitting = true
 	core.one_shot = true
-	core.explosiveness = 1.0
-	core.amount = int(50 + impact_factor * 100)
+	core.explosiveness = 0.3
+	core.amount = int(10 + impact_factor * 20)
 	core.lifetime = 0.3 + impact_factor * 0.2
 
 	var core_mat := ParticleProcessMaterial.new()
@@ -144,12 +144,12 @@ func _spawn_sparks(impact: float) -> void:
 	core.global_position = collision_pos
 	get_tree().current_scene.add_child(core)
 
-	# === РАЗЛЕТАЮЩИЕСЯ ИСКРЫ - длинные следы ===
+	# === РАЗЛЕТАЮЩИЕСЯ ИСКРЫ - следы ===
 	var trails := GPUParticles3D.new()
 	trails.emitting = true
 	trails.one_shot = true
-	trails.explosiveness = 0.9
-	trails.amount = int(100 + impact_factor * 200)
+	trails.explosiveness = 0.3
+	trails.amount = int(20 + impact_factor * 40)
 	trails.lifetime = 1.5 + impact_factor * 1.0
 
 	var trails_mat := ParticleProcessMaterial.new()
