@@ -33,8 +33,8 @@ var _compositor_effect_dof: CompositorEffect
 
 # Сохранённые значения
 var _saved_ssr_max_steps := 64
-var _saved_fog_density := 0.0008
-var _saved_glow_intensity := 0.3
+var _saved_fog_density := 0.0003
+var _saved_glow_intensity := 0.15
 
 
 func _ready() -> void:

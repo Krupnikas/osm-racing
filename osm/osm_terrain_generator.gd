@@ -66,6 +66,9 @@ var _building_queue: Array = []  # Очередь данных зданий дл
 var _building_results: Array = []  # Готовые данные мешей из потоков
 var _building_mutex: Mutex  # Для синхронизации доступа к результатам
 var _pending_building_tasks: int = 0  # Счётчик активных задач в пуле
+var _last_queue_size: int = 0  # Для отслеживания прогресса очереди
+var _queue_stuck_time: float = 0.0  # Время зависания очереди
+const QUEUE_STUCK_TIMEOUT := 5.0  # Таймаут зависшей очереди (секунд)
 
 # Отложенная генерация инфраструктуры (фонари, знаки, светофоры)
 var _infrastructure_queue: Array = []  # Очередь {type, pos, elevation, parent, ...}
@@ -335,8 +338,22 @@ func _check_initial_load_complete() -> void:
 		# Проверяем что все очереди обработаны (для плавности старта)
 		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks == 0
 		if not queues_empty:
-			# Очереди ещё не пусты - ждём следующего кадра
-			return
+			# Отслеживаем зависание очереди
+			if total_queued == _last_queue_size:
+				_queue_stuck_time += get_process_delta_time()
+				if _queue_stuck_time >= QUEUE_STUCK_TIMEOUT:
+					# Очередь зависла - принудительно сбрасываем pending tasks
+					print("OSM: Queue stuck at %d items for %.1fs, forcing completion..." % [total_queued, _queue_stuck_time])
+					_pending_building_tasks = 0
+					_queue_stuck_time = 0.0
+					# Продолжаем к финализации
+				else:
+					return
+			else:
+				_last_queue_size = total_queued
+				_queue_stuck_time = 0.0
+				return
+			# Если мы тут - либо очереди пусты, либо форсируем завершение
 
 		# Финализация: создаём фонари и знаки парковки СРАЗУ (без батчинга)
 		if _finalization_state == 0:
@@ -2831,20 +2848,22 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		accumulated_width += wall_width
 
 	# === ТРИАНГУЛЯЦИЯ КРЫШИ (тяжёлая операция) ===
-	var roof_indices_2d := Geometry2D.triangulate_polygon(points)
-
 	var roof_vertices := PackedVector3Array()
 	var roof_uvs := PackedVector2Array()
 	var roof_normals := PackedVector3Array()
 	var roof_indices := PackedInt32Array()
 
-	if roof_indices_2d.size() >= 3:
-		for p in points:
-			roof_vertices.append(Vector3(p.x, roof_y, p.y))
-			roof_uvs.append(Vector2(p.x * 0.1, p.y * 0.1))
-			roof_normals.append(Vector3.UP)
-		for idx in roof_indices_2d:
-			roof_indices.append(idx)
+	# Ограничиваем сложность полигонов (слишком много точек могут вызвать зависание)
+	if points.size() <= 100:
+		var roof_indices_2d := Geometry2D.triangulate_polygon(points)
+
+		if roof_indices_2d.size() >= 3:
+			for p in points:
+				roof_vertices.append(Vector3(p.x, roof_y, p.y))
+				roof_uvs.append(Vector2(p.x * 0.1, p.y * 0.1))
+				roof_normals.append(Vector3.UP)
+			for idx in roof_indices_2d:
+				roof_indices.append(idx)
 
 	# Сохраняем результат
 	var result := {
