@@ -394,6 +394,13 @@ func _update_graphics_checkboxes() -> void:
 		Viewport.MSAA_4X:
 			msaa_idx = 2
 	$SettingsPanel/VBox/MSAAOption.select(msaa_idx)
+	# Render distance slider
+	var slider := $SettingsPanel/VBox/RenderDistBox/RenderDistSlider as HSlider
+	if slider:
+		slider.set_value_no_signal(_graphics_settings.render_distance)
+	var label := $SettingsPanel/VBox/RenderDistBox/RenderDistValue as Label
+	if label:
+		label.text = "%.0f м" % _graphics_settings.render_distance
 
 
 func _on_ssr_toggled(toggled_on: bool) -> void:
@@ -461,3 +468,12 @@ func _on_vignette_toggled(toggled_on: bool) -> void:
 	if _graphics_settings:
 		_graphics_settings.vignette_enabled = toggled_on
 		_graphics_settings._apply_vignette()
+
+
+func _on_render_dist_changed(value: float) -> void:
+	if _graphics_settings:
+		_graphics_settings.set_render_distance(value)
+	# Обновляем метку
+	var label := $SettingsPanel/VBox/RenderDistBox/RenderDistValue as Label
+	if label:
+		label.text = "%.0f м" % value

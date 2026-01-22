@@ -17,11 +17,14 @@ var clouds_enabled := true
 var msaa_mode := Viewport.MSAA_DISABLED  # MSAA тяжёлый, по умолчанию выкл
 var taa_enabled := true  # TAA легче и лучше сглаживает
 
-# Дополнительные эффекты - по умолчанию выкл для производительности
+# Дополнительные эффекты
 var motion_blur_enabled := false
-var dof_enabled := false  # DOF тяжёлый
+var dof_enabled := true  # Размытие от расстояния
 var chromatic_aberration_enabled := false
-var vignette_enabled := false  # Виньетка легкая но не критична
+var vignette_enabled := true  # Виньетка
+
+# Дальность прорисовки
+var render_distance := 600.0  # Метры
 
 # Ссылки на сцену
 var _environment: Environment
@@ -43,6 +46,12 @@ func _ready() -> void:
 	_find_camera()
 	_load_settings()
 	_apply_all()
+	# Автосохранение при изменении настроек
+	settings_changed.connect(_on_settings_changed)
+
+
+func _on_settings_changed() -> void:
+	save_settings()
 
 
 func _find_environment() -> void:
@@ -117,6 +126,30 @@ func toggle_normal_maps() -> void:
 	print("Normal Maps: ", "ON" if normal_maps_enabled else "OFF")
 	# Normal maps применяются при создании материалов
 	settings_changed.emit()
+
+
+func set_render_distance(distance: float) -> void:
+	render_distance = clampf(distance, 100.0, 1000.0)
+	_apply_render_distance()
+	print("Render distance: %.0f m" % render_distance)
+	settings_changed.emit()
+
+
+func _apply_render_distance() -> void:
+	# Настраиваем камеру
+	if _camera:
+		_camera.far = render_distance * 1.5
+
+	# Настраиваем туман (Godot 4 экспоненциальный)
+	if _environment and fog_enabled:
+		_environment.fog_density = 0.8 / render_distance
+		_environment.fog_aerial_perspective = 0.5
+
+	# Обновляем terrain generator (включая дистанции чанков)
+	var terrain := get_tree().current_scene.find_child("OSMTerrainGenerator", true, false)
+	if terrain:
+		terrain.render_distance = render_distance
+		terrain._setup_render_distance()
 
 
 func toggle_clouds() -> void:
@@ -327,6 +360,7 @@ func _apply_all() -> void:
 	_apply_msaa()
 	_apply_dof()
 	_apply_vignette()
+	_apply_render_distance()
 
 
 func _load_settings() -> void:
@@ -344,6 +378,7 @@ func _load_settings() -> void:
 		motion_blur_enabled = config.get_value("graphics", "motion_blur", false)
 		dof_enabled = config.get_value("graphics", "dof", false)
 		vignette_enabled = config.get_value("graphics", "vignette", true)
+		render_distance = config.get_value("graphics", "render_distance", 400.0)
 
 
 func save_settings() -> void:
@@ -359,6 +394,7 @@ func save_settings() -> void:
 	config.set_value("graphics", "motion_blur", motion_blur_enabled)
 	config.set_value("graphics", "dof", dof_enabled)
 	config.set_value("graphics", "vignette", vignette_enabled)
+	config.set_value("graphics", "render_distance", render_distance)
 	config.save("user://graphics.cfg")
 
 

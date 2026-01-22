@@ -20,11 +20,13 @@ var _ground_textures: Dictionary = {}
 var _normal_textures: Dictionary = {}  # Normal maps
 var _textures_initialized := false
 
-@export var start_lat := 59.149886
+@export var start_lat := 59.150066
 @export var start_lon := 37.949370
 @export var chunk_size := 300.0  # Размер чанка в метрах
-@export var load_distance := 500.0  # Дистанция подгрузки
-@export var unload_distance := 800.0  # Дистанция выгрузки
+@export var load_distance := 500.0  # Дистанция подгрузки чанков
+@export var unload_distance := 800.0  # Дистанция выгрузки чанков
+@export var render_distance := 600.0  # Дальность прорисовки (и начало тумана)
+@export var fog_enabled := true  # Включить туман для скрытия края мира
 @export var car_path: NodePath
 @export var camera_path: NodePath
 @export var debug_print := false  # Выключить debug output для производительности
@@ -189,6 +191,9 @@ func _ready() -> void:
 	# Подключаемся к NightModeManager
 	await get_tree().process_frame
 	_connect_to_night_mode()
+
+	# Настраиваем дальность прорисовки и туман
+	_setup_render_distance()
 
 	print("OSM: Ready for loading (waiting for start_loading call)...")
 
@@ -4849,6 +4854,33 @@ func _connect_to_night_mode() -> void:
 		# Если уже ночь - включаем фонари
 		if night_manager.is_night:
 			_on_night_mode_changed(true)
+
+
+func _setup_render_distance() -> void:
+	"""Настраивает дальность прорисовки камеры, туман и дистанции чанков"""
+	# Настраиваем дистанции загрузки чанков
+	load_distance = render_distance + 100.0  # Загружаем чуть дальше видимости
+	unload_distance = render_distance + 300.0  # Выгружаем с запасом
+	print("OSM: Chunk distances - load: %.0f, unload: %.0f" % [load_distance, unload_distance])
+
+	# Настраиваем камеру
+	if _camera:
+		_camera.far = render_distance * 1.5  # Немного дальше тумана
+		print("OSM: Camera far plane set to %.0f" % _camera.far)
+
+	# Настраиваем туман (Godot 4 использует экспоненциальный туман)
+	if fog_enabled:
+		var world_env := get_tree().current_scene.find_child("WorldEnvironment", true, false) as WorldEnvironment
+		if world_env and world_env.environment:
+			var env := world_env.environment
+			env.fog_enabled = true
+			# Плотность тумана обратно пропорциональна дальности
+			# При 400м density ~= 0.002, при 100м ~= 0.008, при 800м ~= 0.001
+			env.fog_density = 0.8 / render_distance
+			env.fog_light_color = Color(0.7, 0.75, 0.85)  # Светло-серо-голубой
+			env.fog_light_energy = 1.0
+			env.fog_aerial_perspective = 0.5  # Эффект дымки на расстоянии
+			print("OSM: Fog enabled (density: %.4f for %.0fm)" % [env.fog_density, render_distance])
 
 
 func _on_night_mode_changed(enabled: bool) -> void:
