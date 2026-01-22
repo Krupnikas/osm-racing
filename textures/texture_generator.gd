@@ -28,7 +28,7 @@ static func create_road_texture(size: int = 256, lanes: int = 2, has_center_line
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 12345
 
-	var line_width := size / 40  # Ширина линии разметки
+	var line_width := size / 80  # Ширина линии разметки (тонкая)
 	var dash_length := size / 3  # Длина штриха
 	var gap_length := size / 3   # Длина промежутка
 
@@ -56,31 +56,22 @@ static func create_road_texture(size: int = 256, lanes: int = 2, has_center_line
 						var line_wear := 0.85 + rng.randf() * 0.1
 						color = Color(line_wear, line_wear, line_wear * 0.98)
 
-			# Краевые сплошные белые линии
-			if has_edge_lines:
-				var edge_margin := size / 12
-				if x < edge_margin + line_width and x >= edge_margin:
-					var line_wear := 0.8 + rng.randf() * 0.12
-					color = Color(line_wear, line_wear, line_wear * 0.98)
-				elif x > size - edge_margin - line_width and x <= size - edge_margin:
-					var line_wear := 0.8 + rng.randf() * 0.12
-					color = Color(line_wear, line_wear, line_wear * 0.98)
-
 			image.set_pixel(x, y, color)
 
 	var texture := ImageTexture.create_from_image(image)
 	return texture
 
-# Текстура широкой дороги (магистраль) с несколькими полосами
+# Текстура широкой дороги (шоссе) с двойной сплошной в центре
 static func create_highway_texture(size: int = 512, lanes: int = 4) -> ImageTexture:
 	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 23456
 
-	var line_width := size / 64
+	var line_width := size / 128
 	var dash_length := size / 4
 	var gap_length := size / 4
 	var lane_width := size / lanes
+	var center := size / 2
 
 	for y in range(size):
 		for x in range(size):
@@ -96,18 +87,13 @@ static func create_highway_texture(size: int = 512, lanes: int = 4) -> ImageText
 			base = clamp(base + grain + wear, 0.12, 0.30)
 			var color := Color(base, base * 0.98, base * 0.96)
 
-			# Краевые линии (сплошные белые с износом)
-			var edge_margin := size / 20
-			if x < edge_margin + line_width and x >= edge_margin:
-				var line_wear := 0.85 + rng.randf() * 0.1
-				color = Color(line_wear, line_wear, line_wear * 0.98)
-			elif x > size - edge_margin - line_width and x <= size - edge_margin:
-				var line_wear := 0.85 + rng.randf() * 0.1
-				color = Color(line_wear, line_wear, line_wear * 0.98)
-
 			# Разделительные линии между полосами (белые прерывистые)
+			# Пропускаем центральную полосу (lane 2 из 4) - там будет двойная сплошная
 			for lane_i in range(1, lanes):
 				var lane_x := lane_i * lane_width
+				# Пропускаем центр - там двойная сплошная
+				if lane_i == lanes / 2:
+					continue
 				if abs(x - lane_x) < line_width:
 					var dash_pos := y % (dash_length + gap_length)
 					if dash_pos < dash_length:
@@ -115,8 +101,57 @@ static func create_highway_texture(size: int = 512, lanes: int = 4) -> ImageText
 						color = Color(line_wear, line_wear, line_wear * 0.98)
 
 			# Центральная разделительная (двойная сплошная белая)
-			var center := size / 2
-			if abs(x - center - line_width * 2) < line_width or abs(x - center + line_width * 2) < line_width:
+			var double_line_gap := line_width * 2  # Промежуток между линиями
+			if abs(x - center - double_line_gap) < line_width or abs(x - center + double_line_gap) < line_width:
+				var line_wear := 0.88 + rng.randf() * 0.08
+				color = Color(line_wear, line_wear, line_wear * 0.98)
+
+			image.set_pixel(x, y, color)
+
+	var texture := ImageTexture.create_from_image(image)
+	return texture
+
+
+# Текстура primary дороги (одна сплошная в центре)
+static func create_primary_texture(size: int = 512, lanes: int = 4) -> ImageTexture:
+	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 23457
+
+	var line_width := size / 128
+	var dash_length := size / 4
+	var gap_length := size / 4
+	var lane_width := size / lanes
+	var center := size / 2
+
+	for y in range(size):
+		for x in range(size):
+			# Реалистичный тёмный асфальт
+			rng.seed = 23457 + x * 19 + y * 37
+			var base := 0.20 + rng.randf() * 0.06
+			# Крупнозернистая текстура
+			var grain := sin(float(x) * 0.6) * sin(float(y) * 0.6) * 0.015
+			# Износ и пятна
+			var wear := 0.0
+			if rng.randf() < 0.025:
+				wear = rng.randf() * 0.04 - 0.02
+			base = clamp(base + grain + wear, 0.14, 0.32)
+			var color := Color(base, base * 0.98, base * 0.96)
+
+			# Разделительные линии между полосами (белые прерывистые)
+			# Пропускаем центральную полосу - там будет сплошная
+			for lane_i in range(1, lanes):
+				var lane_x := lane_i * lane_width
+				if lane_i == lanes / 2:
+					continue
+				if abs(x - lane_x) < line_width:
+					var dash_pos := y % (dash_length + gap_length)
+					if dash_pos < dash_length:
+						var line_wear := 0.82 + rng.randf() * 0.1
+						color = Color(line_wear, line_wear, line_wear * 0.98)
+
+			# Центральная разделительная (одна сплошная белая)
+			if abs(x - center) < line_width:
 				var line_wear := 0.88 + rng.randf() * 0.08
 				color = Color(line_wear, line_wear, line_wear * 0.98)
 

@@ -196,7 +196,7 @@ func _init_textures() -> void:
 
 	# Текстуры дорог
 	_road_textures["highway"] = TextureGeneratorScript.create_highway_texture(512, 4)
-	_road_textures["primary"] = TextureGeneratorScript.create_highway_texture(512, 4)  # 4 полосы как магистраль
+	_road_textures["primary"] = TextureGeneratorScript.create_primary_texture(512, 4)  # Одна сплошная в центре
 	_road_textures["residential"] = TextureGeneratorScript.create_road_texture(256, 2, true, false)
 	_road_textures["path"] = TextureGeneratorScript.create_sidewalk_texture(256)
 
@@ -1365,10 +1365,13 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 		return
 
 	# Convert to local coordinates
-	var points: PackedVector2Array = []
+	var raw_points: PackedVector2Array = []
 	for node in nodes:
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
-		points.append(local)
+		raw_points.append(local)
+
+	# Smooth sharp corners with Catmull-Rom interpolation
+	var points: PackedVector2Array = _smooth_road_corners(raw_points)
 
 	# Z-fighting offset based on hash
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
@@ -5173,3 +5176,81 @@ func _find_closest_wall_to_point(building_points: PackedVector2Array, target_poi
 			}
 
 	return closest_wall
+
+
+# ============ ROAD SMOOTHING ============
+
+## Catmull-Rom spline interpolation
+func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) -> Vector2:
+	var t2: float = t * t
+	var t3: float = t2 * t
+	return (p1 * 2.0 + (-p0 + p2) * t + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 + (-p0 + p1 * 3.0 - p2 * 3.0 + p3) * t3) * 0.5
+
+
+## Smooths road geometry using Catmull-Rom spline interpolation
+## This creates smooth curves through all points
+func _smooth_road_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
+	if raw_points.size() < 3:
+		return raw_points
+
+	var result: PackedVector2Array = PackedVector2Array()
+
+	# Always add first point
+	result.append(raw_points[0])
+
+	# Interpolate between each pair of points using Catmull-Rom
+	for i in range(raw_points.size() - 1):
+		# Get 4 control points for Catmull-Rom (p0, p1, p2, p3)
+		var p0: Vector2 = raw_points[maxi(0, i - 1)]
+		var p1: Vector2 = raw_points[i]
+		var p2: Vector2 = raw_points[mini(raw_points.size() - 1, i + 1)]
+		var p3: Vector2 = raw_points[mini(raw_points.size() - 1, i + 2)]
+
+		# Calculate segment length to determine subdivision count
+		var seg_length: float = p1.distance_to(p2)
+
+		# Check angle at p1 (current point)
+		var angle_sharpness: float = 1.0
+		if i > 0:
+			var d1: Vector2 = (p1 - p0).normalized()
+			var d2: Vector2 = (p2 - p1).normalized()
+			var dot: float = d1.dot(d2)
+			# dot = 1 means straight, dot = -1 means 180° turn
+			# Convert to sharpness: 0 = straight, 1 = very sharp
+			angle_sharpness = (1.0 - dot) * 0.5
+
+		# More subdivisions for sharp turns and longer segments
+		var base_subdivisions: int = maxi(2, int(seg_length / 3.0))  # ~1 point per 3 meters
+		var subdivisions: int = base_subdivisions
+
+		# Add extra subdivisions for sharp corners
+		if angle_sharpness > 0.1:  # > ~25 degrees
+			subdivisions = maxi(subdivisions, 4)
+		if angle_sharpness > 0.25:  # > ~60 degrees
+			subdivisions = maxi(subdivisions, 6)
+		if angle_sharpness > 0.5:  # > ~90 degrees
+			subdivisions = maxi(subdivisions, 8)
+
+		# Cap at reasonable maximum
+		subdivisions = mini(subdivisions, 12)
+
+		# Interpolate from p1 to p2
+		for j in range(1, subdivisions):
+			var t: float = float(j) / float(subdivisions)
+			var interp: Vector2 = _catmull_rom(p0, p1, p2, p3, t)
+
+			# Only add if far enough from last point (avoid duplicates)
+			if result[result.size() - 1].distance_to(interp) > 0.3:
+				result.append(interp)
+
+		# Add the endpoint of this segment (p2) unless it's the last point
+		if i < raw_points.size() - 2:
+			if result[result.size() - 1].distance_to(p2) > 0.3:
+				result.append(p2)
+
+	# Always add last point
+	var last_point: Vector2 = raw_points[raw_points.size() - 1]
+	if result[result.size() - 1].distance_to(last_point) > 0.1:
+		result.append(last_point)
+
+	return result
