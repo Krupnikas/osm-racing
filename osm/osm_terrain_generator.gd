@@ -5656,52 +5656,11 @@ func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, 
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.mesh = mesh
 
-	# Материал с цветом (временно для отладки)
+	# Материал с текстурой перекрёстка
 	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(1.0, 0.3, 0.3, 0.7)  # Красный полупрозрачный
-	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_texture = _road_textures["intersection"]
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mesh_instance.material_override = material
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 	parent.add_child(mesh_instance)
-
-	# Второй эллипс (зелёный) - зона удаления бордюров (1.41x)
-	var curb_scale := 1.41
-	var st2 := SurfaceTool.new()
-	st2.begin(Mesh.PRIMITIVE_TRIANGLES)
-
-	st2.set_uv(Vector2(0.5, 0.5))
-	st2.set_normal(Vector3.UP)
-	st2.add_vertex(Vector3(pos.x, center_y + 0.01, pos.y))
-
-	for i in range(segments):
-		var angle := float(i) / segments * TAU
-		var ex := cos(angle) * radius_a * curb_scale
-		var ey := sin(angle) * radius_b * curb_scale
-		var rx := ex * cos_rot - ey * sin_rot
-		var ry := ex * sin_rot + ey * cos_rot
-		var x := pos.x + rx
-		var z := pos.y + ry
-		st2.set_uv(Vector2(0.5 + cos(angle) * 0.5, 0.5 + sin(angle) * 0.5))
-		st2.set_normal(Vector3.UP)
-		st2.add_vertex(Vector3(x, center_y + 0.01, z))
-
-	for i in range(segments):
-		var next_i := (i + 1) % segments
-		st2.add_index(0)
-		st2.add_index(i + 1)
-		st2.add_index(next_i + 1)
-
-	var mesh2 := st2.commit()
-	var mesh_instance2 := MeshInstance3D.new()
-	mesh_instance2.mesh = mesh2
-
-	var material2 := StandardMaterial3D.new()
-	material2.albedo_color = Color(0.3, 1.0, 0.3, 0.5)  # Зелёный полупрозрачный
-	material2.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	material2.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mesh_instance2.material_override = material2
-	mesh_instance2.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-
-	parent.add_child(mesh_instance2)
