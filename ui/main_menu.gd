@@ -166,9 +166,11 @@ func _start_game() -> void:
 		_hud.show_hud()
 
 	# Переключаем на следующий трек после загрузки
-	var music_manager = get_tree().current_scene.find_child("MusicManager", true, false)
-	if music_manager:
-		music_manager.play_next_track()
+	# MusicManager - это autoload (синглтон), доступен напрямую
+	if MusicManager:
+		print("MainMenu: calling play_next_track(), current index = ", MusicManager.current_track_index)
+		MusicManager.play_next_track()
+		print("MainMenu: after play_next_track(), new index = ", MusicManager.current_track_index)
 
 	# Скрываем меню
 	visible = false
