@@ -60,6 +60,8 @@ var _intersection_positions: Array[Vector2] = []  # Позиции перекр�
 var _intersection_radii: Array[Vector2] = []  # Полуоси эллипсов (x=вдоль широкой дороги, y=вдоль узкой)
 var _intersection_angles: Array[float] = []  # Углы поворота эллипсов (радианы, направление широкой дороги)
 var _intersection_types: Array[bool] = []  # true = равнозначный (все дороги одного типа)
+var _intersection_spatial_hash: Dictionary = {}  # Spatial hash для быстрого поиска перекрёстков
+const INTERSECTION_CELL_SIZE := 50.0  # Размер ячейки spatial hash в метрах
 var _created_lamp_positions: Dictionary = {}  # Позиции созданных фонарей для избежания дубликатов (ключ: chunk_key)
 var _created_sign_positions: Dictionary = {}  # Позиции созданных знаков для избежания дубликатов
 var _pending_lamps: Array = []  # Отложенные фонари (создаются после загрузки всех парковок)
@@ -82,6 +84,15 @@ var _infrastructure_queue: Array = []  # Очередь {type, pos, elevation, p
 # Отложенная генерация дорог и других тяжёлых объектов
 var _road_queue: Array = []  # Очередь {nodes, tags, parent, elev_data}
 var _curb_queue: Array = []  # Очередь бордюров (создаются после детекции перекрёстков)
+var _curb_smoothed_queue: Array = []  # Очередь сглаженных бордюров для генерации меша
+var _curb_mesh_state: Dictionary = {}  # Текущее состояние генерации меша бордюра (для разбивки по кадрам)
+var _curb_collision_results: Array = []  # Результаты расчёта коллизий из worker threads
+var _curb_collision_mutex: Mutex  # Для синхронизации доступа к результатам коллизий
+
+# Метрики времени для профилирования
+var _perf_metrics: Dictionary = {}
+var _perf_frame_count: int = 0
+var _perf_enabled: bool = true
 
 # Отложенная генерация terrain объектов (natural, landuse, leisure)
 var _terrain_objects_queue: Array = []  # Очередь {type, nodes, tags, parent, elev_data}
@@ -154,6 +165,7 @@ const ROAD_WIDTHS := {
 func _ready() -> void:
 	# Инициализируем mutex для многопоточности
 	_building_mutex = Mutex.new()
+	_curb_collision_mutex = Mutex.new()
 
 	osm_loader = OSMLoaderScript.new()
 	add_child(osm_loader)
@@ -233,23 +245,39 @@ func _init_textures() -> void:
 	print("OSM: Textures initialized in %d ms" % elapsed)
 
 func _process(delta: float) -> void:
-	var _frame_start := Time.get_ticks_msec()
+	var _frame_start := Time.get_ticks_usec()
 
 	# Обрабатываем готовые здания из worker threads (даже на паузе)
+	var t0 := Time.get_ticks_usec()
 	_process_building_results()
+	_record_perf("building_results", Time.get_ticks_usec() - t0)
 
 	# Обрабатываем очередь дорог (3 дороги за кадр)
+	t0 = Time.get_ticks_usec()
 	_process_road_queue()
+	_record_perf("road_queue", Time.get_ticks_usec() - t0)
 
 	# Обрабатываем очередь terrain объектов (2 за кадр)
+	t0 = Time.get_ticks_usec()
 	_process_terrain_objects_queue()
+	_record_perf("terrain_queue", Time.get_ticks_usec() - t0)
 
 	# Обрабатываем очередь инфраструктуры (1 объект за кадр)
+	t0 = Time.get_ticks_usec()
 	_process_infrastructure_queue()
+	_record_perf("infra_queue", Time.get_ticks_usec() - t0)
 
-	var _frame_time := Time.get_ticks_msec() - _frame_start
-	if debug_print and _frame_time > 10:
-		print("PROFILE: _process took %d ms (delta=%.1f ms, fps=%.0f)" % [_frame_time, delta * 1000, 1.0 / delta])
+	# Применяем коллизии бордюров из worker threads
+	t0 = Time.get_ticks_usec()
+	_apply_curb_collisions()
+	_record_perf("curb_collisions", Time.get_ticks_usec() - t0)
+
+	var _frame_time := (Time.get_ticks_usec() - _frame_start) / 1000.0
+	_record_perf("total_frame", int(_frame_time * 1000))
+
+	_perf_frame_count += 1
+	if _perf_enabled and _perf_frame_count % 600 == 0:  # Каждые 10 сек при 60fps
+		_print_perf_metrics()
 
 	# Обновляем debug статистику
 	_update_debug_stats(delta)
@@ -298,7 +326,13 @@ func start_loading() -> void:
 	_intersection_radii.clear()
 	_intersection_angles.clear()
 	_intersection_types.clear()
+	_intersection_spatial_hash.clear()  # Очищаем spatial hash
 	_curb_queue.clear()  # Очищаем очередь бордюров
+	_curb_smoothed_queue.clear()  # Очищаем очередь сглаженных бордюров
+	_curb_mesh_state.clear()  # Очищаем состояние генерации меша
+	_curb_collision_mutex.lock()
+	_curb_collision_results.clear()  # Очищаем очередь коллизий
+	_curb_collision_mutex.unlock()
 
 	# Определяем какие чанки нужны для старта (вокруг точки спавна)
 	_initial_chunks_needed = _get_needed_chunks(Vector3.ZERO)
@@ -1207,6 +1241,10 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			var needs_patch := (max_priority - min_priority) <= 1
 			_intersection_types.append(needs_patch)
 
+			# Добавляем в spatial hash
+			var idx := _intersection_positions.size() - 1
+			_add_intersection_to_spatial_hash(info["pos"], Vector2(radius_a, radius_b), idx)
+
 	# Второй проход: создаём все объекты
 	var skipped_buildings := 0
 	for way in ways:
@@ -1619,7 +1657,7 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 	mesh.material_override = material
 	parent.add_child(mesh)
 
-# Создаёт бордюры вдоль дороги
+# Создаёт бордюры вдоль дороги (старая версия для обратной совместимости)
 func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_height: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 2:
 		return
@@ -1631,6 +1669,14 @@ func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_hei
 
 	# Сглаживаем точки бордюров так же, как дороги
 	var points: PackedVector2Array = _smooth_road_corners(raw_points)
+
+	_create_curbs_from_points(points, road_width, road_height, curb_height, parent, elev_data)
+
+
+# Создаёт бордюры из уже сглаженных точек
+func _create_curbs_from_points(points: PackedVector2Array, road_width: float, road_height: float, curb_height: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
+	if points.size() < 2:
+		return
 
 	var curb_width := 0.15  # Ширина бордюра 15 см
 
@@ -1882,67 +1928,117 @@ func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_hei
 	material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
 	mesh.material_override = material
 
-	# Создаём StaticBody3D с коллизией для бордюров
-	var body := StaticBody3D.new()
-	body.collision_layer = 1  # Слой 1 - земля/дороги
-	body.collision_mask = 0   # Не реагируем ни на что
-	body.add_child(mesh)
+	parent.add_child(mesh)
+	# Примечание: коллизии создаются через инкрементальную систему (_finalize_curb_mesh)
 
-	# Создаём коллизии для каждого сегмента бордюра (тоже пропускаем перекрёстки)
-	for i in range(points.size() - 1):
-		var p1 := points[i]
-		var p2 := points[i + 1]
 
-		var dir := (p2 - p1).normalized()
-		var perp := Vector2(-dir.y, dir.x)
-		var offset := perp * (road_width * 0.5)
+## Вычисляет коллизии бордюра в worker thread
+func _compute_curb_collisions_thread(task: Dictionary) -> void:
+	var points: PackedVector2Array = task.points
+	var groups: Array = task.groups  # Уже вычисленные валидные сегменты из главного потока
+	var road_width: float = task.road_width
+	var road_height: float = task.road_height
+	var curb_height: float = task.curb_height
+	var curb_width: float = task.curb_width
+	var z_offset: float = task.z_offset
+	var elev_data: Dictionary = task.elev_data
 
-		# Пропускаем сегменты около перекрёстков (проверяем края бордюра)
-		var left1 := p1 + offset
-		var left2 := p2 + offset
-		var right1 := p1 - offset
-		var right2 := p2 - offset
-		if _is_point_in_intersection_ellipse(left1, curb_ellipse_scale) >= 0:
+	var collision_boxes: Array = []
+
+	# Создаём коллизии для каждого 3-го сегмента из валидных групп
+	var step := 3
+	for group in groups:
+		var g_idx := 0
+		while g_idx < group.size():
+			var i: int = group[g_idx]
+			# Берём конечную точку с учётом шага
+			var end_g_idx := mini(g_idx + step, group.size() - 1)
+			var end_i: int = group[end_g_idx]
+
+			var p1 := points[i]
+			var p2 := points[mini(end_i + 1, points.size() - 1)]
+
+			var segment_length := p1.distance_to(p2)
+			if segment_length < 0.5:
+				g_idx += step
+				continue
+
+			var dir := (p2 - p1).normalized()
+			var perp := Vector2(-dir.y, dir.x)
+
+			var h1 := _get_elevation_at_point(p1, elev_data)
+			var h2 := _get_elevation_at_point(p2, elev_data)
+			var avg_h := (h1 + h2) / 2.0 + road_height + curb_height * 0.5 + z_offset
+
+			var wall_angle := atan2(p2.y - p1.y, p2.x - p1.x)
+
+			# Левый бордюр
+			var left_center := (p1 + p2) / 2 + perp * (road_width * 0.5 + curb_width * 0.5)
+			collision_boxes.append({
+				"position": Vector3(left_center.x, avg_h, left_center.y),
+				"size": Vector3(segment_length, curb_height, curb_width),
+				"rotation_y": -wall_angle
+			})
+
+			# Правый бордюр
+			var right_center := (p1 + p2) / 2 - perp * (road_width * 0.5 + curb_width * 0.5)
+			collision_boxes.append({
+				"position": Vector3(right_center.x, avg_h, right_center.y),
+				"size": Vector3(segment_length, curb_height, curb_width),
+				"rotation_y": -wall_angle
+			})
+
+			g_idx += step
+
+	# Добавляем результат в очередь
+	if collision_boxes.size() > 0:
+		_curb_collision_mutex.lock()
+		_curb_collision_results.append({
+			"parent": task.parent,
+			"boxes": collision_boxes
+		})
+		_curb_collision_mutex.unlock()
+
+
+## Применяет рассчитанные коллизии бордюров (вызывается из _process)
+func _apply_curb_collisions() -> void:
+	if _curb_collision_results.is_empty():
+		return
+
+	_curb_collision_mutex.lock()
+	var results := _curb_collision_results.duplicate()
+	_curb_collision_results.clear()
+	_curb_collision_mutex.unlock()
+
+	# Применяем по 2 результата за кадр
+	var applied := 0
+	for result in results:
+		if applied >= 2:
+			# Возвращаем оставшиеся обратно
+			_curb_collision_mutex.lock()
+			_curb_collision_results.append(result)
+			_curb_collision_mutex.unlock()
 			continue
-		if _is_point_in_intersection_ellipse(left2, curb_ellipse_scale) >= 0:
-			continue
-		if _is_point_in_intersection_ellipse(right1, curb_ellipse_scale) >= 0:
-			continue
-		if _is_point_in_intersection_ellipse(right2, curb_ellipse_scale) >= 0:
+
+		if not is_instance_valid(result.parent):
 			continue
 
-		var segment_length := p1.distance_to(p2)
+		var body := StaticBody3D.new()
+		body.collision_layer = 1
+		body.collision_mask = 0
 
-		if segment_length < 0.5:
-			continue
+		for box in result.boxes:
+			var collision := CollisionShape3D.new()
+			var shape := BoxShape3D.new()
+			shape.size = box.size
+			collision.shape = shape
+			collision.position = box.position
+			collision.rotation.y = box.rotation_y
+			body.add_child(collision)
 
-		var h1 := _get_elevation_at_point(p1, elev_data)
-		var h2 := _get_elevation_at_point(p2, elev_data)
-		var avg_h := (h1 + h2) / 2.0 + road_height + curb_height * 0.5 + z_offset
+		result.parent.add_child(body)
+		applied += 1
 
-		var wall_angle := atan2(p2.y - p1.y, p2.x - p1.x)
-
-		# Левый бордюр
-		var left_center := (p1 + p2) / 2 + perp * (road_width * 0.5 + curb_width * 0.5)
-		var left_collision := CollisionShape3D.new()
-		var left_box := BoxShape3D.new()
-		left_box.size = Vector3(segment_length, curb_height, curb_width)
-		left_collision.shape = left_box
-		left_collision.position = Vector3(left_center.x, avg_h, left_center.y)
-		left_collision.rotation.y = -wall_angle
-		body.add_child(left_collision)
-
-		# Правый бордюр
-		var right_center := (p1 + p2) / 2 - perp * (road_width * 0.5 + curb_width * 0.5)
-		var right_collision := CollisionShape3D.new()
-		var right_box := BoxShape3D.new()
-		right_box.size = Vector3(segment_length, curb_height, curb_width)
-		right_collision.shape = right_box
-		right_collision.position = Vector3(right_center.x, avg_h, right_center.y)
-		right_collision.rotation.y = -wall_angle
-		body.add_child(right_collision)
-
-	parent.add_child(body)
 
 # Старая версия без текстур (для совместимости)
 func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: float, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
@@ -3269,8 +3365,7 @@ func _process_building_results() -> void:
 	if _building_results.is_empty():
 		return
 
-	var _t0 := Time.get_ticks_msec()
-
+	var t0 := Time.get_ticks_usec()
 	_building_mutex.lock()
 	var results_to_process := _building_results.duplicate()
 	_building_results.clear()
@@ -3278,10 +3373,14 @@ func _process_building_results() -> void:
 
 	# Сортируем здания по близости к игроку (если много в очереди)
 	if results_to_process.size() > 10 and _car:
+		var t_sort := Time.get_ticks_usec()
 		_sort_building_results_by_distance(results_to_process, _car.global_position)
+		_record_perf("building_sort", Time.get_ticks_usec() - t_sort)
 
 	# Применяем 1 здание за кадр для максимальной плавности
+	var t_apply := Time.get_ticks_usec()
 	_apply_building_mesh_result(results_to_process[0])
+	_record_perf("building_apply", Time.get_ticks_usec() - t_apply)
 
 	# Возвращаем оставшиеся обратно в очередь
 	if results_to_process.size() > 1:
@@ -3358,11 +3457,11 @@ func _process_road_queue() -> void:
 		_process_curb_queue()
 		return
 
-	var _t0 := Time.get_ticks_msec()
-
 	# Сортируем очередь по расстоянию до игрока (каждые 30 элементов)
 	if _road_queue.size() > 30 and _car:
+		var t0 := Time.get_ticks_usec()
 		_sort_queue_by_distance(_road_queue, _car.global_position)
+		_record_perf("road_sort", Time.get_ticks_usec() - t0)
 
 	# Обрабатываем 3 дороги за кадр (фиксированное количество для предсказуемости)
 	var max_per_frame := 3
@@ -3370,24 +3469,332 @@ func _process_road_queue() -> void:
 
 	while not _road_queue.is_empty() and processed < max_per_frame:
 		var item: Dictionary = _road_queue.pop_front()
+		var t0 := Time.get_ticks_usec()
 		_create_road_immediate(item.nodes, item.tags, item.parent, item.elev_data)
+		_record_perf("road_create", Time.get_ticks_usec() - t0)
 		processed += 1
 
 
 ## Обрабатывает очередь бордюров (после того как все перекрёстки определены)
 func _process_curb_queue() -> void:
-	if _curb_queue.is_empty():
+	# Этап 1: Сглаживание точек — 2 бордюра за кадр
+	var smoothed_count := 0
+	while not _curb_queue.is_empty() and smoothed_count < 2:
+		var item: Dictionary = _curb_queue.pop_front()
+		if is_instance_valid(item.parent) and item.nodes.size() >= 2:
+			var t0 := Time.get_ticks_usec()
+			var raw_points: PackedVector2Array = []
+			for node in item.nodes:
+				var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+				raw_points.append(local)
+			_record_perf("curb_latlon", Time.get_ticks_usec() - t0)
+
+			# Сглаживаем точки (полное сглаживание как для дорог)
+			t0 = Time.get_ticks_usec()
+			var smoothed_points: PackedVector2Array = _smooth_road_corners(raw_points)
+			_record_perf("curb_smooth", Time.get_ticks_usec() - t0)
+
+			# Добавляем в очередь для генерации меша
+			_curb_smoothed_queue.append({
+				"points": smoothed_points,
+				"width": item.width,
+				"height_offset": item.height_offset,
+				"curb_height": item.curb_height,
+				"parent": item.parent,
+				"elev_data": item.elev_data
+			})
+			smoothed_count += 1
+
+	# Этап 2: Инкрементальная генерация меша — обрабатываем до 50 сегментов за кадр
+	var t0 := Time.get_ticks_usec()
+	_process_curb_mesh_incremental(50)
+	_record_perf("curb_mesh", Time.get_ticks_usec() - t0)
+
+
+## Инкрементальная генерация меша бордюра
+func _process_curb_mesh_incremental(max_segments: int) -> void:
+	var segments_processed := 0
+
+	while segments_processed < max_segments:
+		# Если нет активного состояния, берём следующий бордюр из очереди
+		if _curb_mesh_state.is_empty():
+			if _curb_smoothed_queue.is_empty():
+				return
+			var item: Dictionary = _curb_smoothed_queue.pop_front()
+			if not is_instance_valid(item.parent):
+				continue
+			_init_curb_mesh_state(item)
+
+		# Обрабатываем сегменты
+		var remaining := max_segments - segments_processed
+		var processed := _process_curb_segments(remaining)
+		segments_processed += processed
+
+		# Если бордюр завершён, финализируем меш
+		if _curb_mesh_state.current_idx >= _curb_mesh_state.points.size() - 1:
+			_finalize_curb_mesh()
+			_curb_mesh_state.clear()
+
+
+## Инициализирует состояние для генерации меша бордюра
+func _init_curb_mesh_state(item: Dictionary) -> void:
+	var points: PackedVector2Array = item.points
+	var road_width: float = item.width
+	var curb_height: float = item.curb_height
+
+	var curb_width := 0.15
+	var hash_val := int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
+	var z_offset := hash_val * 0.0002
+	var curb_ellipse_scale := 1.41
+
+	# Предварительно вычисляем валидные сегменты
+	var valid_segments: Array[int] = []
+	for i in range(points.size() - 1):
+		var p1 := points[i]
+		var p2 := points[i + 1]
+		var dir := (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)
+		var offset := perp * (road_width * 0.5)
+		var left1 := p1 + offset
+		var left2 := p2 + offset
+		var right1 := p1 - offset
+		var right2 := p2 - offset
+		if _is_point_in_intersection_ellipse(left1, curb_ellipse_scale) < 0 and \
+		   _is_point_in_intersection_ellipse(left2, curb_ellipse_scale) < 0 and \
+		   _is_point_in_intersection_ellipse(right1, curb_ellipse_scale) < 0 and \
+		   _is_point_in_intersection_ellipse(right2, curb_ellipse_scale) < 0:
+			valid_segments.append(i)
+
+	# Разбиваем на группы непрерывных сегментов
+	var groups: Array[Array] = []
+	var current_group: Array[int] = []
+	for seg_idx in valid_segments:
+		if current_group.is_empty() or current_group[current_group.size() - 1] == seg_idx - 1:
+			current_group.append(seg_idx)
+		else:
+			if not current_group.is_empty():
+				groups.append(current_group.duplicate())
+			current_group = [seg_idx]
+	if not current_group.is_empty():
+		groups.append(current_group)
+
+	_curb_mesh_state = {
+		"points": points,
+		"road_width": road_width,
+		"road_height": item.height_offset,
+		"curb_height": curb_height,
+		"curb_width": curb_width,
+		"z_offset": z_offset,
+		"curb_ellipse_scale": curb_ellipse_scale,
+		"elev_data": item.elev_data,
+		"parent": item.parent,
+		"groups": groups,
+		"current_group_idx": 0,
+		"current_idx_in_group": 0,
+		"current_idx": 0,
+		"vertices": PackedVector3Array(),
+		"normals": PackedVector3Array(),
+		"indices": PackedInt32Array()
+	}
+
+
+## Обрабатывает сегменты бордюра
+func _process_curb_segments(max_count: int) -> int:
+	var state := _curb_mesh_state
+	var processed := 0
+	var points: PackedVector2Array = state.points
+	var groups: Array = state.groups
+	var road_width: float = state.road_width
+	var road_height: float = state.road_height
+	var curb_height: float = state.curb_height
+	var curb_width: float = state.curb_width
+	var z_offset: float = state.z_offset
+	var elev_data: Dictionary = state.elev_data
+	var vertices: PackedVector3Array = state.vertices
+	var normals: PackedVector3Array = state.normals
+	var indices: PackedInt32Array = state.indices
+
+	while processed < max_count and state.current_group_idx < groups.size():
+		var group: Array = groups[state.current_group_idx]
+		if state.current_idx_in_group >= group.size():
+			state.current_group_idx += 1
+			state.current_idx_in_group = 0
+			continue
+
+		var g_idx: int = state.current_idx_in_group
+		var i: int = group[g_idx]
+		var is_first := (g_idx == 0)
+		var is_last := (g_idx == group.size() - 1)
+
+		var p1 := points[i]
+		var p2 := points[i + 1]
+		var dir := (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)
+
+		var h1 := _get_elevation_at_point(p1, elev_data)
+		var h2 := _get_elevation_at_point(p2, elev_data)
+
+		var road_y1 := h1 + road_height + z_offset
+		var road_y2 := h2 + road_height + z_offset
+		var curb_y1 := h1 + road_height + curb_height + z_offset
+		var curb_y2 := h2 + road_height + curb_height + z_offset
+
+		var left_inner1 := p1 + perp * (road_width * 0.5)
+		var left_outer1 := p1 + perp * (road_width * 0.5 + curb_width)
+		var left_inner2 := p2 + perp * (road_width * 0.5)
+		var left_outer2 := p2 + perp * (road_width * 0.5 + curb_width)
+		var right_inner1 := p1 - perp * (road_width * 0.5)
+		var right_outer1 := p1 - perp * (road_width * 0.5 + curb_width)
+		var right_inner2 := p2 - perp * (road_width * 0.5)
+		var right_outer2 := p2 - perp * (road_width * 0.5 + curb_width)
+
+		var idx := vertices.size()
+
+		# Левый бордюр - внутренняя стенка
+		vertices.append(Vector3(left_inner1.x, road_y1, left_inner1.y))
+		vertices.append(Vector3(left_inner2.x, road_y2, left_inner2.y))
+		vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
+		vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
+		for _j in range(4):
+			normals.append(Vector3(-perp.x, 0, -perp.y))
+		indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
+		indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
+		idx = vertices.size()
+
+		# Верхняя грань левого бордюра
+		vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
+		vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
+		vertices.append(Vector3(left_outer2.x, curb_y2, left_outer2.y))
+		vertices.append(Vector3(left_outer1.x, curb_y1, left_outer1.y))
+		for _j in range(4):
+			normals.append(Vector3.UP)
+		indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
+		indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
+
+		# Торцы левого бордюра
+		if is_first:
+			idx = vertices.size()
+			vertices.append(Vector3(left_inner1.x, road_y1, left_inner1.y))
+			vertices.append(Vector3(left_outer1.x, road_y1, left_outer1.y))
+			vertices.append(Vector3(left_outer1.x, curb_y1, left_outer1.y))
+			vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
+			for _j in range(4):
+				normals.append(-dir.x * Vector3(1, 0, 0) - dir.y * Vector3(0, 0, 1))
+			indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
+			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
+		if is_last:
+			idx = vertices.size()
+			vertices.append(Vector3(left_inner2.x, road_y2, left_inner2.y))
+			vertices.append(Vector3(left_outer2.x, road_y2, left_outer2.y))
+			vertices.append(Vector3(left_outer2.x, curb_y2, left_outer2.y))
+			vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
+			for _j in range(4):
+				normals.append(dir.x * Vector3(1, 0, 0) + dir.y * Vector3(0, 0, 1))
+			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
+			indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
+
+		idx = vertices.size()
+
+		# Правый бордюр - внутренняя стенка
+		vertices.append(Vector3(right_inner1.x, road_y1, right_inner1.y))
+		vertices.append(Vector3(right_inner2.x, road_y2, right_inner2.y))
+		vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
+		vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
+		for _j in range(4):
+			normals.append(Vector3(perp.x, 0, perp.y))
+		indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
+		indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
+		idx = vertices.size()
+
+		# Верхняя грань правого бордюра
+		vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
+		vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
+		vertices.append(Vector3(right_outer2.x, curb_y2, right_outer2.y))
+		vertices.append(Vector3(right_outer1.x, curb_y1, right_outer1.y))
+		for _j in range(4):
+			normals.append(Vector3.UP)
+		indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
+		indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
+
+		# Торцы правого бордюра
+		if is_first:
+			idx = vertices.size()
+			vertices.append(Vector3(right_inner1.x, road_y1, right_inner1.y))
+			vertices.append(Vector3(right_outer1.x, road_y1, right_outer1.y))
+			vertices.append(Vector3(right_outer1.x, curb_y1, right_outer1.y))
+			vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
+			for _j in range(4):
+				normals.append(-dir.x * Vector3(1, 0, 0) - dir.y * Vector3(0, 0, 1))
+			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
+			indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
+		if is_last:
+			idx = vertices.size()
+			vertices.append(Vector3(right_inner2.x, road_y2, right_inner2.y))
+			vertices.append(Vector3(right_outer2.x, road_y2, right_outer2.y))
+			vertices.append(Vector3(right_outer2.x, curb_y2, right_outer2.y))
+			vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
+			for _j in range(4):
+				normals.append(dir.x * Vector3(1, 0, 0) + dir.y * Vector3(0, 0, 1))
+			indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
+			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
+
+		state.current_idx_in_group += 1
+		state.current_idx = i + 1
+		processed += 1
+
+	# Если все группы обработаны, помечаем завершение
+	if state.current_group_idx >= groups.size():
+		state.current_idx = points.size()
+
+	return processed
+
+
+## Финализирует меш бордюра и добавляет в сцену
+func _finalize_curb_mesh() -> void:
+	var state := _curb_mesh_state
+	var vertices: PackedVector3Array = state.vertices
+	var normals: PackedVector3Array = state.normals
+	var indices: PackedInt32Array = state.indices
+	var parent: Node3D = state.parent
+
+	if vertices.size() == 0 or not is_instance_valid(parent):
 		return
 
-	# Обрабатываем 5 бордюров за кадр
-	var max_per_frame := 5
-	var processed := 0
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = indices
 
-	while not _curb_queue.is_empty() and processed < max_per_frame:
-		var item: Dictionary = _curb_queue.pop_front()
-		if is_instance_valid(item.parent):
-			_create_curbs(item.nodes, item.width, item.height_offset, item.curb_height, item.parent, item.elev_data)
-		processed += 1
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	var mesh := MeshInstance3D.new()
+	mesh.mesh = arr_mesh
+	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.6, 0.6, 0.58)
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
+	mesh.material_override = material
+
+	parent.add_child(mesh)
+
+	# Запускаем расчёт коллизий в worker thread
+	# Передаём groups (уже вычисленные валидные сегменты) чтобы избежать race condition
+	var collision_task := {
+		"points": state.points,
+		"groups": state.groups,
+		"road_width": state.road_width,
+		"road_height": state.road_height,
+		"curb_height": state.curb_height,
+		"curb_width": state.curb_width,
+		"z_offset": state.z_offset,
+		"elev_data": state.elev_data,
+		"parent": parent
+	}
+	WorkerThreadPool.add_task(_compute_curb_collisions_thread.bind(collision_task))
 
 
 ## Сортирует очередь по расстоянию до игрока (ближайшие первые)
@@ -3453,11 +3860,11 @@ func _process_terrain_objects_queue() -> void:
 	if _terrain_objects_queue.is_empty():
 		return
 
-	var _t0 := Time.get_ticks_msec()
-
 	# Сортируем по расстоянию до игрока
 	if _terrain_objects_queue.size() > 20 and _car:
+		var t0 := Time.get_ticks_usec()
 		_sort_queue_by_distance(_terrain_objects_queue, _car.global_position)
+		_record_perf("terrain_sort", Time.get_ticks_usec() - t0)
 
 	var max_per_frame := 2  # Terrain objects могут быть тяжёлыми (деревья)
 	var processed := 0
@@ -3465,14 +3872,18 @@ func _process_terrain_objects_queue() -> void:
 	while not _terrain_objects_queue.is_empty() and processed < max_per_frame:
 		var item: Dictionary = _terrain_objects_queue.pop_front()
 		var obj_type: String = item.get("type", "")
+		var t0 := Time.get_ticks_usec()
 
 		match obj_type:
 			"natural":
 				_create_natural_immediate(item.nodes, item.tags, item.parent, item.elev_data)
+				_record_perf("terrain_natural", Time.get_ticks_usec() - t0)
 			"landuse":
 				_create_landuse_immediate(item.nodes, item.tags, item.parent, item.elev_data)
+				_record_perf("terrain_landuse", Time.get_ticks_usec() - t0)
 			"leisure":
 				_create_leisure_immediate(item.nodes, item.tags, item.parent, item.elev_data)
+				_record_perf("terrain_leisure", Time.get_ticks_usec() - t0)
 
 		processed += 1
 
@@ -3484,21 +3895,27 @@ func _process_infrastructure_queue() -> void:
 
 	# Сортируем по расстоянию до игрока
 	if _infrastructure_queue.size() > 20 and _car:
+		var t0 := Time.get_ticks_usec()
 		_sort_infrastructure_by_distance(_infrastructure_queue, _car.global_position)
+		_record_perf("infra_sort", Time.get_ticks_usec() - t0)
 
-	var _t0 := Time.get_ticks_msec()
 	var item: Dictionary = _infrastructure_queue.pop_front()
 	var item_type: String = item.get("type", "")
+	var t0 := Time.get_ticks_usec()
 
 	match item_type:
 		"lamp":
 			_create_street_lamp_immediate(item.pos, item.elevation, item.parent, item.get("direction", Vector2.ZERO))
+			_record_perf("infra_lamp", Time.get_ticks_usec() - t0)
 		"traffic_light":
 			_create_traffic_light_immediate(item.pos, item.elevation, item.parent)
+			_record_perf("infra_traffic_light", Time.get_ticks_usec() - t0)
 		"yield_sign":
 			_create_yield_sign_immediate(item.pos, item.elevation, item.parent)
+			_record_perf("infra_yield_sign", Time.get_ticks_usec() - t0)
 		"parking_sign":
 			_create_parking_sign_immediate(item.pos, item.elevation, item.rotation, item.parent)
+			_record_perf("infra_parking_sign", Time.get_ticks_usec() - t0)
 
 
 func _create_3d_building_with_texture(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
@@ -5525,6 +5942,16 @@ func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) 
 ## Smooths road geometry using Catmull-Rom spline interpolation
 ## This creates smooth curves through all points
 func _smooth_road_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
+	return _smooth_points(raw_points, 3.0, 12, 0.3)  # Полное сглаживание для дорог
+
+
+## Упрощённое сглаживание для бордюров (меньше точек)
+func _smooth_curb_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
+	return _smooth_points(raw_points, 8.0, 4, 1.5)  # Меньше точек для бордюров
+
+
+## Общая функция сглаживания с настраиваемыми параметрами
+func _smooth_points(raw_points: PackedVector2Array, meters_per_point: float, max_subdiv: int, min_dist: float) -> PackedVector2Array:
 	if raw_points.size() < 3:
 		return raw_points
 
@@ -5555,19 +5982,19 @@ func _smooth_road_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
 			angle_sharpness = (1.0 - dot) * 0.5
 
 		# More subdivisions for sharp turns and longer segments
-		var base_subdivisions: int = maxi(2, int(seg_length / 3.0))  # ~1 point per 3 meters
+		var base_subdivisions: int = maxi(2, int(seg_length / meters_per_point))
 		var subdivisions: int = base_subdivisions
 
 		# Add extra subdivisions for sharp corners
 		if angle_sharpness > 0.1:  # > ~25 degrees
-			subdivisions = maxi(subdivisions, 4)
+			subdivisions = maxi(subdivisions, mini(4, max_subdiv))
 		if angle_sharpness > 0.25:  # > ~60 degrees
-			subdivisions = maxi(subdivisions, 6)
+			subdivisions = maxi(subdivisions, mini(6, max_subdiv))
 		if angle_sharpness > 0.5:  # > ~90 degrees
-			subdivisions = maxi(subdivisions, 8)
+			subdivisions = maxi(subdivisions, max_subdiv)
 
-		# Cap at reasonable maximum
-		subdivisions = mini(subdivisions, 12)
+		# Cap at maximum
+		subdivisions = mini(subdivisions, max_subdiv)
 
 		# Interpolate from p1 to p2
 		for j in range(1, subdivisions):
@@ -5575,12 +6002,12 @@ func _smooth_road_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
 			var interp: Vector2 = _catmull_rom(p0, p1, p2, p3, t)
 
 			# Only add if far enough from last point (avoid duplicates)
-			if result[result.size() - 1].distance_to(interp) > 0.3:
+			if result[result.size() - 1].distance_to(interp) > min_dist:
 				result.append(interp)
 
 		# Add the endpoint of this segment (p2) unless it's the last point
 		if i < raw_points.size() - 2:
-			if result[result.size() - 1].distance_to(p2) > 0.3:
+			if result[result.size() - 1].distance_to(p2) > min_dist:
 				result.append(p2)
 
 	# Always add last point
@@ -5637,8 +6064,39 @@ func _find_nearest_intersection(pos: Vector2, max_dist: float) -> int:
 
 
 ## Проверяет, находится ли точка внутри эллипса перекрёстка (с масштабом)
+## Добавляет перекрёсток в spatial hash
+func _add_intersection_to_spatial_hash(pos: Vector2, radii: Vector2, idx: int) -> void:
+	# Определяем bounding box перекрёстка с учётом максимального радиуса
+	var max_radius := maxf(radii.x, radii.y) * 1.5  # С запасом для scale
+	var min_cell_x := int(floor((pos.x - max_radius) / INTERSECTION_CELL_SIZE))
+	var max_cell_x := int(floor((pos.x + max_radius) / INTERSECTION_CELL_SIZE))
+	var min_cell_y := int(floor((pos.y - max_radius) / INTERSECTION_CELL_SIZE))
+	var max_cell_y := int(floor((pos.y + max_radius) / INTERSECTION_CELL_SIZE))
+
+	# Добавляем индекс во все затронутые ячейки
+	for cx in range(min_cell_x, max_cell_x + 1):
+		for cy in range(min_cell_y, max_cell_y + 1):
+			var key := Vector2i(cx, cy)
+			if not _intersection_spatial_hash.has(key):
+				_intersection_spatial_hash[key] = []
+			_intersection_spatial_hash[key].append(idx)
+
+
+## Получает индексы перекрёстков рядом с точкой через spatial hash
+func _get_nearby_intersections(pos: Vector2) -> Array:
+	var cell_x := int(floor(pos.x / INTERSECTION_CELL_SIZE))
+	var cell_y := int(floor(pos.y / INTERSECTION_CELL_SIZE))
+	var key := Vector2i(cell_x, cell_y)
+	if _intersection_spatial_hash.has(key):
+		return _intersection_spatial_hash[key]
+	return []
+
+
 func _is_point_in_intersection_ellipse(pos: Vector2, scale: float = 1.0) -> int:
-	for i in range(_intersection_positions.size()):
+	# Используем spatial hash для быстрого поиска
+	var nearby := _get_nearby_intersections(pos)
+
+	for i in nearby:
 		var center: Vector2 = _intersection_positions[i]
 		var radii: Vector2 = _intersection_radii[i] * scale
 		var angle: float = _intersection_angles[i]
@@ -5717,3 +6175,54 @@ func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, 
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 	parent.add_child(mesh_instance)
+
+
+## Записывает метрику времени
+func _record_perf(name: String, time_usec: int) -> void:
+	if not _perf_enabled:
+		return
+	if not _perf_metrics.has(name):
+		_perf_metrics[name] = {"total": 0, "count": 0, "max": 0, "samples": []}
+	var m: Dictionary = _perf_metrics[name]
+	m.total += time_usec
+	m.count += 1
+	if time_usec > m.max:
+		m.max = time_usec
+	# Храним последние 100 сэмплов для расчёта медианы
+	if m.samples.size() < 100:
+		m.samples.append(time_usec)
+	else:
+		m.samples[m.count % 100] = time_usec
+
+
+## Выводит метрики в консоль
+func _print_perf_metrics() -> void:
+	print("\n========== PERFORMANCE METRICS ==========")
+	print("Frames: %d" % _perf_frame_count)
+
+	var sorted_keys := _perf_metrics.keys()
+	sorted_keys.sort_custom(func(a, b):
+		return _perf_metrics[a].total > _perf_metrics[b].total
+	)
+
+	for name in sorted_keys:
+		var m: Dictionary = _perf_metrics[name]
+		if m.count == 0:
+			continue
+		var avg: float = float(m.total) / float(m.count)
+		var samples: Array = m.samples.duplicate()
+		samples.sort()
+		var median: float = float(samples[samples.size() / 2]) if samples.size() > 0 else 0.0
+		print("  %s: avg=%.2f ms, median=%.2f ms, max=%.2f ms, calls=%d, total=%.1f ms" % [
+			name,
+			avg / 1000.0,
+			median / 1000.0,
+			float(m.max) / 1000.0,
+			m.count,
+			float(m.total) / 1000.0
+		])
+
+	print("==========================================\n")
+	# Сбрасываем метрики
+	_perf_metrics.clear()
+	_perf_frame_count = 0

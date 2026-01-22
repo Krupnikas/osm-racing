@@ -15,7 +15,7 @@ class_name VehicleBase
 
 ## Физика двигателя
 @export_group("Engine")
-@export var max_engine_power := 300.0  ## Максимальная мощность двигателя (Н·м)
+@export var max_engine_power := 450.0  ## Максимальная мощность двигателя (Н·м)
 @export var max_rpm := 7000.0  ## Максимальные обороты
 @export var idle_rpm := 900.0  ## Обороты холостого хода
 @export var gear_ratios: Array[float] = [-3.5, 0.0, 3.5, 2.2, 1.4, 1.0, 0.8]  ## Передаточные числа (R, N, 1-5)
