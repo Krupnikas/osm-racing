@@ -13,9 +13,10 @@ var ssao_enabled := true
 var normal_maps_enabled := true
 var clouds_enabled := true
 
-# Antialiasing - по умолчанию только TAA (легче чем MSAA)
-var msaa_mode := Viewport.MSAA_DISABLED  # MSAA тяжёлый, по умолчанию выкл
-var taa_enabled := true  # TAA легче и лучше сглаживает
+# Antialiasing - только MSAA 4X (TAA даёт размытие на скорости)
+var msaa_mode := Viewport.MSAA_4X  # MSAA 4X для чётких краёв без размытия
+var taa_enabled := false  # TAA выключен - размывает на скорости
+var fxaa_enabled := true  # FXAA для сглаживания шума
 
 # Дополнительные эффекты
 var motion_blur_enabled := false
@@ -91,6 +92,8 @@ func _input(event: InputEvent) -> void:
 				set_quality_medium()
 			KEY_F9:
 				set_quality_high()
+			KEY_F10:
+				toggle_fxaa()
 
 
 func toggle_ssr() -> void:
@@ -187,6 +190,13 @@ func set_msaa(mode: Viewport.MSAA) -> void:
 	settings_changed.emit()
 
 
+func toggle_fxaa() -> void:
+	fxaa_enabled = not fxaa_enabled
+	_apply_fxaa()
+	print("FXAA: ", "ON" if fxaa_enabled else "OFF")
+	settings_changed.emit()
+
+
 func toggle_motion_blur() -> void:
 	motion_blur_enabled = not motion_blur_enabled
 	_apply_motion_blur()
@@ -245,6 +255,15 @@ func _apply_msaa() -> void:
 	var viewport := get_viewport()
 	if viewport:
 		viewport.msaa_3d = msaa_mode
+
+
+func _apply_fxaa() -> void:
+	var viewport := get_viewport()
+	if viewport:
+		if fxaa_enabled:
+			viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
+		else:
+			viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
 
 
 func _apply_motion_blur() -> void:
@@ -358,6 +377,7 @@ func _apply_all() -> void:
 	_apply_ssao()
 	_apply_taa()
 	_apply_msaa()
+	_apply_fxaa()
 	_apply_dof()
 	_apply_vignette()
 	_apply_render_distance()
@@ -373,8 +393,9 @@ func _load_settings() -> void:
 		ssao_enabled = config.get_value("graphics", "ssao", true)
 		normal_maps_enabled = config.get_value("graphics", "normal_maps", true)
 		clouds_enabled = config.get_value("graphics", "clouds", true)
-		msaa_mode = config.get_value("graphics", "msaa", Viewport.MSAA_2X)
-		taa_enabled = config.get_value("graphics", "taa", true)
+		msaa_mode = config.get_value("graphics", "msaa", Viewport.MSAA_4X)
+		taa_enabled = config.get_value("graphics", "taa", false)
+		fxaa_enabled = config.get_value("graphics", "fxaa", true)
 		motion_blur_enabled = config.get_value("graphics", "motion_blur", false)
 		dof_enabled = config.get_value("graphics", "dof", false)
 		vignette_enabled = config.get_value("graphics", "vignette", true)
@@ -391,6 +412,7 @@ func save_settings() -> void:
 	config.set_value("graphics", "clouds", clouds_enabled)
 	config.set_value("graphics", "msaa", msaa_mode)
 	config.set_value("graphics", "taa", taa_enabled)
+	config.set_value("graphics", "fxaa", fxaa_enabled)
 	config.set_value("graphics", "motion_blur", motion_blur_enabled)
 	config.set_value("graphics", "dof", dof_enabled)
 	config.set_value("graphics", "vignette", vignette_enabled)

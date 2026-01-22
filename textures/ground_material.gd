@@ -48,7 +48,7 @@ static func create_ground_material(is_wet: bool = false, is_night: bool = false)
 	if normal_tex:
 		mat.normal_enabled = true
 		mat.normal_texture = normal_tex
-		mat.normal_scale = 1.0
+		mat.normal_scale = 0.3  # Уменьшено для меньшего шума
 	if ao_tex:
 		mat.ao_enabled = true
 		mat.ao_texture = ao_tex

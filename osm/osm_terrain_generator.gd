@@ -97,6 +97,9 @@ var _perf_enabled: bool = true
 # Отложенная генерация terrain объектов (natural, landuse, leisure)
 var _terrain_objects_queue: Array = []  # Очередь {type, nodes, tags, parent, elev_data}
 
+# Очередь растительности (деревья, кусты, трава) - обрабатывается отдельно с меньшим приоритетом
+var _vegetation_queue: Array = []  # Очередь {type, points, elev_data, parent, dense}
+
 # FPS статистика для отображения на экране
 var _fps_samples: Array[float] = []
 var _fps_update_timer := 0.0
@@ -270,6 +273,11 @@ func _process(delta: float) -> void:
 	t0 = Time.get_ticks_usec()
 	_process_infrastructure_queue()
 	_record_perf("infra_queue", Time.get_ticks_usec() - t0)
+
+	# Обрабатываем очередь растительности (1 за кадр, низкий приоритет)
+	t0 = Time.get_ticks_usec()
+	_process_vegetation_queue()
+	_record_perf("vegetation_queue", Time.get_ticks_usec() - t0)
 
 	# Применяем коллизии бордюров из worker threads
 	t0 = Time.get_ticks_usec()
@@ -953,6 +961,9 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: String, loader: Node) -> void:
 	await _generate_terrain(osm_data, chunk_node, chunk_key)
 	loader.queue_free()
+
+	# Генерируем растительность на пустых участках чанка
+	_queue_chunk_vegetation(chunk_key, chunk_node)
 
 	# Создаём фонари для этого чанка (если не начальная загрузка)
 	if not _initial_loading:
@@ -1651,7 +1662,7 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 		if _normal_textures.has("asphalt"):
 			material.normal_enabled = true
 			material.normal_texture = _normal_textures["asphalt"]
-			material.normal_scale = 0.6
+			material.normal_scale = 0.3  # Уменьшено для меньшего шума
 	else:
 		material.albedo_color = COLORS.get("road_residential", Color(0.4, 0.4, 0.4))
 
@@ -2363,7 +2374,7 @@ func _create_parking_surface(points: PackedVector2Array, elev_data: Dictionary, 
 	if _normal_textures.has("asphalt"):
 		material.normal_enabled = true
 		material.normal_texture = _normal_textures["asphalt"]
-		material.normal_scale = 0.5
+		material.normal_scale = 0.3  # Уменьшено для меньшего шума
 
 	if _is_wet_mode:
 		WetRoadMaterial.apply_wet_properties(material, true, _is_night_mode)
@@ -3922,6 +3933,30 @@ func _process_infrastructure_queue() -> void:
 			_record_perf("infra_parking_sign", Time.get_ticks_usec() - t0)
 
 
+## Обрабатывает очередь растительности (1 за кадр, низкий приоритет)
+func _process_vegetation_queue() -> void:
+	if _vegetation_queue.is_empty():
+		return
+
+	var item: Dictionary = _vegetation_queue.pop_front()
+	var veg_type: String = item.get("type", "")
+	var t0 := Time.get_ticks_usec()
+
+	if not is_instance_valid(item.get("parent")):
+		return
+
+	match veg_type:
+		"trees":
+			_create_trees_immediate(item.points, item.elev_data, item.parent, item.dense)
+			_record_perf("veg_trees", Time.get_ticks_usec() - t0)
+		"vegetation":
+			_create_vegetation_immediate(item.points, item.elev_data, item.parent, item.dense)
+			_record_perf("veg_bushes_grass", Time.get_ticks_usec() - t0)
+		"chunk_vegetation":
+			_create_chunk_vegetation_immediate(item.chunk_key, item.points, item.elev_data, item.parent)
+			_record_perf("veg_chunk", Time.get_ticks_usec() - t0)
+
+
 func _create_3d_building_with_texture(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
 	# Минимум 4 точки для нормального здания (3 - треугольник, плохо)
 	if points.size() < 4:
@@ -4611,9 +4646,33 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	parent.add_child(lamp)
 
 
-# Процедурная генерация деревьев в полигоне (парк, лес)
+# Процедурная генерация деревьев в полигоне (парк, лес) - добавляет в очередь
 func _generate_trees_in_polygon(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D, dense: bool = false) -> void:
 	if points.size() < 3:
+		return
+
+	# Добавляем в очередь растительности для обработки по кадрам
+	_vegetation_queue.append({
+		"type": "trees",
+		"points": points,
+		"elev_data": elev_data,
+		"parent": parent,
+		"dense": dense
+	})
+
+	# Также добавляем траву и кусты в парках и на газонах
+	_vegetation_queue.append({
+		"type": "vegetation",
+		"points": points,
+		"elev_data": elev_data,
+		"parent": parent,
+		"dense": dense
+	})
+
+
+# Немедленное создание деревьев (вызывается из очереди)
+func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D, dense: bool = false) -> void:
+	if not is_instance_valid(parent):
 		return
 
 	# Вычисляем bounding box
@@ -4636,18 +4695,15 @@ func _generate_trees_in_polygon(points: PackedVector2Array, elev_data: Dictionar
 	var tree_count := 0
 
 	# Используем хаотичное размещение на основе хеша координат полигона
-	# Генерируем псевдослучайные точки внутри bounding box
 	var seed_value := int(abs(min_x * 1000 + min_y * 100 + width * 10 + height)) % 10000
-	var avg_spacing := 12.0 if dense else 20.0  # Среднее расстояние между деревьями
+	var avg_spacing := 12.0 if dense else 20.0
 	var estimated_trees := int((width * height) / (avg_spacing * avg_spacing))
 	estimated_trees = mini(estimated_trees, max_trees)
 
 	for i in range(estimated_trees):
-		# Генерируем псевдослучайные координаты используя разные множители
-		var hash1 := fmod(float(seed_value + i * 7919) * 0.61803398875, 1.0)  # Золотое сечение
-		var hash2 := fmod(float(seed_value + i * 104729) * 0.41421356237, 1.0)  # sqrt(2) - 1
+		var hash1 := fmod(float(seed_value + i * 7919) * 0.61803398875, 1.0)
+		var hash2 := fmod(float(seed_value + i * 104729) * 0.41421356237, 1.0)
 
-		# Добавляем вторичное смещение для большей хаотичности
 		var hash3 := fmod(hash1 * 17.0 + hash2 * 31.0, 1.0)
 		var hash4 := fmod(hash2 * 23.0 + hash1 * 13.0, 1.0)
 
@@ -4655,9 +4711,7 @@ func _generate_trees_in_polygon(points: PackedVector2Array, elev_data: Dictionar
 		var test_y := min_y + (hash2 * 0.7 + hash4 * 0.3) * height
 		var test_point := Vector2(test_x, test_y)
 
-		# Проверяем что точка внутри полигона
 		if Geometry2D.is_point_in_polygon(test_point, points):
-			# Пропускаем деревья слишком близко к дорогам (минимум 3 метра от края дороги)
 			if _is_point_near_road(test_point, 3.0):
 				continue
 
@@ -4667,6 +4721,435 @@ func _generate_trees_in_polygon(points: PackedVector2Array, elev_data: Dictionar
 
 			if tree_count >= max_trees:
 				break
+
+
+# Немедленное создание травы и кустов (вызывается из очереди, без коллизий)
+func _create_vegetation_immediate(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D, dense: bool = false) -> void:
+	if points.size() < 3:
+		return
+
+	# Вычисляем bounding box
+	var min_x := points[0].x
+	var max_x := points[0].x
+	var min_y := points[0].y
+	var max_y := points[0].y
+
+	for p in points:
+		min_x = min(min_x, p.x)
+		max_x = max(max_x, p.x)
+		min_y = min(min_y, p.y)
+		max_y = max(max_y, p.y)
+
+	var width := max_x - min_x
+	var height := max_y - min_y
+	var area := width * height
+
+	# Пропускаем слишком маленькие или большие полигоны
+	if area < 100.0 or area > 50000.0:
+		return
+
+	# Создаём контейнер для растительности
+	var veg_container := Node3D.new()
+	veg_container.name = "Vegetation"
+	parent.add_child(veg_container)
+
+	# Генерация кустов с использованием MultiMesh
+	var bush_count := mini(int(area * 0.005), 30)  # ~5 кустов на 1000 кв.м
+	if dense:
+		bush_count = mini(int(area * 0.01), 50)
+
+	if bush_count > 0:
+		_create_bush_multimesh(points, bush_count, elev_data, veg_container)
+
+	# Генерация травяных пучков с использованием MultiMesh
+	var grass_count := mini(int(area * 0.02), 100)  # ~20 пучков на 1000 кв.м
+	if dense:
+		grass_count = mini(int(area * 0.05), 200)
+
+	if grass_count > 0:
+		_create_grass_multimesh(points, grass_count, elev_data, veg_container)
+
+
+# Создаёт MultiMesh с кустами
+func _create_bush_multimesh(points: PackedVector2Array, count: int, elev_data: Dictionary, parent: Node3D) -> void:
+	var min_x := points[0].x
+	var max_x := points[0].x
+	var min_y := points[0].y
+	var max_y := points[0].y
+
+	for p in points:
+		min_x = min(min_x, p.x)
+		max_x = max(max_x, p.x)
+		min_y = min(min_y, p.y)
+		max_y = max(max_y, p.y)
+
+	var width := max_x - min_x
+	var height := max_y - min_y
+
+	# Создаём меш куста
+	var bush_mesh := _create_bush_mesh()
+
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = bush_mesh
+	multimesh.instance_count = count
+
+	var seed_value := int(abs(min_x * 1000 + min_y * 100)) % 10000
+	var valid_count := 0
+
+	for i in range(count * 3):  # Пробуем больше точек чтобы набрать нужное количество
+		if valid_count >= count:
+			break
+
+		var hash1 := fmod(float(seed_value + i * 7919) * 0.61803398875, 1.0)
+		var hash2 := fmod(float(seed_value + i * 104729) * 0.41421356237, 1.0)
+
+		var test_x := min_x + hash1 * width
+		var test_y := min_y + hash2 * height
+		var test_point := Vector2(test_x, test_y)
+
+		if Geometry2D.is_point_in_polygon(test_point, points):
+			if _is_point_near_road(test_point, 2.0):
+				continue
+
+			var elevation := _get_elevation_at_point(test_point, elev_data)
+			var transform := Transform3D()
+
+			# Случайный поворот
+			var rotation := fmod(float(seed_value + i * 31) * 2.718281828, TAU)
+			transform = transform.rotated(Vector3.UP, rotation)
+
+			# Случайный масштаб
+			var scale_factor := 0.6 + fmod(float(seed_value + i * 17) * 1.414, 0.8)
+			transform = transform.scaled(Vector3(scale_factor, scale_factor, scale_factor))
+
+			# Позиция
+			transform.origin = Vector3(test_x, elevation, test_y)
+
+			multimesh.set_instance_transform(valid_count, transform)
+			valid_count += 1
+
+	if valid_count == 0:
+		return
+
+	multimesh.instance_count = valid_count
+
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = "Bushes"
+	mmi.multimesh = multimesh
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mmi)
+
+
+# Создаёт меш куста (низкополигональный)
+func _create_bush_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var radius := 0.5
+	var height := 0.6
+	var segments := 6
+	var layers := 2
+	var base_color := Color(0.0, 0.0, 1.0)  # DEBUG: Синий для отладки
+
+	for layer in range(layers):
+		var layer_height: float = height * float(layer) / float(layers)
+		var layer_radius: float = radius * (1.0 - float(layer) / float(layers) * 0.4)
+		var color: Color = base_color.lightened(float(layer) * 0.12)
+
+		for i in range(segments):
+			var angle1: float = TAU * float(i) / float(segments)
+			var angle2: float = TAU * float(i + 1) / float(segments)
+
+			var x1 := cos(angle1) * layer_radius
+			var z1 := sin(angle1) * layer_radius
+			var x2 := cos(angle2) * layer_radius
+			var z2 := sin(angle2) * layer_radius
+
+			st.set_color(color)
+			st.set_normal(Vector3(cos(angle1), 0.5, sin(angle1)).normalized())
+			st.add_vertex(Vector3(x1, layer_height, z1))
+
+			st.set_normal(Vector3(cos(angle2), 0.5, sin(angle2)).normalized())
+			st.add_vertex(Vector3(x2, layer_height, z2))
+
+			st.set_color(color.lightened(0.15))
+			st.set_normal(Vector3.UP)
+			st.add_vertex(Vector3(0, layer_height + height / float(layers), 0))
+
+	st.generate_normals()
+	return st.commit()
+
+
+# Создаёт MultiMesh с травой
+func _create_grass_multimesh(points: PackedVector2Array, count: int, elev_data: Dictionary, parent: Node3D) -> void:
+	var min_x := points[0].x
+	var max_x := points[0].x
+	var min_y := points[0].y
+	var max_y := points[0].y
+
+	for p in points:
+		min_x = min(min_x, p.x)
+		max_x = max(max_x, p.x)
+		min_y = min(min_y, p.y)
+		max_y = max(max_y, p.y)
+
+	var width := max_x - min_x
+	var height := max_y - min_y
+
+	# Создаём меш пучка травы
+	var grass_mesh := _create_grass_clump_mesh()
+
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = grass_mesh
+	multimesh.instance_count = count
+
+	var seed_value := int(abs(min_x * 1234 + min_y * 567)) % 10000
+	var valid_count := 0
+
+	for i in range(count * 3):
+		if valid_count >= count:
+			break
+
+		var hash1 := fmod(float(seed_value + i * 6271) * 0.61803398875, 1.0)
+		var hash2 := fmod(float(seed_value + i * 89123) * 0.41421356237, 1.0)
+
+		var test_x := min_x + hash1 * width
+		var test_y := min_y + hash2 * height
+		var test_point := Vector2(test_x, test_y)
+
+		if Geometry2D.is_point_in_polygon(test_point, points):
+			if _is_point_near_road(test_point, 1.5):
+				continue
+
+			var elevation := _get_elevation_at_point(test_point, elev_data)
+			var transform := Transform3D()
+
+			var rotation := fmod(float(seed_value + i * 41) * 2.718281828, TAU)
+			transform = transform.rotated(Vector3.UP, rotation)
+
+			var scale_factor := 0.7 + fmod(float(seed_value + i * 23) * 1.618, 0.6)
+			transform = transform.scaled(Vector3(scale_factor, scale_factor, scale_factor))
+
+			transform.origin = Vector3(test_x, elevation, test_y)
+
+			multimesh.set_instance_transform(valid_count, transform)
+			valid_count += 1
+
+	if valid_count == 0:
+		return
+
+	multimesh.instance_count = valid_count
+
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = "GrassClumps"
+	mmi.multimesh = multimesh
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mmi)
+
+
+# Создаёт меш пучка травы (несколько травинок вместе)
+func _create_grass_clump_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var blades := 5  # Травинок в пучке
+	var base_color := Color(1.0, 0.0, 0.0)  # DEBUG: Красный для отладки
+
+	for b in range(blades):
+		var angle := TAU * float(b) / float(blades)
+		var offset_x := cos(angle) * 0.05
+		var offset_z := sin(angle) * 0.05
+
+		var blade_width := 0.025
+		var blade_height := 0.2 + float(b % 3) * 0.08  # Разная высота
+
+		var color := base_color
+		if b % 2 == 0:
+			color = color.lightened(0.1)
+
+		# Нижние вершины
+		st.set_color(color.darkened(0.2))
+		st.set_normal(Vector3(0, 0, 1))
+		st.add_vertex(Vector3(offset_x - blade_width, 0, offset_z))
+		st.add_vertex(Vector3(offset_x + blade_width, 0, offset_z))
+
+		# Верхняя вершина
+		st.set_color(color.lightened(0.05))
+		st.add_vertex(Vector3(offset_x, blade_height, offset_z))
+
+		# Обратная сторона
+		st.set_color(color.darkened(0.2))
+		st.set_normal(Vector3(0, 0, -1))
+		st.add_vertex(Vector3(offset_x + blade_width, 0, offset_z))
+		st.add_vertex(Vector3(offset_x - blade_width, 0, offset_z))
+
+		st.set_color(color.lightened(0.05))
+		st.add_vertex(Vector3(offset_x, blade_height, offset_z))
+
+	return st.commit()
+
+
+# Добавляет растительность на пустые участки чанка в очередь
+func _queue_chunk_vegetation(chunk_key: String, parent: Node3D) -> void:
+	var coords: Array = chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+
+	var chunk_min_x := chunk_x * chunk_size
+	var chunk_min_z := chunk_z * chunk_size
+
+	# Создаём прямоугольник чанка для генерации
+	var chunk_points: PackedVector2Array = []
+	chunk_points.append(Vector2(chunk_min_x, chunk_min_z))
+	chunk_points.append(Vector2(chunk_min_x + chunk_size, chunk_min_z))
+	chunk_points.append(Vector2(chunk_min_x + chunk_size, chunk_min_z + chunk_size))
+	chunk_points.append(Vector2(chunk_min_x, chunk_min_z + chunk_size))
+
+	# Получаем данные высот
+	var elev_data: Dictionary = {}
+	if _chunk_elevations.has(chunk_key):
+		elev_data = _chunk_elevations[chunk_key]
+
+	# Добавляем в очередь растительности для пустых участков
+	_vegetation_queue.append({
+		"type": "chunk_vegetation",
+		"chunk_key": chunk_key,
+		"points": chunk_points,
+		"elev_data": elev_data,
+		"parent": parent
+	})
+
+
+# Создаёт растительность на пустых участках чанка
+func _create_chunk_vegetation_immediate(chunk_key: String, points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
+	if not is_instance_valid(parent):
+		return
+
+	var min_x := points[0].x
+	var max_x := points[2].x
+	var min_z := points[0].y
+	var max_z := points[2].y
+
+	# Параметры генерации
+	var grass_spacing := 8.0  # Расстояние между пучками травы
+	var bush_spacing := 25.0  # Расстояние между кустами
+
+	var seed_value := hash(chunk_key)
+	var grass_count := 0
+	var bush_count := 0
+	var max_grass := 100
+	var max_bushes := 15
+
+	# Создаём контейнер для растительности чанка
+	var veg_container := Node3D.new()
+	veg_container.name = "ChunkVegetation"
+	parent.add_child(veg_container)
+
+	# Меши для MultiMesh
+	var grass_mesh := _create_grass_clump_mesh()
+	var bush_mesh := _create_bush_mesh()
+
+	# Собираем позиции травы и кустов
+	var grass_transforms: Array[Transform3D] = []
+	var bush_transforms: Array[Transform3D] = []
+
+	# Генерируем позиции на сетке с джиттером
+	var x := min_x + grass_spacing / 2.0
+	while x < max_x and grass_count < max_grass:
+		var z := min_z + grass_spacing / 2.0
+		while z < max_z and grass_count < max_grass:
+			# Псевдослучайное смещение
+			var hash1 := fmod(float(seed_value + int(x * 100) * 7 + int(z * 100) * 13) * 0.61803, 1.0)
+			var hash2 := fmod(float(seed_value + int(x * 100) * 11 + int(z * 100) * 17) * 0.41421, 1.0)
+
+			var jitter_x := (hash1 - 0.5) * grass_spacing * 0.8
+			var jitter_z := (hash2 - 0.5) * grass_spacing * 0.8
+
+			var pos := Vector2(x + jitter_x, z + jitter_z)
+
+			# Проверяем что не на дороге
+			if not _is_point_near_road(pos, 4.0):
+				var elevation := _get_elevation_at_point(pos, elev_data)
+
+				var transform := Transform3D()
+				var rotation := fmod(float(seed_value + int(x * 10) + int(z * 10)) * 2.718, TAU)
+				transform = transform.rotated(Vector3.UP, rotation)
+
+				var scale_factor := 0.8 + hash1 * 0.5
+				transform = transform.scaled(Vector3(scale_factor, scale_factor, scale_factor))
+				transform.origin = Vector3(pos.x, elevation + 0.01, pos.y)
+
+				grass_transforms.append(transform)
+				grass_count += 1
+
+			z += grass_spacing
+		x += grass_spacing
+
+	# Генерируем кусты (реже)
+	x = min_x + bush_spacing / 2.0
+	while x < max_x and bush_count < max_bushes:
+		var z := min_z + bush_spacing / 2.0
+		while z < max_z and bush_count < max_bushes:
+			var hash1 := fmod(float(seed_value + int(x * 50) * 23 + int(z * 50) * 31) * 0.61803, 1.0)
+			var hash2 := fmod(float(seed_value + int(x * 50) * 29 + int(z * 50) * 37) * 0.41421, 1.0)
+
+			# Только 40% позиций получают куст
+			if hash1 < 0.4:
+				var jitter_x := (hash2 - 0.5) * bush_spacing * 0.6
+				var jitter_z := (fmod(hash1 * 3.14, 1.0) - 0.5) * bush_spacing * 0.6
+
+				var pos := Vector2(x + jitter_x, z + jitter_z)
+
+				if not _is_point_near_road(pos, 5.0):
+					var elevation := _get_elevation_at_point(pos, elev_data)
+
+					var transform := Transform3D()
+					var rotation := fmod(float(seed_value + int(x * 20) + int(z * 20)) * 1.618, TAU)
+					transform = transform.rotated(Vector3.UP, rotation)
+
+					var scale_factor := 0.7 + hash2 * 0.6
+					transform = transform.scaled(Vector3(scale_factor, scale_factor, scale_factor))
+					transform.origin = Vector3(pos.x, elevation, pos.y)
+
+					bush_transforms.append(transform)
+					bush_count += 1
+
+			z += bush_spacing
+		x += bush_spacing
+
+	# Создаём MultiMesh для травы
+	if grass_transforms.size() > 0:
+		var grass_mm := MultiMesh.new()
+		grass_mm.transform_format = MultiMesh.TRANSFORM_3D
+		grass_mm.mesh = grass_mesh
+		grass_mm.instance_count = grass_transforms.size()
+
+		for i in range(grass_transforms.size()):
+			grass_mm.set_instance_transform(i, grass_transforms[i])
+
+		var grass_mmi := MultiMeshInstance3D.new()
+		grass_mmi.name = "ChunkGrass"
+		grass_mmi.multimesh = grass_mm
+		grass_mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		veg_container.add_child(grass_mmi)
+
+	# Создаём MultiMesh для кустов
+	if bush_transforms.size() > 0:
+		var bush_mm := MultiMesh.new()
+		bush_mm.transform_format = MultiMesh.TRANSFORM_3D
+		bush_mm.mesh = bush_mesh
+		bush_mm.instance_count = bush_transforms.size()
+
+		for i in range(bush_transforms.size()):
+			bush_mm.set_instance_transform(i, bush_transforms[i])
+
+		var bush_mmi := MultiMeshInstance3D.new()
+		bush_mmi.name = "ChunkBushes"
+		bush_mmi.multimesh = bush_mm
+		bush_mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		veg_container.add_child(bush_mmi)
 
 
 # Процедурная генерация промышленных зданий внутри территории
@@ -6179,6 +6662,7 @@ func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, 
 	if _normal_textures.has("asphalt"):
 		material.normal_enabled = true
 		material.normal_texture = _normal_textures["asphalt"]
+		material.normal_scale = 0.3  # Уменьшено для меньшего шума
 	# Применяем мокрый эффект если дождь
 	if _is_wet_mode:
 		WetRoadMaterial.apply_wet_properties(material, true, _is_night_mode)
