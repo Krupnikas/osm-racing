@@ -1117,9 +1117,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		if highway_type in ["footway", "path", "cycleway", "track", "steps"]:
 			continue
 
-		# Проверяем концы дороги (первый и последний узел)
-		var endpoints := [way_nodes[0], way_nodes[way_nodes.size() - 1]]
-		for node in endpoints:
+		# Проверяем ВСЕ узлы дороги для детекции Т-образных перекрёстков
+		for node in way_nodes:
 			var node_key := "%.6f,%.6f" % [node.lat, node.lon]
 			var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 
@@ -1244,8 +1243,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			await get_tree().process_frame
 
 	# Ищем перекрёстки (узлы, которые используются несколькими дорогами)
-	# Оптимизация: проверяем только концы дорог (первый и последний узел)
-	var node_road_count: Dictionary = {}  # node_key -> count
+	# Для Т-образных перекрёстков: проверяем ВСЕ узлы дорог
+	var node_road_count: Dictionary = {}  # node_key -> count (сколько дорог проходит через узел)
 	var node_positions: Dictionary = {}  # node_key -> Vector2
 	var node_road_types: Dictionary = {}  # node_key -> Array of highway types
 
@@ -1264,10 +1263,9 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		if way_nodes.size() < 2:
 			continue
 
-		# Проверяем только первый и последний узел дороги (концы)
-		var endpoints := [way_nodes[0], way_nodes[way_nodes.size() - 1]]
-		for node in endpoints:
-			var node_key := "%.5f,%.5f" % [node.lat, node.lon]  # Уменьшил точность для группировки близких точек
+		# Проверяем ВСЕ узлы дороги (не только концы) для детекции Т-образных перекрёстков
+		for node in way_nodes:
+			var node_key := "%.5f,%.5f" % [node.lat, node.lon]
 			var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 
 			# Фильтруем по чанку
@@ -1301,7 +1299,6 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 					major_road_count += 1
 				var w: float = ROAD_WIDTHS.get(t, 6.0)
 				max_width = maxf(max_width, w)
-
 			# На крупных перекрёстках - светофор, на мелких - знаки
 			var has_primary := "primary" in road_types or "secondary" in road_types
 			if has_primary and node_road_count[node_key] >= 3:
@@ -1310,8 +1307,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				# На обычных перекрёстках - один знак, не 4
 				_create_yield_sign(pos + Vector2(5, 5), elevation, target)
 
-			# Создаём заплатку без разметки если минимум 2 дороги выше secondary
-			if major_road_count >= 2:
+			# Создаём заплатку без разметки если есть хотя бы 1 крупная дорога (secondary+)
+			if major_road_count >= 1:
 				# Размер заплатки = максимальная ширина дороги * 1.5 (чтобы покрыть весь перекрёсток)
 				var patch_size := max_width * 1.5
 				_create_intersection_patch(pos, elevation, target, patch_size)
@@ -5373,28 +5370,51 @@ func _is_equal_intersection(intersection_idx: int) -> bool:
 
 
 ## Создаёт заплатку на перекрёстке (чистый асфальт без разметки)
+## Круглая форма лучше подходит для перекрёстков разной конфигурации
 func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, size: float = 18.0) -> void:
 	if not _road_textures.has("intersection"):
 		return
 
-	# Минимальный размер заплатки
-	var patch_size := maxf(size, 10.0)
+	# Радиус заплатки = половина ширины дороги + запас
+	var radius := maxf(size * 0.5, 6.0)
 
-	# Создаём простой квадратный меш
+	# Создаём круглый меш (многоугольник с 16 сторонами)
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var segments := 16
+	var center_y := elevation + 0.08  # Выше дороги
+
+	# Центральная вершина
+	st.set_uv(Vector2(0.5, 0.5))
+	st.set_normal(Vector3.UP)
+	st.add_vertex(Vector3(pos.x, center_y, pos.y))
+
+	# Вершины по кругу
+	for i in range(segments):
+		var angle := float(i) / segments * TAU
+		var x := pos.x + cos(angle) * radius
+		var z := pos.y + sin(angle) * radius
+		var u := 0.5 + cos(angle) * 0.5
+		var v := 0.5 + sin(angle) * 0.5
+		st.set_uv(Vector2(u, v))
+		st.set_normal(Vector3.UP)
+		st.add_vertex(Vector3(x, center_y, z))
+
+	# Индексы (треугольники от центра к краям)
+	for i in range(segments):
+		var next_i := (i + 1) % segments
+		st.add_index(0)  # Центр
+		st.add_index(i + 1)
+		st.add_index(next_i + 1)
+
+	var mesh := st.commit()
 	var mesh_instance := MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(patch_size, patch_size)
-	mesh_instance.mesh = plane
-
-	# Позиция выше дороги чтобы перекрыть разметку (дороги на высоте 0.03-0.06)
-	mesh_instance.position = Vector3(pos.x, elevation + 0.08, pos.y)
+	mesh_instance.mesh = mesh
 
 	# Материал с текстурой перекрёстка
 	var material := StandardMaterial3D.new()
 	material.albedo_texture = _road_textures["intersection"]
-	# UV масштаб зависит от размера заплатки (чтобы текстура не растягивалась)
-	var uv_scale := 5.0 / patch_size  # Нормализуем к базовому размеру текстуры
-	material.uv1_scale = Vector3(uv_scale, uv_scale, 1.0)
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mesh_instance.material_override = material
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF

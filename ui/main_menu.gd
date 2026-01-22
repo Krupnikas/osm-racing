@@ -69,6 +69,19 @@ func _ready() -> void:
 	await get_tree().process_frame
 	_scale_for_screen()
 
+	# Автостарт через командную строку: --autostart [location_index]
+	var args := OS.get_cmdline_args()
+	if "--autostart" in args:
+		var idx := args.find("--autostart")
+		var location_idx := 0
+		if idx + 1 < args.size():
+			location_idx = int(args[idx + 1])
+		var locations := LOCATIONS.keys()
+		if location_idx >= 0 and location_idx < locations.size():
+			_selected_location = locations[location_idx]
+		await get_tree().process_frame
+		_start_loading()
+
 func _on_continue_pressed() -> void:
 	# Просто продолжаем игру без повторной загрузки
 	hide_menu()
