@@ -285,6 +285,16 @@ text = "Назад"
 [connection signal="toggled" from="SettingsPanel/VBox/NightModeCheck" to="." method="_on_night_mode_toggled"]
 [connection signal="toggled" from="SettingsPanel/VBox/RainCheck" to="." method="_on_rain_toggled"]
 [connection signal="toggled" from="SettingsPanel/VBox/UnderglowCheck" to="." method="_on_underglow_toggled"]
+[connection signal="toggled" from="SettingsPanel/VBox/SSRCheck" to="." method="_on_ssr_toggled"]
+[connection signal="toggled" from="SettingsPanel/VBox/FogCheck" to="." method="_on_fog_toggled"]
+[connection signal="toggled" from="SettingsPanel/VBox/GlowCheck" to="." method="_on_glow_toggled"]
+[connection signal="toggled" from="SettingsPanel/VBox/SSAOCheck" to="." method="_on_ssao_toggled"]
+[connection signal="toggled" from="SettingsPanel/VBox/NormalMapsCheck" to="." method="_on_normal_maps_toggled"]
+[connection signal="toggled" from="SettingsPanel/VBox/CloudsCheck" to="." method="_on_clouds_toggled"]
+[connection signal="toggled" from="SettingsPanel/VBox/TAACheck" to="." method="_on_taa_toggled"]
+[connection signal="item_selected" from="SettingsPanel/VBox/MSAAOption" to="." method="_on_msaa_selected"]
+[connection signal="toggled" from="SettingsPanel/VBox/DOFCheck" to="." method="_on_dof_toggled"]
+[connection signal="toggled" from="SettingsPanel/VBox/VignetteCheck" to="." method="_on_vignette_toggled"]
 [connection signal="pressed" from="SettingsPanel/VBox/BackButton" to="." method="_on_settings_back_pressed"]
 
 [node name="SettingsPanel" type="Panel" parent="."]
@@ -295,10 +305,10 @@ anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -300.0
-offset_top = -200.0
-offset_right = 300.0
-offset_bottom = 200.0
+offset_left = -350.0
+offset_top = -450.0
+offset_right = 350.0
+offset_bottom = 450.0
 grow_horizontal = 2
 grow_vertical = 2
 
@@ -308,9 +318,9 @@ anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 offset_left = 30.0
-offset_top = 30.0
+offset_top = 20.0
 offset_right = -30.0
-offset_bottom = -30.0
+offset_bottom = -20.0
 grow_horizontal = 2
 grow_vertical = 2
 
@@ -321,7 +331,7 @@ text = "Настройки"
 horizontal_alignment = 1
 
 [node name="Spacer" type="Control" parent="SettingsPanel/VBox"]
-custom_minimum_size = Vector2(0, 20)
+custom_minimum_size = Vector2(0, 10)
 layout_mode = 2
 
 [node name="NightModeCheck" type="CheckButton" parent="SettingsPanel/VBox"]
@@ -339,12 +349,85 @@ layout_mode = 2
 button_pressed = false
 text = "Неон под машиной (G)"
 
+[node name="GraphicsLabel" type="Label" parent="SettingsPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Графика"
+horizontal_alignment = 1
+
+[node name="SSRCheck" type="CheckButton" parent="SettingsPanel/VBox"]
+layout_mode = 2
+button_pressed = true
+text = "SSR (отражения)"
+
+[node name="FogCheck" type="CheckButton" parent="SettingsPanel/VBox"]
+layout_mode = 2
+button_pressed = true
+text = "Туман"
+
+[node name="GlowCheck" type="CheckButton" parent="SettingsPanel/VBox"]
+layout_mode = 2
+button_pressed = true
+text = "Свечение (Glow)"
+
+[node name="SSAOCheck" type="CheckButton" parent="SettingsPanel/VBox"]
+layout_mode = 2
+button_pressed = true
+text = "SSAO"
+
+[node name="NormalMapsCheck" type="CheckButton" parent="SettingsPanel/VBox"]
+layout_mode = 2
+button_pressed = true
+text = "Normal Maps"
+
+[node name="CloudsCheck" type="CheckButton" parent="SettingsPanel/VBox"]
+layout_mode = 2
+button_pressed = true
+text = "Облака"
+
+[node name="AALabel" type="Label" parent="SettingsPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Антиалиасинг"
+horizontal_alignment = 1
+
+[node name="TAACheck" type="CheckButton" parent="SettingsPanel/VBox"]
+layout_mode = 2
+button_pressed = true
+text = "TAA"
+
+[node name="MSAAOption" type="OptionButton" parent="SettingsPanel/VBox"]
+layout_mode = 2
+selected = 0
+item_count = 3
+popup/item_0/text = "MSAA: OFF"
+popup/item_1/text = "MSAA: 2X"
+popup/item_1/id = 1
+popup/item_2/text = "MSAA: 4X"
+popup/item_2/id = 2
+
+[node name="EffectsLabel" type="Label" parent="SettingsPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Эффекты"
+horizontal_alignment = 1
+
+[node name="DOFCheck" type="CheckButton" parent="SettingsPanel/VBox"]
+layout_mode = 2
+button_pressed = false
+text = "Глубина резкости (DOF)"
+
+[node name="VignetteCheck" type="CheckButton" parent="SettingsPanel/VBox"]
+layout_mode = 2
+button_pressed = false
+text = "Виньетка"
+
 [node name="Spacer2" type="Control" parent="SettingsPanel/VBox"]
 layout_mode = 2
 size_flags_vertical = 3
 
 [node name="BackButton" type="Button" parent="SettingsPanel/VBox"]
-custom_minimum_size = Vector2(0, 60)
+custom_minimum_size = Vector2(0, 50)
 layout_mode = 2
 theme_override_font_sizes/font_size = 28
 text = "Назад"

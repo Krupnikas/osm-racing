@@ -182,12 +182,8 @@ static func _find_brand_logo(tags: Dictionary) -> String:
 			if name.contains(brand_key):
 				var logo_path = BRAND_LOGOS_PATH + BRAND_LOGOS[brand_key]
 				if ResourceLoader.exists(logo_path):
-					print("BusinessSign: Found logo (partial) for '%s' contains '%s' -> %s" % [name, brand_key, logo_path])
+					print("BusinessSign: Found logo for '%s' (matched '%s') -> %s" % [name, brand_key, logo_path])
 					return logo_path
-
-	# Debug: показываем что не нашли
-	if not names_to_check.is_empty():
-		print("BusinessSign: No logo found for: %s" % str(names_to_check))
 
 	return ""
 

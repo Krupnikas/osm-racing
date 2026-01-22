@@ -2,7 +2,7 @@ extends Node3D
 class_name OSMTerrainGenerator
 
 signal initial_load_started
-signal initial_load_progress(loaded: int, total: int)
+signal initial_load_progress(progress: float, status: String)  # 0.0-1.0 прогресс + текст статуса
 signal initial_load_complete
 
 const OSMLoaderScript = preload("res://osm/osm_loader.gd")
@@ -17,6 +17,7 @@ const BIRCH_TREE_SCENE = preload("res://models/trees/birch/scene.gltf")
 var _road_textures: Dictionary = {}
 var _building_textures: Dictionary = {}
 var _ground_textures: Dictionary = {}
+var _normal_textures: Dictionary = {}  # Normal maps
 var _textures_initialized := false
 
 @export var start_lat := 59.149886
@@ -26,6 +27,7 @@ var _textures_initialized := false
 @export var unload_distance := 800.0  # Дистанция выгрузки
 @export var car_path: NodePath
 @export var camera_path: NodePath
+@export var debug_print := false  # Выключить debug output для производительности
 @export var enable_elevation := false  # Включить загрузку высот (экспериментально)
 @export var elevation_scale := 1.0  # Масштаб высоты (1.0 = реальный)
 @export var elevation_grid_resolution := 16  # Разрешение сетки высот на чанк
@@ -57,6 +59,7 @@ var _created_sign_positions: Dictionary = {}  # Позиции созданны�
 var _pending_lamps: Array = []  # Отложенные фонари (создаются после загрузки всех парковок)
 var _lamps_created := false  # Флаг что фонари уже созданы
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
+var _finalization_state := 0  # 0=not started, 1=lamps, 2=signs, 3=done
 
 # Многопоточная генерация зданий
 var _building_queue: Array = []  # Очередь данных зданий для генерации
@@ -205,6 +208,12 @@ func _init_textures() -> void:
 	_ground_textures["forest"] = TextureGeneratorScript.create_forest_texture(256)
 	_ground_textures["water"] = TextureGeneratorScript.create_water_texture(256)
 
+	# Normal maps
+	_normal_textures["asphalt"] = TextureGeneratorScript.create_asphalt_normal(256)
+	_normal_textures["brick"] = TextureGeneratorScript.create_brick_normal(256)
+	_normal_textures["concrete"] = TextureGeneratorScript.create_concrete_normal(256)
+	_normal_textures["panel"] = TextureGeneratorScript.create_panel_building_normal(512, 5, 4)
+
 	_textures_initialized = true
 	var elapsed := Time.get_ticks_msec() - start_time
 	print("OSM: Textures initialized in %d ms" % elapsed)
@@ -225,7 +234,7 @@ func _process(delta: float) -> void:
 	_process_infrastructure_queue()
 
 	var _frame_time := Time.get_ticks_msec() - _frame_start
-	if _frame_time > 10:
+	if debug_print and _frame_time > 10:
 		print("PROFILE: _process took %d ms (delta=%.1f ms, fps=%.0f)" % [_frame_time, delta * 1000, 1.0 / delta])
 
 	# Обновляем debug статистику
@@ -298,24 +307,54 @@ func _check_initial_load_complete() -> void:
 			loaded_count += 1
 
 	_initial_chunks_loaded = loaded_count
-	initial_load_progress.emit(loaded_count, _initial_chunks_needed.size())
+
+	# Считаем общий прогресс: 50% на чанки, 50% на очереди
+	var total_chunks: int = _initial_chunks_needed.size()
+	var chunk_progress: float = float(loaded_count) / float(max(1, total_chunks))  # 0.0-1.0
+
+	# Считаем размер всех очередей
+	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks
+
+	# Статус
+	var status: String
+	if loaded_count < total_chunks:
+		status = "Загрузка чанков: %d / %d" % [loaded_count, total_chunks]
+	elif total_queued > 0:
+		status = "Генерация объектов: %d в очереди" % total_queued
+	else:
+		status = "Финализация..."
+
+	# Общий прогресс: 60% - чанки, 40% - очереди
+	var total_progress: float = chunk_progress * 0.6 + (1.0 - float(total_queued) / float(max(1, total_queued + 100))) * 0.4
+	total_progress = clampf(total_progress, 0.0, 1.0)
+
+	initial_load_progress.emit(total_progress, status)
 
 	# Все начальные чанки загружены?
-	if loaded_count >= _initial_chunks_needed.size():
+	if loaded_count >= total_chunks:
 		# Проверяем что все очереди обработаны (для плавности старта)
 		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks == 0
 		if not queues_empty:
 			# Очереди ещё не пусты - ждём следующего кадра
 			return
 
+		# Финализация: создаём фонари и знаки парковки СРАЗУ (без батчинга)
+		if _finalization_state == 0:
+			print("OSM: Starting finalization...")
+			_finalization_state = 1
+			initial_load_progress.emit(0.95, "Финализация: создание фонарей (%d)..." % _pending_lamps.size())
+			# Создаём все фонари сразу
+			_create_pending_lamps()
+			print("OSM: Lamps done, starting parking signs...")
+			_finalization_state = 2
+			initial_load_progress.emit(0.98, "Финализация: создание знаков парковки (%d)..." % _pending_parking_signs.size())
+			# Создаём все знаки парковки сразу
+			_create_pending_parking_signs()
+			print("OSM: Parking signs done")
+			_finalization_state = 3
+
 		_initial_loading = false
 		print("OSM: Initial loading complete! %d chunks loaded" % loaded_count)
-
-		# Создаём отложенные фонари (теперь все парковки известны)
-		_create_pending_lamps()
-
-		# Создаём отложенные знаки парковки (теперь все дороги известны)
-		_create_pending_parking_signs()
 
 		initial_load_complete.emit()
 
@@ -740,6 +779,7 @@ func reset_terrain() -> void:
 	_initial_chunks_needed.clear()
 	_initial_chunks_loaded = 0
 	_loading_paused = true
+	_finalization_state = 0  # Сбрасываем состояние финализации
 	# Предиктивная загрузка
 	_chunk_load_queue.clear()
 	_current_load_count = 0
@@ -1091,24 +1131,15 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		var _t0 := Time.get_ticks_msec()
 		if tags.has("highway"):
 			_create_road(nodes, tags, target, loader, elev_data)
-			var _dt := Time.get_ticks_msec() - _t0
-			if _dt > 5:
-				print("PROFILE: _create_road took %d ms (nodes=%d)" % [_dt, nodes.size()])
 			road_count += 1
 			objects_this_frame += 1
 		elif tags.has("building"):
 			_create_building(nodes, tags, target, loader, elev_data)
-			var _dt := Time.get_ticks_msec() - _t0
-			if _dt > 5:
-				print("PROFILE: _create_building took %d ms (nodes=%d)" % [_dt, nodes.size()])
 			building_count += 1
 			# Здания теперь в thread pool - не нужен await
 		elif tags.has("amenity") and not tags.has("building"):
 			# Amenity без building тега - создаём как здание
 			_create_amenity_building(nodes, tags, target, loader, elev_data)
-			var _dt := Time.get_ticks_msec() - _t0
-			if _dt > 5:
-				print("PROFILE: _create_amenity_building took %d ms" % _dt)
 			building_count += 1
 		elif tags.has("natural"):
 			# Добавляем в очередь для отложенного создания
@@ -1139,20 +1170,12 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			})
 		elif tags.has("waterway"):
 			_create_waterway(nodes, tags, target, loader, elev_data)
-			var _dt := Time.get_ticks_msec() - _t0
-			if _dt > 5:
-				print("PROFILE: _create_waterway took %d ms" % _dt)
 			objects_this_frame += 1
 
 		# Frame budgeting для лёгких объектов
 		if objects_this_frame >= OBJECTS_PER_FRAME:
 			objects_this_frame = 0
 			await get_tree().process_frame
-
-	print("PROFILE: Main loop done in %d ms (roads=%d, buildings=%d)" % [Time.get_ticks_msec() - _profile_start, road_count, building_count])
-
-	if skipped_buildings > 0:
-		print("OSM: Skipped %d buildings (outside chunk bounds)" % skipped_buildings)
 
 	# Ищем перекрёстки (узлы, которые используются несколькими дорогами)
 	# Оптимизация: проверяем только концы дорог (первый и последний узел)
@@ -1410,13 +1433,18 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 	if _road_textures.has(texture_key):
 		material.albedo_texture = _road_textures[texture_key]
 		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		# Normal map для асфальта
+		if _normal_textures.has("asphalt"):
+			material.normal_enabled = true
+			material.normal_texture = _normal_textures["asphalt"]
+			material.normal_scale = 0.6
 	else:
 		# Fallback цвет
 		material.albedo_color = COLORS.get("road_residential", Color(0.4, 0.4, 0.4))
 
 	# Применяем мокрый асфальт если дождь уже идёт
 	if _is_wet_mode:
-		WetRoadMaterial.apply_wet_properties(material, true)
+		WetRoadMaterial.apply_wet_properties(material, true, _is_night_mode)
 
 	mesh.material_override = material
 
@@ -1931,9 +1959,14 @@ func _create_parking_surface(points: PackedVector2Array, elev_data: Dictionary, 
 	material.albedo_texture = _road_textures.get("residential", null)
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	material.uv1_scale = Vector3(0.1, 0.1, 1.0)  # Масштаб UV для текстуры
+	# Normal map
+	if _normal_textures.has("asphalt"):
+		material.normal_enabled = true
+		material.normal_texture = _normal_textures["asphalt"]
+		material.normal_scale = 0.5
 
 	if _is_wet_mode:
-		WetRoadMaterial.apply_wet_properties(material, true)
+		WetRoadMaterial.apply_wet_properties(material, true, _is_night_mode)
 
 	st.set_material(material)
 
@@ -2935,10 +2968,6 @@ func _process_building_results() -> void:
 	# Применяем 1 здание за кадр для максимальной плавности
 	_apply_building_mesh_result(results_to_process[0])
 
-	var _dt := Time.get_ticks_msec() - _t0
-	if _dt > 5:
-		print("PROFILE: _apply_building_mesh_result took %d ms (queue=%d)" % [_dt, results_to_process.size()])
-
 	# Возвращаем оставшиеся обратно в очередь
 	if results_to_process.size() > 1:
 		_building_mutex.lock()
@@ -3027,10 +3056,6 @@ func _process_road_queue() -> void:
 		_create_road_immediate(item.nodes, item.tags, item.parent, item.elev_data)
 		processed += 1
 
-	var _dt := Time.get_ticks_msec() - _t0
-	if _dt > 16:
-		print("PROFILE: _process_road_queue took %d ms, processed %d (queue=%d)" % [_dt, processed, _road_queue.size()])
-
 
 ## Сортирует очередь по расстоянию до игрока (ближайшие первые)
 func _sort_queue_by_distance(queue: Array, player_pos: Vector3) -> void:
@@ -3118,10 +3143,6 @@ func _process_terrain_objects_queue() -> void:
 
 		processed += 1
 
-	var _dt := Time.get_ticks_msec() - _t0
-	if _dt > 16:
-		print("PROFILE: _process_terrain_objects_queue took %d ms, processed %d (queue=%d)" % [_dt, processed, _terrain_objects_queue.size()])
-
 
 ## Обрабатывает очередь инфраструктуры (1 объект за кадр)
 func _process_infrastructure_queue() -> void:
@@ -3144,11 +3165,7 @@ func _process_infrastructure_queue() -> void:
 		"yield_sign":
 			_create_yield_sign_immediate(item.pos, item.elevation, item.parent)
 		"parking_sign":
-			_create_parking_sign_immediate(item.pos, item.elevation, item.parent, item.rotation)
-
-	var _dt := Time.get_ticks_msec() - _t0
-	if _dt > 3:
-		print("PROFILE: _process_infrastructure_queue %s took %d ms (queue=%d)" % [item_type, _dt, _infrastructure_queue.size()])
+			_create_parking_sign_immediate(item.pos, item.elevation, item.rotation, item.parent)
 
 
 func _create_3d_building_with_texture(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
@@ -3794,6 +3811,13 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	# 5% шанс что фонарь сломан
 	var is_broken := randf() < 0.05
 
+	# Проверяем, включён ли ночной режим
+	var is_night := _is_night_mode
+	if not is_night:
+		var night_manager := get_tree().current_scene.find_child("NightModeManager", true, false)
+		if night_manager:
+			is_night = night_manager.is_night
+
 	var lamp_light := OmniLight3D.new()
 	lamp_light.name = "LampLight"
 	lamp_light.position = light_globe.position
@@ -3803,11 +3827,12 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	lamp_light.light_color = Color(1.0, 0.65, 0.2)  # Тёплый натриевый жёлто-оранжевый
 	lamp_light.shadow_enabled = false
 	lamp_light.light_bake_mode = Light3D.BAKE_DISABLED
-	lamp_light.visible = not is_broken  # Сломанные фонари не горят
+	# Фонарь светит только ночью и если не сломан
+	lamp_light.visible = is_night and not is_broken
 	lamp.add_child(lamp_light)
 
-	# Если фонарь сломан, выключаем эмиссию плафона
-	if is_broken:
+	# Эмиссия плафона только ночью (днём как у сломанных - серый без свечения)
+	if is_broken or not is_night:
 		globe_mat.emission_enabled = false
 		globe_mat.albedo_color = Color(0.3, 0.3, 0.3)  # Тусклый серый
 
@@ -4031,7 +4056,9 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 
 func _create_pending_lamps() -> void:
 	"""Создаёт отложенные фонари, фильтруя те что на парковках"""
+	print("OSM: _create_pending_lamps started, count=%d" % _pending_lamps.size())
 	if _pending_lamps.is_empty():
+		print("OSM: No pending lamps")
 		return
 
 	var created := 0
@@ -4070,7 +4097,7 @@ func _create_pending_lamps() -> void:
 
 func _create_pending_parking_signs() -> void:
 	"""Создаёт отложенные знаки парковки (теперь все дороги известны)"""
-	print("OSM: Creating parking signs, have %d road segments" % _road_segments.size())
+	print("OSM: _create_pending_parking_signs started, count=%d, road_segments=%d" % [_pending_parking_signs.size(), _road_segments.size()])
 
 	var created := 0
 	for sign_data in _pending_parking_signs:
@@ -4441,9 +4468,18 @@ var _is_wet_mode := false
 var _night_mode_connected := false
 var _building_night_lights: Array[Node3D] = []  # Храним ссылки на созданные источники света
 
-func set_wet_mode(enabled: bool) -> void:
+var _is_night_mode := false
+
+func set_wet_mode(enabled: bool, is_night: bool = true) -> void:
 	"""Включает/выключает мокрый асфальт для дорог"""
+	_is_night_mode = is_night
+
 	if _is_wet_mode == enabled:
+		# Даже если состояние не изменилось, нужно обновить материалы если изменился день/ночь
+		if enabled:
+			for chunk_key in _loaded_chunks.keys():
+				var chunk: Node3D = _loaded_chunks[chunk_key]
+				_update_chunk_road_wetness(chunk, enabled, is_night)
 		return
 
 	_is_wet_mode = enabled
@@ -4452,24 +4488,24 @@ func set_wet_mode(enabled: bool) -> void:
 	# Обновляем материалы всех загруженных дорог
 	for chunk_key in _loaded_chunks.keys():
 		var chunk: Node3D = _loaded_chunks[chunk_key]
-		_update_chunk_road_wetness(chunk, enabled)
+		_update_chunk_road_wetness(chunk, enabled, is_night)
 
 
-func _update_chunk_road_wetness(chunk: Node3D, is_wet: bool) -> void:
+func _update_chunk_road_wetness(chunk: Node3D, is_wet: bool, is_night: bool = true) -> void:
 	"""Обновляет материалы дорог в чанке для мокрого/сухого состояния"""
 	for child in chunk.get_children():
 		# Дороги добавляются как MeshInstance3D прямо в чанк
 		if child is MeshInstance3D:
 			var mat := child.material_override as StandardMaterial3D
 			if mat and _is_road_material(mat):
-				_apply_wet_material(mat, is_wet)
+				_apply_wet_material(mat, is_wet, is_night)
 		# Также проверяем внутри StaticBody3D (бордюры и коллизии)
 		elif child is StaticBody3D:
 			for mesh_child in child.get_children():
 				if mesh_child is MeshInstance3D:
 					var mat := mesh_child.material_override as StandardMaterial3D
 					if mat and _is_road_material(mat):
-						_apply_wet_material(mat, is_wet)
+						_apply_wet_material(mat, is_wet, is_night)
 
 
 func _is_road_material(mat: StandardMaterial3D) -> bool:
@@ -4484,9 +4520,9 @@ func _is_road_material(mat: StandardMaterial3D) -> bool:
 	return false
 
 
-func _apply_wet_material(mat: StandardMaterial3D, is_wet: bool) -> void:
+func _apply_wet_material(mat: StandardMaterial3D, is_wet: bool, is_night: bool = true) -> void:
 	"""Применяет свойства мокрого/сухого асфальта к материалу"""
-	WetRoadMaterial.apply_wet_properties(mat, is_wet)
+	WetRoadMaterial.apply_wet_properties(mat, is_wet, is_night)
 
 
 func _connect_to_night_mode() -> void:
@@ -4502,8 +4538,6 @@ func _connect_to_night_mode() -> void:
 		if night_manager.is_night:
 			_on_night_mode_changed(true)
 
-
-var _is_night_mode := false
 
 func _on_night_mode_changed(enabled: bool) -> void:
 	"""Обрабатывает переключение ночного режима"""
@@ -4540,14 +4574,20 @@ func _recursive_update_lights(node: Node, night_enabled: bool) -> void:
 	# Проверяем лампы уличных фонарей (SpotLight3D или OmniLight3D для совместимости)
 	if node.name == "LampLight" and (node is SpotLight3D or node is OmniLight3D):
 		node.visible = night_enabled
-		# Усиливаем emission на плафоне
+		# Обновляем плафон - ночью светится, днём серый как у сломанных
 		var lamp_parent := node.get_parent()
 		if lamp_parent:
 			var globe := lamp_parent.find_child("LampGlobe", false)
 			if globe and globe.material_override:
 				var mat := globe.material_override as StandardMaterial3D
 				if mat:
-					mat.emission_energy_multiplier = 5.0 if night_enabled else 0.5
+					if night_enabled:
+						mat.emission_enabled = true
+						mat.emission_energy_multiplier = 5.0
+						mat.albedo_color = Color(1.0, 0.85, 0.5)  # Тёплый жёлтый
+					else:
+						mat.emission_enabled = false
+						mat.albedo_color = Color(0.3, 0.3, 0.3)  # Серый днём
 
 	# Проверяем неоновые вывески и окна
 	if node.name.begins_with("NeonSign") or node.name.begins_with("WindowLights"):
@@ -4598,15 +4638,10 @@ func _add_building_night_decorations(building_mesh: MeshInstance3D, points: Pack
 	if rng.randf() < 0.35 and building_width > 5.0:
 		_add_neon_sign(center, building_height, building_width, rng, parent, building_depth)
 		_neon_signs_created += 1
-		if _neon_signs_created % 10 == 0:
-			print("OSM: Created %d neon signs" % _neon_signs_created)
 
 	# Светящиеся окна для высоких зданий (проверка внутри функции)
 	if building_height > 6.0:
-		var prev_count := _window_lights_created
 		_add_window_lights(center, building_height, building_width, building_depth, rng, parent)
-		if _window_lights_created > prev_count and _window_lights_created % 5 == 0:
-			print("OSM: Created %d window lights" % _window_lights_created)
 
 
 func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNumberGenerator, parent: Node3D, depth: float = 0.0) -> void:
@@ -4880,8 +4915,6 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 			entrance_group.rotation.y = atan2(wall_normal.x, wall_normal.z)
 			entrance_group.name = "EntranceGroup_%s" % sign_text.substr(0, 10)
 			parent.add_child(entrance_group)
-
-		print("BusinessSign: '%s' placed via %s at (%.1f, %.1f, %.1f)%s" % [sign_text, placement_method, sign.position.x, sign.position.y, sign.position.z, " + entrance" if has_entrance_group else ""])
 
 		parent.add_child(sign)
 

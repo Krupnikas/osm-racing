@@ -10,13 +10,8 @@ var stripe_color := Color(0.1, 0.3, 0.8, 1.0)  # Синий для полосы
 func _ready() -> void:
 	await get_tree().process_frame
 
-	# Выводим все mesh'и в модели для отладки
-	_debug_print_meshes()
-
 	# Применяем цветовую схему ДПС
 	_apply_dps_colors()
-
-	print("Lada 2109 DPS model setup complete")
 
 
 func _apply_dps_colors() -> void:
@@ -29,19 +24,6 @@ func _apply_dps_colors() -> void:
 		# Кузов - белый цвет
 		if "carbody" in mesh_name or "body" in mesh_name:
 			_apply_color_to_mesh(mesh_instance, body_color)
-			print("  Applied DPS white to: ", mesh_instance.name)
-
-		# Мигалка/фонарь уже должна быть в модели
-		elif "flashlight" in mesh_name or "light" in mesh_name:
-			print("  Found flashlight: ", mesh_instance.name, " (keeping original)")
-
-		# Зеркала - оставляем как есть
-		elif "mirror" in mesh_name:
-			print("  Found mirror: ", mesh_instance.name, " (keeping original)")
-
-		# Колёса - оставляем как есть
-		elif "wheel" in mesh_name or "whell" in mesh_name:
-			print("  Found wheel: ", mesh_instance.name, " (keeping original)")
 
 
 func _apply_color_to_mesh(mesh_instance: MeshInstance3D, color: Color) -> void:
@@ -73,15 +55,6 @@ func _apply_color_to_mesh(mesh_instance: MeshInstance3D, color: Color) -> void:
 			mesh_instance.set_surface_override_material(i, new_mat)
 
 
-func _debug_print_meshes() -> void:
-	"""Выводит все mesh'и в модели для отладки"""
-	print("=== Lada 2109 DPS Model Meshes Debug ===")
-	var meshes := _find_all_meshes(self)
-	print("Total meshes found: ", meshes.size())
-	for mesh in meshes:
-		print("  - Mesh: ", mesh.name, " (", mesh.get_class(), ")")
-		if mesh is MeshInstance3D and mesh.mesh:
-			print("    Surfaces: ", mesh.mesh.get_surface_count())
 
 
 func _find_all_meshes(node: Node) -> Array:

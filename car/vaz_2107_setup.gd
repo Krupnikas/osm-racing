@@ -28,8 +28,6 @@ func _ready() -> void:
 	# Меняем цвет кузова
 	_change_body_color()
 
-	print("VAZ-2107 setup complete, color: ", body_color)
-
 
 func _find_all_meshes(node: Node) -> Array:
 	"""Рекурсивно находит все MeshInstance3D"""

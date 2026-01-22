@@ -15,21 +15,30 @@ var _environment: Environment
 var _sun_light: DirectionalLight3D
 var _world_env: WorldEnvironment
 var _original_sky: ProceduralSkyMaterial
+var _day_sky: ShaderMaterial
 var _night_sky: ShaderMaterial
 var _rain_system: GPUParticles3D
 var _terrain_generator: Node
+var _graphics_settings: Node
 
 # Сохранённые дневные настройки
 var _day_sun_energy := 1.0
 var _day_sun_color := Color(1.0, 1.0, 1.0)
 var _day_ambient_color := Color(0.5, 0.5, 0.5)
 var _day_ambient_energy := 1.0
+var _day_fog_color := Color(0.7, 0.75, 0.85)
+var _day_fog_density := 0.0008
+var _day_tonemap_exposure := 1.0
+var _day_glow_intensity := 0.3
 
-# Ночные настройки
-const NIGHT_SUN_ENERGY := 0.15  # Лунный свет чуть ярче
-const NIGHT_SUN_COLOR := Color(0.7, 0.8, 1.0)  # Холодный белый лунный свет
-const NIGHT_AMBIENT_COLOR := Color(0.03, 0.04, 0.08)  # Холодный синеватый
-const NIGHT_AMBIENT_ENERGY := 0.25
+# Ночные настройки в стиле NFS Underground
+const NIGHT_SUN_ENERGY := 0.08  # Слабый лунный свет
+const NIGHT_SUN_COLOR := Color(0.4, 0.5, 0.7)  # Холодный синий лунный свет
+const NIGHT_AMBIENT_COLOR := Color(0.015, 0.02, 0.04)  # Очень тёмный синий
+const NIGHT_AMBIENT_ENERGY := 0.15
+# NFS Underground стиль - туман с оттенком городских огней (оранжево-синий)
+const NIGHT_FOG_COLOR := Color(0.08, 0.04, 0.12)  # Тёмно-фиолетовый с оттенком города
+const NIGHT_FOG_DENSITY := 0.003  # Более плотный туман для атмосферы
 
 # Transition
 var _transition_tween: Tween
@@ -40,16 +49,20 @@ func _ready() -> void:
 	await get_tree().process_frame
 	_find_scene_components()
 
+	# Создаём дневное небо с облаками
+	_create_day_sky()
+
 	# Создаём ночное небо
 	_create_night_sky()
 
 	# Создаём систему дождя
 	_create_rain_system()
 
-	# По умолчанию включаем ночь и дождь
-	enable_night_mode()
-	toggle_rain()
-	print("Night mode enabled")
+	# Устанавливаем дневное небо по умолчанию
+	_switch_to_day_sky()
+
+	# По умолчанию: день без дождя
+	print("NightModeManager: Ready (day mode, no rain)")
 
 
 func _find_scene_components() -> void:
@@ -57,8 +70,14 @@ func _find_scene_components() -> void:
 	_world_env = get_tree().current_scene.find_child("WorldEnvironment", true, false) as WorldEnvironment
 	if _world_env:
 		_environment = _world_env.environment
-		if _environment and _environment.sky:
-			_original_sky = _environment.sky.sky_material as ProceduralSkyMaterial
+		if _environment:
+			if _environment.sky:
+				_original_sky = _environment.sky.sky_material as ProceduralSkyMaterial
+			# Сохраняем дневные настройки
+			_day_fog_color = _environment.fog_light_color
+			_day_fog_density = _environment.fog_density
+			_day_tonemap_exposure = _environment.tonemap_exposure
+			_day_glow_intensity = _environment.glow_intensity
 
 	# Ищем DirectionalLight3D (солнце)
 	_sun_light = get_tree().current_scene.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
@@ -69,17 +88,114 @@ func _find_scene_components() -> void:
 	# Ищем terrain generator
 	_terrain_generator = get_tree().current_scene.find_child("OSMTerrain", true, false)
 
+	# Ищем настройки графики
+	_graphics_settings = get_tree().current_scene.find_child("GraphicsSettings", true, false)
+
+
+func _create_day_sky() -> void:
+	_day_sky = ShaderMaterial.new()
+
+	var shader := Shader.new()
+	# Более насыщенное дневное небо
+	shader.code = """
+shader_type sky;
+
+// Более насыщенные цвета неба
+uniform vec3 sky_top_color : source_color = vec3(0.25, 0.45, 0.95);  // Ярче синий
+uniform vec3 sky_horizon_color : source_color = vec3(0.55, 0.7, 0.95);  // Насыщенный горизонт
+uniform vec3 ground_color : source_color = vec3(0.35, 0.4, 0.35);
+
+uniform vec3 sun_direction = vec3(-0.5, 0.7, 0.3);
+uniform float sun_size : hint_range(0.01, 0.2) = 0.045;
+uniform vec3 sun_color : source_color = vec3(1.0, 0.95, 0.85);
+
+uniform float cloud_coverage : hint_range(0.0, 1.0) = 0.35;
+uniform float cloud_speed : hint_range(0.0, 0.1) = 0.008;
+uniform vec3 cloud_color : source_color = vec3(1.0, 1.0, 1.0);
+uniform vec3 cloud_shadow_color : source_color = vec3(0.65, 0.7, 0.8);
+
+float hash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float noise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	float a = hash(i);
+	float b = hash(i + vec2(1.0, 0.0));
+	float c = hash(i + vec2(0.0, 1.0));
+	float d = hash(i + vec2(1.0, 1.0));
+	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float fbm(vec2 p) {
+	float value = 0.0;
+	float amplitude = 0.5;
+	float frequency = 1.0;
+	for (int i = 0; i < 5; i++) {
+		value += amplitude * noise(p * frequency);
+		amplitude *= 0.5;
+		frequency *= 2.0;
+	}
+	return value;
+}
+
+float clouds(vec2 uv, float time) {
+	vec2 cloud_uv = uv * 3.0 + vec2(time * cloud_speed, 0.0);
+	float cloud_noise = fbm(cloud_uv);
+	cloud_noise += 0.5 * fbm(cloud_uv * 2.0 + vec2(time * cloud_speed * 0.5, 0.0));
+	return smoothstep(1.0 - cloud_coverage, 1.0 - cloud_coverage + 0.3, cloud_noise);
+}
+
+void sky() {
+	vec3 dir = normalize(EYEDIR);
+
+	float horizon = smoothstep(-0.1, 0.6, dir.y);
+	vec3 sky = mix(sky_horizon_color, sky_top_color, horizon);
+
+	if (dir.y < 0.0) {
+		float ground_blend = smoothstep(0.0, -0.3, dir.y);
+		sky = mix(sky_horizon_color, ground_color, ground_blend);
+	}
+
+	vec3 sun_dir = normalize(sun_direction);
+	float sun_dist = distance(dir, sun_dir);
+	float sun = smoothstep(sun_size, sun_size * 0.6, sun_dist);
+	float sun_glow = smoothstep(sun_size * 10.0, sun_size, sun_dist) * 0.35;
+	sky += sun_color * sun * 2.5;
+	sky += sun_color * sun_glow;
+
+	if (dir.y > 0.05) {
+		vec2 cloud_uv = dir.xz / (dir.y + 0.1);
+		float cloud = clouds(cloud_uv, TIME);
+		float cloud_sun = dot(normalize(vec3(cloud_uv.x, 1.0, cloud_uv.y)), sun_dir);
+		vec3 lit_cloud = mix(cloud_shadow_color, cloud_color, smoothstep(-0.2, 0.5, cloud_sun));
+		float cloud_fade = smoothstep(0.05, 0.3, dir.y);
+		sky = mix(sky, lit_cloud, cloud * cloud_fade * 0.85);
+	}
+
+	// Атмосферное рассеивание - более тёплое
+	float scatter = pow(1.0 - abs(dir.y), 4.0) * 0.2;
+	sky += vec3(0.9, 0.7, 0.5) * scatter;
+
+	COLOR = sky;
+}
+"""
+	_day_sky.shader = shader
+
 
 func _create_night_sky() -> void:
 	_night_sky = ShaderMaterial.new()
 
 	var shader := Shader.new()
+	# NFS Underground style night sky - яркое свечение города, насыщенные цвета
 	shader.code = """
 shader_type sky;
 
-uniform vec3 moon_direction = vec3(-0.5, 0.7, 0.5);
-uniform float moon_size = 0.06;
-uniform float star_density = 0.002;
+uniform vec3 moon_direction = vec3(-0.3, 0.6, 0.4);
+uniform float moon_size = 0.05;
+uniform float star_density = 0.0015;
 
 float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -88,30 +204,41 @@ float hash(vec2 p) {
 void sky() {
 	vec3 dir = normalize(EYEDIR);
 
-	// Night gradient (horizon to zenith)
-	float horizon = smoothstep(-0.1, 0.4, dir.y);
-	vec3 col = mix(vec3(0.02, 0.04, 0.10), vec3(0.0, 0.01, 0.03), horizon);
+	// NFS Underground style - глубокий тёмно-синий с фиолетовым оттенком
+	float horizon = smoothstep(-0.15, 0.5, dir.y);
+	vec3 sky_top = vec3(0.01, 0.015, 0.04);  // Почти чёрный с синевой
+	vec3 sky_horizon = vec3(0.04, 0.02, 0.08);  // Фиолетовый горизонт
+	vec3 col = mix(sky_horizon, sky_top, horizon);
 
-	// Stars (only above horizon)
-	if (dir.y > 0.0) {
-		vec2 star_uv = dir.xz / (dir.y + 0.001) * 80.0;
+	// Stars - меньше и ярче
+	if (dir.y > 0.05) {
+		vec2 star_uv = dir.xz / (dir.y + 0.001) * 100.0;
 		float star = step(1.0 - star_density, hash(floor(star_uv)));
 		float brightness = hash(floor(star_uv) + vec2(0.5, 0.5));
-		float twinkle = 0.6 + 0.4 * sin(TIME * (2.0 + brightness * 3.0) + brightness * 100.0);
-		col += vec3(star * twinkle * brightness * 0.9);
+		float twinkle = 0.7 + 0.3 * sin(TIME * (3.0 + brightness * 4.0) + brightness * 100.0);
+		col += vec3(0.9, 0.95, 1.0) * star * twinkle * brightness;
 	}
 
-	// Moon - cold white
+	// Moon - холодный белый с голубым ореолом
 	vec3 moon_dir = normalize(moon_direction);
 	float moon_dist = distance(dir, moon_dir);
-	float moon = smoothstep(moon_size, moon_size * 0.7, moon_dist);
-	float moon_glow = smoothstep(moon_size * 5.0, moon_size, moon_dist) * 0.25;
-	col += vec3(0.85, 0.9, 1.0) * moon;
-	col += vec3(0.15, 0.2, 0.35) * moon_glow;
+	float moon = smoothstep(moon_size, moon_size * 0.6, moon_dist);
+	float moon_glow = smoothstep(moon_size * 6.0, moon_size, moon_dist) * 0.3;
+	col += vec3(0.9, 0.95, 1.0) * moon;
+	col += vec3(0.2, 0.25, 0.4) * moon_glow;
 
-	// Slight horizon glow (city lights reflection)
-	float city_glow = smoothstep(0.1, -0.05, dir.y) * 0.15;
-	col += vec3(0.15, 0.10, 0.05) * city_glow;
+	// NFS Underground стиль - СИЛЬНОЕ свечение города на горизонте
+	// Оранжево-жёлтое от натриевых фонарей
+	float city_glow_orange = smoothstep(0.15, -0.1, dir.y);
+	col += vec3(0.25, 0.12, 0.02) * city_glow_orange * 0.8;
+
+	// Дополнительное розово-фиолетовое свечение (неон)
+	float neon_glow = smoothstep(0.1, -0.15, dir.y);
+	col += vec3(0.15, 0.05, 0.2) * neon_glow * 0.5;
+
+	// Синее свечение от рекламы
+	float blue_glow = smoothstep(0.08, -0.08, dir.y) * (0.5 + 0.5 * sin(dir.x * 10.0));
+	col += vec3(0.02, 0.08, 0.15) * blue_glow * 0.3;
 
 	COLOR = col;
 }
@@ -182,8 +309,7 @@ func _input(event: InputEvent) -> void:
 			KEY_N:
 				toggle_night_mode()
 			KEY_R:
-				if is_night:
-					toggle_rain()
+				toggle_rain()
 
 
 func toggle_night_mode() -> void:
@@ -199,6 +325,10 @@ func enable_night_mode() -> void:
 
 	is_night = true
 
+	# Обновляем отражения на дорогах (больше ночью)
+	if is_raining and _terrain_generator and _terrain_generator.has_method("set_wet_mode"):
+		_terrain_generator.set_wet_mode(true, true)  # wet=true, night=true
+
 	# Cancel existing tween
 	if _transition_tween:
 		_transition_tween.kill()
@@ -211,17 +341,25 @@ func enable_night_mode() -> void:
 		_transition_tween.tween_property(_sun_light, "light_energy", NIGHT_SUN_ENERGY, 1.5)
 		_transition_tween.tween_property(_sun_light, "light_color", NIGHT_SUN_COLOR, 1.5)
 
-	# Change ambient
+	# Change ambient and fog - NFS Underground style
 	if _environment:
 		_transition_tween.tween_property(_environment, "ambient_light_color", NIGHT_AMBIENT_COLOR, 1.5)
 		_transition_tween.tween_property(_environment, "ambient_light_energy", NIGHT_AMBIENT_ENERGY, 1.5)
+		_transition_tween.tween_property(_environment, "fog_light_color", NIGHT_FOG_COLOR, 1.5)
+		_transition_tween.tween_property(_environment, "fog_density", NIGHT_FOG_DENSITY, 1.5)
 
-		# Enable bloom
+		# NFS Underground style bloom - сильный, с низким порогом
 		_environment.glow_enabled = true
-		_environment.glow_intensity = 1.2
-		_environment.glow_bloom = 0.3
+		_environment.glow_intensity = 1.8  # Сильнее
+		_environment.glow_bloom = 0.4
 		_environment.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
-		_environment.glow_hdr_threshold = 0.8
+		_environment.glow_hdr_threshold = 0.5  # Ниже порог - больше свечения
+		_environment.glow_hdr_scale = 2.0
+
+		# Tonemap для контраста
+		_environment.tonemap_mode = Environment.TONE_MAPPER_ACES
+		_environment.tonemap_exposure = 1.1
+		_environment.tonemap_white = 6.0
 
 	# Switch sky after short delay
 	_transition_tween.chain().tween_callback(_switch_to_night_sky)
@@ -236,9 +374,9 @@ func disable_night_mode() -> void:
 
 	is_night = false
 
-	# Disable rain first
-	if is_raining:
-		toggle_rain()
+	# Обновляем отражения на дорогах (меньше днём)
+	if is_raining and _terrain_generator and _terrain_generator.has_method("set_wet_mode"):
+		_terrain_generator.set_wet_mode(true, false)  # wet=true, night=false
 
 	# Cancel existing tween
 	if _transition_tween:
@@ -252,13 +390,23 @@ func disable_night_mode() -> void:
 		_transition_tween.tween_property(_sun_light, "light_energy", _day_sun_energy, 1.5)
 		_transition_tween.tween_property(_sun_light, "light_color", _day_sun_color, 1.5)
 
-	# Restore ambient
+	# Restore ambient and fog
 	if _environment:
 		_transition_tween.tween_property(_environment, "ambient_light_color", _day_ambient_color, 1.5)
 		_transition_tween.tween_property(_environment, "ambient_light_energy", _day_ambient_energy, 1.5)
+		_transition_tween.tween_property(_environment, "fog_light_color", _day_fog_color, 1.5)
+		_transition_tween.tween_property(_environment, "fog_density", _day_fog_density, 1.5)
 
-		# Disable bloom
-		_environment.glow_enabled = false
+		# Restore day glow settings
+		_environment.glow_intensity = _day_glow_intensity
+		_environment.glow_bloom = 0.1
+		_environment.glow_hdr_threshold = 1.0
+		_environment.glow_hdr_scale = 1.0
+
+		# Restore tonemap
+		_environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+		_environment.tonemap_exposure = _day_tonemap_exposure
+		_environment.tonemap_white = 1.0
 
 	# Switch sky
 	_switch_to_day_sky()
@@ -273,25 +421,30 @@ func _switch_to_night_sky() -> void:
 
 
 func _switch_to_day_sky() -> void:
-	if _environment and _environment.sky and _original_sky:
+	if not _environment or not _environment.sky:
+		return
+	# Проверяем настройку облаков
+	var use_clouds := true
+	if _graphics_settings:
+		use_clouds = _graphics_settings.clouds_enabled
+	if use_clouds and _day_sky:
+		_environment.sky.sky_material = _day_sky
+	elif _original_sky:
 		_environment.sky.sky_material = _original_sky
 
 
 func toggle_rain() -> void:
-	if not is_night:
-		return
-
 	is_raining = not is_raining
 	_rain_system.emitting = is_raining
 
-	# Update road wetness
+	# Update road wetness - меньше отражений днём
 	if _terrain_generator and _terrain_generator.has_method("set_wet_mode"):
-		_terrain_generator.set_wet_mode(is_raining)
+		_terrain_generator.set_wet_mode(is_raining, is_night)
 
 	rain_changed.emit(is_raining)
 	print("Rain: ", "enabled" if is_raining else "disabled")
 
 
 func set_rain(enabled: bool) -> void:
-	if enabled != is_raining and is_night:
+	if enabled != is_raining:
 		toggle_rain()

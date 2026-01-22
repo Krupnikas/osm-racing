@@ -431,3 +431,179 @@ static func create_forest_texture(size: int = 256) -> ImageTexture:
 
 	var texture := ImageTexture.create_from_image(image)
 	return texture
+
+
+# ============ NORMAL MAPS ============
+
+# Генерирует normal map из height map (grayscale image)
+static func _generate_normal_from_height(height_image: Image, strength: float = 1.0) -> Image:
+	var size := height_image.get_width()
+	var normal_image := Image.create(size, size, false, Image.FORMAT_RGB8)
+
+	for y in range(size):
+		for x in range(size):
+			# Получаем соседние пиксели (с wrap-around)
+			var left := height_image.get_pixel((x - 1 + size) % size, y).r
+			var right := height_image.get_pixel((x + 1) % size, y).r
+			var up := height_image.get_pixel(x, (y - 1 + size) % size).r
+			var down := height_image.get_pixel(x, (y + 1) % size).r
+
+			# Вычисляем нормаль из градиента высоты
+			var dx := (left - right) * strength
+			var dy := (up - down) * strength
+
+			# Нормализуем вектор
+			var normal := Vector3(dx, dy, 1.0).normalized()
+
+			# Конвертируем из [-1,1] в [0,1] для хранения в текстуре
+			var color := Color(
+				normal.x * 0.5 + 0.5,
+				normal.y * 0.5 + 0.5,
+				normal.z * 0.5 + 0.5
+			)
+			normal_image.set_pixel(x, y, color)
+
+	return normal_image
+
+
+static func create_asphalt_normal(size: int = 256) -> ImageTexture:
+	# Создаём height map для асфальта
+	var height_image := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 12345
+
+	for y in range(size):
+		for x in range(size):
+			var height := 0.5 + rng.randf() * 0.15 - 0.075
+			# Трещины
+			if rng.randf() < 0.02:
+				height -= 0.2
+			height_image.set_pixel(x, y, Color(height, height, height))
+
+	var normal_image := _generate_normal_from_height(height_image, 2.0)
+	return ImageTexture.create_from_image(normal_image)
+
+
+static func create_brick_normal(size: int = 256) -> ImageTexture:
+	var height_image := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 11111
+
+	var brick_width := 32
+	var brick_height := 16
+	var mortar := 2
+
+	for y in range(size):
+		for x in range(size):
+			var row := y / brick_height
+			var offset := (row % 2) * (brick_width / 2)
+			var bx := (x + offset) % brick_width
+			var by := y % brick_height
+
+			var is_mortar := bx < mortar or by < mortar
+
+			var height: float
+			if is_mortar:
+				height = 0.3  # Швы ниже
+			else:
+				height = 0.6 + rng.randf() * 0.1  # Кирпичи выше с вариацией
+
+			height_image.set_pixel(x, y, Color(height, height, height))
+
+	var normal_image := _generate_normal_from_height(height_image, 3.0)
+	return ImageTexture.create_from_image(normal_image)
+
+
+static func create_sidewalk_normal(size: int = 256) -> ImageTexture:
+	var height_image := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 34567
+
+	var tile_size := 32
+	var gap := 2
+
+	for y in range(size):
+		for x in range(size):
+			var tx := x % tile_size
+			var ty := y % tile_size
+
+			var is_gap := tx < gap or ty < gap
+
+			var height: float
+			if is_gap:
+				height = 0.3
+			else:
+				height = 0.55 + rng.randf() * 0.1
+
+			height_image.set_pixel(x, y, Color(height, height, height))
+
+	var normal_image := _generate_normal_from_height(height_image, 2.5)
+	return ImageTexture.create_from_image(normal_image)
+
+
+static func create_concrete_normal(size: int = 256) -> ImageTexture:
+	var height_image := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 54321
+
+	for y in range(size):
+		for x in range(size):
+			var height := 0.5 + rng.randf() * 0.08 - 0.04
+			# Швы между плитами
+			if x % 64 < 2 or y % 64 < 2:
+				height = 0.3
+			height_image.set_pixel(x, y, Color(height, height, height))
+
+	var normal_image := _generate_normal_from_height(height_image, 2.0)
+	return ImageTexture.create_from_image(normal_image)
+
+
+static func create_panel_building_normal(size: int = 512, floors: int = 5, windows_per_floor: int = 4) -> ImageTexture:
+	var height_image := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 99999
+
+	var floor_height := size / floors
+	var window_width := size / (windows_per_floor * 2)
+	var window_height := floor_height / 2
+	var window_margin_x := window_width / 2
+	var window_margin_y := floor_height / 4
+
+	for y in range(size):
+		for x in range(size):
+			var height := 0.5 + rng.randf() * 0.02
+
+			# Швы между панелями (углубления)
+			var floor_pos := y % floor_height
+			if floor_pos < 3:
+				height = 0.35
+
+			var section_width := size / 2
+			if x % section_width < 2:
+				height = 0.38
+
+			# Окна (углубления)
+			var in_floor_y := y % floor_height
+			var window_y_start := window_margin_y
+			var window_y_end := window_margin_y + window_height
+
+			if in_floor_y >= window_y_start and in_floor_y < window_y_end:
+				for w in range(windows_per_floor):
+					var window_x_start := window_margin_x + w * (window_width + window_margin_x)
+					var window_x_end := window_x_start + window_width
+
+					if x >= window_x_start and x < window_x_end:
+						var in_window_x := x - window_x_start
+						var in_window_y := in_floor_y - window_y_start
+						var frame_size := 4
+
+						if in_window_x < frame_size or in_window_x >= window_width - frame_size or \
+						   in_window_y < frame_size or in_window_y >= window_height - frame_size:
+							height = 0.55  # Рама выступает
+						else:
+							height = 0.25  # Стекло утоплено
+
+			height_image.set_pixel(x, y, Color(height, height, height))
+
+	var normal_image := _generate_normal_from_height(height_image, 2.5)
+	return ImageTexture.create_from_image(normal_image)

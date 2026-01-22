@@ -47,27 +47,21 @@ func setup_lights(npc: VehicleBody3D) -> void:
 
 func _detect_car_model() -> void:
 	"""Определяет тип модели машины по имени ноды"""
-	print("NPCCarLights: Detecting model for %s, children: %s" % [_npc.name, _npc.get_children().map(func(c): return c.name)])
 	for child in _npc.get_children():
 		if child.name == "NexiaModel":
 			_car_model = CarModel.NEXIA
-			print("NPCCarLights: Detected NEXIA")
 			return
 		elif child.name == "PAZModel":
 			_car_model = CarModel.PAZ
-			print("NPCCarLights: Detected PAZ")
 			return
 		elif child.name == "VAZ2107Model":
 			_car_model = CarModel.VAZ_2107
-			print("NPCCarLights: Detected VAZ_2107")
 			return
 		elif child.name == "Model":
 			# Lada 2109 (taxi, DPS) uses "Model" node name
 			_car_model = CarModel.LADA_2109
-			print("NPCCarLights: Detected LADA_2109")
 			return
 	_car_model = CarModel.DEFAULT
-	print("NPCCarLights: Using DEFAULT model")
 
 
 func _create_headlight() -> void:

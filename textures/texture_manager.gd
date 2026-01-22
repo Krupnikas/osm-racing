@@ -9,12 +9,27 @@ const TextureGeneratorScript = preload("res://textures/texture_generator.gd")
 # Кэш текстур
 var _textures: Dictionary = {}
 
+# Кэш normal maps
+var _normals: Dictionary = {}
+
 # Кэш материалов
 var _materials: Dictionary = {}
+
+# Ссылка на настройки графики
+var _graphics_settings: Node
 
 func _ready() -> void:
 	# Предгенерируем основные текстуры при старте
 	_pregenerate_textures()
+	# Ищем настройки графики
+	await get_tree().process_frame
+	_graphics_settings = get_tree().current_scene.find_child("GraphicsSettings", true, false)
+
+
+func _are_normal_maps_enabled() -> bool:
+	# Всегда возвращаем true при создании материалов
+	# Normal maps будут созданы, но их влияние контролируется через normal_scale
+	return true
 
 func _pregenerate_textures() -> void:
 	print("TextureManager: Pregenerating textures...")
@@ -42,8 +57,17 @@ func _pregenerate_textures() -> void:
 	_textures["concrete"] = TextureGeneratorScript.create_concrete_texture(256)
 	_textures["asphalt"] = TextureGeneratorScript.create_asphalt_texture(256)
 
+	# Normal maps
+	print("TextureManager: Generating normal maps...")
+	_normals["asphalt"] = TextureGeneratorScript.create_asphalt_normal(256)
+	_normals["brick"] = TextureGeneratorScript.create_brick_normal(256)
+	_normals["sidewalk"] = TextureGeneratorScript.create_sidewalk_normal(256)
+	_normals["concrete"] = TextureGeneratorScript.create_concrete_normal(256)
+	_normals["building_panel"] = TextureGeneratorScript.create_panel_building_normal(512, 5, 4)
+
 	var elapsed := Time.get_ticks_msec() - start_time
-	print("TextureManager: Generated %d textures in %d ms" % [_textures.size(), elapsed])
+	print("TextureManager: Generated %d textures + %d normals in %d ms" % [_textures.size(), _normals.size(), elapsed])
+	print("TextureManager: Normal maps: ", _normals.keys())
 
 func get_texture(name: String) -> ImageTexture:
 	if _textures.has(name):
@@ -75,6 +99,11 @@ func get_road_material(road_type: String) -> StandardMaterial3D:
 		material.albedo_texture = _textures[texture_key]
 		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 		material.uv1_scale = Vector3(1, 0.1, 1)  # Повторение вдоль дороги
+		# Normal map для дорог (если включены)
+		if _normals.has("asphalt") and _are_normal_maps_enabled():
+			material.normal_enabled = true
+			material.normal_texture = _normals["asphalt"]
+			material.normal_scale = 0.5
 	else:
 		# Fallback цвет
 		material.albedo_color = Color(0.3, 0.3, 0.3)
@@ -111,6 +140,12 @@ func get_building_wall_material(building_type: String = "residential", height: f
 		# UV масштаб зависит от высоты здания
 		var floors := int(height / 3.0)  # ~3м на этаж
 		material.uv1_scale = Vector3(1.0 / max(1, floors / 5.0), 1.0, 1.0)
+		# Normal map для зданий (если включены)
+		var normal_key := "building_panel" if texture_key == "building_panel" else "brick"
+		if _normals.has(normal_key) and _are_normal_maps_enabled():
+			material.normal_enabled = true
+			material.normal_texture = _normals[normal_key]
+			material.normal_scale = 0.6
 
 	_materials[mat_key] = material
 	return material
@@ -158,6 +193,11 @@ func get_ground_material(ground_type: String) -> StandardMaterial3D:
 		material.albedo_texture = _textures[texture_key]
 		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 		material.uv1_scale = Vector3(0.05, 0.05, 1)  # Большой масштаб для земли
+		# Normal map для тротуаров (если включены)
+		if texture_key == "concrete" and _normals.has("sidewalk") and _are_normal_maps_enabled():
+			material.normal_enabled = true
+			material.normal_texture = _normals["sidewalk"]
+			material.normal_scale = 0.4
 
 	_materials[mat_key] = material
 	return material

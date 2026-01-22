@@ -1,4 +1,4 @@
-[gd_scene load_steps=15 format=3 uid="uid://bmain123"]
+[gd_scene load_steps=16 format=3 uid="uid://bmain123"]
 
 [ext_resource type="PackedScene" uid="uid://bcar_nexia" path="res://car/car_nexia.tscn" id="2_car"]
 [ext_resource type="Script" path="res://camera/follow_camera.gd" id="3_camera"]
@@ -15,6 +15,7 @@
 [ext_resource type="Script" path="res://traffic/traffic_manager.gd" id="11_traffic"]
 [ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="12_night"]
 [ext_resource type="Script" path="res://ui/track_display.gd" id="12_track_display"]
+[ext_resource type="Script" path="res://settings/graphics_settings.gd" id="16_graphics"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -32,6 +33,18 @@ ambient_light_source = 2
 ambient_light_color = Color(0.5, 0.5, 0.5, 1)
 tonemap_mode = 2
 ssao_enabled = true
+ssr_enabled = true
+ssr_max_steps = 64
+ssr_fade_in = 0.15
+ssr_fade_out = 2.0
+glow_enabled = true
+glow_intensity = 0.3
+glow_bloom = 0.1
+glow_hdr_threshold = 1.0
+fog_enabled = true
+fog_light_color = Color(0.7, 0.75, 0.85, 1)
+fog_density = 0.0008
+fog_sky_affect = 0.3
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
 size = Vector3(10000, 1, 10000)
@@ -130,3 +143,6 @@ script = ExtResource("12_night")
 
 [node name="TrackDisplay" type="CanvasLayer" parent="."]
 script = ExtResource("12_track_display")
+
+[node name="GraphicsSettings" type="Node" parent="."]
+script = ExtResource("16_graphics")

@@ -51,12 +51,6 @@ func _ready() -> void:
 	# Вызываем базовый _ready (собирает колёса)
 	super._ready()
 
-	print("NPC %s: Found %d wheels (front: %d, rear: %d)" % [name, wheels_front.size() + wheels_rear.size(), wheels_front.size(), wheels_rear.size()])
-
-	# Выводим позиции колёс для отладки
-	for wheel in wheels_front + wheels_rear:
-		print("  Wheel %s: position y=%.2f, radius=%.2f, rest_length=%.2f" % [wheel.name, wheel.position.y, wheel.wheel_radius, wheel.wheel_rest_length])
-
 	# Настраиваем привод (AWD)
 	for wheel in wheels_front:
 		wheel.use_as_traction = true
@@ -461,9 +455,7 @@ func _debug_wheel_contact() -> void:
 		if wheel.is_in_contact():
 			in_contact += 1
 
-	if in_contact == 0:
-		print("⚠️ NPC %s: NO WHEELS IN CONTACT! Speed: %.1f km/h, Position: %s, Throttle: %.2f" % [
-			name, current_speed_kmh, global_position, throttle_input
-		])
-	elif in_contact < all_wheels.size():
-		print("⚠️ NPC %s: Only %d/%d wheels in contact" % [name, in_contact, all_wheels.size()])
+	# Debug warnings disabled for performance
+	#if in_contact == 0:
+	#	print("⚠️ NPC %s: NO WHEELS IN CONTACT!" % name)
+	pass

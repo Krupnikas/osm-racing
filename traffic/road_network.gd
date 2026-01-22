@@ -59,8 +59,6 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, chunk_ke
 	if not highway_type in VEHICLE_ROADS:
 		return  # Пропускаем residential, service, footway и т.д.
 
-	print("RoadNetwork: Adding %s road in chunk %s (%d points)" % [highway_type, chunk_key, points.size()])
-
 	# Получаем параметры дороги
 	var speed_limit: float = SPEED_LIMITS.get(highway_type, 25.0)
 	var width: float = _get_road_width(highway_type)

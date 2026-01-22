@@ -119,10 +119,7 @@ func _attempt_spawn_in_chunk(chunk_key: String, player_pos: Vector3) -> void:
 	# Получаем waypoints из road network
 	var waypoints: Array = road_network.get_waypoints_in_chunk(chunk_key)
 	if waypoints.is_empty():
-		print("TrafficManager: No waypoints in chunk %s" % chunk_key)
-		return
-
-	print("TrafficManager: Attempting spawn in chunk %s (has %d waypoints)" % [chunk_key, waypoints.size()])
+		return  # Тихо выходим - нет waypoints в этом чанке
 
 	# Фильтруем waypoints по дистанции от игрока
 	var nearby_waypoints: Array = []
@@ -161,8 +158,6 @@ func _attempt_spawn_in_chunk(chunk_key: String, player_pos: Vector3) -> void:
 	# Добавляем в списки
 	active_npcs.append(npc)
 	spawned_positions[chunk_key].append(spawn_waypoint.position)
-
-	print("TrafficManager: Spawned NPC at %s in chunk %s (total active: %d)" % [npc.global_position, chunk_key, active_npcs.size()])
 
 
 func _update_despawning() -> void:
@@ -246,8 +241,6 @@ func _get_npc_from_pool():
 			# 40% - блочные машинки
 			scene_to_use = npc_car_scene
 			car_type = "box car"
-
-		print("TrafficManager: Spawning %s" % car_type)
 
 		var npc = scene_to_use.instantiate()
 		get_parent().add_child(npc)
