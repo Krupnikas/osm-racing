@@ -160,6 +160,31 @@ static func create_primary_texture(size: int = 512, lanes: int = 4) -> ImageText
 	var texture := ImageTexture.create_from_image(image)
 	return texture
 
+
+# Текстура перекрёстка (чистый асфальт без разметки)
+static func create_intersection_texture(size: int = 256) -> ImageTexture:
+	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 34568
+
+	for y in range(size):
+		for x in range(size):
+			# Реалистичный тёмный асфальт (как на дорогах)
+			rng.seed = 34568 + x * 19 + y * 37
+			var base := 0.20 + rng.randf() * 0.06
+			# Крупнозернистая текстура
+			var grain := sin(float(x) * 0.6) * sin(float(y) * 0.6) * 0.015
+			# Износ и пятна (больше износа на перекрёстках)
+			var wear := 0.0
+			if rng.randf() < 0.04:
+				wear = rng.randf() * 0.05 - 0.025
+			base = clamp(base + grain + wear, 0.14, 0.32)
+			image.set_pixel(x, y, Color(base, base * 0.98, base * 0.96))
+
+	var texture := ImageTexture.create_from_image(image)
+	return texture
+
+
 # Текстура пешеходной дорожки (светлый асфальт)
 static func create_sidewalk_texture(size: int = 256) -> ImageTexture:
 	var image := Image.create(size, size, false, Image.FORMAT_RGB8)

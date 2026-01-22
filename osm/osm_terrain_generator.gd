@@ -54,6 +54,8 @@ var _entrance_nodes: Array = []  # Входы в здания/заведения
 var _poi_nodes: Array = []  # Точечные заведения (shop/amenity как node)
 var _parking_polygons: Array[PackedVector2Array] = []  # Полигоны парковок для исключения фонарей
 var _road_segments: Array = []  # Сегменты дорог для позиционирования знаков парковки
+var _intersection_positions: Array[Vector2] = []  # Позиции перекрёстков (центры)
+var _intersection_types: Array[bool] = []  # true = равнозначный (все дороги одного типа)
 var _created_lamp_positions: Dictionary = {}  # Позиции созданных фонарей для избежания дубликатов (ключ: chunk_key)
 var _created_sign_positions: Dictionary = {}  # Позиции созданных знаков для избежания дубликатов
 var _pending_lamps: Array = []  # Отложенные фонари (создаются после загрузки всех парковок)
@@ -199,6 +201,7 @@ func _init_textures() -> void:
 	_road_textures["primary"] = TextureGeneratorScript.create_primary_texture(512, 4)  # Одна сплошная в центре
 	_road_textures["residential"] = TextureGeneratorScript.create_road_texture(256, 2, true, false)
 	_road_textures["path"] = TextureGeneratorScript.create_sidewalk_texture(256)
+	_road_textures["intersection"] = TextureGeneratorScript.create_intersection_texture(256)  # Чистый асфальт
 
 	# Текстуры зданий
 	_building_textures["panel"] = TextureGeneratorScript.create_panel_building_texture(512, 5, 4)
@@ -1097,6 +1100,52 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				points.append(local)
 			_parking_polygons.append(points)
 
+	# Сбор перекрёстков (узлы, где сходятся несколько дорог)
+	_intersection_positions.clear()
+	_intersection_types.clear()
+	var node_usage: Dictionary = {}  # node_key -> {pos: Vector2, types: Array[String]}
+
+	for way in ways:
+		var tags: Dictionary = way.get("tags", {})
+		var way_nodes: Array = way.get("nodes", [])
+
+		if not tags.has("highway") or way_nodes.size() < 2:
+			continue
+
+		var highway_type: String = tags.get("highway", "")
+		# Пропускаем пешеходные дорожки
+		if highway_type in ["footway", "path", "cycleway", "track", "steps"]:
+			continue
+
+		# Проверяем концы дороги (первый и последний узел)
+		var endpoints := [way_nodes[0], way_nodes[way_nodes.size() - 1]]
+		for node in endpoints:
+			var node_key := "%.6f,%.6f" % [node.lat, node.lon]
+			var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+
+			if not node_usage.has(node_key):
+				node_usage[node_key] = {"pos": local, "types": []}
+
+			if highway_type not in node_usage[node_key]["types"]:
+				node_usage[node_key]["types"].append(highway_type)
+
+	# Определяем перекрёстки (2+ дороги сходятся)
+	for node_key in node_usage:
+		var info: Dictionary = node_usage[node_key]
+		var types: Array = info["types"]
+		if types.size() >= 2:
+			_intersection_positions.append(info["pos"])
+			# Вычисляем максимальную разницу в приоритетах дорог
+			var min_priority := 999
+			var max_priority := 0
+			for t in types:
+				var p := _get_road_priority(t)
+				min_priority = mini(min_priority, p)
+				max_priority = maxi(max_priority, p)
+			# true если разница в приоритетах <= 1 (нужна заплатка без разметки)
+			var needs_patch := (max_priority - min_priority) <= 1
+			_intersection_types.append(needs_patch)
+
 	# Второй проход: создаём все объекты
 	var skipped_buildings := 0
 	for way in ways:
@@ -1208,8 +1257,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			continue
 
 		var highway_type: String = way_tags.get("highway", "")
-		# Только primary дороги для перекрёстков
-		if highway_type not in ["primary", "secondary"]:
+		# Исключаем пешеходные дороги из детекции перекрёстков
+		if highway_type in ["footway", "path", "cycleway", "steps", "pedestrian"]:
 			continue
 
 		if way_nodes.size() < 2:
@@ -1235,13 +1284,25 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			if highway_type not in node_road_types[node_key]:
 				node_road_types[node_key].append(highway_type)
 
-	# Создаём светофоры и знаки на перекрёстках
+	# Создаём светофоры, знаки и заплатки на перекрёстках
 	var intersection_count := 0
 	for node_key in node_road_count:
 		if node_road_count[node_key] >= 2:  # Перекрёсток - 2+ дороги сходятся концами
 			var pos: Vector2 = node_positions[node_key]
 			var road_types: Array = node_road_types[node_key]
 			var elevation := _get_elevation_at_point(pos, elev_data)
+
+			# Вычисляем разницу в приоритетах дорог и максимальную ширину
+			var min_priority := 999
+			var max_priority := 0
+			var max_width := 0.0
+			for t in road_types:
+				var p := _get_road_priority(t)
+				min_priority = mini(min_priority, p)
+				max_priority = maxi(max_priority, p)
+				var w: float = ROAD_WIDTHS.get(t, 6.0)
+				max_width = maxf(max_width, w)
+			var priority_diff := max_priority - min_priority
 
 			# На крупных перекрёстках - светофор, на мелких - знаки
 			var has_primary := "primary" in road_types or "secondary" in road_types
@@ -1250,6 +1311,12 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			else:
 				# На обычных перекрёстках - один знак, не 4
 				_create_yield_sign(pos + Vector2(5, 5), elevation, target)
+
+			# Создаём заплатку без разметки если разница в приоритетах <= 1
+			if priority_diff <= 1:
+				# Размер заплатки = максимальная ширина дороги * 1.5 (чтобы покрыть весь перекрёсток)
+				var patch_size := max_width * 1.5
+				_create_intersection_patch(pos, elevation, target, patch_size)
 
 			intersection_count += 1
 
@@ -1476,10 +1543,13 @@ func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_hei
 	if nodes.size() < 2:
 		return
 
-	var points: PackedVector2Array = []
+	var raw_points: PackedVector2Array = []
 	for node in nodes:
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
-		points.append(local)
+		raw_points.append(local)
+
+	# Сглаживаем точки бордюров так же, как дороги
+	var points: PackedVector2Array = _smooth_road_corners(raw_points)
 
 	var curb_width := 0.15  # Ширина бордюра 15 см
 
@@ -1500,9 +1570,18 @@ func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_hei
 	var start_idx := 1 if points.size() > 3 else 0
 	var end_idx := points.size() - 2 if points.size() > 3 else points.size() - 1
 
+	# Радиус зоны без бордюров около перекрёстка
+	var intersection_radius := road_width * 1.5
+
 	for i in range(start_idx, end_idx):
 		var p1 := points[i]
 		var p2 := points[i + 1]
+
+		# Пропускаем сегменты около перекрёстков
+		if _find_nearby_intersection(p1, intersection_radius) >= 0:
+			continue
+		if _find_nearby_intersection(p2, intersection_radius) >= 0:
+			continue
 
 		var dir := (p2 - p1).normalized()
 		var perp := Vector2(-dir.y, dir.x)
@@ -1630,6 +1709,12 @@ func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_hei
 	for i in range(start_idx, end_idx):
 		var p1 := points[i]
 		var p2 := points[i + 1]
+
+		# Пропускаем сегменты около перекрёстков
+		if _find_nearby_intersection(p1, intersection_radius) >= 0:
+			continue
+		if _find_nearby_intersection(p2, intersection_radius) >= 0:
+			continue
 
 		var dir := (p2 - p1).normalized()
 		var perp := Vector2(-dir.y, dir.x)
@@ -5254,3 +5339,66 @@ func _smooth_road_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
 		result.append(last_point)
 
 	return result
+
+
+## Возвращает приоритет дороги (больше = важнее)
+func _get_road_priority(highway_type: String) -> int:
+	match highway_type:
+		"motorway", "trunk":
+			return 5
+		"primary":
+			return 4
+		"secondary":
+			return 3
+		"tertiary":
+			return 2
+		"residential", "unclassified", "service":
+			return 1
+		_:
+			return 0
+
+
+## Проверяет, находится ли точка рядом с перекрёстком
+## Возвращает индекс перекрёстка или -1
+func _find_nearby_intersection(pos: Vector2, radius: float = 15.0) -> int:
+	for i in range(_intersection_positions.size()):
+		if pos.distance_to(_intersection_positions[i]) < radius:
+			return i
+	return -1
+
+
+## Проверяет, является ли перекрёсток равнозначным
+func _is_equal_intersection(intersection_idx: int) -> bool:
+	if intersection_idx < 0 or intersection_idx >= _intersection_types.size():
+		return false
+	return _intersection_types[intersection_idx]
+
+
+## Создаёт заплатку на перекрёстке (чистый асфальт без разметки)
+func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, size: float = 18.0) -> void:
+	if not _road_textures.has("intersection"):
+		return
+
+	# Минимальный размер заплатки
+	var patch_size := maxf(size, 10.0)
+
+	# Создаём простой квадратный меш
+	var mesh_instance := MeshInstance3D.new()
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(patch_size, patch_size)
+	mesh_instance.mesh = plane
+
+	# Позиция выше дороги чтобы перекрыть разметку (дороги на высоте 0.03-0.06)
+	mesh_instance.position = Vector3(pos.x, elevation + 0.08, pos.y)
+
+	# Материал с текстурой перекрёстка
+	var material := StandardMaterial3D.new()
+	material.albedo_texture = _road_textures["intersection"]
+	# UV масштаб зависит от размера заплатки (чтобы текстура не растягивалась)
+	var uv_scale := 5.0 / patch_size  # Нормализуем к базовому размеру текстуры
+	material.uv1_scale = Vector3(uv_scale, uv_scale, 1.0)
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mesh_instance.material_override = material
+	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	parent.add_child(mesh_instance)
