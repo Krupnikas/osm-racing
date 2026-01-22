@@ -1,0 +1,16 @@
+Textures Credits
+================
+
+Grass004 (PBR Grass Texture)
+----------------------------
+Source: ambientCG
+URL: https://ambientcg.com/view?id=Grass004
+License: CC0 1.0 Universal (Public Domain)
+Files:
+  - Grass004_1K-JPG_Color.jpg
+  - Grass004_1K-JPG_NormalGL.jpg
+  - Grass004_1K-JPG_Roughness.jpg
+  - Grass004_1K-JPG_AmbientOcclusion.jpg
+
+You can use these textures for any purpose without restriction.
+No attribution required (but appreciated).
