@@ -1317,34 +1317,35 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 	var texture_key: String
 	var height_offset: float
 	var curb_height: float
+	# Высота дорог по приоритету (большие дороги выше малых для правильного отображения на перекрёстках)
 	match highway_type:
 		"motorway", "trunk":
 			texture_key = "highway"
-			height_offset = 0.02
+			height_offset = 0.06  # Самые высокие
 			curb_height = 0.12
 		"primary":
 			texture_key = "primary"
-			height_offset = 0.02
+			height_offset = 0.05
 			curb_height = 0.10
 		"secondary", "tertiary":
 			texture_key = "primary"
-			height_offset = 0.02
+			height_offset = 0.04
 			curb_height = 0.08
 		"residential", "unclassified":
 			texture_key = "residential"
-			height_offset = 0.02
+			height_offset = 0.03
 			curb_height = 0.06
 		"service":
 			texture_key = "residential"
-			height_offset = 0.02
+			height_offset = 0.02  # Самые низкие дороги
 			curb_height = 0.04
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
-			height_offset = 0.08
+			height_offset = 0.01  # Пешеходные ещё ниже
 			curb_height = 0.0
 		_:
 			texture_key = "residential"
-			height_offset = 0.02
+			height_offset = 0.03
 			curb_height = 0.05
 
 	_create_road_mesh_with_texture(nodes, width, texture_key, height_offset, parent, elev_data)
@@ -2317,7 +2318,8 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	_create_polygon_mesh_with_texture(points, texture_key, 0.04, parent, elev_data, is_water)
+	# Natural объекты ниже дорог чтобы не было z-fighting
+	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
 	# Процедурная генерация деревьев в лесах
 	if natural_type in ["wood"]:
@@ -2361,7 +2363,8 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 		_:
 			texture_key = "grass"
 
-	_create_polygon_mesh_with_texture(points, texture_key, 0.02, parent, elev_data, is_water)
+	# Landuse ниже дорог чтобы не было z-fighting
+	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
 	# Процедурная генерация деревьев в лесах
 	if landuse_type == "forest":
@@ -2395,7 +2398,8 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	_create_polygon_mesh_with_texture(points, texture_key, 0.04, parent, elev_data, is_water)
+	# Парки и зоны отдыха ниже дорог чтобы не было z-fighting
+	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
 	# Процедурная генерация деревьев в парках и садах
 	if leisure_type in ["park", "garden"]:
@@ -3813,21 +3817,7 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	globe_mesh.height = 0.35
 	light_globe.mesh = globe_mesh
 
-	var globe_mat := StandardMaterial3D.new()
-	globe_mat.albedo_color = Color(1.0, 0.75, 0.3)  # Натриевый оранжевый
-	globe_mat.emission_enabled = true
-	globe_mat.emission = Color(1.0, 0.65, 0.2)  # Тёплый натриевый
-	globe_mat.emission_energy_multiplier = 0.8
-	light_globe.material_override = globe_mat
-	light_globe.name = "LampGlobe"
-
-	# Позиция плафона на конце кронштейна
-	light_globe.position.x = arm_end_x
-	light_globe.position.y = arm_end_y
-	lamp.add_child(light_globe)
-
-	# Добавляем источник света - OmniLight для освещения вокруг
-	# 5% шанс что фонарь сломан
+	# 5% шанс что фонарь сломан (определяем до создания плафона)
 	var is_broken := randf() < 0.05
 
 	# Проверяем, включён ли ночной режим
@@ -3837,6 +3827,27 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 		if night_manager:
 			is_night = night_manager.is_night
 
+	var globe_mat := StandardMaterial3D.new()
+	# Настраиваем плафон в зависимости от состояния (ночь/день, сломан/работает)
+	if is_night and not is_broken:
+		globe_mat.albedo_color = Color(1.0, 0.75, 0.3)  # Натриевый оранжевый
+		globe_mat.emission_enabled = true
+		globe_mat.emission = Color(1.0, 0.65, 0.2)  # Тёплый натриевый
+		globe_mat.emission_energy_multiplier = 5.0
+	else:
+		globe_mat.albedo_color = Color(0.3, 0.3, 0.3)  # Серый днём или сломан
+		globe_mat.emission_enabled = false
+	light_globe.material_override = globe_mat
+	light_globe.name = "LampGlobe"
+	# Сохраняем флаг "сломан" в метаданных плафона
+	light_globe.set_meta("is_broken", is_broken)
+
+	# Позиция плафона на конце кронштейна
+	light_globe.position.x = arm_end_x
+	light_globe.position.y = arm_end_y
+	lamp.add_child(light_globe)
+
+	# Добавляем источник света - OmniLight для освещения вокруг
 	var lamp_light := OmniLight3D.new()
 	lamp_light.name = "LampLight"
 	lamp_light.position = light_globe.position
@@ -3848,12 +3859,9 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	lamp_light.light_bake_mode = Light3D.BAKE_DISABLED
 	# Фонарь светит только ночью и если не сломан
 	lamp_light.visible = is_night and not is_broken
+	# Сохраняем флаг "сломан" в метаданных для переключения день/ночь
+	lamp_light.set_meta("is_broken", is_broken)
 	lamp.add_child(lamp_light)
-
-	# Эмиссия плафона только ночью (днём как у сломанных - серый без свечения)
-	if is_broken or not is_night:
-		globe_mat.emission_enabled = false
-		globe_mat.albedo_color = Color(0.3, 0.3, 0.3)  # Тусклый серый
 
 	# Коллизия для столба
 	var body := StaticBody3D.new()
@@ -4592,21 +4600,25 @@ func _recursive_update_lights(node: Node, night_enabled: bool) -> void:
 	"""Рекурсивно обновляет все источники света"""
 	# Проверяем лампы уличных фонарей (SpotLight3D или OmniLight3D для совместимости)
 	if node.name == "LampLight" and (node is SpotLight3D or node is OmniLight3D):
-		node.visible = night_enabled
-		# Обновляем плафон - ночью светится, днём серый как у сломанных
-		var lamp_parent := node.get_parent()
-		if lamp_parent:
-			var globe := lamp_parent.find_child("LampGlobe", false)
-			if globe and globe.material_override:
-				var mat := globe.material_override as StandardMaterial3D
-				if mat:
-					if night_enabled:
-						mat.emission_enabled = true
-						mat.emission_energy_multiplier = 5.0
-						mat.albedo_color = Color(1.0, 0.85, 0.5)  # Тёплый жёлтый
-					else:
-						mat.emission_enabled = false
-						mat.albedo_color = Color(0.3, 0.3, 0.3)  # Серый днём
+		# Проверяем не сломана ли лампа
+		var is_broken: bool = node.get_meta("is_broken", false)
+		# Сломанные лампы не включаются
+		node.visible = night_enabled and not is_broken
+
+	# Проверяем плафоны фонарей (LampGlobe)
+	if node.name == "LampGlobe" and node is MeshInstance3D:
+		var is_broken: bool = node.get_meta("is_broken", false)
+		if node.material_override:
+			var mat := node.material_override as StandardMaterial3D
+			if mat:
+				if night_enabled and not is_broken:
+					mat.emission_enabled = true
+					mat.emission = Color(1.0, 0.65, 0.2)
+					mat.emission_energy_multiplier = 5.0
+					mat.albedo_color = Color(1.0, 0.85, 0.5)  # Тёплый жёлтый
+				else:
+					mat.emission_enabled = false
+					mat.albedo_color = Color(0.3, 0.3, 0.3)  # Серый днём
 
 	# Проверяем неоновые вывески и окна
 	if node.name.begins_with("NeonSign") or node.name.begins_with("WindowLights"):
