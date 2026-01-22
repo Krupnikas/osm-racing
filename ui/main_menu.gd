@@ -149,6 +149,7 @@ func _start_loading() -> void:
 		_start_game()
 
 func _on_load_started() -> void:
+	$LoadingPanel/VBox/ProgressBar.value = 0
 	$LoadingPanel/VBox/StatusLabel.text = "Загрузка карты..."
 
 func _on_load_progress(progress: float, status: String) -> void:

@@ -55,6 +55,8 @@ var _poi_nodes: Array = []  # Точечные заведения (shop/amenity 
 var _parking_polygons: Array[PackedVector2Array] = []  # Полигоны парковок для исключения фонарей
 var _road_segments: Array = []  # Сегменты дорог для позиционирования знаков парковки
 var _intersection_positions: Array[Vector2] = []  # Позиции перекрёстков (центры)
+var _intersection_radii: Array[Vector2] = []  # Полуоси эллипсов (x=вдоль широкой дороги, y=вдоль узкой)
+var _intersection_angles: Array[float] = []  # Углы поворота эллипсов (радианы, направление широкой дороги)
 var _intersection_types: Array[bool] = []  # true = равнозначный (все дороги одного типа)
 var _created_lamp_positions: Dictionary = {}  # Позиции созданных фонарей для избежания дубликатов (ключ: chunk_key)
 var _created_sign_positions: Dictionary = {}  # Позиции созданных знаков для избежания дубликатов
@@ -77,6 +79,7 @@ var _infrastructure_queue: Array = []  # Очередь {type, pos, elevation, p
 
 # Отложенная генерация дорог и других тяжёлых объектов
 var _road_queue: Array = []  # Очередь {nodes, tags, parent, elev_data}
+var _curb_queue: Array = []  # Очередь бордюров (создаются после детекции перекрёстков)
 
 # Отложенная генерация terrain объектов (natural, landuse, leisure)
 var _terrain_objects_queue: Array = []  # Очередь {type, nodes, tags, parent, elev_data}
@@ -286,6 +289,11 @@ func start_loading() -> void:
 	_pending_lamps.clear()  # Очищаем отложенные фонари
 	_pending_parking_signs.clear()  # Очищаем отложенные знаки парковки
 	_lamps_created = false  # Сбрасываем флаг
+	_intersection_positions.clear()  # Очищаем перекрёстки
+	_intersection_radii.clear()
+	_intersection_angles.clear()
+	_intersection_types.clear()
+	_curb_queue.clear()  # Очищаем очередь бордюров
 
 	# Определяем какие чанки нужны для старта (вокруг точки спавна)
 	_initial_chunks_needed = _get_needed_chunks(Vector3.ZERO)
@@ -1101,9 +1109,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			_parking_polygons.append(points)
 
 	# Сбор перекрёстков (узлы, где сходятся несколько дорог)
-	_intersection_positions.clear()
-	_intersection_types.clear()
-	var node_usage: Dictionary = {}  # node_key -> {pos: Vector2, types: Array[String]}
+	# НЕ очищаем массивы - накапливаем из всех чанков (очистка в start_loading)
+	var node_usage: Dictionary = {}  # node_key -> {pos: Vector2, types: Array[String], widths: Array[float], directions: Array[Vector2]}
 
 	for way in ways:
 		var tags: Dictionary = way.get("tags", {})
@@ -1117,23 +1124,73 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		if highway_type in ["footway", "path", "cycleway", "track", "steps"]:
 			continue
 
+		var road_width: float = ROAD_WIDTHS.get(highway_type, 5.0)
+
 		# Проверяем ВСЕ узлы дороги для детекции Т-образных перекрёстков
-		for node in way_nodes:
+		for i in range(way_nodes.size()):
+			var node = way_nodes[i]
 			var node_key := "%.6f,%.6f" % [node.lat, node.lon]
 			var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 
+			# Вычисляем направление дороги в этой точке
+			var direction := Vector2.ZERO
+			if i > 0:
+				var prev_local: Vector2 = _latlon_to_local(way_nodes[i - 1].lat, way_nodes[i - 1].lon)
+				direction = (local - prev_local).normalized()
+			elif i < way_nodes.size() - 1:
+				var next_local: Vector2 = _latlon_to_local(way_nodes[i + 1].lat, way_nodes[i + 1].lon)
+				direction = (next_local - local).normalized()
+
 			if not node_usage.has(node_key):
-				node_usage[node_key] = {"pos": local, "types": []}
+				node_usage[node_key] = {"pos": local, "types": [], "widths": [], "directions": []}
 
 			if highway_type not in node_usage[node_key]["types"]:
 				node_usage[node_key]["types"].append(highway_type)
+				node_usage[node_key]["widths"].append(road_width)
+				node_usage[node_key]["directions"].append(direction)
 
 	# Определяем перекрёстки (2+ дороги сходятся)
 	for node_key in node_usage:
 		var info: Dictionary = node_usage[node_key]
 		var types: Array = info["types"]
+		var widths: Array = info["widths"]
+		var directions: Array = info["directions"]
 		if types.size() >= 2:
+			# Проверяем на дубликат (перекрёсток уже есть рядом)
+			var is_duplicate := false
+			for existing_pos in _intersection_positions:
+				if existing_pos.distance_to(info["pos"]) < 2.0:
+					is_duplicate = true
+					break
+			if is_duplicate:
+				continue
+
 			_intersection_positions.append(info["pos"])
+
+			# Находим самую широкую и вторую по ширине дорогу
+			var max_width := 0.0
+			var second_width := 0.0
+			var max_dir := Vector2.RIGHT
+			for i in range(widths.size()):
+				var w: float = widths[i]
+				if w > max_width:
+					second_width = max_width
+					max_width = w
+					max_dir = directions[i]
+				elif w > second_width:
+					second_width = w
+			if second_width == 0.0:
+				second_width = max_width
+
+			# Полуоси эллипса = половина ширины дорог
+			var radius_a := max_width * 0.5  # вдоль широкой дороги
+			var radius_b := second_width * 0.5  # вдоль узкой дороги
+			_intersection_radii.append(Vector2(radius_a, radius_b))
+
+			# Угол поворота = направление широкой дороги + 90 градусов
+			var angle := atan2(max_dir.y, max_dir.x) + PI * 0.5
+			_intersection_angles.append(angle)
+
 			# Вычисляем максимальную разницу в приоритетах дорог
 			var min_priority := 999
 			var max_priority := 0
@@ -1290,12 +1347,12 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			var road_types: Array = node_road_types[node_key]
 			var elevation := _get_elevation_at_point(pos, elev_data)
 
-			# Считаем дороги выше secondary (motorway, trunk, primary, secondary)
-			# и вычисляем максимальную ширину
+			# Считаем дороги для которых делаем заплатки и бордюры
+			# (motorway, trunk, primary, secondary, tertiary, residential)
 			var major_road_count := 0
 			var max_width := 0.0
 			for t in road_types:
-				if t in ["motorway", "trunk", "primary", "secondary"]:
+				if t in ["motorway", "trunk", "primary", "secondary", "tertiary", "residential"]:
 					major_road_count += 1
 				var w: float = ROAD_WIDTHS.get(t, 6.0)
 				max_width = maxf(max_width, w)
@@ -1309,9 +1366,16 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 
 			# Создаём заплатку без разметки если есть хотя бы 1 крупная дорога (secondary+)
 			if major_road_count >= 1:
-				# Размер заплатки = максимальная ширина дороги * 1.5 (чтобы покрыть весь перекрёсток)
-				var patch_size := max_width * 1.5
-				_create_intersection_patch(pos, elevation, target, patch_size)
+				# Ищем данные эллипса для этого перекрёстка
+				var intersection_idx := _find_nearest_intersection(pos, 2.0)
+				if intersection_idx >= 0:
+					var radii: Vector2 = _intersection_radii[intersection_idx]
+					var angle: float = _intersection_angles[intersection_idx]
+					_create_intersection_patch(pos, elevation, target, radii.x, radii.y, angle)
+				else:
+					# Fallback: круг с радиусом = половина макс ширины
+					var radius := max_width * 0.5
+					_create_intersection_patch(pos, elevation, target, radius, radius, 0.0)
 
 			intersection_count += 1
 
@@ -1413,7 +1477,15 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 	_create_road_mesh_with_texture(nodes, width, texture_key, height_offset, parent, elev_data)
 
 	if curb_height > 0.0:
-		_create_curbs(nodes, width, height_offset, curb_height, parent, elev_data)
+		# Бордюры добавляем в очередь - создадим после детекции всех перекрёстков
+		_curb_queue.append({
+			"nodes": nodes,
+			"width": width,
+			"height_offset": height_offset,
+			"curb_height": curb_height,
+			"parent": parent,
+			"elev_data": elev_data
+		})
 
 	# Процедурная генерация фонарей вдоль дорог (позиции сохраняются для отложенного создания)
 	if highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary"]:
@@ -1561,116 +1633,218 @@ func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_hei
 	var normals := PackedVector3Array()
 	var indices := PackedInt32Array()
 
-	# Пропускаем первый и последний сегменты (перекрёстки)
-	var start_idx := 1 if points.size() > 3 else 0
-	var end_idx := points.size() - 2 if points.size() > 3 else points.size() - 1
+	# Масштаб эллипса для удаления бордюров = 1.41 (больше заплатки)
+	var curb_ellipse_scale := 1.41
 
-	# Радиус зоны без бордюров около перекрёстка
-	var intersection_radius := road_width * 1.5
-
-	for i in range(start_idx, end_idx):
+	# Сначала собираем валидные сегменты (не в эллипсах)
+	# Проверяем точки на краях дороги, а не на центральной линии
+	var valid_segments: Array[int] = []
+	for i in range(points.size() - 1):
 		var p1 := points[i]
 		var p2 := points[i + 1]
-
-		# Пропускаем сегменты около перекрёстков
-		if _find_nearby_intersection(p1, intersection_radius) >= 0:
-			continue
-		if _find_nearby_intersection(p2, intersection_radius) >= 0:
-			continue
-
 		var dir := (p2 - p1).normalized()
 		var perp := Vector2(-dir.y, dir.x)
+		var offset := perp * (road_width * 0.5)
+		# Проверяем левый и правый края бордюра
+		var left1 := p1 + offset
+		var left2 := p2 + offset
+		var right1 := p1 - offset
+		var right2 := p2 - offset
+		var idx_left1 := _is_point_in_intersection_ellipse(left1, curb_ellipse_scale)
+		var idx_left2 := _is_point_in_intersection_ellipse(left2, curb_ellipse_scale)
+		var idx_right1 := _is_point_in_intersection_ellipse(right1, curb_ellipse_scale)
+		var idx_right2 := _is_point_in_intersection_ellipse(right2, curb_ellipse_scale)
+		# Сегмент валиден только если ОБА края вне эллипсов
+		if idx_left1 < 0 and idx_left2 < 0 and idx_right1 < 0 and idx_right2 < 0:
+			valid_segments.append(i)
 
-		var h1 := _get_elevation_at_point(p1, elev_data)
-		var h2 := _get_elevation_at_point(p2, elev_data)
+	if valid_segments.is_empty():
+		return
 
-		# Высоты с z_offset для предотвращения z-fighting
-		var road_y1 := h1 + road_height + z_offset
-		var road_y2 := h2 + road_height + z_offset
-		var curb_y1 := h1 + road_height + curb_height + z_offset
-		var curb_y2 := h2 + road_height + curb_height + z_offset
+	# Разбиваем на группы непрерывных сегментов
+	var groups: Array[Array] = []
+	var current_group: Array[int] = []
+	for seg_idx in valid_segments:
+		if current_group.is_empty() or current_group[current_group.size() - 1] == seg_idx - 1:
+			current_group.append(seg_idx)
+		else:
+			if not current_group.is_empty():
+				groups.append(current_group.duplicate())
+			current_group = [seg_idx]
+	if not current_group.is_empty():
+		groups.append(current_group)
 
-		# Левый бордюр
-		var left_inner1 := p1 + perp * (road_width * 0.5)
-		var left_outer1 := p1 + perp * (road_width * 0.5 + curb_width)
-		var left_inner2 := p2 + perp * (road_width * 0.5)
-		var left_outer2 := p2 + perp * (road_width * 0.5 + curb_width)
+	# Генерируем бордюры для каждой группы
+	for group in groups:
+		var is_first_in_group := true
+		var is_last_in_group := false
 
-		# Правый бордюр
-		var right_inner1 := p1 - perp * (road_width * 0.5)
-		var right_outer1 := p1 - perp * (road_width * 0.5 + curb_width)
-		var right_inner2 := p2 - perp * (road_width * 0.5)
-		var right_outer2 := p2 - perp * (road_width * 0.5 + curb_width)
+		for g_idx in range(group.size()):
+			var i: int = group[g_idx]
+			is_last_in_group = (g_idx == group.size() - 1)
 
-		var idx := vertices.size()
+			var p1 := points[i]
+			var p2 := points[i + 1]
 
-		# === Левый бордюр ===
-		# Внутренняя стенка (со стороны дороги)
-		vertices.append(Vector3(left_inner1.x, road_y1, left_inner1.y))
-		vertices.append(Vector3(left_inner2.x, road_y2, left_inner2.y))
-		vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
-		vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
-		for _j in range(4):
-			normals.append(Vector3(-perp.x, 0, -perp.y))  # Внутрь к дороге
+			var dir := (p2 - p1).normalized()
+			var perp := Vector2(-dir.y, dir.x)
 
-		indices.append(idx + 0)
-		indices.append(idx + 1)
-		indices.append(idx + 2)
-		indices.append(idx + 0)
-		indices.append(idx + 2)
-		indices.append(idx + 3)
+			var h1 := _get_elevation_at_point(p1, elev_data)
+			var h2 := _get_elevation_at_point(p2, elev_data)
 
-		idx = vertices.size()
+			# Высоты с z_offset для предотвращения z-fighting
+			var road_y1 := h1 + road_height + z_offset
+			var road_y2 := h2 + road_height + z_offset
+			var curb_y1 := h1 + road_height + curb_height + z_offset
+			var curb_y2 := h2 + road_height + curb_height + z_offset
 
-		# Верхняя грань
-		vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
-		vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
-		vertices.append(Vector3(left_outer2.x, curb_y2, left_outer2.y))
-		vertices.append(Vector3(left_outer1.x, curb_y1, left_outer1.y))
-		for _j in range(4):
-			normals.append(Vector3.UP)
+			# Левый бордюр
+			var left_inner1 := p1 + perp * (road_width * 0.5)
+			var left_outer1 := p1 + perp * (road_width * 0.5 + curb_width)
+			var left_inner2 := p2 + perp * (road_width * 0.5)
+			var left_outer2 := p2 + perp * (road_width * 0.5 + curb_width)
 
-		indices.append(idx + 0)
-		indices.append(idx + 1)
-		indices.append(idx + 2)
-		indices.append(idx + 0)
-		indices.append(idx + 2)
-		indices.append(idx + 3)
+			# Правый бордюр
+			var right_inner1 := p1 - perp * (road_width * 0.5)
+			var right_outer1 := p1 - perp * (road_width * 0.5 + curb_width)
+			var right_inner2 := p2 - perp * (road_width * 0.5)
+			var right_outer2 := p2 - perp * (road_width * 0.5 + curb_width)
 
-		idx = vertices.size()
+			var idx := vertices.size()
 
-		# === Правый бордюр ===
-		# Внутренняя стенка (со стороны дороги)
-		vertices.append(Vector3(right_inner1.x, road_y1, right_inner1.y))
-		vertices.append(Vector3(right_inner2.x, road_y2, right_inner2.y))
-		vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
-		vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
-		for _j in range(4):
-			normals.append(Vector3(perp.x, 0, perp.y))  # Внутрь к дороге
+			# === Левый бордюр ===
+			# Внутренняя стенка (со стороны дороги)
+			vertices.append(Vector3(left_inner1.x, road_y1, left_inner1.y))
+			vertices.append(Vector3(left_inner2.x, road_y2, left_inner2.y))
+			vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
+			vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
+			for _j in range(4):
+				normals.append(Vector3(-perp.x, 0, -perp.y))
 
-		indices.append(idx + 0)
-		indices.append(idx + 2)
-		indices.append(idx + 1)
-		indices.append(idx + 0)
-		indices.append(idx + 3)
-		indices.append(idx + 2)
+			indices.append(idx + 0)
+			indices.append(idx + 1)
+			indices.append(idx + 2)
+			indices.append(idx + 0)
+			indices.append(idx + 2)
+			indices.append(idx + 3)
 
-		idx = vertices.size()
+			idx = vertices.size()
 
-		# Верхняя грань
-		vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
-		vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
-		vertices.append(Vector3(right_outer2.x, curb_y2, right_outer2.y))
-		vertices.append(Vector3(right_outer1.x, curb_y1, right_outer1.y))
-		for _j in range(4):
-			normals.append(Vector3.UP)
+			# Верхняя грань левого бордюра
+			vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
+			vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
+			vertices.append(Vector3(left_outer2.x, curb_y2, left_outer2.y))
+			vertices.append(Vector3(left_outer1.x, curb_y1, left_outer1.y))
+			for _j in range(4):
+				normals.append(Vector3.UP)
 
-		indices.append(idx + 0)
-		indices.append(idx + 2)
-		indices.append(idx + 1)
-		indices.append(idx + 0)
-		indices.append(idx + 3)
-		indices.append(idx + 2)
+			indices.append(idx + 0)
+			indices.append(idx + 1)
+			indices.append(idx + 2)
+			indices.append(idx + 0)
+			indices.append(idx + 2)
+			indices.append(idx + 3)
+
+			# Торец левого бордюра в начале группы
+			if is_first_in_group:
+				idx = vertices.size()
+				vertices.append(Vector3(left_inner1.x, road_y1, left_inner1.y))
+				vertices.append(Vector3(left_outer1.x, road_y1, left_outer1.y))
+				vertices.append(Vector3(left_outer1.x, curb_y1, left_outer1.y))
+				vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
+				for _j in range(4):
+					normals.append(-dir.x * Vector3(1, 0, 0) - dir.y * Vector3(0, 0, 1))
+				indices.append(idx + 0)
+				indices.append(idx + 1)
+				indices.append(idx + 2)
+				indices.append(idx + 0)
+				indices.append(idx + 2)
+				indices.append(idx + 3)
+
+			# Торец левого бордюра в конце группы
+			if is_last_in_group:
+				idx = vertices.size()
+				vertices.append(Vector3(left_inner2.x, road_y2, left_inner2.y))
+				vertices.append(Vector3(left_outer2.x, road_y2, left_outer2.y))
+				vertices.append(Vector3(left_outer2.x, curb_y2, left_outer2.y))
+				vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
+				for _j in range(4):
+					normals.append(dir.x * Vector3(1, 0, 0) + dir.y * Vector3(0, 0, 1))
+				indices.append(idx + 0)
+				indices.append(idx + 2)
+				indices.append(idx + 1)
+				indices.append(idx + 0)
+				indices.append(idx + 3)
+				indices.append(idx + 2)
+
+			idx = vertices.size()
+
+			# === Правый бордюр ===
+			# Внутренняя стенка (со стороны дороги)
+			vertices.append(Vector3(right_inner1.x, road_y1, right_inner1.y))
+			vertices.append(Vector3(right_inner2.x, road_y2, right_inner2.y))
+			vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
+			vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
+			for _j in range(4):
+				normals.append(Vector3(perp.x, 0, perp.y))
+
+			indices.append(idx + 0)
+			indices.append(idx + 2)
+			indices.append(idx + 1)
+			indices.append(idx + 0)
+			indices.append(idx + 3)
+			indices.append(idx + 2)
+
+			idx = vertices.size()
+
+			# Верхняя грань правого бордюра
+			vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
+			vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
+			vertices.append(Vector3(right_outer2.x, curb_y2, right_outer2.y))
+			vertices.append(Vector3(right_outer1.x, curb_y1, right_outer1.y))
+			for _j in range(4):
+				normals.append(Vector3.UP)
+
+			indices.append(idx + 0)
+			indices.append(idx + 2)
+			indices.append(idx + 1)
+			indices.append(idx + 0)
+			indices.append(idx + 3)
+			indices.append(idx + 2)
+
+			# Торец правого бордюра в начале группы
+			if is_first_in_group:
+				idx = vertices.size()
+				vertices.append(Vector3(right_inner1.x, road_y1, right_inner1.y))
+				vertices.append(Vector3(right_outer1.x, road_y1, right_outer1.y))
+				vertices.append(Vector3(right_outer1.x, curb_y1, right_outer1.y))
+				vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
+				for _j in range(4):
+					normals.append(-dir.x * Vector3(1, 0, 0) - dir.y * Vector3(0, 0, 1))
+				indices.append(idx + 0)
+				indices.append(idx + 2)
+				indices.append(idx + 1)
+				indices.append(idx + 0)
+				indices.append(idx + 3)
+				indices.append(idx + 2)
+
+			# Торец правого бордюра в конце группы
+			if is_last_in_group:
+				idx = vertices.size()
+				vertices.append(Vector3(right_inner2.x, road_y2, right_inner2.y))
+				vertices.append(Vector3(right_outer2.x, road_y2, right_outer2.y))
+				vertices.append(Vector3(right_outer2.x, curb_y2, right_outer2.y))
+				vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
+				for _j in range(4):
+					normals.append(dir.x * Vector3(1, 0, 0) + dir.y * Vector3(0, 0, 1))
+				indices.append(idx + 0)
+				indices.append(idx + 1)
+				indices.append(idx + 2)
+				indices.append(idx + 0)
+				indices.append(idx + 2)
+				indices.append(idx + 3)
+
+			is_first_in_group = false
 
 	if vertices.size() == 0:
 		return
@@ -1701,18 +1875,28 @@ func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_hei
 	body.add_child(mesh)
 
 	# Создаём коллизии для каждого сегмента бордюра (тоже пропускаем перекрёстки)
-	for i in range(start_idx, end_idx):
+	for i in range(points.size() - 1):
 		var p1 := points[i]
 		var p2 := points[i + 1]
 
-		# Пропускаем сегменты около перекрёстков
-		if _find_nearby_intersection(p1, intersection_radius) >= 0:
-			continue
-		if _find_nearby_intersection(p2, intersection_radius) >= 0:
-			continue
-
 		var dir := (p2 - p1).normalized()
 		var perp := Vector2(-dir.y, dir.x)
+		var offset := perp * (road_width * 0.5)
+
+		# Пропускаем сегменты около перекрёстков (проверяем края бордюра)
+		var left1 := p1 + offset
+		var left2 := p2 + offset
+		var right1 := p1 - offset
+		var right2 := p2 - offset
+		if _is_point_in_intersection_ellipse(left1, curb_ellipse_scale) >= 0:
+			continue
+		if _is_point_in_intersection_ellipse(left2, curb_ellipse_scale) >= 0:
+			continue
+		if _is_point_in_intersection_ellipse(right1, curb_ellipse_scale) >= 0:
+			continue
+		if _is_point_in_intersection_ellipse(right2, curb_ellipse_scale) >= 0:
+			continue
+
 		var segment_length := p1.distance_to(p2)
 
 		if segment_length < 0.5:
@@ -3145,6 +3329,8 @@ Chunks: %d loaded""" % [fps, avg_fps, fps_1pct, min_fps, road_q, terrain_q, infr
 ## Обрабатывает очередь дорог (3 дороги за кадр)
 func _process_road_queue() -> void:
 	if _road_queue.is_empty():
+		# Когда все дороги созданы, обрабатываем бордюры
+		_process_curb_queue()
 		return
 
 	var _t0 := Time.get_ticks_msec()
@@ -3160,6 +3346,22 @@ func _process_road_queue() -> void:
 	while not _road_queue.is_empty() and processed < max_per_frame:
 		var item: Dictionary = _road_queue.pop_front()
 		_create_road_immediate(item.nodes, item.tags, item.parent, item.elev_data)
+		processed += 1
+
+
+## Обрабатывает очередь бордюров (после того как все перекрёстки определены)
+func _process_curb_queue() -> void:
+	if _curb_queue.is_empty():
+		return
+
+	# Обрабатываем 5 бордюров за кадр
+	var max_per_frame := 5
+	var processed := 0
+
+	while not _curb_queue.is_empty() and processed < max_per_frame:
+		var item: Dictionary = _curb_queue.pop_front()
+		if is_instance_valid(item.parent):
+			_create_curbs(item.nodes, item.width, item.height_offset, item.curb_height, item.parent, item.elev_data)
 		processed += 1
 
 
@@ -5369,16 +5571,50 @@ func _is_equal_intersection(intersection_idx: int) -> bool:
 	return _intersection_types[intersection_idx]
 
 
+## Ищет ближайший перекрёсток в пределах радиуса
+func _find_nearest_intersection(pos: Vector2, max_dist: float) -> int:
+	var best_idx := -1
+	var best_dist := max_dist
+	for i in range(_intersection_positions.size()):
+		var dist := pos.distance_to(_intersection_positions[i])
+		if dist < best_dist:
+			best_dist = dist
+			best_idx = i
+	return best_idx
+
+
+## Проверяет, находится ли точка внутри эллипса перекрёстка (с масштабом)
+func _is_point_in_intersection_ellipse(pos: Vector2, scale: float = 1.0) -> int:
+	for i in range(_intersection_positions.size()):
+		var center: Vector2 = _intersection_positions[i]
+		var radii: Vector2 = _intersection_radii[i] * scale
+		var angle: float = _intersection_angles[i]
+
+		# Смещение точки относительно центра
+		var dx := pos.x - center.x
+		var dy := pos.y - center.y
+
+		# Поворот в систему координат эллипса
+		var cos_a := cos(-angle)
+		var sin_a := sin(-angle)
+		var rx := dx * cos_a - dy * sin_a
+		var ry := dx * sin_a + dy * cos_a
+
+		# Проверка: (rx/a)^2 + (ry/b)^2 <= 1
+		var normalized := (rx * rx) / (radii.x * radii.x) + (ry * ry) / (radii.y * radii.y)
+		if normalized <= 1.0:
+			return i
+
+	return -1
+
+
 ## Создаёт заплатку на перекрёстке (чистый асфальт без разметки)
-## Круглая форма лучше подходит для перекрёстков разной конфигурации
-func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, size: float = 18.0) -> void:
+## Эллипс с полуосями по ширинам пересекающихся дорог
+func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, radius_a: float = 6.0, radius_b: float = 6.0, rotation_angle: float = 0.0) -> void:
 	if not _road_textures.has("intersection"):
 		return
 
-	# Радиус заплатки = половина ширины дороги + запас
-	var radius := maxf(size * 0.5, 6.0)
-
-	# Создаём круглый меш (многоугольник с 16 сторонами)
+	# Создаём эллиптический меш (многоугольник с 16 сторонами)
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
@@ -5390,11 +5626,19 @@ func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, 
 	st.set_normal(Vector3.UP)
 	st.add_vertex(Vector3(pos.x, center_y, pos.y))
 
-	# Вершины по кругу
+	# Вершины по эллипсу с поворотом
+	var cos_rot := cos(rotation_angle)
+	var sin_rot := sin(rotation_angle)
 	for i in range(segments):
 		var angle := float(i) / segments * TAU
-		var x := pos.x + cos(angle) * radius
-		var z := pos.y + sin(angle) * radius
+		# Точка на эллипсе (до поворота)
+		var ex := cos(angle) * radius_a
+		var ey := sin(angle) * radius_b
+		# Поворот на угол дороги
+		var rx := ex * cos_rot - ey * sin_rot
+		var ry := ex * sin_rot + ey * cos_rot
+		var x := pos.x + rx
+		var z := pos.y + ry
 		var u := 0.5 + cos(angle) * 0.5
 		var v := 0.5 + sin(angle) * 0.5
 		st.set_uv(Vector2(u, v))
@@ -5412,11 +5656,52 @@ func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, 
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.mesh = mesh
 
-	# Материал с текстурой перекрёстка
+	# Материал с цветом (временно для отладки)
 	var material := StandardMaterial3D.new()
-	material.albedo_texture = _road_textures["intersection"]
+	material.albedo_color = Color(1.0, 0.3, 0.3, 0.7)  # Красный полупрозрачный
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mesh_instance.material_override = material
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 	parent.add_child(mesh_instance)
+
+	# Второй эллипс (зелёный) - зона удаления бордюров (1.41x)
+	var curb_scale := 1.41
+	var st2 := SurfaceTool.new()
+	st2.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	st2.set_uv(Vector2(0.5, 0.5))
+	st2.set_normal(Vector3.UP)
+	st2.add_vertex(Vector3(pos.x, center_y + 0.01, pos.y))
+
+	for i in range(segments):
+		var angle := float(i) / segments * TAU
+		var ex := cos(angle) * radius_a * curb_scale
+		var ey := sin(angle) * radius_b * curb_scale
+		var rx := ex * cos_rot - ey * sin_rot
+		var ry := ex * sin_rot + ey * cos_rot
+		var x := pos.x + rx
+		var z := pos.y + ry
+		st2.set_uv(Vector2(0.5 + cos(angle) * 0.5, 0.5 + sin(angle) * 0.5))
+		st2.set_normal(Vector3.UP)
+		st2.add_vertex(Vector3(x, center_y + 0.01, z))
+
+	for i in range(segments):
+		var next_i := (i + 1) % segments
+		st2.add_index(0)
+		st2.add_index(i + 1)
+		st2.add_index(next_i + 1)
+
+	var mesh2 := st2.commit()
+	var mesh_instance2 := MeshInstance3D.new()
+	mesh_instance2.mesh = mesh2
+
+	var material2 := StandardMaterial3D.new()
+	material2.albedo_color = Color(0.3, 1.0, 0.3, 0.5)  # Зелёный полупрозрачный
+	material2.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material2.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mesh_instance2.material_override = material2
+	mesh_instance2.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	parent.add_child(mesh_instance2)
