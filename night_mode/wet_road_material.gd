@@ -3,10 +3,10 @@ class_name WetRoadMaterial
 
 ## Утилиты для создания эффекта мокрого асфальта
 
-# Параметры мокрой дороги ночью - сильные отражения
-const WET_NIGHT_METALLIC := 0.6
-const WET_NIGHT_ROUGHNESS := 0.02
-const WET_NIGHT_SPECULAR := 1.0
+# Параметры мокрой дороги ночью - умеренные отражения
+const WET_NIGHT_METALLIC := 0.4
+const WET_NIGHT_ROUGHNESS := 0.1
+const WET_NIGHT_SPECULAR := 0.8
 
 # Параметры мокрой дороги днём - меньше отражений
 const WET_DAY_METALLIC := 0.3

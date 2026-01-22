@@ -255,21 +255,6 @@ static func create_brick_texture(size: int = 256) -> ImageTexture:
 	var texture := ImageTexture.create_from_image(image)
 	return texture
 
-static func create_grass_texture(size: int = 256) -> ImageTexture:
-	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 33333
-
-	for y in range(size):
-		for x in range(size):
-			var base_g := 0.4 + rng.randf() * 0.25
-			var base_r := base_g * 0.5 + rng.randf() * 0.1
-			var base_b := base_g * 0.3 + rng.randf() * 0.05
-			image.set_pixel(x, y, Color(base_r, base_g, base_b))
-
-	var texture := ImageTexture.create_from_image(image)
-	return texture
-
 static func create_dirt_texture(size: int = 256) -> ImageTexture:
 	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
 	var rng := RandomNumberGenerator.new()

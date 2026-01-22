@@ -16,6 +16,7 @@
 [ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="12_night"]
 [ext_resource type="Script" path="res://ui/track_display.gd" id="12_track_display"]
 [ext_resource type="Script" path="res://settings/graphics_settings.gd" id="16_graphics"]
+[ext_resource type="Script" path="res://textures/ground_setup.gd" id="17_ground"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -151,3 +152,8 @@ script = ExtResource("12_track_display")
 
 [node name="GraphicsSettings" type="Node" parent="."]
 script = ExtResource("16_graphics")
+
+[node name="GroundSetup" type="Node" parent="."]
+script = ExtResource("17_ground")
+ground_mesh_path = NodePath("../StaticGround/MeshInstance3D")
+night_mode_manager_path = NodePath("../NightModeManager")

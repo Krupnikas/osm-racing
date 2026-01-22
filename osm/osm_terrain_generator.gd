@@ -229,8 +229,12 @@ func _init_textures() -> void:
 	_building_textures["wall"] = TextureGeneratorScript.create_wall_texture(256)
 	_building_textures["roof"] = TextureGeneratorScript.create_roof_texture(256)
 
-	# Текстуры земли
-	_ground_textures["grass"] = TextureGeneratorScript.create_grass_texture(256)
+	# Текстуры земли - загружаем PBR текстуру травы
+	var grass_img := Image.load_from_file("res://textures/Grass004_1K-JPG_Color.jpg")
+	if grass_img:
+		_ground_textures["grass"] = ImageTexture.create_from_image(grass_img)
+	else:
+		_ground_textures["grass"] = TextureGeneratorScript.create_forest_texture(256)
 	_ground_textures["forest"] = TextureGeneratorScript.create_forest_texture(256)
 	_ground_textures["water"] = TextureGeneratorScript.create_water_texture(256)
 
@@ -6171,6 +6175,13 @@ func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, 
 	var material := StandardMaterial3D.new()
 	material.albedo_texture = _road_textures["intersection"]
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	# Добавляем карту нормалей как у дорог
+	if _normal_textures.has("asphalt"):
+		material.normal_enabled = true
+		material.normal_texture = _normal_textures["asphalt"]
+	# Применяем мокрый эффект если дождь
+	if _is_wet_mode:
+		WetRoadMaterial.apply_wet_properties(material, true, _is_night_mode)
 	mesh_instance.material_override = material
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
