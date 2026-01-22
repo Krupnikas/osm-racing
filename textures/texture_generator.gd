@@ -28,32 +28,43 @@ static func create_road_texture(size: int = 256, lanes: int = 2, has_center_line
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 12345
 
-	var line_width := size / 32  # Ширина линии разметки
-	var dash_length := size / 4  # Длина штриха
-	var gap_length := size / 4   # Длина промежутка
+	var line_width := size / 40  # Ширина линии разметки
+	var dash_length := size / 3  # Длина штриха
+	var gap_length := size / 3   # Длина промежутка
 
 	for y in range(size):
 		for x in range(size):
-			# Базовый асфальт
-			var base := 0.25 + rng.randf() * 0.08
-			var color := Color(base, base, base)
+			# Реалистичный асфальт с вариацией
+			rng.seed = 12345 + x * 17 + y * 31
+			var base := 0.22 + rng.randf() * 0.06
+			# Добавляем крупнозернистую текстуру
+			var grain := sin(float(x) * 0.8) * sin(float(y) * 0.8) * 0.02
+			# Пятна масла и износ
+			var wear := 0.0
+			if rng.randf() < 0.03:
+				wear = rng.randf() * 0.05 - 0.025
+			base = clamp(base + grain + wear, 0.15, 0.35)
+			var color := Color(base, base * 0.98, base * 0.96)
 
-			# Центральная линия (прерывистая белая или сплошная жёлтая)
+			# Центральная прерывистая белая линия
 			if has_center_line:
 				var center := size / 2
 				if abs(x - center) < line_width:
-					# Прерывистая линия
 					var dash_pos := y % (dash_length + gap_length)
 					if dash_pos < dash_length:
-						color = Color(0.9, 0.9, 0.9)  # Белая
+						# Белая разметка с лёгким износом
+						var line_wear := 0.85 + rng.randf() * 0.1
+						color = Color(line_wear, line_wear, line_wear * 0.98)
 
-			# Краевые линии (сплошные белые)
+			# Краевые сплошные белые линии
 			if has_edge_lines:
-				var edge_margin := size / 16
+				var edge_margin := size / 12
 				if x < edge_margin + line_width and x >= edge_margin:
-					color = Color(0.9, 0.9, 0.9)
+					var line_wear := 0.8 + rng.randf() * 0.12
+					color = Color(line_wear, line_wear, line_wear * 0.98)
 				elif x > size - edge_margin - line_width and x <= size - edge_margin:
-					color = Color(0.9, 0.9, 0.9)
+					var line_wear := 0.8 + rng.randf() * 0.12
+					color = Color(line_wear, line_wear, line_wear * 0.98)
 
 			image.set_pixel(x, y, color)
 
@@ -73,57 +84,67 @@ static func create_highway_texture(size: int = 512, lanes: int = 4) -> ImageText
 
 	for y in range(size):
 		for x in range(size):
-			# Тёмный асфальт для магистрали
-			var base := 0.2 + rng.randf() * 0.06
-			var color := Color(base, base, base)
+			# Реалистичный тёмный асфальт для магистрали
+			rng.seed = 23456 + x * 19 + y * 37
+			var base := 0.18 + rng.randf() * 0.06
+			# Крупнозернистая текстура
+			var grain := sin(float(x) * 0.6) * sin(float(y) * 0.6) * 0.015
+			# Износ и пятна
+			var wear := 0.0
+			if rng.randf() < 0.025:
+				wear = rng.randf() * 0.04 - 0.02
+			base = clamp(base + grain + wear, 0.12, 0.30)
+			var color := Color(base, base * 0.98, base * 0.96)
 
-			# Краевые линии (сплошные белые)
+			# Краевые линии (сплошные белые с износом)
 			var edge_margin := size / 20
 			if x < edge_margin + line_width and x >= edge_margin:
-				color = Color(0.95, 0.95, 0.95)
+				var line_wear := 0.85 + rng.randf() * 0.1
+				color = Color(line_wear, line_wear, line_wear * 0.98)
 			elif x > size - edge_margin - line_width and x <= size - edge_margin:
-				color = Color(0.95, 0.95, 0.95)
+				var line_wear := 0.85 + rng.randf() * 0.1
+				color = Color(line_wear, line_wear, line_wear * 0.98)
 
-			# Разделительные линии между полосами
+			# Разделительные линии между полосами (белые прерывистые)
 			for lane_i in range(1, lanes):
 				var lane_x := lane_i * lane_width
 				if abs(x - lane_x) < line_width:
 					var dash_pos := y % (dash_length + gap_length)
 					if dash_pos < dash_length:
-						color = Color(0.9, 0.9, 0.9)
+						var line_wear := 0.82 + rng.randf() * 0.1
+						color = Color(line_wear, line_wear, line_wear * 0.98)
 
-			# Центральная разделительная (двойная сплошная жёлтая)
+			# Центральная разделительная (двойная сплошная белая)
 			var center := size / 2
 			if abs(x - center - line_width * 2) < line_width or abs(x - center + line_width * 2) < line_width:
-				color = Color(0.9, 0.8, 0.2)  # Жёлтая
+				var line_wear := 0.88 + rng.randf() * 0.08
+				color = Color(line_wear, line_wear, line_wear * 0.98)
 
 			image.set_pixel(x, y, color)
 
 	var texture := ImageTexture.create_from_image(image)
 	return texture
 
-# Текстура пешеходной дорожки (брусчатка/плитка)
+# Текстура пешеходной дорожки (светлый асфальт)
 static func create_sidewalk_texture(size: int = 256) -> ImageTexture:
 	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 34567
 
-	var tile_size := 32
-	var gap := 2
-
 	for y in range(size):
 		for x in range(size):
-			var tx := x % tile_size
-			var ty := y % tile_size
-
-			var is_gap := tx < gap or ty < gap
-
-			if is_gap:
-				var c := 0.3 + rng.randf() * 0.05
-				image.set_pixel(x, y, Color(c, c * 0.9, c * 0.85))
-			else:
-				var base := 0.55 + rng.randf() * 0.1
-				image.set_pixel(x, y, Color(base, base * 0.95, base * 0.9))
+			# Светлый серый асфальт для тротуаров
+			rng.seed = 34567 + x * 13 + y * 29
+			var base := 0.45 + rng.randf() * 0.08
+			# Мелкозернистая текстура
+			var grain := sin(float(x) * 1.2) * sin(float(y) * 1.2) * 0.015
+			# Небольшие пятна и вариации
+			var spot := 0.0
+			if rng.randf() < 0.04:
+				spot = rng.randf() * 0.06 - 0.03
+			base = clamp(base + grain + spot, 0.38, 0.58)
+			# Чуть тёплый оттенок серого
+			image.set_pixel(x, y, Color(base, base * 0.98, base * 0.95))
 
 	var texture := ImageTexture.create_from_image(image)
 	return texture
@@ -519,25 +540,17 @@ static func create_sidewalk_normal(size: int = 256) -> ImageTexture:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 34567
 
-	var tile_size := 32
-	var gap := 2
-
 	for y in range(size):
 		for x in range(size):
-			var tx := x % tile_size
-			var ty := y % tile_size
-
-			var is_gap := tx < gap or ty < gap
-
-			var height: float
-			if is_gap:
-				height = 0.3
-			else:
-				height = 0.55 + rng.randf() * 0.1
-
+			# Мелкозернистая текстура светлого асфальта
+			rng.seed = 34567 + x * 13 + y * 29
+			var height := 0.5 + rng.randf() * 0.1 - 0.05
+			# Мелкие неровности
+			if rng.randf() < 0.03:
+				height -= 0.08
 			height_image.set_pixel(x, y, Color(height, height, height))
 
-	var normal_image := _generate_normal_from_height(height_image, 2.5)
+	var normal_image := _generate_normal_from_height(height_image, 1.5)
 	return ImageTexture.create_from_image(normal_image)
 
 

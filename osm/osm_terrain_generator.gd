@@ -1364,108 +1364,108 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 	if nodes.size() < 2:
 		return
 
+	# Convert to local coordinates
 	var points: PackedVector2Array = []
 	for node in nodes:
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	# Добавляем небольшое случайное смещение по высоте для предотвращения z-fighting
-	# на пересечениях (используем хэш от первой точки дороги)
-	var hash_val := int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-	var z_offset := hash_val * 0.0003  # 0-3 см случайное смещение
+	# Z-fighting offset based on hash
+	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
+	var z_offset: float = hash_val * 0.0003
 
-	# Используем ArrayMesh для UV координат
-	var arrays := []
+	var arrays: Array = []
 	arrays.resize(Mesh.ARRAY_MAX)
 
-	var vertices := PackedVector3Array()
-	var uvs := PackedVector2Array()
-	var normals := PackedVector3Array()
-	var indices := PackedInt32Array()
+	var vertices: PackedVector3Array = PackedVector3Array()
+	var uvs: PackedVector2Array = PackedVector2Array()
+	var normals: PackedVector3Array = PackedVector3Array()
+	var indices: PackedInt32Array = PackedInt32Array()
 
-	var accumulated_length := 0.0
-	var uv_scale := 0.1  # Масштаб UV вдоль дороги (чтобы разметка повторялась)
+	var uv_scale: float = 0.1
+	var accumulated_length: float = 0.0
+	var half_w: float = width * 0.5
 
+	# Precompute averaged perpendiculars at each point to eliminate gaps
+	var perpendiculars: PackedVector2Array = PackedVector2Array()
+	for i in range(points.size()):
+		var perp: Vector2
+		if i == 0:
+			var dir: Vector2 = (points[1] - points[0]).normalized()
+			perp = Vector2(-dir.y, dir.x)
+		elif i == points.size() - 1:
+			var dir: Vector2 = (points[i] - points[i - 1]).normalized()
+			perp = Vector2(-dir.y, dir.x)
+		else:
+			var dir_in: Vector2 = (points[i] - points[i - 1]).normalized()
+			var dir_out: Vector2 = (points[i + 1] - points[i]).normalized()
+			var perp_in: Vector2 = Vector2(-dir_in.y, dir_in.x)
+			var perp_out: Vector2 = Vector2(-dir_out.y, dir_out.x)
+			perp = ((perp_in + perp_out) * 0.5).normalized()
+		perpendiculars.append(perp)
+
+	# Generate 2 vertices per point (left and right edge) - shared between segments
+	for i in range(points.size()):
+		var p: Vector2 = points[i]
+		var perp: Vector2 = perpendiculars[i]
+		var h: float = _get_elevation_at_point(p, elev_data) + height_offset + z_offset
+
+		if i > 0:
+			accumulated_length += points[i - 1].distance_to(p)
+		var uv_y: float = accumulated_length * uv_scale
+
+		# Left vertex
+		vertices.append(Vector3(p.x - perp.x * half_w, h, p.y - perp.y * half_w))
+		uvs.append(Vector2(0.0, uv_y))
+		normals.append(Vector3.UP)
+
+		# Right vertex
+		vertices.append(Vector3(p.x + perp.x * half_w, h, p.y + perp.y * half_w))
+		uvs.append(Vector2(1.0, uv_y))
+		normals.append(Vector3.UP)
+
+	# Generate triangle indices (triangle strip with shared vertices)
 	for i in range(points.size() - 1):
-		var p1 := points[i]
-		var p2 := points[i + 1]
+		var idx: int = i * 2
 
-		var segment_length := p1.distance_to(p2)
-		var dir := (p2 - p1).normalized()
-		var perp := Vector2(-dir.y, dir.x) * width * 0.5
-
-		# Получаем высоты для каждой точки с z_offset
-		var h1 := _get_elevation_at_point(p1, elev_data) + height_offset + z_offset
-		var h2 := _get_elevation_at_point(p2, elev_data) + height_offset + z_offset
-
-		var v1 := Vector3(p1.x - perp.x, h1, p1.y - perp.y)
-		var v2 := Vector3(p1.x + perp.x, h1, p1.y + perp.y)
-		var v3 := Vector3(p2.x + perp.x, h2, p2.y + perp.y)
-		var v4 := Vector3(p2.x - perp.x, h2, p2.y - perp.y)
-
-		# UV координаты: x = поперёк дороги (0-1), y = вдоль дороги (повторяется)
-		var uv_y1 := accumulated_length * uv_scale
-		var uv_y2 := (accumulated_length + segment_length) * uv_scale
-
-		var idx := vertices.size()
-		vertices.append(v1)
-		vertices.append(v2)
-		vertices.append(v3)
-		vertices.append(v4)
-
-		uvs.append(Vector2(0.0, uv_y1))  # v1 - левый край, начало
-		uvs.append(Vector2(1.0, uv_y1))  # v2 - правый край, начало
-		uvs.append(Vector2(1.0, uv_y2))  # v3 - правый край, конец
-		uvs.append(Vector2(0.0, uv_y2))  # v4 - левый край, конец
-
-		normals.append(Vector3.UP)
-		normals.append(Vector3.UP)
-		normals.append(Vector3.UP)
-		normals.append(Vector3.UP)
-
-		# Два треугольника
-		indices.append(idx + 0)
-		indices.append(idx + 2)
-		indices.append(idx + 1)
-
+		# Triangle 1
 		indices.append(idx + 0)
 		indices.append(idx + 3)
-		indices.append(idx + 2)
+		indices.append(idx + 1)
 
-		accumulated_length += segment_length
+		# Triangle 2
+		indices.append(idx + 0)
+		indices.append(idx + 2)
+		indices.append(idx + 3)
 
 	arrays[Mesh.ARRAY_VERTEX] = vertices
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
 	arrays[Mesh.ARRAY_NORMAL] = normals
 	arrays[Mesh.ARRAY_INDEX] = indices
 
-	var arr_mesh := ArrayMesh.new()
+	var arr_mesh: ArrayMesh = ArrayMesh.new()
 	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
-	var mesh := MeshInstance3D.new()
+	var mesh: MeshInstance3D = MeshInstance3D.new()
 	mesh.mesh = arr_mesh
 
 	# Материал с текстурой
-	var material := StandardMaterial3D.new()
+	var material: StandardMaterial3D = StandardMaterial3D.new()
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	if _road_textures.has(texture_key):
 		material.albedo_texture = _road_textures[texture_key]
 		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-		# Normal map для асфальта
 		if _normal_textures.has("asphalt"):
 			material.normal_enabled = true
 			material.normal_texture = _normal_textures["asphalt"]
 			material.normal_scale = 0.6
 	else:
-		# Fallback цвет
 		material.albedo_color = COLORS.get("road_residential", Color(0.4, 0.4, 0.4))
 
-	# Применяем мокрый асфальт если дождь уже идёт
 	if _is_wet_mode:
 		WetRoadMaterial.apply_wet_properties(material, true, _is_night_mode)
 
 	mesh.material_override = material
-
 	parent.add_child(mesh)
 
 # Создаёт бордюры вдоль дороги
