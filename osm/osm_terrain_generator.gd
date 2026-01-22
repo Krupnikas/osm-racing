@@ -1292,17 +1292,15 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			var road_types: Array = node_road_types[node_key]
 			var elevation := _get_elevation_at_point(pos, elev_data)
 
-			# Вычисляем разницу в приоритетах дорог и максимальную ширину
-			var min_priority := 999
-			var max_priority := 0
+			# Считаем дороги выше secondary (motorway, trunk, primary, secondary)
+			# и вычисляем максимальную ширину
+			var major_road_count := 0
 			var max_width := 0.0
 			for t in road_types:
-				var p := _get_road_priority(t)
-				min_priority = mini(min_priority, p)
-				max_priority = maxi(max_priority, p)
+				if t in ["motorway", "trunk", "primary", "secondary"]:
+					major_road_count += 1
 				var w: float = ROAD_WIDTHS.get(t, 6.0)
 				max_width = maxf(max_width, w)
-			var priority_diff := max_priority - min_priority
 
 			# На крупных перекрёстках - светофор, на мелких - знаки
 			var has_primary := "primary" in road_types or "secondary" in road_types
@@ -1312,8 +1310,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				# На обычных перекрёстках - один знак, не 4
 				_create_yield_sign(pos + Vector2(5, 5), elevation, target)
 
-			# Создаём заплатку без разметки если разница в приоритетах <= 1
-			if priority_diff <= 1:
+			# Создаём заплатку без разметки если минимум 2 дороги выше secondary
+			if major_road_count >= 2:
 				# Размер заплатки = максимальная ширина дороги * 1.5 (чтобы покрыть весь перекрёсток)
 				var patch_size := max_width * 1.5
 				_create_intersection_patch(pos, elevation, target, patch_size)
