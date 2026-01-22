@@ -1361,18 +1361,27 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 					major_road_count += 1
 				var w: float = ROAD_WIDTHS.get(t, 6.0)
 				max_width = maxf(max_width, w)
+			# Ищем данные эллипса для этого перекрёстка
+			var intersection_idx := _find_nearest_intersection(pos, 2.0)
+
+			# Смещение знаков/светофоров к краю дороги (перпендикулярно направлению)
+			var sign_offset := Vector2(5, 5)  # Fallback
+			if intersection_idx >= 0:
+				var angle: float = _intersection_angles[intersection_idx]
+				# Перпендикуляр к направлению дороги
+				var perp := Vector2(cos(angle), sin(angle))
+				sign_offset = perp * (max_width * 0.5 + 0.5)  # К краю дороги + 0.5м
+
 			# На крупных перекрёстках - светофор, на мелких - знаки
 			var has_primary := "primary" in road_types or "secondary" in road_types
 			if has_primary and node_road_count[node_key] >= 3:
-				_create_traffic_light(pos, elevation, target)
+				_create_traffic_light(pos + sign_offset, elevation, target)
 			else:
-				# На обычных перекрёстках - один знак, не 4
-				_create_yield_sign(pos + Vector2(5, 5), elevation, target)
+				# На обычных перекрёстках - один знак
+				_create_yield_sign(pos + sign_offset, elevation, target)
 
 			# Создаём заплатку без разметки если есть хотя бы 1 крупная дорога (secondary+)
 			if major_road_count >= 1:
-				# Ищем данные эллипса для этого перекрёстка
-				var intersection_idx := _find_nearest_intersection(pos, 2.0)
 				if intersection_idx >= 0:
 					var radii: Vector2 = _intersection_radii[intersection_idx]
 					var angle: float = _intersection_angles[intersection_idx]
@@ -1955,6 +1964,7 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: 
 	mesh.material_override = material
 
 	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+	im.surface_set_normal(Vector3.UP)  # Нормаль вверх для дорог
 
 	for i in range(points.size() - 1):
 		var p1 := points[i]
@@ -2796,6 +2806,10 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 		var v3 := Vector3(p2.x, h2 + fence_height, p2.y)
 		var v4 := Vector3(p1.x, h1 + fence_height, p1.y)
 
+		# Нормаль стены (наружу)
+		var wall_normal := Vector3(-dir.y, 0, dir.x)
+		im.surface_set_normal(wall_normal)
+
 		# Внешняя сторона
 		im.surface_add_vertex(v1)
 		im.surface_add_vertex(v2)
@@ -2932,6 +2946,7 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 	# Крыша - используем триангуляцию для корректной работы с невыпуклыми полигонами
 	var roof_indices := Geometry2D.triangulate_polygon(points)
 	if roof_indices.size() >= 3:
+		im.surface_set_normal(Vector3.UP)  # Нормаль вверх для крыши
 		for i in range(0, roof_indices.size(), 3):
 			var p1 := points[roof_indices[i]]
 			var p2 := points[roof_indices[i + 1]]
@@ -2949,6 +2964,11 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 		var v2 := Vector3(p2.x, floor_y, p2.y)
 		var v3 := Vector3(p2.x, roof_y, p2.y)
 		var v4 := Vector3(p1.x, roof_y, p1.y)
+
+		# Вычисляем нормаль стены (наружу)
+		var wall_dir := Vector2(p2.x - p1.x, p2.y - p1.y).normalized()
+		var wall_normal := Vector3(-wall_dir.y, 0, wall_dir.x)  # Перпендикуляр
+		im.surface_set_normal(wall_normal)
 
 		# Внешняя сторона
 		im.surface_add_vertex(v1)
@@ -3730,6 +3750,7 @@ func _create_polygon_mesh(points: PackedVector2Array, color: Color, height_offse
 	# Используем триангуляцию для корректной работы с невыпуклыми полигонами
 	var indices := Geometry2D.triangulate_polygon(points)
 	if indices.size() >= 3:
+		im.surface_set_normal(Vector3.UP)  # Нормаль вверх для плоских поверхностей
 		for i in range(0, indices.size(), 3):
 			var p1 := points[indices[i]]
 			var p2 := points[indices[i + 1]]

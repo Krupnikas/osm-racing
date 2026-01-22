@@ -21,9 +21,7 @@ void fragment() {
 		color = albedo_color.rgb;
 	}
 
-	// Простой Ambient Occlusion - затемнение внизу здания
-	float ao = 1.0 - ao_strength * pow(1.0 - UV.y, 2.0);
-	color *= ao;
+	// AO отключён - вызывал проблемы с высокими зданиями
 
 	// Добавляем небольшую вариацию по высоте
 	float height_variation = 0.02 * sin(UV.y * 50.0);
@@ -44,7 +42,10 @@ void fragment() {
 	}
 
 	// Вариация roughness для интересных отражений
-	float roughness_variation = 0.05 * texture(albedo_texture, UV * 4.0).r;
+	float roughness_variation = 0.0;
+	if (use_texture) {
+		roughness_variation = 0.05 * texture(albedo_texture, UV * 4.0).r;
+	}
 	ROUGHNESS = roughness_base + roughness_variation;
 	METALLIC = 0.0;
 }
