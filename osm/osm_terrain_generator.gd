@@ -5165,6 +5165,12 @@ func _create_chunk_vegetation_immediate(chunk_key: String, points: PackedVector2
 
 				var transform := Transform3D()
 				var rotation := fmod(float(seed_value + int(x * 10) + int(z * 10)) * 2.718, TAU)
+
+				# ПРОВЕРКА: Пропускаем если rotation невалиден
+				if not is_finite(rotation):
+					z += grass_spacing
+					continue
+
 				transform = transform.rotated(Vector3.UP, rotation)
 
 				var scale_factor := 0.8 + hash1 * 0.5
@@ -5172,7 +5178,7 @@ func _create_chunk_vegetation_immediate(chunk_key: String, points: PackedVector2
 				transform.origin = Vector3(pos.x, elevation + 0.01, pos.y)
 
 				# Финальная проверка transform перед добавлением
-				if transform.origin.is_finite():
+				if transform.origin.is_finite() and transform.basis.x.is_finite() and transform.basis.y.is_finite() and transform.basis.z.is_finite():
 					grass_transforms.append(transform)
 					grass_count += 1
 
@@ -5204,6 +5210,12 @@ func _create_chunk_vegetation_immediate(chunk_key: String, points: PackedVector2
 
 					var transform := Transform3D()
 					var rotation := fmod(float(seed_value + int(x * 20) + int(z * 20)) * 1.618, TAU)
+
+					# ПРОВЕРКА: Пропускаем если rotation невалиден
+					if not is_finite(rotation):
+						z += bush_spacing
+						continue
+
 					transform = transform.rotated(Vector3.UP, rotation)
 
 					var scale_factor := 0.7 + hash2 * 0.6
@@ -5211,7 +5223,7 @@ func _create_chunk_vegetation_immediate(chunk_key: String, points: PackedVector2
 					transform.origin = Vector3(pos.x, elevation, pos.y)
 
 					# Финальная проверка transform перед добавлением
-					if transform.origin.is_finite():
+					if transform.origin.is_finite() and transform.basis.x.is_finite() and transform.basis.y.is_finite() and transform.basis.z.is_finite():
 						bush_transforms.append(transform)
 						bush_count += 1
 
