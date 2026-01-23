@@ -52,16 +52,16 @@ func _process(delta: float) -> void:
 		rpm_norm = clamp((rpm - _car.idle_rpm) / rpm_range, 0.0, 1.0)
 
 	# Проверка на NaN
-	if not rpm_norm.is_finite():
+	if not is_finite(rpm_norm):
 		rpm_norm = 0.0
-	var throttle := _car.throttle_input if _car.throttle_input.is_finite() else 0.0
+	var throttle := _car.throttle_input if is_finite(_car.throttle_input) else 0.0
 
 	# Pitch: 0.5 -> 2.0
 	pitch_scale = lerp(pitch_scale, 0.5 + rpm_norm * 1.5, delta * 10.0)
 
 	# Громкость
 	var target_volume := lerp(min_volume, max_volume, rpm_norm * 0.5 + throttle * 0.5)
-	if target_volume.is_finite():
+	if is_finite(target_volume):
 		volume_db = target_volume
 
 func _generate_engine_loop() -> AudioStreamWAV:

@@ -370,7 +370,9 @@ func start_loading() -> void:
 	_initial_chunks_needed = _get_needed_chunks(spawn_pos)
 	print("OSM: Need to load %d chunks for initial area" % _initial_chunks_needed.size())
 
+	print("OSM: Emitting initial_load_started signal...")
 	initial_load_started.emit()
+	print("OSM: initial_load_started signal emitted")
 
 	# Загружаем начальные чанки
 	var chunks_to_load := 0
@@ -5157,7 +5159,7 @@ func _create_chunk_vegetation_immediate(chunk_key: String, points: PackedVector2
 				var elevation := _get_elevation_at_point(pos, elev_data)
 
 				# ПРОВЕРКА: Пропускаем если высота невалидна
-				if not elevation.is_finite():
+				if not is_finite(elevation):
 					z += grass_spacing
 					continue
 
@@ -5196,7 +5198,7 @@ func _create_chunk_vegetation_immediate(chunk_key: String, points: PackedVector2
 					var elevation := _get_elevation_at_point(pos, elev_data)
 
 					# ПРОВЕРКА: Пропускаем если высота невалидна
-					if not elevation.is_finite():
+					if not is_finite(elevation):
 						z += bush_spacing
 						continue
 

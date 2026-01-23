@@ -74,17 +74,36 @@ func _ready() -> void:
 	_scale_for_screen()
 
 	# Автостарт через командную строку: --autostart [location_index]
-	var args := OS.get_cmdline_args()
-	if "--autostart" in args:
-		var idx := args.find("--autostart")
+	# В Godot пользовательские аргументы идут после '--'
+	# Пример: godot -- --autostart 0
+	var args := OS.get_cmdline_user_args()
+	print("MainMenu: User args: ", args)
+
+	# Проверяем есть ли --autostart в пользовательских аргументах
+	var autostart_idx := -1
+	for i in range(args.size()):
+		if args[i] == "--autostart":
+			autostart_idx = i
+			break
+
+	if autostart_idx >= 0:
+		print("MainMenu: Autostart requested!")
 		var location_idx := 0
-		if idx + 1 < args.size():
-			location_idx = int(args[idx + 1])
+		if autostart_idx + 1 < args.size():
+			location_idx = int(args[autostart_idx + 1])
+		print("MainMenu: Autostart location index: ", location_idx)
 		var locations := LOCATIONS.keys()
+		print("MainMenu: Available locations: ", locations)
 		if location_idx >= 0 and location_idx < locations.size():
 			_selected_location = locations[location_idx]
+			print("MainMenu: Selected location for autostart: ", _selected_location)
+		else:
+			print("WARNING: Invalid location index ", location_idx, ", using default")
 		await get_tree().process_frame
+		print("MainMenu: Starting autostart loading...")
 		_start_loading()
+	else:
+		print("MainMenu: No autostart - showing main menu")
 
 func _on_continue_pressed() -> void:
 	# Просто продолжаем игру без повторной загрузки
@@ -164,6 +183,7 @@ func _start_loading() -> void:
 		_start_game()
 
 func _on_load_started() -> void:
+	print("MainMenu: _on_load_started() called!")
 	$LoadingPanel/VBox/ProgressBar.value = 0
 	$LoadingPanel/VBox/StatusLabel.text = "Загрузка карты..."
 
