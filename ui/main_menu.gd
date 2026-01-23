@@ -27,6 +27,7 @@ var _graphics_settings: Node
 var _car_lights: Node3D
 var _is_loading := false
 var _game_started := false  # Игра уже была запущена
+var _is_apply_settings_reload := false  # Флаг перезагрузки через Apply Settings
 var _selected_location := "Череповец"
 
 func _ready() -> void:
@@ -178,8 +179,10 @@ func _on_load_complete() -> void:
 func _start_game() -> void:
 	_game_started = true
 
-	# Спавним машину на ближайшей дороге
-	_spawn_car_on_road()
+	# Спавним машину на дороге только при первом запуске
+	# При Apply Settings машина уже на дороге, просто возвращаем её
+	if not _is_apply_settings_reload:
+		_spawn_car_on_road()
 
 	# КРИТИЧНО: Ждём один физический кадр чтобы машина стабилизировалась
 	await get_tree().physics_frame
@@ -198,8 +201,9 @@ func _start_game() -> void:
 	# Показываем мир (размораживаем машину)
 	_show_world()
 
-	# КРИТИЧНО: Снимаем флаг загрузки только после полной инициализации
+	# КРИТИЧНО: Снимаем флаги загрузки только после полной инициализации
 	_is_loading = false
+	_is_apply_settings_reload = false  # Сбрасываем флаг перезагрузки
 
 	# Показываем HUD
 	if _hud:
@@ -388,8 +392,9 @@ func _on_apply_settings_pressed() -> void:
 	if _terrain_generator and _game_started:
 		print("MainMenu: Applying graphics settings - reloading terrain...")
 
-		# КРИТИЧНО: Устанавливаем флаг загрузки
+		# КРИТИЧНО: Устанавливаем флаги загрузки
 		_is_loading = true
+		_is_apply_settings_reload = true  # Это перезагрузка, не первый запуск
 
 		# Скрываем панель настроек, показываем экран загрузки
 		$SettingsPanel.visible = false
