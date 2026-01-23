@@ -68,6 +68,8 @@ var _entrance_nodes: Array = []  # Входы в здания/заведения
 var _poi_nodes: Array = []  # Точечные заведения (shop/amenity как node)
 var _parking_polygons: Array[PackedVector2Array] = []  # Полигоны парковок для исключения фонарей
 var _road_segments: Array = []  # Сегменты дорог для позиционирования знаков парковки
+var _road_spatial_hash: Dictionary = {}  # Spatial hash для быстрого поиска дорог
+const ROAD_CELL_SIZE := 20.0  # Размер ячейки spatial hash для дорог
 var _intersection_positions: Array[Vector2] = []  # Позиции перекрёстков (центры)
 var _intersection_radii: Array[Vector2] = []  # Полуоси эллипсов (x=вдоль широкой дороги, y=вдоль узкой)
 var _intersection_angles: Array[float] = []  # Углы поворота эллипсов (радианы, направление широкой дороги)
@@ -961,6 +963,7 @@ func reset_terrain() -> void:
 	_created_lamp_positions.clear()
 	_created_sign_positions.clear()
 	_road_segments.clear()
+	_road_spatial_hash.clear()
 	_parking_polygons.clear()
 
 	print("OSM: Terrain reset complete")
@@ -1590,13 +1593,15 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, 
 		"elev_data": elev_data
 	})
 
-	# Сегменты дорог сохраняем сразу (нужны для знаков парковки)
+	# Сегменты дорог сохраняем сразу (нужны для знаков парковки и проверки фонарей)
 	var highway_type: String = tags.get("highway", "residential")
 	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
 	for i in range(nodes.size() - 1):
 		var p1 = _latlon_to_local(nodes[i].lat, nodes[i].lon)
 		var p2 = _latlon_to_local(nodes[i + 1].lat, nodes[i + 1].lon)
-		_road_segments.append({"p1": p1, "p2": p2, "width": width})
+		var seg := {"p1": p1, "p2": p2, "width": width}
+		_road_segments.append(seg)
+		_add_road_segment_to_spatial_hash(seg)
 
 
 ## Немедленное создание дороги (вызывается из очереди)
@@ -5434,8 +5439,13 @@ func _create_pending_lamps() -> void:
 
 		var parent: Node3D = _loaded_chunks[chunk_key]
 
-		# Теперь проверяем с полным списком парковок
+		# Проверяем что фонарь не на парковке
 		if _is_point_in_any_parking(pos):
+			skipped += 1
+			continue
+
+		# Проверяем что фонарь не на дороге (с небольшим запасом)
+		if _is_point_on_road(pos, 0.5):
 			skipped += 1
 			continue
 
@@ -6688,6 +6698,75 @@ func _get_nearby_intersections(pos: Vector2) -> Array:
 	if _intersection_spatial_hash.has(key):
 		return _intersection_spatial_hash[key]
 	return []
+
+
+## Добавляет сегмент дороги в spatial hash для быстрого поиска
+func _add_road_segment_to_spatial_hash(seg: Dictionary) -> void:
+	var p1: Vector2 = seg.p1
+	var p2: Vector2 = seg.p2
+	var width: float = seg.width
+
+	# Определяем bounding box сегмента дороги
+	var min_x := minf(p1.x, p2.x) - width / 2.0
+	var max_x := maxf(p1.x, p2.x) + width / 2.0
+	var min_y := minf(p1.y, p2.y) - width / 2.0
+	var max_y := maxf(p1.y, p2.y) + width / 2.0
+
+	var min_cell_x := int(floor(min_x / ROAD_CELL_SIZE))
+	var max_cell_x := int(floor(max_x / ROAD_CELL_SIZE))
+	var min_cell_y := int(floor(min_y / ROAD_CELL_SIZE))
+	var max_cell_y := int(floor(max_y / ROAD_CELL_SIZE))
+
+	# Добавляем сегмент во все затронутые ячейки
+	for cx in range(min_cell_x, max_cell_x + 1):
+		for cy in range(min_cell_y, max_cell_y + 1):
+			var key := Vector2i(cx, cy)
+			if not _road_spatial_hash.has(key):
+				_road_spatial_hash[key] = []
+			_road_spatial_hash[key].append(seg)
+
+
+## Получает сегменты дорог рядом с точкой через spatial hash
+func _get_nearby_road_segments(pos: Vector2) -> Array:
+	var cell_x := int(floor(pos.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(pos.y / ROAD_CELL_SIZE))
+	var key := Vector2i(cell_x, cell_y)
+	if _road_spatial_hash.has(key):
+		return _road_spatial_hash[key]
+	return []
+
+
+## Проверяет, находится ли точка на дороге
+func _is_point_on_road(pos: Vector2, margin: float = 0.5) -> bool:
+	# Используем spatial hash для быстрого поиска ближайших сегментов
+	var nearby_segments := _get_nearby_road_segments(pos)
+
+	for seg in nearby_segments:
+		var p1: Vector2 = seg.p1
+		var p2: Vector2 = seg.p2
+		var width: float = seg.width
+
+		# Вычисляем расстояние от точки до сегмента дороги
+		var line_vec := p2 - p1
+		var point_vec := pos - p1
+		var line_len := line_vec.length()
+
+		if line_len < 0.01:  # Вырожденный сегмент
+			continue
+
+		# Проекция точки на линию сегмента
+		var t := point_vec.dot(line_vec) / (line_len * line_len)
+		t = clampf(t, 0.0, 1.0)
+
+		# Ближайшая точка на сегменте
+		var closest := p1 + line_vec * t
+		var dist := pos.distance_to(closest)
+
+		# Проверяем, находится ли точка в пределах ширины дороги + margin
+		if dist <= (width / 2.0 + margin):
+			return true
+
+	return false
 
 
 func _is_point_in_intersection_ellipse(pos: Vector2, scale: float = 1.0) -> int:
