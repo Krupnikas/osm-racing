@@ -325,6 +325,9 @@ func enable_night_mode() -> void:
 
 	is_night = true
 
+	# Переключаем небо СРАЗУ
+	_switch_to_night_sky()
+
 	# Обновляем отражения на дорогах (больше ночью)
 	if is_raining and _terrain_generator and _terrain_generator.has_method("set_wet_mode"):
 		_terrain_generator.set_wet_mode(true, true)  # wet=true, night=true
@@ -361,9 +364,6 @@ func enable_night_mode() -> void:
 		_environment.tonemap_exposure = 1.1
 		_environment.tonemap_white = 6.0
 
-	# Switch sky after short delay
-	_transition_tween.chain().tween_callback(_switch_to_night_sky)
-
 	night_mode_changed.emit(true)
 	print("Night mode enabled")
 
@@ -373,6 +373,9 @@ func disable_night_mode() -> void:
 		return
 
 	is_night = false
+
+	# Переключаем небо обратно
+	_switch_to_day_sky()
 
 	# Обновляем отражения на дорогах (меньше днём)
 	if is_raining and _terrain_generator and _terrain_generator.has_method("set_wet_mode"):
@@ -407,9 +410,6 @@ func disable_night_mode() -> void:
 		_environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 		_environment.tonemap_exposure = _day_tonemap_exposure
 		_environment.tonemap_white = 1.0
-
-	# Switch sky
-	_switch_to_day_sky()
 
 	night_mode_changed.emit(false)
 	print("Night mode disabled")

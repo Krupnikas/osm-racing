@@ -13,10 +13,10 @@ var ssao_enabled := true
 var normal_maps_enabled := true
 var clouds_enabled := true
 
-# Antialiasing - только MSAA 4X (TAA даёт размытие на скорости)
-var msaa_mode := Viewport.MSAA_4X  # MSAA 4X для чётких краёв без размытия
-var taa_enabled := false  # TAA выключен - размывает на скорости
-var fxaa_enabled := true  # FXAA для сглаживания шума
+# Antialiasing - MSAA 2X + TAA для баланса качества и чёткости
+var msaa_mode := Viewport.MSAA_2X  # MSAA 2X
+var taa_enabled := true  # TAA включен
+var fxaa_enabled := false  # FXAA выключен
 var taa_jitter_amount := 0.5  # Сила TAA (0.0-1.0): меньше = четче но больше шума, больше = размытие
 
 # Дополнительные эффекты
