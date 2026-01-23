@@ -41,6 +41,9 @@ func _ready() -> void:
 		_terrain_generator = get_node(terrain_generator_path)
 	if car_path:
 		_car = get_node(car_path)
+		# КРИТИЧНО: Сразу замораживаем машину чтобы не упала до _hide_world()
+		if _car and _car is RigidBody3D:
+			_car.freeze = true
 	if world_root_path:
 		_world_root = get_node(world_root_path)
 	if hud_path:
@@ -116,6 +119,7 @@ func _on_dubai_pressed() -> void:
 	_on_location_selected("Дубай (Крик)")
 
 func _start_loading() -> void:
+	print("MainMenu: _start_loading() called")
 	_is_loading = true
 
 	# Скрываем панель выбора, показываем экран загрузки
@@ -126,6 +130,7 @@ func _start_loading() -> void:
 
 	# Если игра уже была запущена - сбрасываем террейн
 	if _game_started and _terrain_generator:
+		print("MainMenu: Resetting terrain...")
 		_terrain_generator.reset_terrain()
 
 	# Сбрасываем машину на начальную позицию
@@ -146,11 +151,15 @@ func _start_loading() -> void:
 
 	# Устанавливаем координаты для генератора
 	if _terrain_generator:
+		print("MainMenu: Setting coordinates and starting terrain loading...")
 		var coords: Array = LOCATIONS[_selected_location]
 		_terrain_generator.start_lat = coords[0]
 		_terrain_generator.start_lon = coords[1]
+		print("MainMenu: Calling terrain_generator.start_loading()...")
 		_terrain_generator.start_loading()
+		print("MainMenu: terrain_generator.start_loading() returned")
 	else:
+		print("MainMenu: No terrain generator, starting game immediately")
 		# Если нет генератора - сразу показываем игру
 		_start_game()
 
