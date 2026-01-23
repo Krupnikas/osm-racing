@@ -128,11 +128,16 @@ func _start_loading() -> void:
 		_terrain_generator.reset_terrain()
 
 	# Сбрасываем машину на начальную позицию
-	if _car:
-		_car.global_position = Vector3(0, 2, 0)
-		_car.rotation = Vector3.ZERO
+	if _car and _car is RigidBody3D:
+		# КРИТИЧНО: Сначала обнуляем скорости, потом замораживаем
 		_car.linear_velocity = Vector3.ZERO
 		_car.angular_velocity = Vector3.ZERO
+		_car.freeze = true
+		# Сбрасываем позицию только после заморозки
+		_car.global_position = Vector3(0, 2, 0)
+		_car.rotation = Vector3.ZERO
+	elif _car:
+		print("WARNING: Car is not RigidBody3D, cannot reset safely!")
 
 	# Сбрасываем камеру
 	if _camera and _camera.has_method("reset_camera"):
@@ -163,17 +168,38 @@ func _on_load_complete() -> void:
 	# Небольшая задержка для отображения 100%
 	await get_tree().create_timer(0.3).timeout
 
+	# ВАЖНО: Проверяем что загрузка всё ещё активна после await
+	if not _is_loading:
+		print("WARNING: Loading was cancelled during completion delay")
+		return
+
 	_start_game()
 
 func _start_game() -> void:
-	_is_loading = false
 	_game_started = true
 
 	# Спавним машину на ближайшей дороге
 	_spawn_car_on_road()
 
-	# Показываем мир
+	# КРИТИЧНО: Ждём один физический кадр чтобы машина стабилизировалась
+	await get_tree().physics_frame
+
+	# ВАЖНО: Проверяем что загрузка не была прервана во время await
+	if not _is_loading:
+		print("WARNING: Loading flag was cleared during await, aborting _start_game()")
+		return
+
+	# ВАЖНО: Проверяем что машина всё ещё существует после await
+	if not is_instance_valid(_car):
+		print("ERROR: Car was deleted during await!")
+		_is_loading = false
+		return
+
+	# Показываем мир (размораживаем машину)
 	_show_world()
+
+	# КРИТИЧНО: Снимаем флаг загрузки только после полной инициализации
+	_is_loading = false
 
 	# Показываем HUD
 	if _hud:
@@ -221,28 +247,52 @@ func _spawn_car_on_road() -> void:
 	var road_pos: Vector3 = nearest_wp.position
 	var road_dir: Vector3 = nearest_wp.direction
 
+	# ПРОВЕРКА: Убедимся что позиция валидна
+	if not road_pos.is_finite():
+		print("ERROR: road_pos is NaN! Using default spawn position")
+		road_pos = Vector3(0, 2, 0)
+	if not road_dir.is_finite():
+		print("ERROR: road_dir is NaN! Using default direction")
+		road_dir = Vector3(0, 0, 1)
+
 	# Поднимаем машину чуть выше дороги
 	road_pos.y += 0.5
 
-	# Устанавливаем позицию
+	# КРИТИЧНО: Сначала замораживаем машину перед изменением transform
+	if not (_car is RigidBody3D):
+		print("ERROR: Car is not RigidBody3D! Cannot spawn safely.")
+		return
+
+	_car.linear_velocity = Vector3.ZERO
+	_car.angular_velocity = Vector3.ZERO
+	_car.freeze = true
+
+	# Устанавливаем позицию (машина уже заморожена)
 	_car.global_position = road_pos
+
+	# ПРОВЕРКА: Убедимся что позиция не стала NaN после установки
+	if not _car.global_position.is_finite():
+		print("ERROR: Car position became NaN after assignment! Road pos was: ", road_pos)
+		_car.global_position = Vector3(0, 2, 0)
 
 	# Поворачиваем машину вдоль дороги
 	# direction - это нормализованный вектор направления движения
+	var final_yaw := 0.0
 	if road_dir.length_squared() > 0.01:
 		var yaw := atan2(road_dir.x, road_dir.z)
 		# Для Череповца разворачиваем на 180 градусов
 		if _selected_location == "Череповец":
 			yaw += PI
 		_car.rotation = Vector3(0, yaw, 0)
+		final_yaw = yaw
 
-	# Сбрасываем скорости
-	if _car is RigidBody3D:
-		_car.linear_velocity = Vector3.ZERO
-		_car.angular_velocity = Vector3.ZERO
+	# ПРОВЕРКА: Убедимся что rotation не стал NaN
+	if not _car.rotation.is_finite():
+		print("ERROR: Car rotation became NaN! Yaw was: ", final_yaw)
+		_car.rotation = Vector3.ZERO
 
 	print("MainMenu: Spawned car on road at (%.1f, %.1f, %.1f), heading %.0f°" % [
-		road_pos.x, road_pos.y, road_pos.z, rad_to_deg(atan2(road_dir.x, road_dir.z))
+		_car.global_position.x, _car.global_position.y, _car.global_position.z, rad_to_deg(final_yaw)
 	])
 
 func _hide_world() -> void:
@@ -259,6 +309,16 @@ func _show_world() -> void:
 		_car.visible = true
 		# Размораживаем физику машины
 		if _car is RigidBody3D:
+			# КРИТИЧНО: Перед размораживанием проверяем что скорости нулевые
+			_car.linear_velocity = Vector3.ZERO
+			_car.angular_velocity = Vector3.ZERO
+			# Проверяем что позиция валидна
+			if not _car.global_position.is_finite():
+				print("ERROR: Car position is NaN before unfreeze! Resetting...")
+				_car.global_position = Vector3(0, 2, 0)
+			if not _car.rotation.is_finite():
+				print("ERROR: Car rotation is NaN before unfreeze! Resetting...")
+				_car.rotation = Vector3.ZERO
 			_car.freeze = false
 
 func _on_controls_pressed() -> void:
@@ -318,6 +378,58 @@ func _on_settings_pressed() -> void:
 	_update_underglow_checkbox()
 	# Синхронизируем графические настройки
 	_update_graphics_checkboxes()
+
+
+func _on_apply_settings_pressed() -> void:
+	# Применяем настройки - перезагружаем террейн для применения Normal Maps
+	if _is_loading:
+		print("MainMenu: Cannot apply settings while loading")
+		return
+	if _terrain_generator and _game_started:
+		print("MainMenu: Applying graphics settings - reloading terrain...")
+
+		# КРИТИЧНО: Устанавливаем флаг загрузки
+		_is_loading = true
+
+		# Скрываем панель настроек, показываем экран загрузки
+		$SettingsPanel.visible = false
+		$LoadingPanel.visible = true
+		$LoadingPanel/VBox/ProgressBar.value = 0
+		$LoadingPanel/VBox/StatusLabel.text = "Применение настроек..."
+
+		# Прячем HUD
+		if _hud:
+			_hud.hide_hud()
+
+		# КРИТИЧНО: Скрываем и замораживаем машину ПЕРЕД снятием паузы
+		if _car and _car is RigidBody3D:
+			_car.visible = false
+			# Сначала обнуляем скорости, потом замораживаем
+			_car.linear_velocity = Vector3.ZERO
+			_car.angular_velocity = Vector3.ZERO
+			_car.freeze = true
+			# Сбрасываем позицию только после заморозки
+			_car.global_position = Vector3(0, 2, 0)
+			_car.rotation = Vector3.ZERO
+		elif _car:
+			print("WARNING: Car is not RigidBody3D in Apply settings!")
+
+		# ВАЖНО: Снимаем паузу для загрузки ПОСЛЕ заморозки машины
+		get_tree().paused = false
+
+		# Сбрасываем террейн
+		_terrain_generator.reset_terrain()
+
+		# Запускаем перезагрузку
+		var coords: Array = LOCATIONS[_selected_location]
+		_terrain_generator.start_lat = coords[0]
+		_terrain_generator.start_lon = coords[1]
+		_terrain_generator.start_loading()
+	else:
+		print("MainMenu: Settings will be applied on next game start")
+		# Просто закрываем настройки
+		$SettingsPanel.visible = false
+		$VBox.visible = true
 
 
 func _on_settings_back_pressed() -> void:
@@ -385,6 +497,7 @@ func _update_graphics_checkboxes() -> void:
 	$SettingsPanel/VBox/NormalMapsCheck.set_pressed_no_signal(_graphics_settings.normal_maps_enabled)
 	$SettingsPanel/VBox/CloudsCheck.set_pressed_no_signal(_graphics_settings.clouds_enabled)
 	$SettingsPanel/VBox/TAACheck.set_pressed_no_signal(_graphics_settings.taa_enabled)
+	$SettingsPanel/VBox/FXAACheck.set_pressed_no_signal(_graphics_settings.fxaa_enabled)
 	$SettingsPanel/VBox/DOFCheck.set_pressed_no_signal(_graphics_settings.dof_enabled)
 	$SettingsPanel/VBox/VignetteCheck.set_pressed_no_signal(_graphics_settings.vignette_enabled)
 	# MSAA option
@@ -410,40 +523,54 @@ func _on_ssr_toggled(toggled_on: bool) -> void:
 	if _graphics_settings:
 		_graphics_settings.ssr_enabled = toggled_on
 		_graphics_settings._apply_ssr()
+		_graphics_settings.settings_changed.emit()
 
 
 func _on_fog_toggled(toggled_on: bool) -> void:
 	if _graphics_settings:
 		_graphics_settings.fog_enabled = toggled_on
 		_graphics_settings._apply_fog()
+		_graphics_settings.settings_changed.emit()
 
 
 func _on_glow_toggled(toggled_on: bool) -> void:
 	if _graphics_settings:
 		_graphics_settings.glow_enabled = toggled_on
 		_graphics_settings._apply_glow()
+		_graphics_settings.settings_changed.emit()
 
 
 func _on_ssao_toggled(toggled_on: bool) -> void:
 	if _graphics_settings:
 		_graphics_settings.ssao_enabled = toggled_on
 		_graphics_settings._apply_ssao()
+		_graphics_settings.settings_changed.emit()
 
 
 func _on_normal_maps_toggled(toggled_on: bool) -> void:
 	if _graphics_settings:
 		_graphics_settings.normal_maps_enabled = toggled_on
+		_graphics_settings.settings_changed.emit()
 
 
 func _on_clouds_toggled(toggled_on: bool) -> void:
 	if _graphics_settings:
 		_graphics_settings.clouds_enabled = toggled_on
+		_graphics_settings.settings_changed.emit()
 
 
 func _on_taa_toggled(toggled_on: bool) -> void:
 	if _graphics_settings:
 		_graphics_settings.taa_enabled = toggled_on
 		_graphics_settings._apply_taa()
+		_graphics_settings.settings_changed.emit()
+
+
+func _on_fxaa_toggled(toggled_on: bool) -> void:
+	if _graphics_settings:
+		_graphics_settings.fxaa_enabled = toggled_on
+		_graphics_settings._apply_fxaa()
+		_graphics_settings.settings_changed.emit()
 
 
 func _on_msaa_selected(index: int) -> void:
@@ -465,12 +592,14 @@ func _on_dof_toggled(toggled_on: bool) -> void:
 	if _graphics_settings:
 		_graphics_settings.dof_enabled = toggled_on
 		_graphics_settings._apply_dof()
+		_graphics_settings.settings_changed.emit()
 
 
 func _on_vignette_toggled(toggled_on: bool) -> void:
 	if _graphics_settings:
 		_graphics_settings.vignette_enabled = toggled_on
 		_graphics_settings._apply_vignette()
+		_graphics_settings.settings_changed.emit()
 
 
 func _on_render_dist_changed(value: float) -> void:

@@ -17,12 +17,13 @@ var clouds_enabled := true
 var msaa_mode := Viewport.MSAA_4X  # MSAA 4X для чётких краёв без размытия
 var taa_enabled := false  # TAA выключен - размывает на скорости
 var fxaa_enabled := true  # FXAA для сглаживания шума
+var taa_jitter_amount := 0.5  # Сила TAA (0.0-1.0): меньше = четче но больше шума, больше = размытие
 
 # Дополнительные эффекты
 var motion_blur_enabled := false
 var dof_enabled := false  # Размытие от расстояния
 var chromatic_aberration_enabled := false
-var vignette_enabled := false  # Виньетка
+var vignette_enabled := false  # Виньетка (по умолчанию выключена)
 
 # Дальность прорисовки
 var render_distance := 600.0  # Метры
@@ -46,7 +47,9 @@ func _ready() -> void:
 	_find_environment()
 	_find_camera()
 	_load_settings()
+	print("GraphicsSettings: Applying initial settings...")
 	_apply_all()
+	print("GraphicsSettings: Ready")
 	# Автосохранение при изменении настроек
 	settings_changed.connect(_on_settings_changed)
 
@@ -59,6 +62,9 @@ func _find_environment() -> void:
 	_world_env = get_tree().current_scene.find_child("WorldEnvironment", true, false) as WorldEnvironment
 	if _world_env:
 		_environment = _world_env.environment
+		print("GraphicsSettings: Found WorldEnvironment")
+	else:
+		print("GraphicsSettings: ERROR - WorldEnvironment not found!")
 
 
 func _find_camera() -> void:
@@ -69,6 +75,10 @@ func _find_camera() -> void:
 		var cameras := get_tree().get_nodes_in_group("camera")
 		if cameras.size() > 0:
 			_camera = cameras[0] as Camera3D
+	if _camera:
+		print("GraphicsSettings: Found Camera3D")
+	else:
+		print("GraphicsSettings: WARNING - Camera3D not found")
 
 
 func _input(event: InputEvent) -> void:
@@ -127,7 +137,8 @@ func toggle_ssao() -> void:
 func toggle_normal_maps() -> void:
 	normal_maps_enabled = not normal_maps_enabled
 	print("Normal Maps: ", "ON" if normal_maps_enabled else "OFF")
-	# Normal maps применяются при создании материалов
+	print("WARNING: Normal Maps change requires terrain reload to take effect")
+	# Normal maps применяются при создании материалов - нужна перезагрузка чанков
 	settings_changed.emit()
 
 
@@ -152,7 +163,10 @@ func _apply_render_distance() -> void:
 	var terrain := get_tree().current_scene.find_child("OSMTerrainGenerator", true, false)
 	if terrain:
 		terrain.render_distance = render_distance
-		terrain._setup_render_distance()
+		if terrain.has_method("_setup_render_distance"):
+			terrain._setup_render_distance()
+		else:
+			print("WARNING: Terrain does not have _setup_render_distance() method")
 
 
 func toggle_clouds() -> void:
@@ -228,42 +242,59 @@ func toggle_vignette() -> void:
 func _apply_ssr() -> void:
 	if _environment:
 		_environment.ssr_enabled = ssr_enabled
+		print("SSR: ", "ON" if ssr_enabled else "OFF")
+	else:
+		print("ERROR: Cannot apply SSR - no environment!")
 
 
 func _apply_fog() -> void:
 	if _environment:
 		_environment.fog_enabled = fog_enabled
+		print("Fog: ", "ON" if fog_enabled else "OFF")
+	else:
+		print("ERROR: Cannot apply Fog - no environment!")
 
 
 func _apply_glow() -> void:
 	if _environment:
 		_environment.glow_enabled = glow_enabled
+		print("Glow: ", "ON" if glow_enabled else "OFF")
+	else:
+		print("ERROR: Cannot apply Glow - no environment!")
 
 
 func _apply_ssao() -> void:
 	if _environment:
 		_environment.ssao_enabled = ssao_enabled
+		print("SSAO: ", "ON" if ssao_enabled else "OFF")
+	else:
+		print("ERROR: Cannot apply SSAO - no environment!")
 
 
 func _apply_taa() -> void:
-	var viewport := get_viewport()
+	var viewport := get_tree().root
 	if viewport:
 		viewport.use_taa = taa_enabled
+		print("TAA: ", "ON" if taa_enabled else "OFF")
+		# Рекомендация: TAA + MSAA 2X = хорошее сглаживание без сильного размытия
 
 
 func _apply_msaa() -> void:
-	var viewport := get_viewport()
+	var viewport := get_tree().root
 	if viewport:
 		viewport.msaa_3d = msaa_mode
+		print("MSAA: ", _get_msaa_name())
 
 
 func _apply_fxaa() -> void:
-	var viewport := get_viewport()
+	var viewport := get_tree().root
 	if viewport:
 		if fxaa_enabled:
 			viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
+			print("FXAA enabled on root viewport")
 		else:
 			viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
+			print("FXAA disabled on root viewport")
 
 
 func _apply_motion_blur() -> void:
@@ -279,6 +310,9 @@ func _apply_motion_blur() -> void:
 
 func _apply_dof() -> void:
 	# DOF через CameraAttributes
+	if not _camera:
+		_find_camera()
+
 	if _camera:
 		if not _camera.attributes:
 			_camera.attributes = CameraAttributesPractical.new()
@@ -289,8 +323,12 @@ func _apply_dof() -> void:
 				attrs.dof_blur_far_distance = 100.0
 				attrs.dof_blur_far_transition = 50.0
 				attrs.dof_blur_amount = 0.05
+				print("DOF: ON (far distance: 100m)")
 			else:
 				attrs.dof_blur_far_enabled = false
+				print("DOF: OFF")
+	else:
+		print("ERROR: Cannot apply DOF - no camera!")
 
 
 func _apply_chromatic_aberration() -> void:
@@ -387,6 +425,7 @@ func _load_settings() -> void:
 	var config := ConfigFile.new()
 	var err := config.load("user://graphics.cfg")
 	if err == OK:
+		print("GraphicsSettings: Loading settings from file...")
 		ssr_enabled = config.get_value("graphics", "ssr", true)
 		fog_enabled = config.get_value("graphics", "fog", true)
 		glow_enabled = config.get_value("graphics", "glow", true)
@@ -398,8 +437,13 @@ func _load_settings() -> void:
 		fxaa_enabled = config.get_value("graphics", "fxaa", true)
 		motion_blur_enabled = config.get_value("graphics", "motion_blur", false)
 		dof_enabled = config.get_value("graphics", "dof", false)
-		vignette_enabled = config.get_value("graphics", "vignette", true)
-		render_distance = config.get_value("graphics", "render_distance", 400.0)
+		vignette_enabled = config.get_value("graphics", "vignette", false)  # Дефолт false как при инициализации
+		render_distance = config.get_value("graphics", "render_distance", 600.0)  # Дефолт как при инициализации
+		print("GraphicsSettings: Settings loaded - FXAA: ", fxaa_enabled, ", TAA: ", taa_enabled, ", MSAA: ", msaa_mode)
+	else:
+		print("GraphicsSettings: No saved settings found (err: ", err, "), using defaults")
+		# Сохраняем дефолтные настройки в файл
+		save_settings()
 
 
 func save_settings() -> void:
@@ -417,7 +461,11 @@ func save_settings() -> void:
 	config.set_value("graphics", "dof", dof_enabled)
 	config.set_value("graphics", "vignette", vignette_enabled)
 	config.set_value("graphics", "render_distance", render_distance)
-	config.save("user://graphics.cfg")
+	var err := config.save("user://graphics.cfg")
+	if err == OK:
+		print("GraphicsSettings: Settings saved successfully")
+	else:
+		print("GraphicsSettings: ERROR - Failed to save settings: ", err)
 
 
 func get_settings_text() -> String:
@@ -431,6 +479,7 @@ func get_settings_text() -> String:
   F7 - Quality: LOW
   F8 - Quality: MEDIUM
   F9 - Quality: HIGH
+  F10 - FXAA: %s
 
   TAA: %s | MSAA: %s
   DOF: %s | Vignette: %s""" % [
@@ -440,6 +489,7 @@ func get_settings_text() -> String:
 		"ON" if ssao_enabled else "OFF",
 		"ON" if normal_maps_enabled else "OFF",
 		"ON" if clouds_enabled else "OFF",
+		"ON" if fxaa_enabled else "OFF",
 		"ON" if taa_enabled else "OFF",
 		_get_msaa_name(),
 		"ON" if dof_enabled else "OFF",

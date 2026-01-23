@@ -292,10 +292,12 @@ text = "Назад"
 [connection signal="toggled" from="SettingsPanel/VBox/NormalMapsCheck" to="." method="_on_normal_maps_toggled"]
 [connection signal="toggled" from="SettingsPanel/VBox/CloudsCheck" to="." method="_on_clouds_toggled"]
 [connection signal="toggled" from="SettingsPanel/VBox/TAACheck" to="." method="_on_taa_toggled"]
+[connection signal="toggled" from="SettingsPanel/VBox/FXAACheck" to="." method="_on_fxaa_toggled"]
 [connection signal="item_selected" from="SettingsPanel/VBox/MSAAOption" to="." method="_on_msaa_selected"]
 [connection signal="toggled" from="SettingsPanel/VBox/DOFCheck" to="." method="_on_dof_toggled"]
 [connection signal="toggled" from="SettingsPanel/VBox/VignetteCheck" to="." method="_on_vignette_toggled"]
 [connection signal="value_changed" from="SettingsPanel/VBox/RenderDistBox/RenderDistSlider" to="." method="_on_render_dist_changed"]
+[connection signal="pressed" from="SettingsPanel/VBox/ApplyButton" to="." method="_on_apply_settings_pressed"]
 [connection signal="pressed" from="SettingsPanel/VBox/BackButton" to="." method="_on_settings_back_pressed"]
 
 [node name="SettingsPanel" type="Panel" parent="."]
@@ -397,6 +399,11 @@ layout_mode = 2
 button_pressed = true
 text = "TAA"
 
+[node name="FXAACheck" type="CheckButton" parent="SettingsPanel/VBox"]
+layout_mode = 2
+button_pressed = true
+text = "FXAA"
+
 [node name="MSAAOption" type="OptionButton" parent="SettingsPanel/VBox"]
 layout_mode = 2
 selected = 0
@@ -448,6 +455,12 @@ text = "600 м"
 [node name="Spacer2" type="Control" parent="SettingsPanel/VBox"]
 layout_mode = 2
 size_flags_vertical = 3
+
+[node name="ApplyButton" type="Button" parent="SettingsPanel/VBox"]
+custom_minimum_size = Vector2(0, 50)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Применить"
 
 [node name="BackButton" type="Button" parent="SettingsPanel/VBox"]
 custom_minimum_size = Vector2(0, 50)

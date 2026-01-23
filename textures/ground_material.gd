@@ -10,9 +10,9 @@ const WET_NIGHT_ROUGHNESS := 0.25
 const WET_NIGHT_SPECULAR := 0.6
 
 # Параметры мокрой травы днём
-const WET_DAY_METALLIC := 0.1
-const WET_DAY_ROUGHNESS := 0.3
-const WET_DAY_SPECULAR := 0.5
+const WET_DAY_METALLIC := 0.15
+const WET_DAY_ROUGHNESS := 0.25
+const WET_DAY_SPECULAR := 0.6
 
 # Параметры сухой травы
 const DRY_METALLIC := 0.0
@@ -20,7 +20,7 @@ const DRY_ROUGHNESS := 0.9
 const DRY_SPECULAR := 0.3
 
 # UV масштаб для тайлинга текстуры (текстура 1.4м x 1.4м)
-const UV_SCALE := Vector3(0.5, 0.5, 0.5)  # ~2 метра на тайл
+const UV_SCALE := Vector3(0.0625, 0.0625, 0.0625)  # ~16 метров на тайл (огромная текстура, почти нет деталей)
 
 
 static func create_ground_material(is_wet: bool = false, is_night: bool = false) -> StandardMaterial3D:
@@ -37,10 +37,16 @@ static func create_ground_material(is_wet: bool = false, is_night: bool = false)
 
 	if albedo_img:
 		albedo_tex = ImageTexture.create_from_image(albedo_img)
+	else:
+		print("WARNING: Failed to load grass albedo texture!")
 	if normal_img:
 		normal_tex = ImageTexture.create_from_image(normal_img)
+	else:
+		print("WARNING: Failed to load grass normal texture!")
 	if ao_img:
 		ao_tex = ImageTexture.create_from_image(ao_img)
+	else:
+		print("WARNING: Failed to load grass AO texture!")
 
 	# Применяем текстуры
 	if albedo_tex:
@@ -74,12 +80,14 @@ static func apply_weather_properties(material: StandardMaterial3D, is_wet: bool,
 			material.metallic = WET_NIGHT_METALLIC
 			material.roughness = WET_NIGHT_ROUGHNESS
 			material.metallic_specular = WET_NIGHT_SPECULAR
+			# Мокрая трава ночью немного темнее
+			material.albedo_color = Color(0.85, 0.85, 0.85)
 		else:
 			material.metallic = WET_DAY_METALLIC
 			material.roughness = WET_DAY_ROUGHNESS
 			material.metallic_specular = WET_DAY_SPECULAR
-		# Мокрая трава немного темнее
-		material.albedo_color = Color(0.85, 0.85, 0.85)
+			# Мокрая трава днём значительно темнее
+			material.albedo_color = Color(0.6, 0.6, 0.6)
 	else:
 		material.metallic = DRY_METALLIC
 		material.roughness = DRY_ROUGHNESS

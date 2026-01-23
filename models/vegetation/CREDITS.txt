@@ -1,0 +1,21 @@
+Vegetation Models Credits
+========================
+
+Models from Kenney Nature Kit
+-----------------------------
+Source: Kenney (kenney.nl)
+URL: https://kenney.nl/assets/nature-kit
+License: CC0 1.0 Universal (Public Domain)
+
+Files:
+  - grass.glb
+  - grass_large.glb
+  - grass_leafs.glb
+  - grass_leafsLarge.glb
+  - plant_bush.glb
+  - plant_bushSmall.glb
+  - plant_bushLarge.glb
+  - plant_bushDetailed.glb
+
+You can use these models for any purpose without restriction.
+No attribution required (but appreciated).

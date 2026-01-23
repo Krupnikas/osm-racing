@@ -13,6 +13,17 @@ const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
 const BIRCH_TREE_SCENE = preload("res://models/trees/birch/scene.gltf")
 
+# Пути к моделям растительности Kenney Nature Kit (CC0)
+const GRASS_MODEL_PATH := "res://models/vegetation/grass.glb"
+const GRASS_LARGE_MODEL_PATH := "res://models/vegetation/grass_large.glb"
+const BUSH_SMALL_MODEL_PATH := "res://models/vegetation/plant_bushSmall.glb"
+const BUSH_MODEL_PATH := "res://models/vegetation/plant_bush.glb"
+const BUSH_LARGE_MODEL_PATH := "res://models/vegetation/plant_bushLarge.glb"
+
+# Кэш загруженных моделей растительности
+var _grass_model: PackedScene
+var _bush_model: PackedScene
+
 # Кэш текстур (создаются один раз)
 var _road_textures: Dictionary = {}
 var _building_textures: Dictionary = {}
@@ -38,7 +49,8 @@ var osm_loader: Node
 var _car: Node3D
 var _camera: Camera3D
 var _loaded_chunks: Dictionary = {}  # key: "x,z" -> value: Node3D (chunk node)
-var _loading_chunks: Dictionary = {}  # Чанки в процессе загрузки
+var _loading_chunks: Dictionary = {}  # key: "x,z" -> value: timestamp (start time in msec)
+const CHUNK_LOAD_TIMEOUT := 30.0  # Таймаут загрузки чанка (секунд)
 var _chunk_elevations: Dictionary = {}  # key: "x,z" -> value: elevation data
 var _loading_elevations: Dictionary = {}  # Чанки с загружающимися высотами
 var _elevation_queue: Array = []  # Очередь чанков для загрузки высот
@@ -380,6 +392,47 @@ func _check_initial_load_complete() -> void:
 	# Считаем размер всех очередей
 	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks
 
+	# DEBUG: Детальное логирование очередей
+	if loaded_count >= total_chunks and total_queued > 0:
+		print("OSM DEBUG: Chunks loaded %d/%d, but queues not empty:" % [loaded_count, total_chunks])
+		print("  - _building_results: %d" % _building_results.size())
+		print("  - _road_queue: %d" % _road_queue.size())
+		print("  - _terrain_objects_queue: %d" % _terrain_objects_queue.size())
+		print("  - _infrastructure_queue: %d" % _infrastructure_queue.size())
+		print("  - _pending_building_tasks: %d" % _pending_building_tasks)
+
+	# DEBUG: Проверяем зависшие чанки в _loading_chunks
+	if loaded_count < total_chunks:
+		var missing_chunks: Array[String] = []
+		for chunk_key in _initial_chunks_needed:
+			if not _loaded_chunks.has(chunk_key):
+				missing_chunks.append(chunk_key)
+
+		if missing_chunks.size() > 0:
+			print("OSM DEBUG: Missing chunks (%d): %s" % [missing_chunks.size(), str(missing_chunks)])
+			print("  - Currently loading: %s" % str(_loading_chunks.keys()))
+
+			# Проверяем таймауты для загружающихся чанков
+			var current_time := Time.get_ticks_msec()
+			var timed_out_chunks: Array[String] = []
+			for chunk_key in _loading_chunks.keys():
+				var load_start_time: int = _loading_chunks[chunk_key]
+				var elapsed_sec := float(current_time - load_start_time) / 1000.0
+				if elapsed_sec > CHUNK_LOAD_TIMEOUT:
+					timed_out_chunks.append(chunk_key)
+					print("OSM WARNING: Chunk %s timed out after %.1f seconds!" % [chunk_key, elapsed_sec])
+
+			# Убираем зависшие чанки и пытаемся загрузить заново
+			for chunk_key in timed_out_chunks:
+				_loading_chunks.erase(chunk_key)
+				_current_load_count = max(0, _current_load_count - 1)
+				print("OSM: Retrying timed out chunk %s..." % chunk_key)
+				# Перезагружаем чанк
+				var coords: Array = chunk_key.split(",")
+				var chunk_x := int(coords[0])
+				var chunk_z := int(coords[1])
+				_load_chunk(chunk_x, chunk_z)
+
 	# Статус
 	var status: String
 	if loaded_count < total_chunks:
@@ -404,18 +457,20 @@ func _check_initial_load_complete() -> void:
 			if total_queued == _last_queue_size:
 				_queue_stuck_time += get_process_delta_time()
 				if _queue_stuck_time >= QUEUE_STUCK_TIMEOUT:
-					# Очередь зависла - принудительно сбрасываем pending tasks
+					# Очередь зависла - принудительно сбрасываем pending tasks и переходим к финализации
 					print("OSM: Queue stuck at %d items for %.1fs, forcing completion..." % [total_queued, _queue_stuck_time])
 					_pending_building_tasks = 0
 					_queue_stuck_time = 0.0
-					# Продолжаем к финализации
+					# НЕ делаем return - продолжаем к финализации ниже
 				else:
+					# Очередь ещё не зависла, ждём дальше
 					return
 			else:
+				# Размер очереди изменился - сбрасываем таймер и ждём
 				_last_queue_size = total_queued
 				_queue_stuck_time = 0.0
 				return
-			# Если мы тут - либо очереди пусты, либо форсируем завершение
+			# Если мы тут - очередь зависла и мы форсируем завершение
 
 		# Финализация: создаём фонари и знаки парковки СРАЗУ (без батчинга)
 		if _finalization_state == 0:
@@ -755,7 +810,7 @@ func _get_chunk_distance(chunk_key: String, pos: Vector3) -> float:
 
 func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 	var chunk_key := "%d,%d" % [chunk_x, chunk_z]
-	_loading_chunks[chunk_key] = true
+	_loading_chunks[chunk_key] = Time.get_ticks_msec()  # Сохраняем время начала загрузки
 
 	# Вычисляем центр чанка в координатах lat/lon
 	var center_x := chunk_x * chunk_size + chunk_size / 2
@@ -863,6 +918,32 @@ func reset_terrain() -> void:
 	_chunk_load_queue.clear()
 	_current_load_count = 0
 	_smoothed_velocity = Vector3.ZERO
+	# Сбрасываем таймеры зависания
+	_queue_stuck_time = 0.0
+	_last_queue_size = 0
+
+	# КРИТИЧНО: Очищаем все очереди генерации объектов
+	_building_mutex.lock()
+	_building_results.clear()
+	_pending_building_tasks = 0
+	_building_mutex.unlock()
+	_curb_collision_mutex.lock()
+	_curb_collision_results.clear()
+	_curb_collision_mutex.unlock()
+	_road_queue.clear()
+	_terrain_objects_queue.clear()
+	_infrastructure_queue.clear()
+	_vegetation_queue.clear()
+	_pending_lamps.clear()
+	_pending_parking_signs.clear()
+	_lamps_created = false
+
+	# Очищаем словари позиций объектов и парковок
+	_created_lamp_positions.clear()
+	_created_sign_positions.clear()
+	_road_segments.clear()
+	_parking_polygons.clear()
+
 	print("OSM: Terrain reset complete")
 
 func _on_osm_load_failed(error: String) -> void:
@@ -962,8 +1043,8 @@ func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: 
 	await _generate_terrain(osm_data, chunk_node, chunk_key)
 	loader.queue_free()
 
-	# Генерируем растительность на пустых участках чанка
-	_queue_chunk_vegetation(chunk_key, chunk_node)
+	# Генерируем растительность на пустых участках чанка (временно отключено)
+	# _queue_chunk_vegetation(chunk_key, chunk_node)
 
 	# Создаём фонари для этого чанка (если не начальная загрузка)
 	if not _initial_loading:
@@ -4758,16 +4839,18 @@ func _create_vegetation_immediate(points: PackedVector2Array, elev_data: Diction
 	if dense:
 		bush_count = mini(int(area * 0.01), 50)
 
-	if bush_count > 0:
-		_create_bush_multimesh(points, bush_count, elev_data, veg_container)
+	# Временно отключено
+	# if bush_count > 0:
+	# 	_create_bush_multimesh(points, bush_count, elev_data, veg_container)
 
 	# Генерация травяных пучков с использованием MultiMesh
 	var grass_count := mini(int(area * 0.02), 100)  # ~20 пучков на 1000 кв.м
 	if dense:
 		grass_count = mini(int(area * 0.05), 200)
 
-	if grass_count > 0:
-		_create_grass_multimesh(points, grass_count, elev_data, veg_container)
+	# Временно отключено
+	# if grass_count > 0:
+	# 	_create_grass_multimesh(points, grass_count, elev_data, veg_container)
 
 
 # Создаёт MultiMesh с кустами
@@ -4841,44 +4924,16 @@ func _create_bush_multimesh(points: PackedVector2Array, count: int, elev_data: D
 	parent.add_child(mmi)
 
 
-# Создаёт меш куста (низкополигональный)
-func _create_bush_mesh() -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-
-	var radius := 0.5
-	var height := 0.6
-	var segments := 6
-	var layers := 2
-	var base_color := Color(0.0, 0.0, 1.0)  # DEBUG: Синий для отладки
-
-	for layer in range(layers):
-		var layer_height: float = height * float(layer) / float(layers)
-		var layer_radius: float = radius * (1.0 - float(layer) / float(layers) * 0.4)
-		var color: Color = base_color.lightened(float(layer) * 0.12)
-
-		for i in range(segments):
-			var angle1: float = TAU * float(i) / float(segments)
-			var angle2: float = TAU * float(i + 1) / float(segments)
-
-			var x1 := cos(angle1) * layer_radius
-			var z1 := sin(angle1) * layer_radius
-			var x2 := cos(angle2) * layer_radius
-			var z2 := sin(angle2) * layer_radius
-
-			st.set_color(color)
-			st.set_normal(Vector3(cos(angle1), 0.5, sin(angle1)).normalized())
-			st.add_vertex(Vector3(x1, layer_height, z1))
-
-			st.set_normal(Vector3(cos(angle2), 0.5, sin(angle2)).normalized())
-			st.add_vertex(Vector3(x2, layer_height, z2))
-
-			st.set_color(color.lightened(0.15))
-			st.set_normal(Vector3.UP)
-			st.add_vertex(Vector3(0, layer_height + height / float(layers), 0))
-
-	st.generate_normals()
-	return st.commit()
+# Извлекает меш куста из загруженной GLB модели (Kenney Nature Kit)
+func _create_bush_mesh() -> Mesh:
+	print("OSM: Loading bush model from ", BUSH_MODEL_PATH)
+	if not _bush_model:
+		_bush_model = load(BUSH_MODEL_PATH)
+		if not _bush_model:
+			print("ERROR: Failed to load bush model!")
+			return null
+		print("OSM: Bush model loaded successfully")
+	return _extract_mesh_from_scene(_bush_model)
 
 
 # Создаёт MultiMesh с травой
@@ -4949,46 +5004,57 @@ func _create_grass_multimesh(points: PackedVector2Array, count: int, elev_data: 
 	parent.add_child(mmi)
 
 
-# Создаёт меш пучка травы (несколько травинок вместе)
-func _create_grass_clump_mesh() -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+# Извлекает меш травы из загруженной GLB модели (Kenney Nature Kit)
+func _create_grass_clump_mesh() -> Mesh:
+	print("OSM: Loading grass model from ", GRASS_MODEL_PATH)
+	if not _grass_model:
+		_grass_model = load(GRASS_MODEL_PATH)
+		if not _grass_model:
+			print("ERROR: Failed to load grass model!")
+			return null
+		print("OSM: Grass model loaded successfully")
+	return _extract_mesh_from_scene(_grass_model)
 
-	var blades := 5  # Травинок в пучке
-	var base_color := Color(1.0, 0.0, 0.0)  # DEBUG: Красный для отладки
 
-	for b in range(blades):
-		var angle := TAU * float(b) / float(blades)
-		var offset_x := cos(angle) * 0.05
-		var offset_z := sin(angle) * 0.05
+# Вспомогательная функция для извлечения меша из PackedScene (GLB модели)
+func _extract_mesh_from_scene(scene: PackedScene) -> Mesh:
+	if not scene:
+		print("ERROR: Scene is null in _extract_mesh_from_scene")
+		return null
 
-		var blade_width := 0.025
-		var blade_height := 0.2 + float(b % 3) * 0.08  # Разная высота
+	print("OSM: Instantiating scene...")
+	var instance := scene.instantiate()
+	if not instance:
+		print("ERROR: Failed to instantiate scene!")
+		return null
 
-		var color := base_color
-		if b % 2 == 0:
-			color = color.lightened(0.1)
+	print("OSM: Searching for mesh in node tree...")
+	var mesh: Mesh = null
 
-		# Нижние вершины
-		st.set_color(color.darkened(0.2))
-		st.set_normal(Vector3(0, 0, 1))
-		st.add_vertex(Vector3(offset_x - blade_width, 0, offset_z))
-		st.add_vertex(Vector3(offset_x + blade_width, 0, offset_z))
+	# Ищем MeshInstance3D в дереве
+	mesh = _find_mesh_in_node(instance)
 
-		# Верхняя вершина
-		st.set_color(color.lightened(0.05))
-		st.add_vertex(Vector3(offset_x, blade_height, offset_z))
+	if not mesh:
+		print("ERROR: No mesh found in scene!")
+	else:
+		print("OSM: Mesh found successfully")
 
-		# Обратная сторона
-		st.set_color(color.darkened(0.2))
-		st.set_normal(Vector3(0, 0, -1))
-		st.add_vertex(Vector3(offset_x + blade_width, 0, offset_z))
-		st.add_vertex(Vector3(offset_x - blade_width, 0, offset_z))
+	# Освобождаем ноду напрямую (она не в дереве сцены)
+	instance.free()
+	return mesh
 
-		st.set_color(color.lightened(0.05))
-		st.add_vertex(Vector3(offset_x, blade_height, offset_z))
 
-	return st.commit()
+# Рекурсивно ищет первый меш в дереве нод
+func _find_mesh_in_node(node: Node) -> Mesh:
+	if node is MeshInstance3D:
+		return node.mesh
+
+	for child in node.get_children():
+		var found := _find_mesh_in_node(child)
+		if found:
+			return found
+
+	return null
 
 
 # Добавляет растительность на пустые участки чанка в очередь
