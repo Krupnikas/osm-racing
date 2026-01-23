@@ -358,19 +358,36 @@ func start_loading() -> void:
 	_curb_collision_results.clear()  # Очищаем очередь коллизий
 	_curb_collision_mutex.unlock()
 
-	# Определяем какие чанки нужны для старта (вокруг точки спавна)
-	_initial_chunks_needed = _get_needed_chunks(Vector3.ZERO)
+	# Определяем какие чанки нужны для старта
+	# Используем позицию машины если она есть, иначе Vector3.ZERO
+	var spawn_pos := Vector3.ZERO
+	if _car:
+		spawn_pos = _car.global_position
+		print("OSM: Loading chunks around car position (%.1f, %.1f, %.1f)" % [spawn_pos.x, spawn_pos.y, spawn_pos.z])
+	else:
+		print("OSM: Loading chunks around spawn point (0, 0, 0)")
+
+	_initial_chunks_needed = _get_needed_chunks(spawn_pos)
 	print("OSM: Need to load %d chunks for initial area" % _initial_chunks_needed.size())
 
 	initial_load_started.emit()
 
 	# Загружаем начальные чанки
+	var chunks_to_load := 0
 	for chunk_key in _initial_chunks_needed:
 		if not _loaded_chunks.has(chunk_key) and not _loading_chunks.has(chunk_key):
 			var coords: Array = chunk_key.split(",")
 			var chunk_x := int(coords[0])
 			var chunk_z := int(coords[1])
 			_load_chunk(chunk_x, chunk_z)
+			chunks_to_load += 1
+		else:
+			if _loaded_chunks.has(chunk_key):
+				print("OSM: Chunk %s already loaded, skipping" % chunk_key)
+			if _loading_chunks.has(chunk_key):
+				print("OSM: Chunk %s already loading, skipping" % chunk_key)
+
+	print("OSM: Started loading %d chunks (total needed: %d, already loaded: %d)" % [chunks_to_load, _initial_chunks_needed.size(), _initial_chunks_needed.size() - chunks_to_load])
 
 # Проверяем завершение начальной загрузки
 func _check_initial_load_complete() -> void:

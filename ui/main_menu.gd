@@ -408,9 +408,7 @@ func _on_apply_settings_pressed() -> void:
 			_car.linear_velocity = Vector3.ZERO
 			_car.angular_velocity = Vector3.ZERO
 			_car.freeze = true
-			# Сбрасываем позицию только после заморозки
-			_car.global_position = Vector3(0, 2, 0)
-			_car.rotation = Vector3.ZERO
+			# НЕ сбрасываем позицию - оставляем машину где она была
 		elif _car:
 			print("WARNING: Car is not RigidBody3D in Apply settings!")
 
