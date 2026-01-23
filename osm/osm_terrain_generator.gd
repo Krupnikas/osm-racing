@@ -2670,8 +2670,14 @@ func _apply_parked_car_color(car: Node3D) -> void:
 
 func _create_parking_sign(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> void:
 	"""Добавляет знак парковки в очередь для отложенного создания"""
+	# Смещаем знак с дороги если нужно
+	var safe_pos := _move_object_off_road(pos, 0.5, 5)
+	if safe_pos == Vector2.ZERO:
+		# Не нашли безопасное место, пропускаем
+		return
+
 	# Проверяем, не создан ли уже знак в этой позиции (избегаем дубликатов)
-	var pos_key := "%d_%d" % [int(pos.x), int(pos.y)]
+	var pos_key := "%d_%d" % [int(safe_pos.x), int(safe_pos.y)]
 	if _created_sign_positions.has(pos_key):
 		return
 	_created_sign_positions[pos_key] = true
@@ -2679,7 +2685,7 @@ func _create_parking_sign(pos: Vector2, elevation: float, rotation_y: float, par
 	# Добавляем в очередь для отложенного создания
 	_infrastructure_queue.append({
 		"type": "parking_sign",
-		"pos": pos,
+		"pos": safe_pos,
 		"elevation": elevation,
 		"parent": parent,
 		"rotation": rotation_y
@@ -4537,8 +4543,14 @@ func _create_tree(pos: Vector2, elevation: float, parent: Node3D) -> void:
 
 # Создание дорожного знака - разрушаемый при столкновении
 func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, parent: Node3D) -> void:
-	# Проверяем на дубликаты
-	var pos_key := "ts_%d_%d" % [int(pos.x), int(pos.y)]
+	# Смещаем знак с дороги если нужно
+	var safe_pos := _move_object_off_road(pos, 0.5, 5)
+	if safe_pos == Vector2.ZERO:
+		# Не нашли безопасное место, пропускаем
+		return
+
+	# Проверяем на дубликаты (с учётом новой позиции)
+	var pos_key := "ts_%d_%d" % [int(safe_pos.x), int(safe_pos.y)]
 	if _created_sign_positions.has(pos_key):
 		return
 	_created_sign_positions[pos_key] = true
@@ -4546,7 +4558,7 @@ func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, pare
 	# RigidBody3D как корневой узел для физики
 	var body := RigidBody3D.new()
 	body.name = "TrafficSign"
-	body.position = Vector3(pos.x, elevation, pos.y)
+	body.position = Vector3(safe_pos.x, elevation, safe_pos.y)
 	body.collision_layer = 4  # Слой 4 - разрушаемые знаки
 	body.collision_mask = 7  # Машины(1) + статика(2) + другие знаки(4)
 	body.mass = 15.0
@@ -5594,10 +5606,16 @@ func _is_point_near_any_parking(point: Vector2, max_distance: float) -> bool:
 
 # Создание светофора на перекрёстке
 func _create_traffic_light(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	# Смещаем светофор с дороги если нужно
+	var safe_pos := _move_object_off_road(pos, 0.5, 5)
+	if safe_pos == Vector2.ZERO:
+		# Не нашли безопасное место, пропускаем
+		return
+
 	# Добавляем в очередь для отложенного создания
 	_infrastructure_queue.append({
 		"type": "traffic_light",
-		"pos": pos,
+		"pos": safe_pos,
 		"elevation": elevation,
 		"parent": parent
 	})
@@ -5716,8 +5734,14 @@ func _create_intersection_signs(pos: Vector2, elevation: float, parent: Node3D) 
 
 # Создание знака "Уступи дорогу" - разрушаемый при столкновении
 func _create_yield_sign(pos: Vector2, elevation: float, parent: Node3D) -> void:
-	# Проверяем на дубликаты
-	var pos_key := "ys_%d_%d" % [int(pos.x), int(pos.y)]
+	# Смещаем знак с дороги если нужно
+	var safe_pos := _move_object_off_road(pos, 0.5, 5)
+	if safe_pos == Vector2.ZERO:
+		# Не нашли безопасное место, пропускаем
+		return
+
+	# Проверяем на дубликаты (с учётом новой позиции)
+	var pos_key := "ys_%d_%d" % [int(safe_pos.x), int(safe_pos.y)]
 	if _created_sign_positions.has(pos_key):
 		return
 	_created_sign_positions[pos_key] = true
@@ -5725,7 +5749,7 @@ func _create_yield_sign(pos: Vector2, elevation: float, parent: Node3D) -> void:
 	# Добавляем в очередь для отложенного создания
 	_infrastructure_queue.append({
 		"type": "yield_sign",
-		"pos": pos,
+		"pos": safe_pos,
 		"elevation": elevation,
 		"parent": parent
 	})
@@ -6767,6 +6791,67 @@ func _is_point_on_road(pos: Vector2, margin: float = 0.5) -> bool:
 			return true
 
 	return false
+
+
+## Пытается сместить позицию объекта с дороги к её краю
+## Возвращает новую позицию или Vector2.ZERO если не удалось найти безопасное место
+func _move_object_off_road(pos: Vector2, margin: float = 0.5, max_attempts: int = 5) -> Vector2:
+	var current_pos := pos
+
+	for attempt in range(max_attempts):
+		# Проверяем текущую позицию
+		if not _is_point_on_road(current_pos, margin):
+			return current_pos  # Нашли безопасное место
+
+		# Ищем ближайший сегмент дороги
+		var nearby_segments := _get_nearby_road_segments(current_pos)
+		if nearby_segments.is_empty():
+			return current_pos  # Нет дорог рядом, позиция безопасна
+
+		# Находим самый близкий сегмент
+		var closest_seg: Dictionary = {}
+		var min_dist := INF
+		var closest_point := Vector2.ZERO
+
+		for seg in nearby_segments:
+			var p1: Vector2 = seg.p1
+			var p2: Vector2 = seg.p2
+			var line_vec := p2 - p1
+			var point_vec := current_pos - p1
+			var line_len := line_vec.length()
+
+			if line_len < 0.01:
+				continue
+
+			var t := point_vec.dot(line_vec) / (line_len * line_len)
+			t = clampf(t, 0.0, 1.0)
+			var closest := p1 + line_vec * t
+			var dist := current_pos.distance_to(closest)
+
+			if dist < min_dist:
+				min_dist = dist
+				closest_seg = seg
+				closest_point = closest
+
+		if closest_seg.is_empty():
+			return current_pos  # Не нашли близкий сегмент
+
+		# Направление от ближайшей точки на дороге к текущей позиции
+		var away_dir := (current_pos - closest_point).normalized()
+		if away_dir.length() < 0.01:
+			# Если находимся точно на линии дороги, используем перпендикуляр
+			var p1: Vector2 = closest_seg.p1
+			var p2: Vector2 = closest_seg.p2
+			var road_dir := (p2 - p1).normalized()
+			away_dir = Vector2(-road_dir.y, road_dir.x)  # Перпендикуляр
+
+		# Смещаем к краю дороги + margin
+		var width: float = closest_seg.width
+		var target_dist := width / 2.0 + margin + 0.5  # Дополнительный запас 0.5м
+		current_pos = closest_point + away_dir * target_dist
+
+	# Не удалось найти безопасное место за max_attempts попыток
+	return Vector2.ZERO
 
 
 func _is_point_in_intersection_ellipse(pos: Vector2, scale: float = 1.0) -> int:
