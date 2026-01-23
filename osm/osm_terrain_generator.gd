@@ -5156,6 +5156,11 @@ func _create_chunk_vegetation_immediate(chunk_key: String, points: PackedVector2
 			if not _is_point_near_road(pos, 4.0):
 				var elevation := _get_elevation_at_point(pos, elev_data)
 
+				# ПРОВЕРКА: Пропускаем если высота невалидна
+				if not elevation.is_finite():
+					z += grass_spacing
+					continue
+
 				var transform := Transform3D()
 				var rotation := fmod(float(seed_value + int(x * 10) + int(z * 10)) * 2.718, TAU)
 				transform = transform.rotated(Vector3.UP, rotation)
@@ -5164,8 +5169,10 @@ func _create_chunk_vegetation_immediate(chunk_key: String, points: PackedVector2
 				transform = transform.scaled(Vector3(scale_factor, scale_factor, scale_factor))
 				transform.origin = Vector3(pos.x, elevation + 0.01, pos.y)
 
-				grass_transforms.append(transform)
-				grass_count += 1
+				# Финальная проверка transform перед добавлением
+				if transform.origin.is_finite():
+					grass_transforms.append(transform)
+					grass_count += 1
 
 			z += grass_spacing
 		x += grass_spacing
@@ -5188,6 +5195,11 @@ func _create_chunk_vegetation_immediate(chunk_key: String, points: PackedVector2
 				if not _is_point_near_road(pos, 5.0):
 					var elevation := _get_elevation_at_point(pos, elev_data)
 
+					# ПРОВЕРКА: Пропускаем если высота невалидна
+					if not elevation.is_finite():
+						z += bush_spacing
+						continue
+
 					var transform := Transform3D()
 					var rotation := fmod(float(seed_value + int(x * 20) + int(z * 20)) * 1.618, TAU)
 					transform = transform.rotated(Vector3.UP, rotation)
@@ -5196,8 +5208,10 @@ func _create_chunk_vegetation_immediate(chunk_key: String, points: PackedVector2
 					transform = transform.scaled(Vector3(scale_factor, scale_factor, scale_factor))
 					transform.origin = Vector3(pos.x, elevation, pos.y)
 
-					bush_transforms.append(transform)
-					bush_count += 1
+					# Финальная проверка transform перед добавлением
+					if transform.origin.is_finite():
+						bush_transforms.append(transform)
+						bush_count += 1
 
 			z += bush_spacing
 		x += bush_spacing
