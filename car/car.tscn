@@ -98,8 +98,8 @@ wheel_friction_slip = 3.0
 suspension_stiffness = 55.0
 suspension_max_force = 12000.0
 suspension_travel = 0.25
-damping_compression = 2.5
-damping_relaxation = 3.5
+damping_compression = 4.5
+damping_relaxation = 2.5
 
 [node name="Tire" type="MeshInstance3D" parent="WheelFL"]
 transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
@@ -120,8 +120,8 @@ wheel_friction_slip = 3.0
 suspension_stiffness = 55.0
 suspension_max_force = 12000.0
 suspension_travel = 0.25
-damping_compression = 2.5
-damping_relaxation = 3.5
+damping_compression = 4.5
+damping_relaxation = 2.5
 
 [node name="Tire" type="MeshInstance3D" parent="WheelFR"]
 transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
@@ -142,8 +142,8 @@ wheel_friction_slip = 3.0
 suspension_stiffness = 60.0
 suspension_max_force = 12000.0
 suspension_travel = 0.25
-damping_compression = 2.8
-damping_relaxation = 3.8
+damping_compression = 5.0
+damping_relaxation = 2.8
 
 [node name="Tire" type="MeshInstance3D" parent="WheelRL"]
 transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
@@ -164,8 +164,8 @@ wheel_friction_slip = 3.0
 suspension_stiffness = 60.0
 suspension_max_force = 12000.0
 suspension_travel = 0.25
-damping_compression = 2.8
-damping_relaxation = 3.8
+damping_compression = 5.0
+damping_relaxation = 2.8
 
 [node name="Tire" type="MeshInstance3D" parent="WheelRR"]
 transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0)

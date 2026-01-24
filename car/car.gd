@@ -29,6 +29,8 @@ class_name Car
 @export var stability_control := true  ## Система стабилизации
 @export var tc_slip_threshold := 0.3  ## Порог срабатывания TCS
 @export var sc_angle_threshold := 30.0  ## Порог срабатывания ESC (градусы)
+@export var anti_roll_bar := true  ## Стабилизатор поперечной устойчивости
+@export var anti_roll_strength := 8000.0  ## Сила стабилизатора
 
 # Внутренние переменные (специфичные для player car)
 var handbrake_input := 0.0

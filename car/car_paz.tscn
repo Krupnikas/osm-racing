@@ -48,8 +48,8 @@ wheel_friction_slip = 2.5
 suspension_stiffness = 50.0
 suspension_max_force = 18000.0
 suspension_travel = 0.3
-damping_compression = 3.0
-damping_relaxation = 4.0
+damping_compression = 5.5
+damping_relaxation = 3.0
 
 [node name="WheelFR" type="VehicleWheel3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0, 0.5, 2.5)
@@ -60,8 +60,8 @@ wheel_friction_slip = 2.5
 suspension_stiffness = 50.0
 suspension_max_force = 18000.0
 suspension_travel = 0.3
-damping_compression = 3.0
-damping_relaxation = 4.0
+damping_compression = 5.5
+damping_relaxation = 3.0
 
 [node name="WheelRL" type="VehicleWheel3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.0, 0.5, -2.5)
@@ -72,8 +72,8 @@ wheel_friction_slip = 2.5
 suspension_stiffness = 55.0
 suspension_max_force = 18000.0
 suspension_travel = 0.3
-damping_compression = 3.2
-damping_relaxation = 4.2
+damping_compression = 6.0
+damping_relaxation = 3.2
 
 [node name="WheelRR" type="VehicleWheel3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0, 0.5, -2.5)
@@ -84,8 +84,8 @@ wheel_friction_slip = 2.5
 suspension_stiffness = 55.0
 suspension_max_force = 18000.0
 suspension_travel = 0.3
-damping_compression = 3.2
-damping_relaxation = 4.2
+damping_compression = 6.0
+damping_relaxation = 3.2
 
 [node name="EngineSound" type="AudioStreamPlayer" parent="."]
 script = ExtResource("2_engine_sound")
