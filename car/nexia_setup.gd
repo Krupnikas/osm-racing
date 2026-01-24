@@ -59,13 +59,17 @@ func _change_body_color() -> void:
 		print("Nexia: Found mesh: ", mesh.name)
 
 		# Проверяем тип детали
-		var is_glass: bool = "glass" in mesh_name or "window" in mesh_name or "стекло" in mesh_name
-		var is_light: bool = "light" in mesh_name or "lamp" in mesh_name or "фара" in mesh_name
-		var is_wheel: bool = "wheel" in mesh_name or "tire" in mesh_name or "rim" in mesh_name
+		# Стёкла - только opaque glass (не цветное стекло фар)
+		var is_glass: bool = ("glass" in mesh_name and "opaque" in mesh_name) or "window" in mesh_name or "стекло" in mesh_name
+		# Фары и габариты - цветное стекло (orangeglass, redglass)
+		var is_light: bool = "light" in mesh_name or "lamp" in mesh_name or "фара" in mesh_name or "orangeglass" in mesh_name or "redglass" in mesh_name
+		var is_wheel: bool = "wheel" in mesh_name or "tire" in mesh_name or "rim" in mesh_name or "колесо" in mesh_name or "brakedisk" in mesh_name
+		var is_chrome: bool = "chrome" in mesh_name or "mattemetal" in mesh_name or "хром" in mesh_name or "mirror" in mesh_name
+		var is_interior: bool = "leather" in mesh_name or "кожа" in mesh_name
 
-		# Пропускаем фары и колёса (они остаются как есть)
-		if is_light or is_wheel:
-			print("  -> Skipping (light/wheel)")
+		# Пропускаем фары, габариты, хромированные детали, колёса и салон (они остаются как есть)
+		if is_light or is_wheel or is_chrome or is_interior:
+			print("  -> Skipping (light/wheel/chrome/interior)")
 			continue
 
 		# Проходим по всем surface материалам

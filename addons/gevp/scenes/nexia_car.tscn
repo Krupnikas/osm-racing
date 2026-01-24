@@ -3,6 +3,7 @@
 [ext_resource type="Script" path="res://addons/gevp/scripts/vehicle.gd" id="1_wr17c"]
 [ext_resource type="Script" path="res://addons/gevp/scripts/wheel.gd" id="2_67xbp"]
 [ext_resource type="PackedScene" path="res://car/models/nexia/scene.gltf" id="3_nexia"]
+[ext_resource type="Script" path="res://car/nexia_setup.gd" id="4_nexia_setup"]
 [sub_resource type="Curve" id="Curve_bt7kc"]
 _data = [Vector2(0, 0.494505), 0.0, 2.04495, 0, 0, Vector2(0.617978, 1), 0.0, 0.0, 0, 0, Vector2(1, 0.692308), -1.4839, 0.0, 0, 0]
 point_count = 3
@@ -363,10 +364,11 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.4545e-14, 0.2, 0)
 shape = SubResource("ConvexPolygonShape3D_5m52b")
 
 [node name="NexiaModel" parent="." instance=ExtResource("3_nexia")]
-transform = Transform3D(-10, 0, 0, 0, 10, 0, 0, 0, -10, 0, 0, 0)
+transform = Transform3D(-11, 0, 0, 0, 11, 0, 0, 0, -11, 0, 0, 0)
+script = ExtResource("4_nexia_setup")
 
 [node name="WheelFrontLeft" type="RayCast3D" parent="." node_paths=PackedStringArray("wheel_node")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.84, 0.5, -1.25)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.79, 0.5, -1.25)
 script = ExtResource("2_67xbp")
 wheel_node = NodePath("FrontLeftWheel")
 tire_radius = 0.35
@@ -381,7 +383,7 @@ mesh = SubResource("ArrayMesh_0m480")
 skeleton = NodePath("")
 
 [node name="WheelFrontRight" type="RayCast3D" parent="." node_paths=PackedStringArray("wheel_node")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.84, 0.5, -1.25)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.79, 0.5, -1.25)
 script = ExtResource("2_67xbp")
 wheel_node = NodePath("FrontRightWheel")
 tire_radius = 0.35
@@ -396,7 +398,7 @@ mesh = SubResource("ArrayMesh_0m480")
 skeleton = NodePath("")
 
 [node name="WheelRearLeft" type="RayCast3D" parent="." node_paths=PackedStringArray("wheel_node")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.84, 0.5, 1.25)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.79, 0.5, 1.25)
 script = ExtResource("2_67xbp")
 wheel_node = NodePath("RearLeftWheel")
 tire_radius = 0.35
@@ -411,7 +413,7 @@ mesh = SubResource("ArrayMesh_0m480")
 skeleton = NodePath("")
 
 [node name="WheelRearRight" type="RayCast3D" parent="." node_paths=PackedStringArray("wheel_node")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.84, 0.5, 1.25)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.79, 0.5, 1.25)
 script = ExtResource("2_67xbp")
 wheel_node = NodePath("RearRightWheel")
 tire_radius = 0.35
