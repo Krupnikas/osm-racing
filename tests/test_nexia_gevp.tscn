@@ -1,0 +1,72 @@
+[gd_scene load_steps=9 format=3 uid="uid://test_nexia_gevp"]
+
+[ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_oiv4q"]
+[ext_resource type="Script" path="res://tests/test_nexia_gevp.gd" id="2_test"]
+[ext_resource type="PackedScene" uid="uid://b2hlchrj4h2b7" path="res://addons/gevp/scenes/engine_sound.tscn" id="4_r1tsm"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/gui.gd" id="5_haswc"]
+[ext_resource type="PackedScene" uid="uid://dxnvsoi1pvfeu" path="res://addons/gevp/scenes/track.tscn" id="6_3l0qk"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/camera.gd" id="6_vitqy"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/debug.gd" id="7_vstgd"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/debug_ui.gd" id="8_1up8y"]
+
+[node name="TestNexiaGEVP" type="Node3D"]
+
+[node name="VehicleRigidBody" parent="." instance=ExtResource("2_oiv4q")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.926611, 0)
+script = ExtResource("2_test")
+center_of_mass_mode = 1
+linear_damp_mode = 1
+angular_damp_mode = 1
+
+[node name="EngineSound" parent="VehicleRigidBody" node_paths=PackedStringArray("vehicle") instance=ExtResource("4_r1tsm")]
+max_db = -24.0
+vehicle = NodePath("..")
+
+[node name="GUI" type="Control" parent="." node_paths=PackedStringArray("vehicle")]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("5_haswc")
+vehicle = NodePath("../VehicleRigidBody")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="GUI"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Speed" type="Label" parent="GUI/VBoxContainer"]
+layout_mode = 2
+
+[node name="RPM" type="Label" parent="GUI/VBoxContainer"]
+layout_mode = 2
+
+[node name="Gear" type="Label" parent="GUI/VBoxContainer"]
+layout_mode = 2
+
+[node name="Camera3D" type="Camera3D" parent="." node_paths=PackedStringArray("follow_this")]
+transform = Transform3D(1, 0, 0, 0, 0.989776, 0.142629, 0, -0.142629, 0.989776, 4.05282, 1.58316, 5.80061)
+script = ExtResource("6_vitqy")
+follow_distance = 3
+follow_this = NodePath("../VehicleRigidBody")
+
+[node name="Demo" parent="." instance=ExtResource("6_3l0qk")]
+
+[node name="Debug" type="Node" parent="." node_paths=PackedStringArray("vehicle")]
+script = ExtResource("7_vstgd")
+vehicle = NodePath("../VehicleRigidBody")
+
+[node name="DebugUI" type="Control" parent="Debug"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("8_1up8y")
+metadata/_edit_use_anchors_ = true
