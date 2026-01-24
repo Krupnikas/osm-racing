@@ -18,7 +18,8 @@ const LOCATIONS := {
 }
 
 var _terrain_generator: Node3D
-var _car: Node3D
+var _car: Node3D  # VehicleController wrapper
+var _car_rigidbody: RigidBody3D  # Actual Vehicle RigidBody3D
 var _world_root: Node3D
 var _hud: Control
 var _camera: Camera3D
@@ -41,9 +42,14 @@ func _ready() -> void:
 		_terrain_generator = get_node(terrain_generator_path)
 	if car_path:
 		_car = get_node(car_path)
+		# Получаем актуальный RigidBody3D для GEVP (VehicleController/Car)
+		if _car.has_node("Car"):
+			_car_rigidbody = _car.get_node("Car")
+		else:
+			_car_rigidbody = _car if _car is RigidBody3D else null
 		# КРИТИЧНО: Сразу замораживаем машину чтобы не упала до _hide_world()
-		if _car and _car is RigidBody3D:
-			_car.freeze = true
+		if _car_rigidbody and _car_rigidbody is RigidBody3D:
+			_car_rigidbody.freeze = true
 	if world_root_path:
 		_world_root = get_node(world_root_path)
 	if hud_path:
@@ -153,16 +159,16 @@ func _start_loading() -> void:
 		_terrain_generator.reset_terrain()
 
 	# Сбрасываем машину на начальную позицию
-	if _car and _car is RigidBody3D:
+	if _car_rigidbody and _car_rigidbody is RigidBody3D:
 		# КРИТИЧНО: Сначала обнуляем скорости, потом замораживаем
-		_car.linear_velocity = Vector3.ZERO
-		_car.angular_velocity = Vector3.ZERO
-		_car.freeze = true
+		_car_rigidbody.linear_velocity = Vector3.ZERO
+		_car_rigidbody.angular_velocity = Vector3.ZERO
+		_car_rigidbody.freeze = true
 		# Сбрасываем позицию только после заморозки
 		_car.global_position = Vector3(0, 2, 0)
 		_car.rotation = Vector3.ZERO
 	elif _car:
-		print("WARNING: Car is not RigidBody3D, cannot reset safely!")
+		print("WARNING: Car RigidBody not found, cannot reset safely!")
 
 	# Сбрасываем камеру
 	if _camera and _camera.has_method("reset_camera"):
@@ -292,15 +298,16 @@ func _spawn_car_on_road() -> void:
 	road_pos.y += 0.5
 
 	# КРИТИЧНО: Сначала замораживаем машину перед изменением transform
-	if not (_car is RigidBody3D):
-		print("ERROR: Car is not RigidBody3D! Cannot spawn safely.")
+	if not (_car_rigidbody is RigidBody3D):
+		print("ERROR: Car RigidBody not found! Cannot spawn safely.")
 		return
 
-	_car.linear_velocity = Vector3.ZERO
-	_car.angular_velocity = Vector3.ZERO
-	_car.freeze = true
+	_car_rigidbody.linear_velocity = Vector3.ZERO
+	_car_rigidbody.angular_velocity = Vector3.ZERO
+	_car_rigidbody.freeze = true
 
 	# Устанавливаем позицию (машина уже заморожена)
+	# Используем VehicleController родителя для позиционирования
 	_car.global_position = road_pos
 
 	# ПРОВЕРКА: Убедимся что позиция не стала NaN после установки
@@ -333,18 +340,18 @@ func _hide_world() -> void:
 	if _car:
 		_car.visible = false
 		# Замораживаем физику машины
-		if _car is RigidBody3D:
-			_car.freeze = true
+		if _car_rigidbody is RigidBody3D:
+			_car_rigidbody.freeze = true
 
 func _show_world() -> void:
 	# Показываем машину
 	if _car:
 		_car.visible = true
 		# Размораживаем физику машины
-		if _car is RigidBody3D:
+		if _car_rigidbody is RigidBody3D:
 			# КРИТИЧНО: Перед размораживанием проверяем что скорости нулевые
-			_car.linear_velocity = Vector3.ZERO
-			_car.angular_velocity = Vector3.ZERO
+			_car_rigidbody.linear_velocity = Vector3.ZERO
+			_car_rigidbody.angular_velocity = Vector3.ZERO
 			# Проверяем что позиция валидна
 			if not _car.global_position.is_finite():
 				print("ERROR: Car position is NaN before unfreeze! Resetting...")
@@ -352,7 +359,7 @@ func _show_world() -> void:
 			if not _car.rotation.is_finite():
 				print("ERROR: Car rotation is NaN before unfreeze! Resetting...")
 				_car.rotation = Vector3.ZERO
-			_car.freeze = false
+			_car_rigidbody.freeze = false
 
 func _on_controls_pressed() -> void:
 	$ControlsPanel.visible = not $ControlsPanel.visible
@@ -436,15 +443,15 @@ func _on_apply_settings_pressed() -> void:
 			_hud.hide_hud()
 
 		# КРИТИЧНО: Скрываем и замораживаем машину ПЕРЕД снятием паузы
-		if _car and _car is RigidBody3D:
+		if _car and _car_rigidbody is RigidBody3D:
 			_car.visible = false
 			# Сначала обнуляем скорости, потом замораживаем
-			_car.linear_velocity = Vector3.ZERO
-			_car.angular_velocity = Vector3.ZERO
-			_car.freeze = true
+			_car_rigidbody.linear_velocity = Vector3.ZERO
+			_car_rigidbody.angular_velocity = Vector3.ZERO
+			_car_rigidbody.freeze = true
 			# НЕ сбрасываем позицию - оставляем машину где она была
 		elif _car:
-			print("WARNING: Car is not RigidBody3D in Apply settings!")
+			print("WARNING: Car RigidBody not found in Apply settings!")
 
 		# ВАЖНО: Снимаем паузу для загрузки ПОСЛЕ заморозки машины
 		get_tree().paused = false

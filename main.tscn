@@ -1,6 +1,7 @@
 [gd_scene load_steps=16 format=3 uid="uid://bmain123"]
 
-[ext_resource type="PackedScene" uid="uid://bcar_nexia" path="res://car/car_nexia.tscn" id="2_car"]
+[ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_car"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/vehicle_controllergd.gd" id="2_controller"]
 [ext_resource type="Script" path="res://camera/follow_camera.gd" id="3_camera"]
 [ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="4_osm"]
 [ext_resource type="Script" path="res://ui/coordinates_display.gd" id="5_coords"]
@@ -80,32 +81,36 @@ start_lon = 37.94937
 chunk_size = 300.0
 load_distance = 500.0
 unload_distance = 800.0
-car_path = NodePath("../Car")
+car_path = NodePath("../VehicleController")
 
-[node name="Car" parent="." instance=ExtResource("2_car")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+[node name="VehicleController" type="Node3D" parent="." node_paths=PackedStringArray("vehicle_node")]
+transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 5.0, 0)
+script = ExtResource("2_controller")
+vehicle_node = NodePath("Car")
+
+[node name="Car" parent="VehicleController" groups=["car", "player"] instance=ExtResource("2_car")]
 
 [node name="TrafficManager" type="Node" parent="."]
 script = ExtResource("11_traffic")
 
 [node name="CameraManager" type="Node" parent="."]
 script = ExtResource("6_cam_mgr")
-car_path = NodePath("../Car")
+car_path = NodePath("../VehicleController")
 
 [node name="FollowCamera" type="Camera3D" parent="CameraManager"]
 transform = Transform3D(1, 0, 0, 0, 0.9, 0.44, 0, -0.44, 0.9, 0, 7, -10)
 script = ExtResource("3_camera")
-target = NodePath("../../Car")
+target = NodePath("../../VehicleController")
 
 [node name="CinematicCamera" type="Camera3D" parent="CameraManager"]
 current = true
 script = ExtResource("15_cinematic_cam")
-target = NodePath("../../Car")
+target = NodePath("../../VehicleController")
 
 [node name="TopDownCamera" type="Camera3D" parent="CameraManager"]
 transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 50, 0)
 script = ExtResource("8_top_cam")
-target = NodePath("../../Car")
+target = NodePath("../../VehicleController")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
 transform = Transform3D(0.866025, -0.353553, 0.353553, 0, 0.707107, 0.707107, -0.5, -0.612372, 0.612372, 0, 20, 0)
@@ -131,18 +136,18 @@ theme_override_constants/shadow_offset_x = 1
 theme_override_constants/shadow_offset_y = 1
 theme_override_font_sizes/font_size = 18
 script = ExtResource("5_coords")
-car_path = NodePath("../../Car")
+car_path = NodePath("../../VehicleController")
 start_lat = 59.149886
 start_lon = 37.94937
 
 [node name="MainMenu" parent="UI" instance=ExtResource("9_menu")]
 terrain_generator_path = NodePath("../../OSMTerrain")
-car_path = NodePath("../../Car")
+car_path = NodePath("../../VehicleController")
 hud_path = NodePath("../HUD")
 camera_path = NodePath("../../CameraManager/FollowCamera")
 
 [node name="HUD" parent="UI" instance=ExtResource("10_hud")]
-car_path = NodePath("../../Car")
+car_path = NodePath("../../VehicleController")
 
 [node name="NightModeManager" type="Node" parent="."]
 script = ExtResource("12_night")

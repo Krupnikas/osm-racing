@@ -4,6 +4,7 @@ extends Vehicle
 ## Автоматически едет по кругу вправо на полном газу
 
 var test_time := 0.0
+var frame_count := 0
 
 func _ready() -> void:
 	print("=== Nexia GEVP Test - _ready() called ===")
@@ -19,6 +20,7 @@ func _ready() -> void:
 
 func _physics_process(delta: float) -> void:
 	test_time += delta
+	frame_count += 1
 
 	# Устанавливаем инпуты напрямую
 	throttle_input = 1.0  # Полный газ
@@ -30,8 +32,8 @@ func _physics_process(delta: float) -> void:
 	# Вызов базовой физики
 	super._physics_process(delta)
 
-	# Вывод в логи каждые 2 секунды
-	if int(test_time) % 2 == 0 and test_time - delta < int(test_time):
+	# Вывод в логи каждые 120 кадров (~2 секунды при 60fps)
+	if frame_count % 120 == 0:
 		var speed := linear_velocity.length() * 3.6
 		var roll := rad_to_deg(rotation.z)
 		var roll_direction := ""
