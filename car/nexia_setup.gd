@@ -8,8 +8,8 @@ extends Node3D
 # RGB: 89, 0, 6 -> нормализованные значения для Godot (делим на 255)
 var body_color := Color(0.349, 0.0, 0.024, 1.0)  # #590006
 
-# Цвет тонировки стёкол (тёмно-серый, почти непрозрачный)
-var glass_color := Color(0.1, 0.1, 0.12, 1.0)  # Тёмная тонировка (непрозрачная)
+# Цвет тонировки стёкол (слегка затемнённое, прозрачное, блестящее)
+var glass_color := Color(0.15, 0.15, 0.17, 0.3)  # Лёгкая тонировка (полупрозрачная)
 
 func _ready() -> void:
 	await get_tree().process_frame
@@ -109,17 +109,19 @@ func _change_body_color() -> void:
 				if material is StandardMaterial3D:
 					material.albedo_color = target_color
 					if is_glass:
-						# Для стёкол делаем тёмными но непрозрачными
-						material.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
-						material.metallic = 0.3
-						material.roughness = 0.2
-						print("  -> Changed glass to tinted (dark)")
+						# Для стёкол делаем прозрачными с сильным блеском
+						material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+						material.metallic = 0.8  # Высокая металличность для блеска
+						material.roughness = 0.05  # Минимальная шероховатость для зеркального эффекта
+						material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
+						material.cull_mode = BaseMaterial3D.CULL_DISABLED  # Рендерим с обеих сторон
+						print("  -> Changed glass to tinted (transparent, shiny)")
 					else:
 						print("  -> Changed body color to cherry")
 				elif material is BaseMaterial3D:
 					material.albedo_color = target_color
 					if is_glass:
-						material.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
-						print("  -> Changed glass to tinted (dark)")
+						material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+						print("  -> Changed glass to tinted (transparent)")
 					else:
 						print("  -> Changed body color to cherry")
