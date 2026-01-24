@@ -1,0 +1,31 @@
+[gd_scene load_steps=5 format=3 uid="uid://test_nexia_roll"]
+
+[ext_resource type="PackedScene" uid="uid://ck25wru5dlbf4" path="res://car/car_nexia.tscn" id="1"]
+[ext_resource type="Script" path="res://tests/test_nexia_roll.gd" id="2"]
+
+[sub_resource type="BoxMesh" id="ground_mesh"]
+size = Vector3(300, 1, 300)
+
+[sub_resource type="BoxShape3D" id="ground_shape"]
+size = Vector3(300, 1, 300)
+
+[node name="TestNexiaRoll" type="Node3D"]
+
+[node name="Ground" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+
+[node name="GroundMesh" type="MeshInstance3D" parent="Ground"]
+mesh = SubResource("ground_mesh")
+
+[node name="GroundCollision" type="CollisionShape3D" parent="Ground"]
+shape = SubResource("ground_shape")
+
+[node name="Nexia" parent="." instance=ExtResource("1")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+script = ExtResource("2")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.866025, 0.5, 0, -0.5, 0.866025, 0, 10, 20)
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.707107, 0.707107, 0, -0.707107, 0.707107, 0, 15, 0)
