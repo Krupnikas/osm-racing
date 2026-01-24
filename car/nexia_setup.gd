@@ -88,7 +88,20 @@ func _change_body_color() -> void:
 					print("  -> Created override material for surface ", i)
 
 			if material:
-				print("  -> Material type: ", material.get_class())
+				var mat_name := ""
+				if material.resource_name:
+					mat_name = material.resource_name.to_lower()
+				print("  -> Material: ", material.resource_name, " (", material.get_class(), ")")
+
+				# Проверяем материал на предмет фар/стёкол/белых элементов
+				var is_light_material: bool = "light" in mat_name or "lamp" in mat_name or "фара" in mat_name or "white" in mat_name or "yellow" in mat_name or "orange" in mat_name or "red" in mat_name
+				# Для стёкол - проверяем что это именно opaque glass
+				if "glass" in mat_name and not "opaque" in mat_name:
+					is_light_material = true
+
+				if is_light_material:
+					print("  -> Skipping light/glass material")
+					continue
 
 				# Выбираем цвет в зависимости от типа детали
 				var target_color: Color = glass_color if is_glass else body_color
