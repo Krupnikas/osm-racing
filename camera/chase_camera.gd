@@ -34,8 +34,8 @@ func _physics_process(delta: float) -> void:
 
 	var target_pos := _target_node.global_position + Vector3(0, 0.8, 0)
 
-	# Следуем за поворотом машины
-	var target_yaw := _target_node.rotation.y + PI
+	# Следуем за поворотом машины (убираем +PI чтобы камера была сзади)
+	var target_yaw := _target_node.rotation.y
 	_yaw = lerp_angle(_yaw, target_yaw, rotation_smooth * delta)
 
 	# Позиция камеры

@@ -122,8 +122,8 @@ func _process_follow_mode(delta: float) -> void:
 
 	# Если включено следование за поворотом машины
 	if follow_rotation:
-		# Получаем угол поворота машины (Y rotation) и добавляем PI для позиции сзади
-		_target_yaw = _target_node.rotation.y + PI
+		# Получаем угол поворота машины (убираем +PI чтобы камера была сзади)
+		_target_yaw = _target_node.rotation.y
 		# Плавно интерполируем угол камеры к углу машины + смещение от мыши
 		_yaw = lerp_angle(_yaw, _target_yaw + _yaw_offset, rotation_smooth * delta)
 		# Плавно возвращаем смещение мыши к нулю

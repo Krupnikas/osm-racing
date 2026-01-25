@@ -32,8 +32,8 @@ func _physics_process(delta: float) -> void:
 
 	var target_pos := _target_node.global_position + Vector3(0, 1.0, 0)
 
-	# Медленно следуем за поворотом - камера "отстаёт" от машины
-	var target_yaw := _target_node.rotation.y + PI
+	# Медленно следуем за поворотом - камера "отстаёт" от машины (убираем +PI)
+	var target_yaw := _target_node.rotation.y
 	_yaw = lerp_angle(_yaw, target_yaw, rotation_smooth * delta)
 
 	# Позиция камеры
@@ -45,7 +45,7 @@ func _physics_process(delta: float) -> void:
 	var desired_pos := target_pos + offset
 	global_position = global_position.lerp(desired_pos, smooth_speed * delta)
 
-	# Смотрим вперёд по направлению движения машины
-	var forward := _target_node.global_transform.basis.z
+	# Смотрим вперёд по направлению движения машины (инвертируем для правильного направления)
+	var forward := -_target_node.global_transform.basis.z
 	var look_target := target_pos + forward * look_ahead
 	look_at(look_target)

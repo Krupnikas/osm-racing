@@ -29,8 +29,8 @@ func _physics_process(delta: float) -> void:
 	var car_transform := _target_node.global_transform
 	global_position = car_transform * offset
 
-	# Смотрим вперёд
-	var forward := car_transform.basis.z
+	# Смотрим вперёд (инвертируем направление чтобы камера была сзади)
+	var forward := -car_transform.basis.z
 	look_at(global_position + forward * look_ahead, Vector3.UP)
 
 	# Динамический FOV на основе скорости (эффект NFS)
