@@ -384,11 +384,11 @@ rear_damping_ratio = 0.35
 braking_grip_multiplier = 2.0
 tire_stiffnesses = { "Road": 10.0, "Dirt": 0.5, "Grass": 0.3, "Park": 0.2 }
 coefficient_of_friction = { "Road": 3.0, "Dirt": 2.4, "Grass": 1.8, "Park": 1.5 }
-rolling_resistance = { "Road": 0.5, "Dirt": 3.0, "Grass": 6.0, "Park": 10.0 }
+rolling_resistance = { "Road": 0.2, "Dirt": 3.0, "Grass": 6.0, "Park": 10.0 }
 lateral_grip_assist = { "Road": 0.05, "Dirt": 0.0, "Grass": 0.0, "Park": 0.0 }
 longitudinal_grip_ratio = { "Road": 0.5, "Dirt": 0.5, "Grass": 0.4, "Park": 0.3 }
-coefficient_of_drag = 0.23
-frontal_area = 1.0
+coefficient_of_drag = 0.15
+frontal_area = 0.8
 steering_speed_decay = 0.12
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
