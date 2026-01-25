@@ -6,7 +6,7 @@ extends Camera3D
 @export var distance := 8.0
 @export var min_distance := 3.0
 @export var max_distance := 30.0
-@export var smooth_speed := 8.0
+@export var smooth_speed := 2.0  # Медленное плавное следование
 @export var mouse_sensitivity := 0.005
 @export var zoom_speed := 1.0
 
@@ -22,13 +22,14 @@ func _ready() -> void:
 		if _target_node is VehicleBody3D or _target_node is RigidBody3D:
 			_car = _target_node
 
-	# Начальная позиция - сзади машины
+	# Начальная позиция - сзади машины (yaw=0 = сзади относительно машины)
 	_yaw = 0.0
 	_pitch = 0.3
 
 func reset_camera() -> void:
-	_yaw = 0.0
+	# Сброс только pitch, yaw не трогаем - он изменяется только мышкой
 	_pitch = 0.3
+	# _yaw остаётся как есть
 
 func _input(event: InputEvent) -> void:
 	if not current:
@@ -63,14 +64,11 @@ func _physics_process(delta: float) -> void:
 	# Целевая позиция - центр машины
 	var target_pos := _target_node.global_position + Vector3(0, 1, 0)
 
-	# Вычисляем позицию камеры относительно машины
-	# Добавляем rotation.y машины к углу камеры для привязки к машине
-	var car_yaw := _target_node.rotation.y
-	var absolute_yaw := car_yaw + _yaw
-
+	# Вычисляем позицию камеры в мировых координатах
+	# _yaw - абсолютный угол в мире, изменяется только мышкой
 	var offset := Vector3.ZERO
-	offset.x = sin(absolute_yaw) * cos(_pitch) * distance
-	offset.z = cos(absolute_yaw) * cos(_pitch) * distance
+	offset.x = sin(_yaw) * cos(_pitch) * distance
+	offset.z = cos(_yaw) * cos(_pitch) * distance
 	offset.y = sin(_pitch) * distance
 
 	var desired_pos := target_pos + offset

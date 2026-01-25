@@ -362,7 +362,7 @@ rear_damping_ratio = 0.6
 braking_grip_multiplier = 2.0
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.4545e-14, 0.2, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.4, 0)
 shape = SubResource("ConvexPolygonShape3D_5m52b")
 
 [node name="NexiaModel" parent="." instance=ExtResource("3_nexia")]
