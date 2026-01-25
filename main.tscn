@@ -1,4 +1,4 @@
-[gd_scene load_steps=16 format=3 uid="uid://bmain123"]
+[gd_scene load_steps=17 format=3 uid="uid://bmain123"]
 
 [ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://addons/gevp/scripts/vehicle_controllergd.gd" id="2_controller"]
@@ -20,6 +20,7 @@
 [ext_resource type="Script" path="res://settings/graphics_settings.gd" id="16_graphics"]
 [ext_resource type="Script" path="res://textures/ground_setup.gd" id="17_ground"]
 [ext_resource type="Script" path="res://debug/collision_visualizer.gd" id="18_collision_vis"]
+[ext_resource type="Script" path="res://debug/performance_profiler.gd" id="19_profiler"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -171,3 +172,7 @@ night_mode_manager_path = NodePath("../NightModeManager")
 
 [node name="CollisionVisualizer" type="Node" parent="."]
 script = ExtResource("18_collision_vis")
+
+[node name="PerformanceProfiler" type="Node" parent="."]
+script = ExtResource("19_profiler")
+print_interval = 5.0

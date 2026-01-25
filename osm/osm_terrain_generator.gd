@@ -3076,7 +3076,7 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 	# Добавляем коллизию для забора
 	var body := StaticBody3D.new()
 	body.collision_layer = 2
-	body.collision_mask = 1
+	body.collision_mask = 0  # Статика не проверяет коллизии
 	body.add_child(mesh)
 
 	for i in range(points.size()):
@@ -3235,7 +3235,7 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 
 	var body := StaticBody3D.new()
 	body.collision_layer = 2  # Слой 2 для зданий
-	body.collision_mask = 1   # Реагирует на слой 1 (машина)
+	body.collision_mask = 0   # Статика не проверяет коллизии (машина проверяет со зданиями)
 	body.add_child(mesh)
 
 	# Создаём коллизию для каждой стены отдельно (точнее чем бокс)
@@ -3466,6 +3466,9 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 	var wall_mesh_instance := MeshInstance3D.new()
 	wall_mesh_instance.mesh = wall_mesh
 	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	# Visibility range для автоматического скрытия далёких зданий
+	wall_mesh_instance.visibility_range_end = 400.0
+	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
 	# Материал стен
 	var wall_material := ShaderMaterial.new()
@@ -3508,7 +3511,7 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 	# Физическое тело
 	var body := StaticBody3D.new()
 	body.collision_layer = 2
-	body.collision_mask = 1
+	body.collision_mask = 0  # Статика не проверяет коллизии
 	body.add_child(wall_mesh_instance)
 	parent.add_child(body)
 
@@ -4226,6 +4229,9 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	var wall_mesh_instance := MeshInstance3D.new()
 	wall_mesh_instance.mesh = wall_mesh
 	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	# Visibility range для автоматического скрытия далёких зданий
+	wall_mesh_instance.visibility_range_end = 400.0
+	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
 	# Материал стен с шейдером для правильного двустороннего освещения
 	var wall_material := ShaderMaterial.new()
@@ -4288,7 +4294,7 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	# Создаём физическое тело
 	var body := StaticBody3D.new()
 	body.collision_layer = 2  # Слой 2 для зданий
-	body.collision_mask = 1   # Реагирует на слой 1 (машина)
+	body.collision_mask = 0   # Статика не проверяет коллизии (машина проверяет со зданиями)
 	body.add_child(wall_mesh_instance)
 
 	# Добавляем тело в сцену сразу (визуал появится)
@@ -4471,7 +4477,7 @@ func _create_park_collision(points: PackedVector2Array, elev_data: Dictionary, p
 	var body := StaticBody3D.new()
 	body.name = "ParkCollision"
 	body.collision_layer = 1
-	body.collision_mask = 1
+	body.collision_mask = 0  # Статика не проверяет коллизии
 	body.add_to_group("Park")  # GEVP - парк (очень высокое сопротивление)
 	body.add_child(mesh)
 
@@ -4590,7 +4596,7 @@ func _create_tree(pos: Vector2, elevation: float, parent: Node3D) -> void:
 
 	var body := StaticBody3D.new()
 	body.collision_layer = 2  # Слой статических объектов
-	body.collision_mask = 1   # Сталкивается с машинами (слой 1)
+	body.collision_mask = 0   # Статика не проверяет коллизии
 	body.name = "TreeCollision"
 
 	var collision := CollisionShape3D.new()
@@ -4830,7 +4836,7 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	# Коллизия для столба
 	var body := StaticBody3D.new()
 	body.collision_layer = 2
-	body.collision_mask = 1
+	body.collision_mask = 0  # Статика не проверяет коллизии
 	var collision := CollisionShape3D.new()
 	var shape := CylinderShape3D.new()
 	shape.radius = 0.1
@@ -5780,7 +5786,7 @@ func _create_traffic_light_immediate(pos: Vector2, elevation: float, parent: Nod
 	# Коллизия для столба
 	var body := StaticBody3D.new()
 	body.collision_layer = 2
-	body.collision_mask = 1
+	body.collision_mask = 0  # Статика не проверяет коллизии
 	var collision := CollisionShape3D.new()
 	var shape := CylinderShape3D.new()
 	shape.radius = 0.12
