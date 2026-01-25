@@ -16,11 +16,9 @@ var _car: RigidBody3D  # Может быть VehicleBody3D или GEVP Vehicle
 func _ready() -> void:
 	if target:
 		_target_node = get_node(target)
-		# Для GEVP - target это VehicleController, машина внутри
+		# Target теперь указывает прямо на Car (RigidBody3D)
 		if _target_node is VehicleBody3D or _target_node is RigidBody3D:
 			_car = _target_node
-		elif _target_node.has_node("Car"):
-			_car = _target_node.get_node("Car")
 	fov = fov_base
 
 func _physics_process(delta: float) -> void:

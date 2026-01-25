@@ -17,11 +17,9 @@ var _pitch := 0.15  # Более горизонтальный угол (было
 func _ready() -> void:
 	if target:
 		_target_node = get_node(target)
-		# Для GEVP - target это VehicleController, машина внутри
+		# Target теперь указывает прямо на Car (RigidBody3D)
 		if _target_node is VehicleBody3D or _target_node is RigidBody3D:
 			_car = _target_node
-		elif _target_node.has_node("Car"):
-			_car = _target_node.get_node("Car")
 	fov = 60.0  # Широкий угол для эпичности
 
 func reset_camera() -> void:
