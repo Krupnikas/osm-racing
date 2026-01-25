@@ -73,10 +73,7 @@ func _physics_process(_delta):
 		vehicle_node.steering_input = Input.get_action_strength(string_steer_left) - Input.get_action_strength(string_steer_right)
 
 	if string_throttle_input != "":
-		vehicle_node.throttle_input = pow(Input.get_action_strength(string_throttle_input), 2.0)
-		if debug_timer > 1.0 and Input.get_action_strength(string_throttle_input) > 0:
-			print("Throttle input: ", vehicle_node.throttle_input, " | Gear: ", vehicle_node.current_gear, " | RPM: ", vehicle_node.motor_rpm)
-			debug_timer = 0.0
+		vehicle_node.throttle_input = Input.get_action_strength(string_throttle_input)
 
 	if string_handbrake_input != "":
 		vehicle_node.handbrake_input = Input.get_action_strength(string_handbrake_input)
@@ -101,3 +98,12 @@ func _physics_process(_delta):
 	if vehicle_node.current_gear == -1:
 		vehicle_node.brake_input = Input.get_action_strength(string_throttle_input)
 		vehicle_node.throttle_input = Input.get_action_strength(string_brake_input)
+
+	# Дебаг поверхности - каждые 2 секунды
+	if debug_timer > 2.0:
+		debug_timer = 0.0
+		var surface := "unknown"
+		if vehicle_node.front_left_wheel:
+			surface = vehicle_node.front_left_wheel.surface_type
+		var speed := vehicle_node.linear_velocity.length() * 3.6
+		print("Surface: %s | Speed: %.0f km/h | Gear: %d | RPM: %.0f" % [surface, speed, vehicle_node.current_gear, vehicle_node.motor_rpm])

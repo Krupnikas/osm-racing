@@ -1182,6 +1182,7 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	body.name = "TerrainBody"
 	body.collision_layer = 1  # Слой 1 - земля, по которой едет машина
 	body.collision_mask = 1   # Реагирует на слой 1
+	body.add_to_group("Grass")  # GEVP - террейн как трава (большое сопротивление)
 	body.add_child(mesh)
 
 	# Создаём коллизию из меша
@@ -1616,34 +1617,35 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 	var height_offset: float
 	var curb_height: float
 	# Высота дорог по приоритету (большие дороги выше малых для правильного отображения на перекрёстках)
+	# Увеличены offset'ы чтобы дорожная коллизия была выше террейна для GEVP
 	match highway_type:
 		"motorway", "trunk":
 			texture_key = "highway"
-			height_offset = 0.06  # Самые высокие
+			height_offset = 0.12  # Самые высокие
 			curb_height = 0.12
 		"primary":
 			texture_key = "primary"
-			height_offset = 0.05
+			height_offset = 0.11
 			curb_height = 0.10
 		"secondary", "tertiary":
 			texture_key = "primary"
-			height_offset = 0.04
+			height_offset = 0.10
 			curb_height = 0.08
 		"residential", "unclassified":
 			texture_key = "residential"
-			height_offset = 0.03
+			height_offset = 0.09
 			curb_height = 0.06
 		"service":
 			texture_key = "residential"
-			height_offset = 0.02  # Самые низкие дороги
+			height_offset = 0.08  # Самые низкие дороги
 			curb_height = 0.04
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
-			height_offset = 0.01  # Пешеходные ещё ниже
+			height_offset = 0.07  # Пешеходные ещё ниже
 			curb_height = 0.0
 		_:
 			texture_key = "residential"
-			height_offset = 0.03
+			height_offset = 0.09
 			curb_height = 0.05
 
 	_create_road_mesh_with_texture(nodes, width, texture_key, height_offset, parent, elev_data)
@@ -1775,7 +1777,26 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 		WetRoadMaterial.apply_wet_properties(material, true, _is_night_mode)
 
 	mesh.material_override = material
-	parent.add_child(mesh)
+
+	# Создаём коллизию дороги с группой Road для GEVP
+	var road_body := StaticBody3D.new()
+	road_body.name = "RoadCollision"
+	road_body.collision_layer = 1
+	road_body.collision_mask = 1
+	road_body.add_to_group("Road")  # GEVP - дорога (отличное сцепление)
+	road_body.add_child(mesh)
+
+	# Создаём trimesh коллизию из меша дороги
+	mesh.create_trimesh_collision()
+	for child in mesh.get_children():
+		if child is StaticBody3D:
+			var col_shape := child.get_child(0)
+			if col_shape is CollisionShape3D:
+				child.remove_child(col_shape)
+				road_body.add_child(col_shape)
+			child.queue_free()
+
+	parent.add_child(road_body)
 
 # Создаёт бордюры вдоль дороги (старая версия для обратной совместимости)
 func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_height: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
@@ -2146,6 +2167,7 @@ func _apply_curb_collisions() -> void:
 		var body := StaticBody3D.new()
 		body.collision_layer = 1
 		body.collision_mask = 0
+		body.add_to_group("Road")  # GEVP использует группу для определения типа поверхности
 
 		for box in result.boxes:
 			var collision := CollisionShape3D.new()
@@ -2908,6 +2930,10 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 
 	# Парки и зоны отдыха ниже дорог чтобы не было z-fighting
 	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
+
+	# Добавляем коллизию с группой Park для высокого сопротивления качению
+	if leisure_type in ["park", "garden", "pitch"]:
+		_create_park_collision(points, elev_data, parent)
 
 	# Процедурная генерация деревьев в парках и садах
 	if leisure_type in ["park", "garden"]:
@@ -4410,6 +4436,53 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 
 	mesh.material_override = material
 	parent.add_child(mesh)
+
+## Создаёт коллизию для парка с группой "Park" (очень высокое сопротивление качению)
+func _create_park_collision(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
+	if points.size() < 3:
+		return
+
+	# Триангуляция для создания коллизии
+	var indices := Geometry2D.triangulate_polygon(points)
+	if indices.size() < 3:
+		return
+
+	var vertices := PackedVector3Array()
+	for p in points:
+		var h := _get_elevation_at_point(p, elev_data) + 0.01  # Чуть выше террейна
+		vertices.append(Vector3(p.x, h, p.y))
+
+	# Создаём меш для коллизии
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_INDEX] = PackedInt32Array(indices)
+
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	var mesh := MeshInstance3D.new()
+	mesh.mesh = arr_mesh
+	mesh.visible = false  # Невидимый меш только для коллизии
+
+	var body := StaticBody3D.new()
+	body.name = "ParkCollision"
+	body.collision_layer = 1
+	body.collision_mask = 1
+	body.add_to_group("Park")  # GEVP - парк (очень высокое сопротивление)
+	body.add_child(mesh)
+
+	# Создаём коллизию
+	mesh.create_trimesh_collision()
+	for child in mesh.get_children():
+		if child is StaticBody3D:
+			var col_shape := child.get_child(0)
+			if col_shape is CollisionShape3D:
+				child.remove_child(col_shape)
+				body.add_child(col_shape)
+			child.queue_free()
+
+	parent.add_child(body)
 
 # Конвертация lat/lon в локальные координаты относительно стартовой точки
 # Примечание: Z инвертирован, т.к. в Godot +Z направлен "от экрана", а latitude растёт на север

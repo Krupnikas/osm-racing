@@ -66,7 +66,7 @@ albedo_color = Color(0.4, 0.5, 0.4, 1)
 
 [node name="Main" type="Node3D"]
 
-[node name="StaticGround" type="StaticBody3D" parent="."]
+[node name="StaticGround" type="StaticBody3D" parent="." groups=["Grass"]]
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="StaticGround"]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
@@ -86,7 +86,7 @@ unload_distance = 800.0
 car_path = NodePath("../Car")
 
 [node name="Car" parent="." groups=["car", "player"] instance=ExtResource("2_car")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)
 
 [node name="VehicleController" type="Node3D" parent="Car" node_paths=PackedStringArray("vehicle_node")]
 script = ExtResource("2_controller")
