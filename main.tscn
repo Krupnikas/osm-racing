@@ -81,36 +81,36 @@ start_lon = 37.94937
 chunk_size = 300.0
 load_distance = 500.0
 unload_distance = 800.0
-car_path = NodePath("../VehicleController")
+car_path = NodePath("../Car")
 
-[node name="VehicleController" type="Node3D" parent="." node_paths=PackedStringArray("vehicle_node")]
+[node name="Car" parent="." groups=["car", "player"] instance=ExtResource("2_car")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
-script = ExtResource("2_controller")
-vehicle_node = NodePath("Car")
 
-[node name="Car" parent="VehicleController" groups=["car", "player"] instance=ExtResource("2_car")]
+[node name="VehicleController" type="Node" parent="Car" node_paths=PackedStringArray("vehicle_node")]
+script = ExtResource("2_controller")
+vehicle_node = NodePath("..")
 
 [node name="TrafficManager" type="Node" parent="."]
 script = ExtResource("11_traffic")
 
 [node name="CameraManager" type="Node" parent="."]
 script = ExtResource("6_cam_mgr")
-car_path = NodePath("../VehicleController")
+car_path = NodePath("../Car")
 
 [node name="FollowCamera" type="Camera3D" parent="CameraManager"]
 transform = Transform3D(1, 0, 0, 0, 0.9, 0.44, 0, -0.44, 0.9, 0, 7, -10)
 script = ExtResource("3_camera")
-target = NodePath("../../VehicleController/Car")
+target = NodePath("../../Car")
 
 [node name="CinematicCamera" type="Camera3D" parent="CameraManager"]
 current = true
 script = ExtResource("15_cinematic_cam")
-target = NodePath("../../VehicleController/Car")
+target = NodePath("../../Car")
 
 [node name="TopDownCamera" type="Camera3D" parent="CameraManager"]
 transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 50, 0)
 script = ExtResource("8_top_cam")
-target = NodePath("../../VehicleController/Car")
+target = NodePath("../../Car")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
 transform = Transform3D(0.866025, -0.353553, 0.353553, 0, 0.707107, 0.707107, -0.5, -0.612372, 0.612372, 0, 20, 0)

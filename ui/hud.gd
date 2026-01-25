@@ -22,10 +22,8 @@ func _ready() -> void:
 	else:
 		_car = get_tree().get_first_node_in_group("car")
 
-	# Получаем RigidBody3D для GEVP (VehicleController/Car)
-	if _car and _car.has_node("Car"):
-		_car_rigidbody = _car.get_node("Car")
-	elif _car is RigidBody3D:
+	# Теперь _car указывает прямо на RigidBody3D (как в аркаде)
+	if _car is RigidBody3D:
 		_car_rigidbody = _car
 
 	# Подключаем сигналы если есть (старая аркадная физика)

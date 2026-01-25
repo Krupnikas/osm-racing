@@ -42,11 +42,8 @@ func _ready() -> void:
 		_terrain_generator = get_node(terrain_generator_path)
 	if car_path:
 		_car = get_node(car_path)
-		# Получаем актуальный RigidBody3D для GEVP (VehicleController/Car)
-		if _car.has_node("Car"):
-			_car_rigidbody = _car.get_node("Car")
-		else:
-			_car_rigidbody = _car if _car is RigidBody3D else null
+		# Теперь _car указывает прямо на RigidBody3D (как в аркаде)
+		_car_rigidbody = _car if _car is RigidBody3D else null
 		# КРИТИЧНО: Сразу замораживаем машину чтобы не упала до _hide_world()
 		if _car_rigidbody and _car_rigidbody is RigidBody3D:
 			_car_rigidbody.freeze = true
