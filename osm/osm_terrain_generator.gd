@@ -1456,10 +1456,12 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			_create_waterway(nodes, tags, target, loader, elev_data)
 			objects_this_frame += 1
 
-		# Frame budgeting для лёгких объектов
-		if objects_this_frame >= OBJECTS_PER_FRAME:
-			objects_this_frame = 0
-			await get_tree().process_frame
+		# Frame budgeting ОТКЛЮЧЕН - вызывает исчезновение бизнес-вывесок
+		# См. bisect: проблема появилась в коммите 00b311f
+		# if objects_this_frame >= OBJECTS_PER_FRAME:
+		# 	objects_this_frame = 0
+		# 	await get_tree().process_frame
+		pass
 
 	# Ищем перекрёстки (узлы, которые используются несколькими дорогами)
 	# Для Т-образных перекрёстков: проверяем ВСЕ узлы дорог
