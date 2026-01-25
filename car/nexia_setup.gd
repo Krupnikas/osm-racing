@@ -3,25 +3,59 @@ extends Node3D
 ## Скрипт для настройки модели Daewoo Nexia
 ## Скрывает колёса из модели, так как используются VehicleWheel3D
 ## Изменяет цвет кузова
+## Переключает материал стёкол день/ночь
 
-# Цвет кузова (спелая вишня - код 74U "Красный шпинель")
-# RGB: 89, 0, 6 -> нормализованные значения для Godot (делим на 255)
-var body_color := Color(0.349, 0.0, 0.024, 1.0)  # #590006
+# Цвет кузова (бордовый - тёмно-вишнёвый)
+var body_color := Color(0.5, 0.05, 0.1, 1.0)  # Бордовый
 
-# Цвет тонировки стёкол (слегка затемнённое, прозрачное, блестящее)
-var glass_color := Color(0.15, 0.15, 0.17, 0.3)  # Лёгкая тонировка (полупрозрачная)
+# Цвета стёкол для дня и ночи
+var glass_color_day := Color(0.12, 0.14, 0.2, 0.5)  # Полупрозрачная тонировка днём
+var glass_color_night := Color(0.05, 0.07, 0.12, 1.0)  # Глухая тонировка ночью
+
+var _glass_materials: Array[StandardMaterial3D] = []
+var _is_night := false
 
 func _ready() -> void:
 	await get_tree().process_frame
-
-	# Не скрываем колёса модели - они нужны для визуала
-	# VehicleWheel3D используются только для физики
-	# _hide_model_wheels()
 
 	# Меняем цвет кузова
 	_change_body_color()
 
 	print("Nexia model setup complete")
+
+func _process(_delta: float) -> void:
+	# Проверяем режим дня/ночи (ищем NightModeManager)
+	var night_manager = get_node_or_null("/root/Main/NightModeManager")
+	if night_manager and "is_night" in night_manager:
+		var current_night: bool = night_manager.is_night
+		if current_night != _is_night:
+			_is_night = current_night
+			_update_glass_materials()
+
+func _update_glass_materials() -> void:
+	"""Обновляет материалы стёкол в зависимости от времени суток"""
+	for material in _glass_materials:
+		if not is_instance_valid(material):
+			continue
+
+		if _is_night:
+			# Ночью - непрозрачные с бликами
+			material.albedo_color = glass_color_night
+			material.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+			material.metallic = 0.2
+			material.metallic_specular = 0.8
+			material.roughness = 0.1
+			material.clearcoat = 0.9
+			material.clearcoat_roughness = 0.05
+		else:
+			# Днём - полупрозрачные
+			material.albedo_color = glass_color_day
+			material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			material.metallic = 0.0
+			material.metallic_specular = 0.5
+			material.roughness = 0.05
+			material.clearcoat = 0.0
+			material.clearcoat_roughness = 0.0
 
 func _hide_model_wheels() -> void:
 	"""Скрывает колёса из импортированной модели"""
@@ -103,23 +137,31 @@ func _change_body_color() -> void:
 					print("  -> Skipping light/glass material")
 					continue
 
-				# Выбираем цвет в зависимости от типа детали
-				var target_color: Color = glass_color if is_glass else body_color
-
 				if material is StandardMaterial3D:
-					material.albedo_color = target_color
 					if is_glass:
-						# Для стёкол делаем прозрачными с сильным блеском
+						# Для стёкол - настраиваем и сохраняем для переключения день/ночь
+						material.albedo_texture = null
+						material.normal_texture = null
+						material.albedo_color = glass_color_day
 						material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-						material.metallic = 0.8  # Высокая металличность для блеска
-						material.roughness = 0.05  # Минимальная шероховатость для зеркального эффекта
 						material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
-						material.cull_mode = BaseMaterial3D.CULL_DISABLED  # Рендерим с обеих сторон
-						print("  -> Changed glass to tinted (transparent, shiny)")
+						material.cull_mode = BaseMaterial3D.CULL_DISABLED
+						material.metallic = 0.0
+						material.metallic_specular = 0.5
+						material.roughness = 0.05
+						_glass_materials.append(material)
+						print("  -> Changed glass to tinted (day mode)")
 					else:
-						print("  -> Changed body color to cherry")
+						# Для кузова - глянцевая краска с лаком
+						material.albedo_color = body_color
+						material.metallic = 0.3
+						material.metallic_specular = 0.8
+						material.roughness = 0.15
+						material.clearcoat = 0.9
+						material.clearcoat_roughness = 0.1
+						print("  -> Changed body color to cherry (glossy)")
 				elif material is BaseMaterial3D:
-					material.albedo_color = target_color
+					material.albedo_color = body_color if not is_glass else glass_color_day
 					if is_glass:
 						material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 						print("  -> Changed glass to tinted (transparent)")
