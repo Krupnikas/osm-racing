@@ -2779,15 +2779,19 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 
 # Обработчик столкновения со знаком - активирует физику
 func _on_sign_hit(other_body: Node, rigid_body: RigidBody3D) -> void:
-	# Проверяем, что столкновение с машиной (VehicleBody3D)
-	if other_body is VehicleBody3D:
-		var vehicle := other_body as VehicleBody3D
+	# Проверяем, что столкновение с машиной (VehicleBody3D, RigidBody3D или группа "car")
+	var is_vehicle := other_body is VehicleBody3D or other_body is RigidBody3D or other_body.is_in_group("car")
+	if is_vehicle and other_body != rigid_body:
 		# Размораживаем знак - теперь он подвержен физике
 		rigid_body.freeze = false
 		# Добавляем импульс в направлении от машины
-		var impulse_dir: Vector3 = (rigid_body.global_position - vehicle.global_position).normalized()
+		var impulse_dir: Vector3 = (rigid_body.global_position - other_body.global_position).normalized()
 		impulse_dir.y = 0.3  # Немного вверх для реалистичного отлёта
-		var car_speed: float = vehicle.linear_velocity.length()
+		var car_speed: float = 0.0
+		if other_body is RigidBody3D:
+			car_speed = (other_body as RigidBody3D).linear_velocity.length()
+		elif other_body is VehicleBody3D:
+			car_speed = (other_body as VehicleBody3D).linear_velocity.length()
 		var impulse_strength: float = clamp(car_speed * 20.0, 100.0, 800.0)
 		rigid_body.apply_central_impulse(impulse_dir * impulse_strength)
 		# Добавляем вращение для реалистичности
