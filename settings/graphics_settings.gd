@@ -71,12 +71,20 @@ func _find_camera() -> void:
 	# Ищем камеру в сцене
 	_camera = get_tree().current_scene.find_child("Camera3D", true, false) as Camera3D
 	if not _camera:
-		# Пробуем найти любую Camera3D
+		# Пробуем найти OrbitCamera
+		_camera = get_tree().current_scene.find_child("OrbitCamera", true, false) as Camera3D
+	if not _camera:
+		# Пробуем найти любую Camera3D в группе
 		var cameras := get_tree().get_nodes_in_group("camera")
 		if cameras.size() > 0:
 			_camera = cameras[0] as Camera3D
+	if not _camera:
+		# Последняя попытка - найти любую активную Camera3D
+		var viewport := get_viewport()
+		if viewport:
+			_camera = viewport.get_camera_3d()
 	if _camera:
-		print("GraphicsSettings: Found Camera3D")
+		print("GraphicsSettings: Found Camera3D: ", _camera.name)
 	else:
 		print("GraphicsSettings: WARNING - Camera3D not found")
 

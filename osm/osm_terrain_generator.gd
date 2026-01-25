@@ -3914,12 +3914,15 @@ func _process_curb_segments(max_count: int) -> int:
 ## Финализирует меш бордюра и добавляет в сцену
 func _finalize_curb_mesh() -> void:
 	var state := _curb_mesh_state
+	if not state or not is_instance_valid(state.get("parent")):
+		return
+
 	var vertices: PackedVector3Array = state.vertices
 	var normals: PackedVector3Array = state.normals
 	var indices: PackedInt32Array = state.indices
 	var parent: Node3D = state.parent
 
-	if vertices.size() == 0 or not is_instance_valid(parent):
+	if vertices.size() == 0:
 		return
 
 	var arrays := []

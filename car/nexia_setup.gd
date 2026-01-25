@@ -22,6 +22,7 @@ var _glass_materials: Array[StandardMaterial3D] = []
 var _taillight_materials: Array[StandardMaterial3D] = []
 var _frontlight_materials: Array[StandardMaterial3D] = []
 var _brake_lights: Array[SpotLight3D] = []
+var _headlights: Array[SpotLight3D] = []
 var _is_night := false
 var _vehicle: Node  # Ссылка на Vehicle для проверки торможения
 
@@ -37,6 +38,7 @@ func _ready() -> void:
 	# Настраиваем габариты
 	_setup_taillights()
 	_setup_frontlights()
+	_setup_headlights()
 
 	print("Nexia model setup complete")
 
@@ -48,6 +50,7 @@ func _process(_delta: float) -> void:
 		if current_night != _is_night:
 			_is_night = current_night
 			_update_glass_materials()
+			_update_headlights()
 
 	# Обновляем emission габаритов при торможении
 	_update_taillight_brightness()
@@ -289,6 +292,31 @@ func _setup_frontlight_material(mesh: MeshInstance3D) -> void:
 			print("  -> Added front marker material")
 
 
+func _setup_headlights() -> void:
+	"""Создаёт SpotLight3D для передних фар"""
+	# Z отрицательный - спереди машины (ось инвертирована)
+	var headlight_positions := [
+		Vector3(-0.55, 0.75, -1.9),  # Левая фара
+		Vector3(0.55, 0.75, -1.9),   # Правая фара
+	]
+
+	for i in range(headlight_positions.size()):
+		var light := SpotLight3D.new()
+		light.name = "Headlight_%d" % i
+		light.position = headlight_positions[i]
+		light.rotation_degrees = Vector3(0, 0, 0)  # Направлен вперёд (по -Z)
+		light.spot_range = 30.0
+		light.spot_angle = 45.0
+		light.light_energy = 2.0
+		light.light_color = Color(1.0, 0.95, 0.8)  # Тёплый белый
+		light.shadow_enabled = true
+		light.visible = _is_night  # Включаются только ночью
+
+		get_parent().add_child(light)
+		_headlights.append(light)
+		print("  -> Created headlight SpotLight at ", headlight_positions[i])
+
+
 func _update_taillight_brightness() -> void:
 	"""Обновляет яркость габаритов и включает стоп-сигналы при торможении"""
 	var braking := false
@@ -304,3 +332,10 @@ func _update_taillight_brightness() -> void:
 	for light in _brake_lights:
 		if is_instance_valid(light):
 			light.light_energy = 2.0 if braking else 0.3
+
+
+func _update_headlights() -> void:
+	"""Включает/выключает фары в зависимости от времени суток"""
+	for light in _headlights:
+		if is_instance_valid(light):
+			light.visible = _is_night
