@@ -26,6 +26,26 @@ func _physics_process(delta: float) -> void:
 	# Вызов базовой физики
 	super._physics_process(delta)
 
+	# HACK: Инвертируем body roll применяя counter-torque
+	# Используем угловую скорость поворота (yaw) для расчёта центробежной силы
+	var forward_speed := linear_velocity.dot(-global_transform.basis.z)
+	var yaw_rate := angular_velocity.y  # Скорость поворота вокруг вертикальной оси
+
+	# Центробежное ускорение = V * omega
+	var centrifugal_accel := forward_speed * yaw_rate
+
+	# Желаемый крен ПРОТИВОПОЛОЖЕН центробежной силе
+	# При повороте вправо (yaw < 0) машина должна крениться влево (roll < 0)
+	var target_roll := -centrifugal_accel * 0.15  # Уменьшен коэффициент
+	var current_roll := rotation.z
+	var roll_error := target_roll - current_roll
+
+	# PD controller с балансом между коррекцией и стабильностью
+	var angular_vel_z := angular_velocity.dot(global_transform.basis.z)
+	var correction_torque := roll_error * 120000.0 - angular_vel_z * 4000.0
+
+	apply_torque_impulse(global_transform.basis.z * correction_torque * delta)
+
 	# Вывод в логи каждые 2 секунды
 	if int(test_time) % 2 == 0 and test_time - delta < int(test_time):
 		var speed := linear_velocity.length() * 3.6

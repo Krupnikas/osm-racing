@@ -3,7 +3,6 @@
 [ext_resource type="Script" path="res://addons/gevp/scripts/vehicle.gd" id="1_wr17c"]
 [ext_resource type="Script" path="res://addons/gevp/scripts/wheel.gd" id="2_67xbp"]
 
-[ext_resource type="PackedScene" path="res://car/models/sedan.glb" id="3_sedan"]
 [sub_resource type="Curve" id="Curve_bt7kc"]
 _data = [Vector2(0, 0.494505), 0.0, 2.04495, 0, 0, Vector2(0.617978, 1), 0.0, 0.0, 0, 0, Vector2(1, 0.692308), -1.4839, 0.0, 0, 0]
 point_count = 3
@@ -363,8 +362,22 @@ braking_grip_multiplier = 2.0
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.4545e-14, 0.2, 0)
 shape = SubResource("ConvexPolygonShape3D_5m52b")
 
-[node name="SedanModel" parent="." instance_placeholder="res://car/models/sedan.glb"]
-transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, 0, -0.15, 0)
+[node name="body" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.4545e-14, 0.2, 0)
+mesh = SubResource("ArrayMesh_7r1v5")
+skeleton = NodePath("")
+
+[node name="spoiler" type="MeshInstance3D" parent="body"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -5.77529e-15, 0.4, 1.06869)
+mesh = SubResource("ArrayMesh_2qsgi")
+skeleton = NodePath("")
+
+[node name="WheelFrontLeft" type="RayCast3D" parent="." node_paths=PackedStringArray("wheel_node")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.5, 0.35, -0.66)
+script = ExtResource("2_67xbp")
+wheel_node = NodePath("FrontLeftWheel")
+
+[node name="FrontLeftWheel" type="Node3D" parent="WheelFrontLeft"]
 
 [node name="wheel_frontLeft" type="MeshInstance3D" parent="WheelFrontLeft/FrontLeftWheel"]
 transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, 1, 0.2, 0, 0)

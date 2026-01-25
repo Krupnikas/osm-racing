@@ -335,6 +335,14 @@ func _spawn_car_on_road() -> void:
 		_car.global_position.x, _car.global_position.y, _car.global_position.z, rad_to_deg(final_yaw)
 	])
 
+	# Для GEVP Vehicle - переключаем на 1-ю передачу и включаем автомат
+	if _car_rigidbody and _car_rigidbody.has_method("set"):
+		if _car_rigidbody.get("current_gear") != null:
+			_car_rigidbody.current_gear = 1  # 1-я передача
+			if _car_rigidbody.get("automatic_transmission") != null:
+				_car_rigidbody.automatic_transmission = true
+			print("MainMenu: Set GEVP to gear 1 with automatic transmission")
+
 func _hide_world() -> void:
 	# Скрываем машину
 	if _car:

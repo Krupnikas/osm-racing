@@ -5,6 +5,7 @@
 [ext_resource type="PackedScene" path="res://car/models/nexia/scene.gltf" id="3_nexia"]
 [ext_resource type="Script" path="res://car/nexia_setup.gd" id="4_nexia_setup"]
 [ext_resource type="Script" path="res://addons/gevp/scripts/wheel_visibility.gd" id="5_wheel_vis"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/vehicle_input.gd" id="6_vehicle_input"]
 [sub_resource type="Curve" id="Curve_bt7kc"]
 _data = [Vector2(0, 0.494505), 0.0, 2.04495, 0, 0, Vector2(0.617978, 1), 0.0, 0.0, 0, 0, Vector2(1, 0.692308), -1.4839, 0.0, 0, 0]
 point_count = 3

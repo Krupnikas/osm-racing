@@ -47,25 +47,8 @@ class_name VehicleController
 ## [br]Leave blank to disable.
 @export var string_shift_down: String = "Shift Down"
 
-var debug_timer := 0.0
-var _initialization_done := false
-
-func _ready():
-	# Проверяем что vehicle_node установлен
-	if vehicle_node == null:
-		print("ERROR: VehicleController - vehicle_node is null!")
-	else:
-		print("VehicleController: vehicle_node found: ", vehicle_node.name)
-
 func _physics_process(_delta):
-	if vehicle_node == null:
-		if not _initialization_done:
-			print("ERROR: VehicleController - vehicle_node is still null in _physics_process!")
-			_initialization_done = true
-		return
-
-	debug_timer += _delta
-
+	
 	if string_brake_input != "":
 		vehicle_node.brake_input = Input.get_action_strength(string_brake_input)
 
@@ -74,9 +57,6 @@ func _physics_process(_delta):
 
 	if string_throttle_input != "":
 		vehicle_node.throttle_input = pow(Input.get_action_strength(string_throttle_input), 2.0)
-		if debug_timer > 1.0 and Input.get_action_strength(string_throttle_input) > 0:
-			print("Throttle input: ", vehicle_node.throttle_input, " | Gear: ", vehicle_node.current_gear, " | RPM: ", vehicle_node.motor_rpm)
-			debug_timer = 0.0
 
 	if string_handbrake_input != "":
 		vehicle_node.handbrake_input = Input.get_action_strength(string_handbrake_input)

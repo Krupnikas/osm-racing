@@ -12,15 +12,18 @@ extends Camera3D
 @export var max_speed_for_fov := 120.0
 
 var _target_node: Node3D
-var _car: VehicleBody3D
+var _car: RigidBody3D  # Может быть VehicleBody3D или GEVP Vehicle
 var _yaw := 0.0
 var _pitch := 0.25  # Небольшой наклон вниз
 
 func _ready() -> void:
 	if target:
 		_target_node = get_node(target)
-		if _target_node is VehicleBody3D:
+		# Для GEVP - target это VehicleController, машина внутри
+		if _target_node is VehicleBody3D or _target_node is RigidBody3D:
 			_car = _target_node
+		elif _target_node.has_node("Car"):
+			_car = _target_node.get_node("Car")
 	fov = fov_base
 
 func reset_camera() -> void:
