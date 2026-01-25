@@ -1,4 +1,4 @@
-[gd_scene load_steps=19 format=3 uid="uid://fo6kt54q87tf"]
+[gd_scene load_steps=21 format=3 uid="uid://fo6kt54q87tf"]
 
 [ext_resource type="Script" path="res://addons/gevp/scripts/vehicle.gd" id="1_wr17c"]
 [ext_resource type="Script" path="res://addons/gevp/scripts/wheel.gd" id="2_67xbp"]
@@ -6,6 +6,8 @@
 [ext_resource type="Script" path="res://car/nexia_setup.gd" id="4_nexia_setup"]
 [ext_resource type="Script" path="res://addons/gevp/scripts/wheel_visibility.gd" id="5_wheel_vis"]
 [ext_resource type="Script" path="res://addons/gevp/scripts/vehicle_input.gd" id="6_vehicle_input"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/engine_sound.gd" id="7_engine_sound"]
+[ext_resource type="AudioStream" path="res://addons/gevp/sounds/4000.wav" id="8_engine_wav"]
 [sub_resource type="Curve" id="Curve_bt7kc"]
 _data = [Vector2(0, 0.494505), 0.0, 2.04495, 0, 0, Vector2(0.617978, 1), 0.0, 0.0, 0, 0, Vector2(1, 0.692308), -1.4839, 0.0, 0, 0]
 point_count = 3
@@ -364,7 +366,7 @@ front_right_wheel = NodePath("WheelFrontRight")
 rear_left_wheel = NodePath("WheelRearLeft")
 rear_right_wheel = NodePath("WheelRearRight")
 stability_yaw_ground_multiplier = 6.0
-max_torque = 1000.0
+max_torque = 400.0
 max_rpm = 6000.0
 idle_rpm = 800.0
 torque_curve = SubResource("Curve_bt7kc")
@@ -457,3 +459,11 @@ skeleton = NodePath("")
 [node name="WheelVisibility" type="Node" parent="." node_paths=PackedStringArray("vehicle")]
 script = ExtResource("5_wheel_vis")
 vehicle = NodePath("../NexiaModel")
+
+[node name="EngineSound" type="AudioStreamPlayer3D" parent="." node_paths=PackedStringArray("vehicle")]
+stream = ExtResource("8_engine_wav")
+autoplay = true
+max_db = 10.0
+script = ExtResource("7_engine_sound")
+vehicle = NodePath("..")
+sample_rpm = 4000.0

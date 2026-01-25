@@ -25,8 +25,8 @@ var contact_patch := 0.2
 var braking_grip_multiplier := 1.4
 var surface_type := ""
 var tire_stiffnesses := { "Road" : 5.0, "Dirt" : 0.5, "Grass" : 0.5 }
-var coefficient_of_friction := { "Road" : 2.0, "Dirt" : 1.4, "Grass" : 1.0 }
-var rolling_resistance := { "Road" : 1.0, "Dirt" : 2.0, "Grass" : 4.0 }
+var coefficient_of_friction := { "Road" : 2.0, "Dirt" : 1.4, "Grass" : 0.6 }
+var rolling_resistance := { "Road" : 1.0, "Dirt" : 2.0, "Grass" : 15.0 }
 var lateral_grip_assist := { "Road" : 0.05, "Dirt" : 0.0, "Grass" : 0.0}
 var longitudinal_grip_ratio := { "Road" : 0.5, "Dirt": 0.5, "Grass" : 0.5}
 
