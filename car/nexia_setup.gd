@@ -220,9 +220,10 @@ func _setup_taillights() -> void:
 		light.position = brake_positions[i]
 		light.rotation_degrees = Vector3(0, 180, 0)  # Направлен назад (учитывая инверсию модели)
 		light.spot_range = 1.5
-		light.spot_angle = 150.0
+		light.spot_angle = 90.0
 		light.light_energy = 0.3  # Тусклый свет для габаритов
 		light.light_color = Color(1.0, 0.0, 0.0)
+		light.shadow_enabled = false  # Без теней - иначе блокируется коллизией машины
 		light.visible = true
 
 		get_parent().add_child(light)
@@ -326,7 +327,7 @@ func _update_taillight_brightness() -> void:
 	# Emission: тусклый для габаритов, яркий при торможении
 	for material in _taillight_materials:
 		if is_instance_valid(material):
-			material.emission_energy_multiplier = 3.0 if braking else 0.5
+			material.emission_energy_multiplier = 2.0 if braking else 0.5
 
 	# SpotLight: тусклый для габаритов, яркий при торможении
 	for light in _brake_lights:
