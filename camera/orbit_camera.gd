@@ -31,6 +31,30 @@ func reset_camera() -> void:
 	_pitch = 0.3
 	# _yaw остаётся как есть
 
+
+func teleport_to_target() -> void:
+	"""Мгновенно телепортировать камеру к цели (без интерполяции).
+	Вызывать после телепортации машины!"""
+	if not _target_node:
+		return
+
+	# ВАЖНО: Устанавливаем _yaw равным углу поворота машины + PI (сзади машины)
+	# Это гарантирует что камера будет сзади машины после телепортации
+	_yaw = _target_node.global_rotation.y + PI
+
+	var target_pos := _target_node.global_position + Vector3(0, 1, 0)
+
+	# Вычисляем позицию камеры
+	var offset := Vector3.ZERO
+	offset.x = sin(_yaw) * cos(_pitch) * distance
+	offset.z = cos(_yaw) * cos(_pitch) * distance
+	offset.y = sin(_pitch) * distance
+
+	# Мгновенно устанавливаем позицию
+	global_position = target_pos + offset
+	look_at(target_pos)
+	print("OrbitCamera: Teleported behind car (yaw=%.2f)" % _yaw)
+
 func _input(event: InputEvent) -> void:
 	if not current:
 		return

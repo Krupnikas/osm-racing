@@ -1,0 +1,462 @@
+[gd_scene load_steps=3 format=3 uid="uid://dxqmenu001"]
+
+[ext_resource type="Script" path="res://ui/standalone_main_menu.gd" id="1_script"]
+[ext_resource type="Texture2D" path="res://ui/assets/zhazhda-speed.png" id="2_bg"]
+
+[node name="StandaloneMainMenu" type="Control"]
+process_mode = 3
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+script = ExtResource("1_script")
+
+[node name="Background" type="TextureRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+texture = ExtResource("2_bg")
+expand_mode = 1
+stretch_mode = 6
+
+[node name="Overlay" type="ColorRect" parent="Background"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0, 0, 0, 0.15)
+
+[node name="VBox" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 7
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -200.0
+offset_top = -400.0
+offset_right = 200.0
+offset_bottom = -50.0
+grow_horizontal = 2
+grow_vertical = 0
+mouse_filter = 2
+
+[node name="Spacer" type="Control" parent="VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+mouse_filter = 2
+
+[node name="StartButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(400, 80)
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_hover_color = Color(1, 1, 0.5, 1)
+theme_override_colors/font_pressed_color = Color(0.8, 0.8, 0.8, 1)
+theme_override_font_sizes/font_size = 42
+text = "▶ СТАРТ"
+
+[node name="RacesButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(400, 70)
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_hover_color = Color(1, 0.5, 0.5, 1)
+theme_override_font_sizes/font_size = 36
+text = "🏁 ГОНКИ"
+
+[node name="ControlsButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(400, 70)
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_hover_color = Color(1, 1, 0.5, 1)
+theme_override_font_sizes/font_size = 36
+text = "⚙ УПРАВЛЕНИЕ"
+
+[node name="SettingsButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(350, 70)
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "Настройки"
+
+[node name="QuitButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(400, 70)
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_hover_color = Color(1, 1, 0.5, 1)
+theme_override_font_sizes/font_size = 36
+text = "✕ ВЫХОД"
+
+[node name="LocationPanel" type="Panel" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -300.0
+offset_top = -250.0
+offset_right = 300.0
+offset_bottom = 250.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="LocationPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 30.0
+offset_top = 30.0
+offset_right = -30.0
+offset_bottom = -30.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Title" type="Label" parent="LocationPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "Выберите локацию"
+horizontal_alignment = 1
+
+[node name="Spacer" type="Control" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 25)
+layout_mode = 2
+
+[node name="CherepovetsButton" type="Button" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Череповец"
+
+[node name="MoscowButton" type="Button" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Москва (Отрадное)"
+
+[node name="TbilisiButton" type="Button" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Тбилиси (Важа-Пшавела)"
+
+[node name="DubaiButton" type="Button" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Дубай (Крик)"
+
+[node name="Spacer2" type="Control" parent="LocationPanel/VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="BackButton" type="Button" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Назад"
+
+[node name="ModesPanel" type="Panel" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -200.0
+offset_top = -150.0
+offset_right = 200.0
+offset_bottom = 150.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="ModesPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 20.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = -20.0
+alignment = 1
+
+[node name="TitleLabel" type="Label" parent="ModesPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+text = "Режим гонки"
+horizontal_alignment = 1
+
+[node name="Spacer1" type="Control" parent="ModesPanel/VBox"]
+custom_minimum_size = Vector2(0, 20)
+layout_mode = 2
+
+[node name="SprintButton" type="Button" parent="ModesPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "Спринт"
+
+[node name="Spacer2" type="Control" parent="ModesPanel/VBox"]
+custom_minimum_size = Vector2(0, 20)
+layout_mode = 2
+
+[node name="BackButton" type="Button" parent="ModesPanel/VBox"]
+custom_minimum_size = Vector2(0, 50)
+layout_mode = 2
+theme_override_font_sizes/font_size = 20
+text = "Назад"
+
+[node name="TracksPanel" type="Panel" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -200.0
+offset_top = -200.0
+offset_right = 200.0
+offset_bottom = 200.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="TracksPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 20.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = -20.0
+alignment = 1
+
+[node name="TitleLabel" type="Label" parent="TracksPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+text = "Выбор трассы"
+horizontal_alignment = 1
+
+[node name="Spacer1" type="Control" parent="TracksPanel/VBox"]
+custom_minimum_size = Vector2(0, 20)
+layout_mode = 2
+
+[node name="TracksContainer" type="VBoxContainer" parent="TracksPanel/VBox"]
+layout_mode = 2
+alignment = 1
+
+[node name="Spacer2" type="Control" parent="TracksPanel/VBox"]
+custom_minimum_size = Vector2(0, 20)
+layout_mode = 2
+
+[node name="BackButton" type="Button" parent="TracksPanel/VBox"]
+custom_minimum_size = Vector2(0, 50)
+layout_mode = 2
+theme_override_font_sizes/font_size = 20
+text = "Назад"
+
+[node name="ControlsPanel" type="Panel" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -350.0
+offset_top = -300.0
+offset_right = 350.0
+offset_bottom = 300.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="ControlsPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 30.0
+offset_top = 30.0
+offset_right = -30.0
+offset_bottom = -30.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Title" type="Label" parent="ControlsPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "Управление"
+horizontal_alignment = 1
+
+[node name="Spacer" type="Control" parent="ControlsPanel/VBox"]
+custom_minimum_size = Vector2(0, 20)
+layout_mode = 2
+
+[node name="Controls" type="Label" parent="ControlsPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "W/S или стрелки - Газ/Тормоз
+A/D или стрелки - Поворот
+Пробел - Ручной тормоз
+
+C - Переключение камеры
+ПКМ + мышь - Вращение камеры
+Колёсико - Зум
+
+N - Ночной режим
+R - Дождь
+G - Неон под машиной
+
+Escape - Меню паузы"
+
+[node name="Spacer2" type="Control" parent="ControlsPanel/VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="BackButton" type="Button" parent="ControlsPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Назад"
+
+[node name="SettingsPanel" type="Panel" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -300.0
+offset_top = -200.0
+offset_right = 300.0
+offset_bottom = 200.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="SettingsPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 30.0
+offset_top = 30.0
+offset_right = -30.0
+offset_bottom = -30.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Title" type="Label" parent="SettingsPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "Настройки"
+horizontal_alignment = 1
+
+[node name="Spacer" type="Control" parent="SettingsPanel/VBox"]
+custom_minimum_size = Vector2(0, 20)
+layout_mode = 2
+
+[node name="Info" type="Label" parent="SettingsPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 20
+theme_override_colors/font_color = Color(0.7, 0.7, 0.7, 1)
+text = "Графические настройки доступны
+во время игры (ESC → Настройки)"
+horizontal_alignment = 1
+
+[node name="Spacer2" type="Control" parent="SettingsPanel/VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="BackButton" type="Button" parent="SettingsPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Назад"
+
+[node name="LoadingPanel" type="Panel" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="LoadingPanel"]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -300.0
+offset_top = -120.0
+offset_right = 300.0
+offset_bottom = 120.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Title" type="Label" parent="LoadingPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 48
+text = "Загрузка..."
+horizontal_alignment = 1
+
+[node name="Spacer" type="Control" parent="LoadingPanel/VBox"]
+custom_minimum_size = Vector2(0, 30)
+layout_mode = 2
+
+[node name="ProgressBar" type="ProgressBar" parent="LoadingPanel/VBox"]
+custom_minimum_size = Vector2(600, 40)
+layout_mode = 2
+value = 0.0
+show_percentage = false
+
+[node name="StatusLabel" type="Label" parent="LoadingPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "Загрузка карты..."
+horizontal_alignment = 1
+
+[node name="Version" type="Label" parent="."]
+layout_mode = 1
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = -30.0
+offset_right = 200.0
+grow_vertical = 0
+theme_override_font_sizes/font_size = 16
+theme_override_colors/font_color = Color(0.5, 0.5, 0.5, 1)
+text = "v0.1 alpha"
+
+[connection signal="pressed" from="VBox/StartButton" to="." method="_on_start_pressed"]
+[connection signal="pressed" from="VBox/RacesButton" to="." method="_on_races_pressed"]
+[connection signal="pressed" from="VBox/ControlsButton" to="." method="_on_controls_pressed"]
+[connection signal="pressed" from="VBox/SettingsButton" to="." method="_on_settings_pressed"]
+[connection signal="pressed" from="VBox/QuitButton" to="." method="_on_quit_pressed"]
+[connection signal="pressed" from="LocationPanel/VBox/CherepovetsButton" to="." method="_on_cherepovets_pressed"]
+[connection signal="pressed" from="LocationPanel/VBox/MoscowButton" to="." method="_on_moscow_pressed"]
+[connection signal="pressed" from="LocationPanel/VBox/TbilisiButton" to="." method="_on_tbilisi_pressed"]
+[connection signal="pressed" from="LocationPanel/VBox/DubaiButton" to="." method="_on_dubai_pressed"]
+[connection signal="pressed" from="LocationPanel/VBox/BackButton" to="." method="_on_location_back_pressed"]
+[connection signal="pressed" from="ModesPanel/VBox/SprintButton" to="." method="_on_sprint_pressed"]
+[connection signal="pressed" from="ModesPanel/VBox/BackButton" to="." method="_on_modes_back_pressed"]
+[connection signal="pressed" from="TracksPanel/VBox/BackButton" to="." method="_on_tracks_back_pressed"]
+[connection signal="pressed" from="ControlsPanel/VBox/BackButton" to="." method="_on_controls_back_pressed"]
+[connection signal="pressed" from="SettingsPanel/VBox/BackButton" to="." method="_on_settings_back_pressed"]
