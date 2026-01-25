@@ -3626,6 +3626,8 @@ func _process_road_queue() -> void:
 
 	while not _road_queue.is_empty() and processed < max_per_frame:
 		var item: Dictionary = _road_queue.pop_front()
+		if not is_instance_valid(item.get("parent")):
+			continue
 		var t0 := Time.get_ticks_usec()
 		_create_road_immediate(item.nodes, item.tags, item.parent, item.elev_data)
 		_record_perf("road_create", Time.get_ticks_usec() - t0)
