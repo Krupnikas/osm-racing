@@ -13,6 +13,7 @@ var is_raining := false
 # Ссылки на сцену
 var _environment: Environment
 var _sun_light: DirectionalLight3D
+var _moon_light: DirectionalLight3D
 var _world_env: WorldEnvironment
 var _original_sky: ProceduralSkyMaterial
 var _day_sky: ShaderMaterial
@@ -32,8 +33,11 @@ var _day_tonemap_exposure := 1.0
 var _day_glow_intensity := 0.3
 
 # Ночные настройки в стиле NFS Underground
-const NIGHT_SUN_ENERGY := 0.08  # Слабый лунный свет
-const NIGHT_SUN_COLOR := Color(0.4, 0.5, 0.7)  # Холодный синий лунный свет
+const NIGHT_SUN_ENERGY := 0.02  # Почти нет солнца ночью
+
+# Лунный свет - иссиня-белый
+const MOON_LIGHT_ENERGY := 0.12
+const MOON_LIGHT_COLOR := Color(0.7, 0.8, 1.0)  # Иссиня-белый холодный свет
 const NIGHT_AMBIENT_COLOR := Color(0.015, 0.02, 0.04)  # Очень тёмный синий
 const NIGHT_AMBIENT_ENERGY := 0.15
 # NFS Underground стиль - туман с оттенком городских огней (оранжево-синий)
@@ -54,6 +58,9 @@ func _ready() -> void:
 
 	# Создаём ночное небо
 	_create_night_sky()
+
+	# Создаём лунный свет
+	_create_moon_light()
 
 	# Создаём систему дождя
 	_create_rain_system()
@@ -185,6 +192,22 @@ void sky() {
 	_day_sky.shader = shader
 
 
+func _create_moon_light() -> void:
+	# Создаём отдельный направленный свет для луны
+	_moon_light = DirectionalLight3D.new()
+	_moon_light.name = "MoonLight"
+	_moon_light.light_color = MOON_LIGHT_COLOR
+	_moon_light.light_energy = 0.0  # Выключен днём
+	_moon_light.shadow_enabled = true
+	_moon_light.directional_shadow_max_distance = 300.0
+
+	# Луна светит под другим углом, чем солнце (противоположная сторона)
+	# Направление совпадает с moon_direction в шейдере: vec3(-0.3, 0.6, 0.4)
+	_moon_light.rotation_degrees = Vector3(-35, 145, 0)
+
+	get_tree().current_scene.add_child(_moon_light)
+
+
 func _create_night_sky() -> void:
 	_night_sky = ShaderMaterial.new()
 
@@ -194,7 +217,7 @@ func _create_night_sky() -> void:
 shader_type sky;
 
 uniform vec3 moon_direction = vec3(-0.3, 0.6, 0.4);
-uniform float moon_size = 0.05;
+uniform float moon_size = 0.08;  // Больше луна
 uniform float star_density = 0.0015;
 
 float hash(vec2 p) {
@@ -219,13 +242,15 @@ void sky() {
 		col += vec3(0.9, 0.95, 1.0) * star * twinkle * brightness;
 	}
 
-	// Moon - холодный белый с голубым ореолом
+	// Moon - иссиня-белый с ярким ореолом
 	vec3 moon_dir = normalize(moon_direction);
 	float moon_dist = distance(dir, moon_dir);
-	float moon = smoothstep(moon_size, moon_size * 0.6, moon_dist);
-	float moon_glow = smoothstep(moon_size * 6.0, moon_size, moon_dist) * 0.3;
-	col += vec3(0.9, 0.95, 1.0) * moon;
-	col += vec3(0.2, 0.25, 0.4) * moon_glow;
+	float moon = smoothstep(moon_size, moon_size * 0.5, moon_dist);
+	float moon_glow = smoothstep(moon_size * 8.0, moon_size, moon_dist) * 0.5;
+	// Иссиня-белый цвет луны
+	col += vec3(0.85, 0.9, 1.0) * moon * 1.5;
+	// Синеватый ореол вокруг луны
+	col += vec3(0.3, 0.4, 0.7) * moon_glow;
 
 	// NFS Underground стиль - СИЛЬНОЕ свечение города на горизонте
 	// Оранжево-жёлтое от натриевых фонарей
@@ -339,10 +364,13 @@ func enable_night_mode() -> void:
 	_transition_tween = create_tween()
 	_transition_tween.set_parallel(true)
 
-	# Dim sun and change color to moonlight
+	# Dim sun
 	if _sun_light:
 		_transition_tween.tween_property(_sun_light, "light_energy", NIGHT_SUN_ENERGY, 1.5)
-		_transition_tween.tween_property(_sun_light, "light_color", NIGHT_SUN_COLOR, 1.5)
+
+	# Turn on moon light
+	if _moon_light:
+		_transition_tween.tween_property(_moon_light, "light_energy", MOON_LIGHT_ENERGY, 1.5)
 
 	# Change ambient and fog - NFS Underground style
 	if _environment:
@@ -392,6 +420,10 @@ func disable_night_mode() -> void:
 	if _sun_light:
 		_transition_tween.tween_property(_sun_light, "light_energy", _day_sun_energy, 1.5)
 		_transition_tween.tween_property(_sun_light, "light_color", _day_sun_color, 1.5)
+
+	# Turn off moon light
+	if _moon_light:
+		_transition_tween.tween_property(_moon_light, "light_energy", 0.0, 1.5)
 
 	# Restore ambient and fog
 	if _environment:
