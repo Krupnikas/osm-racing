@@ -1,10 +1,10 @@
 extends Camera3D
 
 @export var target: NodePath
-@export var distance := 10.0
+@export var distance := 6.0  # Ближе к машине (было 10.0)
 @export var min_distance := 3.0
 @export var max_distance := 30.0
-@export var height := 5.0
+@export var height := 3.0  # Ниже (было 5.0)
 @export var smooth_speed := 5.0
 @export var mouse_sensitivity := 0.003
 @export var zoom_speed := 1.0

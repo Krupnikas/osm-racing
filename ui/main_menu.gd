@@ -317,9 +317,6 @@ func _spawn_car_on_road() -> void:
 	var final_yaw := 0.0
 	if road_dir.length_squared() > 0.01:
 		var yaw := atan2(road_dir.x, road_dir.z)
-		# Для Череповца разворачиваем на 180 градусов
-		if _selected_location == "Череповец":
-			yaw += PI
 		_car.rotation = Vector3(0, yaw, 0)
 		final_yaw = yaw
 

@@ -53,8 +53,6 @@ func _ready() -> void:
 	print("Speedometer: setup complete")
 
 func _draw() -> void:
-	print("Speedometer: _draw() called")
-
 	# Отрисовываем главный спидометр
 	_draw_main_gauge()
 
