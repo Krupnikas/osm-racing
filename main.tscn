@@ -86,7 +86,7 @@ car_path = NodePath("../Car")
 [node name="Car" parent="." groups=["car", "player"] instance=ExtResource("2_car")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
 
-[node name="VehicleController" type="Node" parent="Car" node_paths=PackedStringArray("vehicle_node")]
+[node name="VehicleController" type="Node3D" parent="Car" node_paths=PackedStringArray("vehicle_node")]
 script = ExtResource("2_controller")
 vehicle_node = NodePath("..")
 
