@@ -4,6 +4,12 @@ extends Node3D
 ## Скрывает колёса из модели, так как используются VehicleWheel3D
 ## Изменяет цвет кузова
 ## Переключает материал стёкол день/ночь
+## Управляет габаритами (emission + OmniLight)
+##
+## ВАЖНО: Модель Nexia имеет transform с инвертированной осью Z (scale -10)
+## Поэтому в координатах Vehicle:
+## - Передняя часть (капот, фары) находится в ОТРИЦАТЕЛЬНОМ Z
+## - Задняя часть (багажник, габариты) находится в ПОЛОЖИТЕЛЬНОМ Z
 
 # Цвет кузова (бордовый - тёмно-вишнёвый)
 var body_color := Color(0.5, 0.05, 0.1, 1.0)  # Бордовый
@@ -13,13 +19,24 @@ var glass_color_day := Color(0.12, 0.14, 0.2, 0.5)  # Полупрозрачна
 var glass_color_night := Color(0.05, 0.07, 0.12, 1.0)  # Глухая тонировка ночью
 
 var _glass_materials: Array[StandardMaterial3D] = []
+var _taillight_materials: Array[StandardMaterial3D] = []
+var _frontlight_materials: Array[StandardMaterial3D] = []
+var _brake_lights: Array[SpotLight3D] = []
 var _is_night := false
+var _vehicle: Node  # Ссылка на Vehicle для проверки торможения
 
 func _ready() -> void:
 	await get_tree().process_frame
 
+	# Находим Vehicle (родитель)
+	_vehicle = get_parent()
+
 	# Меняем цвет кузова
 	_change_body_color()
+
+	# Настраиваем габариты
+	_setup_taillights()
+	_setup_frontlights()
 
 	print("Nexia model setup complete")
 
@@ -31,6 +48,9 @@ func _process(_delta: float) -> void:
 		if current_night != _is_night:
 			_is_night = current_night
 			_update_glass_materials()
+
+	# Обновляем emission габаритов при торможении
+	_update_taillight_brightness()
 
 func _update_glass_materials() -> void:
 	"""Обновляет материалы стёкол в зависимости от времени суток"""
@@ -167,3 +187,120 @@ func _change_body_color() -> void:
 						print("  -> Changed glass to tinted (transparent)")
 					else:
 						print("  -> Changed body color to cherry")
+
+
+func _setup_taillights() -> void:
+	"""Находит материалы задних габаритов (redglass) и создаёт стоп-сигналы"""
+	var meshes := _find_all_meshes(self)
+
+	for mesh in meshes:
+		if not (mesh is MeshInstance3D):
+			continue
+
+		var mesh_name: String = mesh.name.to_lower()
+
+		# Ищем красное стекло задних габаритов (body_redglass_0)
+		if "redglass" in mesh_name:
+			print("Nexia: Found taillight mesh: ", mesh.name)
+			_setup_taillight_material(mesh)
+
+	# Создаём SpotLight3D для стоп-сигналов (направлены назад)
+	# Z положительный - сзади машины (ось инвертирована)
+	var brake_positions := [
+		Vector3(-0.5, 0.9, 1.95),  # Левый
+		Vector3(0.5, 0.9, 1.95),   # Правый
+	]
+
+	for i in range(brake_positions.size()):
+		var light := SpotLight3D.new()
+		light.name = "BrakeLight_%d" % i
+		light.position = brake_positions[i]
+		light.rotation_degrees = Vector3(0, 180, 0)  # Направлен назад (учитывая инверсию модели)
+		light.spot_range = 1.5
+		light.spot_angle = 150.0
+		light.light_energy = 0.3  # Тусклый свет для габаритов
+		light.light_color = Color(1.0, 0.0, 0.0)
+		light.visible = true
+
+		get_parent().add_child(light)
+		_brake_lights.append(light)
+		print("  -> Created brake SpotLight at ", brake_positions[i])
+
+
+func _setup_taillight_material(mesh: MeshInstance3D) -> void:
+	"""Настраивает материал для габаритов"""
+	var surface_count: int = mesh.get_surface_override_material_count()
+	if surface_count == 0 and mesh.mesh:
+		surface_count = mesh.mesh.get_surface_count()
+
+	for i in range(surface_count):
+		var material: Material = mesh.get_surface_override_material(i)
+		if not material and mesh.mesh:
+			var original_mat: Material = mesh.mesh.surface_get_material(i)
+			if original_mat:
+				material = original_mat.duplicate()
+				mesh.set_surface_override_material(i, material)
+
+		if material is StandardMaterial3D:
+			# Габариты всегда светятся, но тускло
+			material.emission_enabled = true
+			material.emission = Color(1.0, 0.1, 0.1)  # Красный
+			material.emission_energy_multiplier = 0.5  # Тусклые габариты
+			_taillight_materials.append(material)
+			print("  -> Added taillight material")
+
+
+func _setup_frontlights() -> void:
+	"""Находит материалы передних габаритов (orangeglass) и включает emission"""
+	var meshes := _find_all_meshes(self)
+
+	for mesh in meshes:
+		if not (mesh is MeshInstance3D):
+			continue
+
+		var mesh_name: String = mesh.name.to_lower()
+
+		# Ищем оранжевое стекло передних габаритов (body_orangeglass_0)
+		if "orangeglass" in mesh_name:
+			print("Nexia: Found front marker mesh: ", mesh.name)
+			_setup_frontlight_material(mesh)
+
+
+func _setup_frontlight_material(mesh: MeshInstance3D) -> void:
+	"""Настраивает материал для передних габаритов"""
+	var surface_count: int = mesh.get_surface_override_material_count()
+	if surface_count == 0 and mesh.mesh:
+		surface_count = mesh.mesh.get_surface_count()
+
+	for i in range(surface_count):
+		var material: Material = mesh.get_surface_override_material(i)
+		if not material and mesh.mesh:
+			var original_mat: Material = mesh.mesh.surface_get_material(i)
+			if original_mat:
+				material = original_mat.duplicate()
+				mesh.set_surface_override_material(i, material)
+
+		if material is StandardMaterial3D:
+			# Передние габариты - жёлто-оранжевые, всегда тускло светятся
+			material.emission_enabled = true
+			material.emission = Color(1.0, 0.6, 0.1)  # Жёлто-оранжевый
+			material.emission_energy_multiplier = 0.5
+			_frontlight_materials.append(material)
+			print("  -> Added front marker material")
+
+
+func _update_taillight_brightness() -> void:
+	"""Обновляет яркость габаритов и включает стоп-сигналы при торможении"""
+	var braking := false
+	if _vehicle and "brake_input" in _vehicle:
+		braking = _vehicle.brake_input > 0.1
+
+	# Emission: тусклый для габаритов, яркий при торможении
+	for material in _taillight_materials:
+		if is_instance_valid(material):
+			material.emission_energy_multiplier = 3.0 if braking else 0.5
+
+	# SpotLight: тусклый для габаритов, яркий при торможении
+	for light in _brake_lights:
+		if is_instance_valid(light):
+			light.light_energy = 2.0 if braking else 0.3
