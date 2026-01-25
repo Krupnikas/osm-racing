@@ -3442,9 +3442,10 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 	if not result.valid:
 		return
 
-	var parent: Node3D = result.parent
-	if not is_instance_valid(parent):
+	# Проверяем валидность parent до присваивания
+	if not is_instance_valid(result.get("parent")):
 		return
+	var parent: Node3D = result.parent
 
 	var texture_type: String = result.texture_type
 	var building_height: float = result.building_height
