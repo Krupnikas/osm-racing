@@ -136,18 +136,18 @@ theme_override_constants/shadow_offset_x = 1
 theme_override_constants/shadow_offset_y = 1
 theme_override_font_sizes/font_size = 18
 script = ExtResource("5_coords")
-car_path = NodePath("../../VehicleController")
+car_path = NodePath("../../Car")
 start_lat = 59.149886
 start_lon = 37.94937
 
 [node name="MainMenu" parent="UI" instance=ExtResource("9_menu")]
 terrain_generator_path = NodePath("../../OSMTerrain")
-car_path = NodePath("../../VehicleController")
+car_path = NodePath("../../Car")
 hud_path = NodePath("../HUD")
 camera_path = NodePath("../../CameraManager/FollowCamera")
 
 [node name="HUD" parent="UI" instance=ExtResource("10_hud")]
-car_path = NodePath("../../VehicleController")
+car_path = NodePath("../../Car")
 
 [node name="NightModeManager" type="Node" parent="."]
 script = ExtResource("12_night")
