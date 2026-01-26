@@ -5,9 +5,9 @@ extends Node
 
 @export var test_duration: float = 60.0  # Увеличено до 1 минуты для better statistics
 @export var test_speed: float = 20.0  # m/s (~72 km/h)
-@export var enable_night_mode: bool = true
+@export var enable_night_mode: bool = false
 @export var test_location: Vector2 = Vector2(59.1167, 37.9000)  # Cherepovets coordinates
-@export var auto_quit_after_test: bool = false
+@export var auto_quit_after_test: bool = true
 
 var logger: PerformanceLogger
 var car: Node3D
@@ -19,7 +19,10 @@ var test_time: float = 0.0
 var output_filename: String = ""
 
 func _ready() -> void:
+	# Fix random seed for reproducible tests
+	seed(12345)
 	print("\n========== Starting Performance Test ==========")
+	print("Random seed: 12345 (fixed for reproducibility)")
 	print("Location: Cherepovets (%.4f, %.4f)" % [test_location.x, test_location.y])
 	print("Duration: %.1f seconds" % test_duration)
 	print("Night mode: %s" % ("ON" if enable_night_mode else "OFF"))
@@ -138,6 +141,15 @@ func _on_terrain_loaded() -> void:
 	_position_car_on_road()
 
 	await get_tree().create_timer(2.0).timeout
+
+	# Re-enable night mode before test (in case it got disabled)
+	if enable_night_mode and night_mode_manager:
+		if night_mode_manager.has_method("enable_night_mode"):
+			night_mode_manager.enable_night_mode()
+		# Disable input processing to prevent KEY_N from toggling night mode
+		night_mode_manager.set_process_input(false)
+		print("[PerformanceTest] Night mode re-enabled and locked (input disabled)")
+
 	_start_test()
 
 # Позиционирует машину на ближайшей дороге, в центре полосы, по направлению дороги

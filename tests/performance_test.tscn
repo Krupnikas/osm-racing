@@ -56,11 +56,11 @@ albedo_color = Color(0.4, 0.5, 0.4, 1)
 
 [node name="PerformanceTest" type="Node3D"]
 script = ExtResource("test_script")
-test_duration = 30.0
+test_duration = 60.0
 test_speed = 20.0
-enable_night_mode = true
+enable_night_mode = false
 test_location = Vector2(59.1167, 37.9)
-auto_quit_after_test = false
+auto_quit_after_test = true
 
 [node name="StaticGround" type="StaticBody3D" parent="." groups=["Grass"]]
 
