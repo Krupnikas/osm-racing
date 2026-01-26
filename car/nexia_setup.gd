@@ -23,8 +23,22 @@ var _taillight_materials: Array[StandardMaterial3D] = []
 var _frontlight_materials: Array[StandardMaterial3D] = []
 var _brake_lights: Array[SpotLight3D] = []
 var _headlights: Array[SpotLight3D] = []
+var _underglow_lights: Array[SpotLight3D] = []
+var _underglow_strips: Array[MeshInstance3D] = []
+var _underglow_material: StandardMaterial3D
+var _underglow_enabled := false
+var _underglow_color_index := 0
 var _is_night := false
 var _vehicle: Node  # Ссылка на Vehicle для проверки торможения
+
+# Цвета неона
+const UNDERGLOW_COLORS := [
+	Color(0.0, 1.0, 0.9),   # Cyan
+	Color(0.8, 0.0, 1.0),   # Purple
+	Color(1.0, 0.0, 0.5),   # Pink
+	Color(0.0, 1.0, 0.3),   # Green
+	Color(1.0, 0.5, 0.0),   # Orange
+]
 
 func _ready() -> void:
 	await get_tree().process_frame
@@ -39,6 +53,7 @@ func _ready() -> void:
 	_setup_taillights()
 	_setup_frontlights()
 	_setup_headlights()
+	_setup_underglow()
 
 	print("Nexia model setup complete")
 
@@ -340,3 +355,124 @@ func _update_headlights() -> void:
 	for light in _headlights:
 		if is_instance_valid(light):
 			light.visible = _is_night
+
+
+func _setup_underglow() -> void:
+	"""Создаёт неоновую подсветку под машиной"""
+	var color := UNDERGLOW_COLORS[0]
+
+	# Материал для светящихся полосок
+	_underglow_material = StandardMaterial3D.new()
+	_underglow_material.albedo_color = color
+	_underglow_material.emission_enabled = true
+	_underglow_material.emission = color
+	_underglow_material.emission_energy_multiplier = 3.0
+
+	# 5 SpotLight3D с каждой стороны (между колёсами, короче в 2 раза)
+	var left_positions: Array[Vector3] = []
+	var right_positions: Array[Vector3] = []
+	for i in range(5):
+		var z: float = 0.75 - (i * 0.375)  # От 0.75 до -0.75
+		left_positions.append(Vector3(-0.65, 0.37, z))
+		right_positions.append(Vector3(0.65, 0.37, z))
+
+	# 3 под задним бампером
+	var rear_positions: Array[Vector3] = []
+	for i in range(3):
+		var x: float = -0.4 + (i * 0.4)  # От -0.4 до 0.4
+		rear_positions.append(Vector3(x, 0.37, 1.6))
+
+	# 3 под передним бампером (ниже на 5 см)
+	var front_positions: Array[Vector3] = []
+	for i in range(3):
+		var x: float = -0.4 + (i * 0.4)  # От -0.4 до 0.4
+		front_positions.append(Vector3(x, 0.32, -1.6))
+
+	var all_positions: Array[Vector3] = []
+	all_positions.append_array(left_positions)
+	all_positions.append_array(right_positions)
+	all_positions.append_array(rear_positions)
+
+	# Боковые источники (угол 60)
+	var side_count: int = left_positions.size() + right_positions.size()
+	for i in range(side_count):
+		var pos: Vector3
+		if i < left_positions.size():
+			pos = left_positions[i]
+		else:
+			pos = right_positions[i - left_positions.size()]
+		var light := SpotLight3D.new()
+		light.name = "Underglow_%d" % i
+		light.position = pos
+		light.rotation_degrees = Vector3(-90, 0, 0)  # Светит вниз (-Y)
+		light.spot_range = 1.0
+		light.spot_angle = 60.0
+		light.light_energy = 0.8
+		light.light_color = color
+		light.shadow_enabled = true
+		light.visible = false
+		get_parent().add_child(light)
+		_underglow_lights.append(light)
+
+	# Задние источники (угол 70)
+	for i in range(rear_positions.size()):
+		var light := SpotLight3D.new()
+		light.name = "UnderglowRear_%d" % i
+		light.position = rear_positions[i]
+		light.rotation_degrees = Vector3(-90, 0, 0)  # Светит вниз (-Y)
+		light.spot_range = 1.0
+		light.spot_angle = 70.0
+		light.light_energy = 0.8
+		light.light_color = color
+		light.shadow_enabled = true
+		light.visible = false
+		get_parent().add_child(light)
+		_underglow_lights.append(light)
+
+	# Передние источники (угол 90, ниже на 5 см)
+	for i in range(front_positions.size()):
+		var light := SpotLight3D.new()
+		light.name = "UnderglowFront_%d" % i
+		light.position = front_positions[i]
+		light.rotation_degrees = Vector3(-90, 0, 0)  # Светит вниз (-Y)
+		light.spot_range = 1.0
+		light.spot_angle = 90.0
+		light.light_energy = 0.8
+		light.light_color = color
+		light.shadow_enabled = true
+		light.visible = false
+		get_parent().add_child(light)
+		_underglow_lights.append(light)
+
+	print("  -> Created underglow with %d lights" % _underglow_lights.size())
+
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_G:
+			_toggle_underglow()
+
+
+func _toggle_underglow() -> void:
+	"""Переключает неон вкл/выкл, при включении меняет цвет"""
+	_underglow_enabled = not _underglow_enabled
+
+	# При включении - следующий цвет
+	if _underglow_enabled:
+		_underglow_color_index = (_underglow_color_index + 1) % UNDERGLOW_COLORS.size()
+		var new_color: Color = UNDERGLOW_COLORS[_underglow_color_index]
+
+		for light in _underglow_lights:
+			if is_instance_valid(light):
+				light.light_color = new_color
+
+		if _underglow_material:
+			_underglow_material.albedo_color = new_color
+			_underglow_material.emission = new_color
+
+	# Включаем/выключаем
+	for light in _underglow_lights:
+		if is_instance_valid(light):
+			light.visible = _underglow_enabled
+
+	print("Underglow: ", "ON (color %d)" % _underglow_color_index if _underglow_enabled else "OFF")
