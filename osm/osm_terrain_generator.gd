@@ -64,6 +64,7 @@ var _initial_loading := false  # Флаг начальной загрузки
 var _initial_chunks_needed: Array[String] = []  # Чанки нужные для старта
 var _initial_chunks_loaded: int = 0  # Количество загруженных начальных чанков
 var _loading_paused := true  # Загрузка на паузе до команды
+var _load_generation := 0  # Инкрементируется при reset для игнорирования старых callback'ов
 var _entrance_nodes: Array = []  # Входы в здания/заведения из OSM
 var _poi_nodes: Array = []  # Точечные заведения (shop/amenity как node)
 var _parking_polygons: Array[PackedVector2Array] = []  # Полигоны парковок для исключения фонарей
@@ -339,7 +340,17 @@ func _process(delta: float) -> void:
 
 # Начать загрузку карты
 func start_loading() -> void:
-	print("OSM: Starting initial loading...")
+	print("OSM: Starting initial loading... (generation %d)" % _load_generation)
+	print("OSM: State before start: _loaded_chunks=%d, _loading_chunks=%d" % [_loaded_chunks.size(), _loading_chunks.size()])
+
+	# ПРИНУДИТЕЛЬНАЯ очистка на случай если reset_terrain не очистил
+	if _loaded_chunks.size() > 0:
+		print("OSM: WARNING - _loaded_chunks not empty, clearing...")
+		_loaded_chunks.clear()
+	if _loading_chunks.size() > 0:
+		print("OSM: WARNING - _loading_chunks not empty, clearing...")
+		_loading_chunks.clear()
+
 	_loading_paused = false
 	_initial_loading = true
 	_initial_chunks_loaded = 0
@@ -392,6 +403,12 @@ func start_loading() -> void:
 				print("OSM: Chunk %s already loading, skipping" % chunk_key)
 
 	print("OSM: Started loading %d chunks (total needed: %d, already loaded: %d)" % [chunks_to_load, _initial_chunks_needed.size(), _initial_chunks_needed.size() - chunks_to_load])
+
+	# Если нет чанков для загрузки - сразу завершаем
+	if chunks_to_load == 0:
+		print("OSM: No chunks to load, completing immediately")
+		_initial_loading = false
+		initial_load_complete.emit()
 
 # Проверяем завершение начальной загрузки
 func _check_initial_load_complete() -> void:
@@ -852,8 +869,9 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 	# Создаём отдельный загрузчик для этого чанка
 	var loader := OSMLoaderScript.new()
 	add_child(loader)
-	loader.data_loaded.connect(_on_chunk_data_loaded.bind(chunk_key, loader))
-	loader.load_failed.connect(_on_chunk_load_failed.bind(chunk_key, loader))
+	var gen := _load_generation  # Захватываем текущую генерацию
+	loader.data_loaded.connect(_on_chunk_data_loaded.bind(chunk_key, loader, gen))
+	loader.load_failed.connect(_on_chunk_load_failed.bind(chunk_key, loader, gen))
 	loader.load_area(chunk_lat, chunk_lon, chunk_size / 2 + 100)  # +100м overlap для зданий на границах
 
 func _load_chunk_at_position(pos: Vector3) -> void:
@@ -916,6 +934,9 @@ func _clear_chunk_objects_positions(chunk_key: String) -> void:
 # Сбрасывает все загруженные чанки (для смены локации)
 func reset_terrain() -> void:
 	print("OSM: Resetting terrain...")
+	# Инкрементируем generation чтобы игнорировать callback'и от старых загрузок
+	_load_generation += 1
+	print("OSM: Load generation incremented to %d" % _load_generation)
 	# Выгружаем все чанки
 	var chunks_to_unload: Array[String] = []
 	for chunk_key in _loaded_chunks:
@@ -971,7 +992,13 @@ func reset_terrain() -> void:
 func _on_osm_load_failed(error: String) -> void:
 	push_error("OSM load failed: " + error)
 
-func _on_chunk_load_failed(error: String, chunk_key: String, loader: Node) -> void:
+func _on_chunk_load_failed(error: String, chunk_key: String, loader: Node, gen: int) -> void:
+	# Игнорируем callback если это от старой загрузки
+	if gen != _load_generation:
+		print("OSM: Ignoring stale failed chunk %s (gen %d != %d)" % [chunk_key, gen, _load_generation])
+		loader.queue_free()
+		return
+
 	push_error("OSM chunk %s load failed: %s" % [chunk_key, error])
 	_loading_chunks.erase(chunk_key)
 	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
@@ -1042,7 +1069,13 @@ func _on_osm_data_loaded(osm_data: Dictionary) -> void:
 	# Запускаем генерацию асинхронно (не блокируя callback)
 	_generate_terrain(osm_data, null)
 
-func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node) -> void:
+func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node, gen: int) -> void:
+	# Игнорируем callback если это от старой загрузки (после reset_terrain)
+	if gen != _load_generation:
+		print("OSM: Ignoring stale chunk %s (gen %d != %d)" % [chunk_key, gen, _load_generation])
+		loader.queue_free()
+		return
+
 	print("OSM: Chunk %s data loaded" % chunk_key)
 	_loading_chunks.erase(chunk_key)
 	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
@@ -1058,12 +1091,17 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 		_create_terrain_mesh(chunk_key, chunk_node)
 
 	# Генерируем объекты асинхронно (с frame budgeting)
-	_generate_chunk_async(osm_data, chunk_node, chunk_key, loader)
+	_generate_chunk_async(osm_data, chunk_node, chunk_key, loader, gen)
 
 # Асинхронная генерация чанка с frame budgeting
-func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: String, loader: Node) -> void:
+func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: String, loader: Node, gen: int) -> void:
 	await _generate_terrain(osm_data, chunk_node, chunk_key)
 	loader.queue_free()
+
+	# После await проверяем что это не устаревшая загрузка
+	if gen != _load_generation:
+		print("OSM: Ignoring stale chunk generation %s (gen %d != %d)" % [chunk_key, gen, _load_generation])
+		return
 
 	# Генерируем растительность на пустых участках чанка (временно отключено)
 	# _queue_chunk_vegetation(chunk_key, chunk_node)
@@ -4043,6 +4081,11 @@ func _process_terrain_objects_queue() -> void:
 
 	while not _terrain_objects_queue.is_empty() and processed < max_per_frame:
 		var item: Dictionary = _terrain_objects_queue.pop_front()
+
+		# Проверяем что parent ещё существует
+		if not is_instance_valid(item.get("parent")):
+			continue
+
 		var obj_type: String = item.get("type", "")
 		var t0 := Time.get_ticks_usec()
 
@@ -4073,6 +4116,12 @@ func _process_infrastructure_queue() -> void:
 
 	var item: Dictionary = _infrastructure_queue.pop_front()
 	var item_type: String = item.get("type", "")
+
+	# Проверяем что parent ещё существует (мог быть удалён при reset_terrain)
+	var parent = item.get("parent")
+	if parent == null or not is_instance_valid(parent):
+		return
+
 	var t0 := Time.get_ticks_usec()
 
 	match item_type:
@@ -4513,6 +4562,40 @@ func _latlon_to_local(lat: float, lon: float) -> Vector2:
 	var dx := (lon - start_lon) * 111000.0 * cos(deg_to_rad(start_lat))
 	var dz := (lat - start_lat) * 111000.0
 	return Vector2(dx, -dz)  # Инвертируем Z для корректной ориентации карты
+
+
+## Предзагрузка чанков вдоль маршрута гонки
+## waypoints: Array[Vector2] - массив точек (lat, lon)
+func preload_route_chunks(waypoints: Array) -> void:
+	if waypoints.is_empty():
+		return
+
+	print("OSMTerrain: Preloading chunks for %d waypoints" % waypoints.size())
+
+	var chunks_to_load: Array[String] = []
+
+	for wp in waypoints:
+		# wp - это Vector2(lat, lon)
+		var local_pos := _latlon_to_local(wp.x, wp.y)
+		var chunk_x := int(floor(local_pos.x / chunk_size))
+		var chunk_z := int(floor(local_pos.y / chunk_size))
+
+		# Загружаем также соседние чанки для плавности
+		for dx in range(-1, 2):
+			for dz in range(-1, 2):
+				var key := "%d,%d" % [chunk_x + dx, chunk_z + dz]
+				if key not in chunks_to_load and key not in _loaded_chunks and key not in _loading_chunks:
+					chunks_to_load.append(key)
+
+	print("OSMTerrain: Will load %d chunks along route" % chunks_to_load.size())
+
+	# Запускаем загрузку чанков
+	for key in chunks_to_load:
+		var parts := key.split(",")
+		var cx := int(parts[0])
+		var cz := int(parts[1])
+		_load_chunk(cx, cz)
+
 
 # Расчёт площади полигона (формула Шолейса)
 func _calculate_polygon_area(points: PackedVector2Array) -> float:

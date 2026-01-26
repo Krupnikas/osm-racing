@@ -1,6 +1,10 @@
-[gd_scene load_steps=17 format=3 uid="uid://bmain123"]
+[gd_scene load_steps=21 format=3 uid="uid://bmain123"]
 
 [ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_car"]
+[ext_resource type="Script" path="res://race/race_manager.gd" id="20_race_mgr"]
+[ext_resource type="PackedScene" uid="uid://race_hud_001" path="res://ui/race_hud.tscn" id="21_race_hud"]
+[ext_resource type="PackedScene" uid="uid://race_menu_001" path="res://ui/race_menu.tscn" id="22_race_menu"]
+[ext_resource type="PackedScene" uid="uid://cpausemenu001" path="res://ui/pause_menu.tscn" id="23_pause_menu"]
 [ext_resource type="Script" path="res://addons/gevp/scripts/vehicle_controllergd.gd" id="2_controller"]
 [ext_resource type="Script" path="res://camera/follow_camera.gd" id="3_camera"]
 [ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="4_osm"]
@@ -155,6 +159,20 @@ camera_path = NodePath("../../CameraManager/FollowCamera")
 
 [node name="HUD" parent="UI" instance=ExtResource("10_hud")]
 car_path = NodePath("../../Car")
+
+[node name="RaceHUD" parent="UI" instance=ExtResource("21_race_hud")]
+race_manager_path = NodePath("../../RaceManager")
+
+[node name="RaceMenu" parent="UI" instance=ExtResource("22_race_menu")]
+race_manager_path = NodePath("../../RaceManager")
+
+[node name="PauseMenu" parent="UI" instance=ExtResource("23_pause_menu")]
+
+[node name="RaceManager" type="Node" parent="."]
+script = ExtResource("20_race_mgr")
+terrain_generator_path = NodePath("../OSMTerrain")
+car_path = NodePath("../Car")
+camera_path = NodePath("../CameraManager/FollowCamera")
 
 [node name="NightModeManager" type="Node" parent="."]
 script = ExtResource("12_night")

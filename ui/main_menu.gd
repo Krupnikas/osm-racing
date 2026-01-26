@@ -30,6 +30,8 @@ var _is_loading := false
 var _game_started := false  # Игра уже была запущена
 var _is_apply_settings_reload := false  # Флаг перезагрузки через Apply Settings
 var _selected_location := "Череповец"
+var _pending_race_track = null  # Трек для автозапуска после перезагрузки сцены
+var _standalone_mode := false  # Загружены из standalone меню (ESC обрабатывает PauseMenu)
 
 func _ready() -> void:
 	# Показываем курсор в меню
@@ -89,7 +91,34 @@ func _ready() -> void:
 			autostart_idx = i
 			break
 
-	if autostart_idx >= 0:
+	# Проверяем загрузку свободной езды из standalone меню
+	if RaceState.free_roam_location != "":
+		print("MainMenu: Free roam from standalone menu: ", RaceState.free_roam_location)
+		_standalone_mode = true  # ESC будет обрабатывать PauseMenu
+		_selected_location = RaceState.free_roam_location
+		# Устанавливаем координаты в terrain_generator
+		if _terrain_generator:
+			_terrain_generator.start_lat = RaceState.free_roam_lat
+			_terrain_generator.start_lon = RaceState.free_roam_lon
+		# Очищаем состояние
+		RaceState.free_roam_location = ""
+		RaceState.free_roam_lat = 0.0
+		RaceState.free_roam_lon = 0.0
+		# ВАЖНО: Оставляем MainMenu видимым чтобы показать LoadingPanel!
+		# Скрываем только кнопки меню
+		$VBox.visible = false
+		await get_tree().process_frame
+		_start_loading()
+	# Проверяем есть ли отложенный трек для гонки (после перезагрузки сцены через "Заново")
+	elif RaceState.pending_track != null:
+		print("MainMenu: Pending race track found: ", RaceState.pending_track.track_name)
+		_pending_race_track = RaceState.pending_track
+		RaceState.pending_track = null
+		# Используем координаты старта трека для загрузки
+		_selected_location = "Череповец"  # Fallback, координаты будут из трека
+		await get_tree().process_frame
+		_start_loading_for_race()
+	elif autostart_idx >= 0:
 		print("MainMenu: Autostart requested!")
 		var location_idx := 0
 		if autostart_idx + 1 < args.size():
@@ -185,6 +214,42 @@ func _start_loading() -> void:
 		# Если нет генератора - сразу показываем игру
 		_start_game()
 
+func _start_loading_for_race() -> void:
+	"""Загрузка для рестарта гонки - использует координаты трека"""
+	print("MainMenu: _start_loading_for_race() called")
+	_is_loading = true
+
+	# Скрываем меню полностью
+	$VBox.visible = false
+	$LocationPanel.visible = false
+	$LoadingPanel.visible = true
+	$LoadingPanel/VBox/ProgressBar.value = 0
+	$LoadingPanel/VBox/StatusLabel.text = "Перезагрузка трассы..."
+
+	# Сбрасываем машину
+	if _car_rigidbody and _car_rigidbody is RigidBody3D:
+		_car_rigidbody.linear_velocity = Vector3.ZERO
+		_car_rigidbody.angular_velocity = Vector3.ZERO
+		_car_rigidbody.freeze = true
+		_car.global_position = Vector3(0, 2, 0)
+		_car.rotation = Vector3.ZERO
+
+	# Сбрасываем камеру
+	if _camera and _camera.has_method("reset_camera"):
+		_camera.reset_camera()
+
+	# Запускаем загрузку с координат старта трека
+	if _terrain_generator and _pending_race_track:
+		print("MainMenu: Loading terrain for race track...")
+		_terrain_generator.reset_terrain()
+		_terrain_generator.start_lat = _pending_race_track.start_lat
+		_terrain_generator.start_lon = _pending_race_track.start_lon
+		_terrain_generator.start_loading()
+	else:
+		print("ERROR: No terrain generator or pending track!")
+		_start_game()
+
+
 func _on_load_started() -> void:
 	print("MainMenu: _on_load_started() called!")
 	$LoadingPanel/VBox/ProgressBar.value = 0
@@ -252,6 +317,18 @@ func _start_game() -> void:
 	visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	start_game.emit()
+
+	# Если есть отложенный трек для гонки - запускаем гонку автоматически
+	if _pending_race_track:
+		print("MainMenu: Auto-starting race on track: ", _pending_race_track.track_name)
+		var race_manager = get_tree().current_scene.find_child("RaceManager", true, false)
+		if race_manager:
+			# Небольшая задержка чтобы всё инициализировалось
+			await get_tree().process_frame
+			race_manager.start_race(_pending_race_track)
+		else:
+			print("ERROR: RaceManager not found for auto-start!")
+		_pending_race_track = null
 
 
 func _spawn_car_on_road() -> void:
@@ -363,6 +440,18 @@ func _show_world() -> void:
 				_car.rotation = Vector3.ZERO
 			_car_rigidbody.freeze = false
 
+func _on_races_pressed() -> void:
+	"""Открыть меню гонок"""
+	$VBox.visible = false
+	# Ищем RaceMenu в сцене
+	var race_menu := get_tree().current_scene.find_child("RaceMenu", true, false)
+	if race_menu:
+		race_menu.show_menu()
+	else:
+		print("WARNING: RaceMenu not found!")
+		$VBox.visible = true
+
+
 func _on_controls_pressed() -> void:
 	$ControlsPanel.visible = not $ControlsPanel.visible
 
@@ -374,6 +463,10 @@ func _on_back_pressed() -> void:
 	$ControlsPanel.visible = false
 
 func _input(event: InputEvent) -> void:
+	# В standalone режиме ESC обрабатывает PauseMenu
+	if _standalone_mode:
+		return
+
 	# Escape открывает/закрывает меню (но не во время загрузки)
 	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
 		if _is_loading:

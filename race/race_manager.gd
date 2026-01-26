@@ -85,7 +85,7 @@ func start_race(track) -> void:
 	# ВАЖНО: Перемещаем машину на старт ДО загрузки terrain
 	# Это нужно чтобы terrain_generator загрузил чанки вокруг старта, а не финиша
 	var start_pos := _latlon_to_local(track.start_lat, track.start_lon)
-	start_pos.y = 0.5
+	start_pos.y = 1.0
 	if _car:
 		_car.global_position = start_pos
 		_car.visible = false
@@ -139,9 +139,9 @@ func _on_race_ready() -> void:
 
 	# Проверяем что машина на правильной высоте (защита от багов)
 	if _car and _car.global_position.y > 10.0:
-		print("RaceManager: WARNING - Car at height %.1f, correcting to 0.5" % _car.global_position.y)
+		print("RaceManager: WARNING - Car at height %.1f, correcting to 1.5" % _car.global_position.y)
 		var pos := _car.global_position
-		pos.y = 0.5
+		pos.y = 1.0
 		_car.global_position = pos
 
 	# Создаём финишную линию
@@ -227,7 +227,7 @@ func _spawn_car_at_start() -> void:
 				print("RaceManager: Found road waypoint near start at Y=%.1f" % nearest_wp.position.y)
 
 	# Поднимаем машину над дорогой
-	start_pos.y = 0.5
+	start_pos.y = 1.0
 
 	# Сбрасываем физику машины перед спавном
 	if _car_rigidbody:
