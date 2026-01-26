@@ -28,6 +28,31 @@ func reset_camera() -> void:
 	_yaw = 0.0
 	_pitch = 0.25
 
+
+func teleport_to_target() -> void:
+	"""Мгновенно телепортировать камеру за машину"""
+	if not _target_node:
+		return
+
+	# Устанавливаем yaw равным повороту машины (камера сзади)
+	_yaw = _target_node.rotation.y
+
+	var target_pos := _target_node.global_position + Vector3(0, 0.8, 0)
+
+	# Позиция камеры
+	var offset := Vector3.ZERO
+	offset.x = sin(_yaw) * cos(_pitch) * distance
+	offset.z = cos(_yaw) * cos(_pitch) * distance
+	offset.y = sin(_pitch) * distance + height
+
+	global_position = target_pos + offset
+
+	# Смотрим на точку чуть впереди машины
+	var look_target := target_pos + _target_node.global_transform.basis.z * 5.0
+	look_at(look_target)
+	print("ChaseCamera: Teleported behind car")
+
+
 func _physics_process(delta: float) -> void:
 	if not _target_node or not current:
 		return
