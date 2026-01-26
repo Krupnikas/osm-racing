@@ -240,9 +240,9 @@ func _init_textures() -> void:
 	_road_textures["path"] = TextureGeneratorScript.create_sidewalk_texture(256)
 	_road_textures["intersection"] = TextureGeneratorScript.create_intersection_texture(256)  # Чистый асфальт
 
-	# Текстуры зданий
-	_building_textures["panel"] = TextureGeneratorScript.create_panel_building_texture(512, 5, 4)
-	_building_textures["brick"] = TextureGeneratorScript.create_brick_building_texture(512, 4, 3)
+	# Текстуры зданий (без окон - окна добавляются как 3D объекты)
+	_building_textures["panel"] = TextureGeneratorScript.create_panel_building_no_windows(512, 5)
+	_building_textures["brick"] = TextureGeneratorScript.create_brick_building_no_windows(512)
 	_building_textures["wall"] = TextureGeneratorScript.create_wall_texture(256)
 	_building_textures["roof"] = TextureGeneratorScript.create_roof_texture(256)
 
@@ -3351,6 +3351,10 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 	var uv_scale_y := 0.1
 	var accumulated_width := 0.0
 
+	# Определяем направление полигона для корректных нормалей
+	var is_ccw := _is_polygon_ccw(points)
+	var normal_sign := 1.0 if is_ccw else -1.0
+
 	for i in range(points.size()):
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
@@ -3362,7 +3366,8 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		var v4 := Vector3(p1.x, roof_y, p1.y)
 
 		var dir := (p2 - p1).normalized()
-		var normal := Vector3(-dir.y, 0, dir.x)
+		# Нормаль наружу - учитываем направление обхода полигона
+		var normal := Vector3(-dir.y * normal_sign, 0, dir.x * normal_sign)
 
 		var u1 := accumulated_width * uv_scale_x
 		var u2 := (accumulated_width + wall_width) * uv_scale_x
@@ -4171,6 +4176,10 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	var uv_scale_x := 0.1  # Масштаб UV по горизонтали (10м = 1 повтор текстуры)
 	var uv_scale_y := 0.1  # Масштаб UV по вертикали
 
+	# Определяем направление полигона для корректных нормалей
+	var is_ccw := _is_polygon_ccw(points)
+	var normal_sign := 1.0 if is_ccw else -1.0
+
 	var accumulated_width := 0.0
 	for i in range(points.size()):
 		var p1 := points[i]
@@ -4183,9 +4192,9 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 		var v3 := Vector3(p2.x, roof_y, p2.y)
 		var v4 := Vector3(p1.x, roof_y, p1.y)
 
-		# Нормаль стены (наружу)
+		# Нормаль стены (наружу) - учитываем направление обхода полигона
 		var dir := (p2 - p1).normalized()
-		var normal := Vector3(-dir.y, 0, dir.x)
+		var normal := Vector3(-dir.y * normal_sign, 0, dir.x * normal_sign)
 
 		# UV координаты
 		var u1 := accumulated_width * uv_scale_x
@@ -4512,6 +4521,17 @@ func _calculate_polygon_area(points: PackedVector2Array) -> float:
 		area += points[i].x * points[j].y
 		area -= points[j].x * points[i].y
 	return abs(area) / 2.0
+
+
+# Проверка направления полигона (true = против часовой стрелки = нормали наружу)
+func _is_polygon_ccw(points: PackedVector2Array) -> bool:
+	var signed_area := 0.0
+	var n := points.size()
+	for i in range(n):
+		var j := (i + 1) % n
+		signed_area += points[i].x * points[j].y
+		signed_area -= points[j].x * points[i].y
+	return signed_area > 0.0  # Положительная = против часовой (CCW)
 
 # Получение центра полигона
 func _get_polygon_center(points: PackedVector2Array) -> Vector2:
@@ -6096,9 +6116,15 @@ func _recursive_update_lights(node: Node, night_enabled: bool) -> void:
 					mat.emission_enabled = false
 					mat.albedo_color = Color(0.3, 0.3, 0.3)  # Серый днём
 
-	# Проверяем неоновые вывески и окна
-	if node.name.begins_with("NeonSign") or node.name.begins_with("WindowLights"):
+	# Проверяем неоновые вывески
+	if node.name.begins_with("NeonSign"):
 		node.visible = night_enabled
+
+	# Проверяем окна (MultiMeshInstance3D с шейдером)
+	if node.name.begins_with("Windows_") and node is MultiMeshInstance3D:
+		var mat := node.material_override as ShaderMaterial
+		if mat:
+			mat.set_shader_parameter("is_night", night_enabled)
 
 	# Рекурсивно обходим дочерние ноды
 	for child in node.get_children():
@@ -6118,12 +6144,23 @@ const NEON_COLORS := [
 
 
 var _neon_signs_created := 0
-var _window_lights_created := 0
 
 func _add_building_night_decorations(building_mesh: MeshInstance3D, points: PackedVector2Array, building_height: float, parent: Node3D) -> void:
 	"""Добавляет неоновые вывески и освещённые окна к зданию"""
-	# Случайный seed на основе позиции здания
+	# Проверка на дублирование - ищем уже существующие окна по позиции
 	var center := _get_polygon_center(points)
+	var window_name := "Windows_%d" % hash(Vector2(center.x, center.y))
+
+	# Проверяем, есть ли уже окна с таким именем в parent
+	for child in parent.get_children():
+		if child.name.begins_with("Windows_") or child.name.begins_with("NeonSign_"):
+			# Проверяем позицию - если совпадает, пропускаем
+			if child is Node3D:
+				var child_pos := Vector2(child.position.x, child.position.z)
+				if child_pos.distance_to(center) < 1.0:
+					return  # Уже есть декорации для этого здания
+
+	# Случайный seed на основе позиции здания
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash(Vector2(center.x, center.y))
 
@@ -6146,9 +6183,9 @@ func _add_building_night_decorations(building_mesh: MeshInstance3D, points: Pack
 		_add_neon_sign(center, building_height, building_width, rng, parent, building_depth)
 		_neon_signs_created += 1
 
-	# Светящиеся окна для высоких зданий (проверка внутри функции)
-	if building_height > 6.0:
-		_add_window_lights(center, building_height, building_width, building_depth, rng, parent)
+	# Добавляем светящиеся окна для зданий выше 1 этажа
+	if building_height > 3.5:
+		_add_building_windows(points, building_height, rng, parent)
 
 
 func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNumberGenerator, parent: Node3D, depth: float = 0.0) -> void:
@@ -6228,91 +6265,171 @@ func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNum
 	parent.add_child(sign_container)
 
 
-func _add_window_lights(center: Vector2, height: float, width: float, depth: float, rng: RandomNumberGenerator, parent: Node3D) -> void:
-	"""Добавляет светящиеся окна: 5% жёлтые, 0.5% фиолетовые - видимые издалека"""
-	# 5% жёлтые + 0.5% фиолетовые = 5.5% зданий
-	var chance := rng.randf()
-	var is_purple := chance < 0.005  # 0.5% фиолетовые
-	var is_yellow := chance >= 0.005 and chance < 0.055  # 5% жёлтые
-
-	if not is_purple and not is_yellow:
+func _add_building_windows(points: PackedVector2Array, height: float, rng: RandomNumberGenerator, parent: Node3D) -> void:
+	"""Добавляет светящиеся окна по периметру здания используя MultiMesh"""
+	if points.size() < 3:
 		return
 
-	_window_lights_created += 1
-
-	var container := Node3D.new()
-	container.name = "WindowLights_%d" % rng.randi()
-	container.position = Vector3(center.x, 0, center.y)
-
-	# Параметры - увеличенные для видимости издалека
+	# Параметры окон
 	var floor_height := 3.0
-	var num_floors := mini(int(height / floor_height), 3)
+	var num_floors := int(height / floor_height)
 	if num_floors < 1:
-		num_floors = 1
+		return
 
-	# Цвет окна - более яркий для видимости
-	var color: Color
-	var emission_energy: float
-	if is_purple:
-		color = Color(0.8, 0.3, 1.0)  # Яркий фиолетовый
-		emission_energy = 15.0  # Очень яркий для видимости издалека
-	else:
-		color = Color(1.0, 0.95, 0.7)  # Яркий тёплый жёлтый
-		emission_energy = 10.0  # Яркий для видимости издалека
+	var window_size := 1.2  # Квадратные окна
+	var window_spacing := 2.5  # Расстояние между окнами
+	var wall_offset := 0.05  # Отступ окна от стены
 
-	# Выбираем одну случайную сторону
-	var all_sides := [
-		{"offset": Vector3(0, 0, depth / 2 + 0.08), "rot": 0.0, "length": width},
-		{"offset": Vector3(0, 0, -depth / 2 - 0.08), "rot": PI, "length": width},
-		{"offset": Vector3(width / 2 + 0.08, 0, 0), "rot": PI / 2, "length": depth},
-		{"offset": Vector3(-width / 2 - 0.08, 0, 0), "rot": -PI / 2, "length": depth},
+	# Цвета окон: тёплые-холодные и фитолампы
+	var warm_cold_colors := [
+		Color(1.0, 0.85, 0.5),   # Тёплый жёлтый
+		Color(1.0, 0.9, 0.6),    # Жёлтый
+		Color(1.0, 0.95, 0.75),  # Светло-жёлтый
+		Color(0.95, 0.92, 0.85), # Тёплый белый
+		Color(0.9, 0.92, 0.95),  # Нейтральный белый
+		Color(0.85, 0.9, 1.0),   # Холодный белый
+		Color(0.75, 0.85, 1.0),  # Холодный голубоватый
 	]
-	var side: Dictionary = all_sides[rng.randi() % 4]
-	var side_length: float = side["length"]
+	var phyto_color := Color(0.9, 0.2, 0.9)  # Фиолетовый/маджента
+	var off_color := Color(0.0, 0.0, 0.0)  # Чёрный для выключенных окон
 
-	# Создаём 1-3 окна на случайных этажах
-	var num_windows := rng.randi_range(1, mini(3, num_floors))
+	# Случайное распределение для этого здания:
+	# Выключено: 30-80%, Включено: 17-65%, Фитолампы: 3-5%
+	var off_percent := 0.30 + rng.randf() * 0.50  # 30% - 80%
+	var phyto_percent := 0.03 + rng.randf() * 0.02  # 3% - 5%
+	# Включённые = остаток (17% - 65%)
 
-	for _i in range(num_windows):
-		var floor_idx := rng.randi() % num_floors
-		var along := rng.randf_range(-side_length / 2 + 1.0, side_length / 2 - 1.0)
-		var wy := floor_height * 0.6 + floor_idx * floor_height
+	# Собираем трансформы и цвета окон
+	var window_transforms: Array[Transform3D] = []
+	var window_colors: Array[Color] = []
 
-		var window_mesh := MeshInstance3D.new()
-		var box := BoxMesh.new()
-		# Увеличенный размер для видимости издалека
-		box.size = Vector3(1.5, 2.0, 0.08)
-		window_mesh.mesh = box
+	# Определяем направление полигона для корректных нормалей (как в генерации стен)
+	# Инвертируем знак чтобы окна смотрели наружу (в ту же сторону что нормали стен)
+	var is_ccw := _is_polygon_ccw(points)
+	var normal_sign := -1.0 if is_ccw else 1.0
 
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = color
-		mat.emission_enabled = true
-		mat.emission = color
-		mat.emission_energy_multiplier = emission_energy
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED  # Всегда яркий, без затенения
-		window_mesh.material_override = mat
+	# Итерируем по рёбрам полигона (стенам здания)
+	var num_points := points.size()
+	for i in range(num_points):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % num_points]
 
-		var base_offset: Vector3 = side["offset"]
-		var rotation_y: float = side["rot"]
-		window_mesh.position = base_offset + Vector3(along, wy, 0).rotated(Vector3.UP, rotation_y)
-		window_mesh.position.y = wy
-		window_mesh.rotation.y = rotation_y
+		# Направление и длина стены
+		var wall_dir := (p2 - p1)
+		var wall_length := wall_dir.length()
+		if wall_length < window_spacing:
+			continue  # Стена слишком короткая для окон
 
-		container.add_child(window_mesh)
+		wall_dir = wall_dir.normalized()
 
-	# Добавляем OmniLight для видимости издалека (один на все окна здания)
-	var window_light := OmniLight3D.new()
-	window_light.name = "WindowOmniLight"
-	window_light.position = Vector3(0, height * 0.5, 0)  # В центре здания по высоте
-	window_light.omni_range = 25.0 if is_purple else 20.0  # Большой радиус для видимости
-	window_light.light_energy = 2.5 if is_purple else 1.5
-	window_light.light_color = color
-	window_light.shadow_enabled = false
-	window_light.light_bake_mode = Light3D.BAKE_DISABLED
-	container.add_child(window_light)
+		# Нормаль стены (наружу) - учитываем направление обхода полигона
+		var wall_normal := Vector2(-wall_dir.y * normal_sign, wall_dir.x * normal_sign)
 
-	container.visible = false  # Включается ночью
-	parent.add_child(container)
+		# Угол поворота окна - окно должно быть параллельно стене и смотреть наружу
+		# atan2(normal.x, normal.y) даёт угол нормали относительно +Z
+		var rot := atan2(wall_normal.x, wall_normal.y)
+
+		# Количество окон на этой стене
+		var num_windows := int((wall_length - window_spacing * 0.5) / window_spacing)
+		if num_windows < 1:
+			num_windows = 1
+
+		# Начальный отступ от края стены
+		var start_offset := (wall_length - (num_windows - 1) * window_spacing) / 2.0
+
+		for floor_idx in range(num_floors):
+			for win_idx in range(num_windows):
+				# Выбор цвета: off_percent выключены, остальные - тёплые-холодные или фитолампы
+				var color: Color
+				var chance := rng.randf()
+				if chance < off_percent:
+					# Выключенные окна (остаются тёмными ночью)
+					color = off_color
+				elif chance < (1.0 - phyto_percent):
+					# Тёплые до холодных оттенков (жёлтый -> белый)
+					color = warm_cold_colors[rng.randi() % warm_cold_colors.size()]
+					# Случайная яркость от 0.15 до 0.5 (храним в альфа-канале)
+					color.a = 0.15 + rng.randf() * 0.35
+				else:
+					# Фитолампы (маджента)
+					color = phyto_color
+					color.a = 0.25 + rng.randf() * 0.25  # Фитолампы ярче
+
+				# Позиция вдоль стены
+				var along_wall := start_offset + win_idx * window_spacing
+				var wall_pos := p1 + wall_dir * along_wall
+
+				# Смещение наружу от стены
+				var final_pos := wall_pos + wall_normal * wall_offset
+
+				# Высота окна
+				var y_pos := floor_height * 0.5 + floor_idx * floor_height
+
+				var pos := Vector3(final_pos.x, y_pos, final_pos.y)
+				var transform := Transform3D(Basis.from_euler(Vector3(0, rot, 0)), pos)
+				window_transforms.append(transform)
+				window_colors.append(color)
+
+	if window_transforms.is_empty():
+		return
+
+	# Создаём MultiMesh с цветами
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.use_colors = true
+	multimesh.instance_count = window_transforms.size()
+
+	# Создаём базовый меш окна
+	var box := BoxMesh.new()
+	box.size = Vector3(window_size, window_size, 0.05)
+	multimesh.mesh = box
+
+	# Заполняем трансформы и цвета
+	for i in range(window_transforms.size()):
+		multimesh.set_instance_transform(i, window_transforms[i])
+		multimesh.set_instance_color(i, window_colors[i])
+
+	# Шейдер для emission из instance color
+	# Днём все окна тёмные, ночью светятся (кроме чёрных - они выключены)
+	# Альфа-канал хранит яркость окна (0-1)
+	var shader := Shader.new()
+	shader.code = """
+shader_type spatial;
+
+uniform bool is_night = false;
+
+void fragment() {
+	// Проверяем, выключено ли окно (чёрный цвет = выключено)
+	bool is_off = (COLOR.r < 0.01 && COLOR.g < 0.01 && COLOR.b < 0.01);
+
+	if (is_night && !is_off) {
+		// Ночью включенные окна светятся
+		// Альфа-канал = яркость (0-1)
+		float brightness = COLOR.a;
+		ALBEDO = COLOR.rgb * brightness;
+		EMISSION = COLOR.rgb * brightness;
+	} else {
+		// Днём все окна тёмные, ночью выключенные тоже тёмные
+		ALBEDO = vec3(0.08, 0.1, 0.12);
+		EMISSION = vec3(0.0);
+	}
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	mat.set_shader_parameter("is_night", false)
+
+	# Создаём MultiMeshInstance3D
+	var mm_instance := MultiMeshInstance3D.new()
+	mm_instance.name = "Windows_%d" % rng.randi()
+	mm_instance.multimesh = multimesh
+	mm_instance.material_override = mat
+	mm_instance.visible = true  # Теперь видны всегда, шейдер управляет внешним видом
+
+	# Без LOD - visibility_range плохо работает для длинных зданий
+	# (считается от центра объекта, а не от ближайшей точки)
+
+	parent.add_child(mm_instance)
 
 
 ## ============================================================================

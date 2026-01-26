@@ -325,6 +325,83 @@ static func create_wall_texture(size: int = 256) -> ImageTexture:
 	var texture := ImageTexture.create_from_image(image)
 	return texture
 
+# Текстура панельного дома БЕЗ окон (для ночного режима с 3D окнами)
+static func create_panel_building_no_windows(size: int = 512, floors: int = 5) -> ImageTexture:
+	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 99999
+
+	var floor_height := size / floors
+
+	# Цвета панелек (серый бетон с лёгким оттенком)
+	var panel_colors := [
+		Color(0.65, 0.63, 0.60),  # Серый
+		Color(0.70, 0.68, 0.62),  # Светло-серый
+		Color(0.60, 0.58, 0.55),  # Тёмно-серый
+		Color(0.68, 0.65, 0.58),  # Бежево-серый
+	]
+	var panel_color: Color = panel_colors[rng.randi() % panel_colors.size()]
+
+	for y in range(size):
+		for x in range(size):
+			# Базовый цвет панели с шумом
+			var noise := rng.randf() * 0.05 - 0.025
+			var color := Color(
+				clamp(panel_color.r + noise, 0.0, 1.0),
+				clamp(panel_color.g + noise, 0.0, 1.0),
+				clamp(panel_color.b + noise, 0.0, 1.0)
+			)
+
+			# Швы между панелями (горизонтальные между этажами)
+			var floor_pos := y % floor_height
+			if floor_pos < 3:
+				color = color.darkened(0.2)
+
+			# Вертикальные швы между секциями
+			var section_width := size / 2
+			if x % section_width < 2:
+				color = color.darkened(0.15)
+
+			image.set_pixel(x, y, color)
+
+	var texture := ImageTexture.create_from_image(image)
+	return texture
+
+
+# Текстура кирпичного дома БЕЗ окон (для ночного режима с 3D окнами)
+static func create_brick_building_no_windows(size: int = 512) -> ImageTexture:
+	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 88888
+
+	var brick_width := 24
+	var brick_height := 12
+	var mortar := 2
+
+	for y in range(size):
+		for x in range(size):
+			# Кирпичная кладка
+			var row := y / brick_height
+			var offset := (row % 2) * (brick_width / 2)
+			var bx := (x + offset) % brick_width
+			var by := y % brick_height
+
+			var is_mortar := bx < mortar or by < mortar
+
+			var color: Color
+			if is_mortar:
+				var c := 0.5 + rng.randf() * 0.05
+				color = Color(c, c * 0.95, c * 0.9)
+			else:
+				var base := 0.5 + rng.randf() * 0.15
+				color = Color(base * 1.1, base * 0.45, base * 0.35)
+
+			image.set_pixel(x, y, color)
+
+	var texture := ImageTexture.create_from_image(image)
+	return texture
+
+
 # Текстура панельного дома (российская панелька)
 # Имитирует бетонные панели с окнами
 static func create_panel_building_texture(size: int = 512, floors: int = 5, windows_per_floor: int = 4) -> ImageTexture:
