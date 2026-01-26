@@ -274,12 +274,12 @@ void sky() {
 func _create_rain_system() -> void:
 	_rain_system = GPUParticles3D.new()
 	_rain_system.name = "RainSystem"
-	_rain_system.amount = 4000  # Оптимизация: снижено с 8000 для производительности
+	_rain_system.amount = 8000
 	_rain_system.lifetime = 1.5
 	_rain_system.one_shot = false
 	_rain_system.explosiveness = 0.0
 	_rain_system.randomness = 1.0
-	_rain_system.visibility_aabb = AABB(Vector3(-40, -20, -40), Vector3(80, 40, 80))  # Оптимизация: уменьшена область
+	_rain_system.visibility_aabb = AABB(Vector3(-60, -30, -60), Vector3(120, 60, 120))
 	_rain_system.emitting = false
 
 	# Материал частиц

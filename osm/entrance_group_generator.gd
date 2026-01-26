@@ -57,7 +57,7 @@ static func _ensure_materials() -> void:
 		_metal_material.albedo_color = METAL_COLOR
 		_metal_material.metallic = 0.7
 		_metal_material.roughness = 0.4
-		_metal_material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация: металл не прозрачный
+		_metal_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	if _glass_material == null:
 		_glass_material = StandardMaterial3D.new()
@@ -71,14 +71,14 @@ static func _ensure_materials() -> void:
 		_concrete_material = StandardMaterial3D.new()
 		_concrete_material.albedo_color = CONCRETE_COLOR
 		_concrete_material.roughness = 0.9
-		_concrete_material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация: бетон не прозрачный
+		_concrete_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	if _frame_material == null:
 		_frame_material = StandardMaterial3D.new()
 		_frame_material.albedo_color = FRAME_COLOR
 		_frame_material.metallic = 0.6
 		_frame_material.roughness = 0.3
-		_frame_material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация: рама не прозрачная
+		_frame_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 
 static func _add_steps(root: Node3D, total_door_width: float) -> void:

@@ -5,7 +5,7 @@ class_name PerformanceProfiler
 ## Выводит метрики каждые N секунд
 
 @export var print_interval: float = 5.0  # Интервал вывода в секундах
-@export var enabled: bool = false  # Оптимизация: отключить по умолчанию
+@export var enabled: bool = true
 
 var _timer: float = 0.0
 var _frame_times: Array[float] = []

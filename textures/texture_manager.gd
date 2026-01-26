@@ -80,7 +80,7 @@ func get_road_material(road_type: String) -> StandardMaterial3D:
 		return _materials[mat_key]
 
 	var material := StandardMaterial3D.new()
-	material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация: дороги не нужны с обратной стороны
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	var texture_key: String
 	match road_type:
@@ -117,7 +117,7 @@ func get_building_wall_material(building_type: String = "residential", height: f
 		return _materials[mat_key]
 
 	var material := StandardMaterial3D.new()
-	material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация: стены зданий не нужны с обратной стороны
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	var texture_key: String
 	match building_type:
@@ -155,7 +155,7 @@ func get_building_roof_material() -> StandardMaterial3D:
 		return _materials["building_roof"]
 
 	var material := StandardMaterial3D.new()
-	material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация: крыши зданий не нужны с обратной стороны
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	if _textures.has("building_roof"):
 		material.albedo_texture = _textures["building_roof"]
@@ -171,7 +171,7 @@ func get_ground_material(ground_type: String) -> StandardMaterial3D:
 		return _materials[mat_key]
 
 	var material := StandardMaterial3D.new()
-	material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация: земля не нужна с обратной стороны
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	var texture_key: String
 	match ground_type:

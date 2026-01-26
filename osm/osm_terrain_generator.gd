@@ -2620,14 +2620,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 					color = Color(0.65, 0.55, 0.45)  # Стандартный коричневатый
 
 	# Получаем высоту террейна для здания (берём центр)
-	var building_center := _get_polygon_center(points)
-	var base_elev := _get_elevation_at_point(building_center, elev_data)
-
-	# Calculate distance to player for LOD
-	var distance_to_player := 999999.0
-	if _car and is_instance_valid(_car):
-		var center_3d := Vector3(building_center.x, 0, building_center.y)
-		distance_to_player = _car.global_position.distance_to(center_3d)
+	var base_elev := _get_elevation_at_point(_get_polygon_center(points), elev_data)
 
 	# Определяем тип текстуры здания
 	var building_type: String = str(tags.get("building", "yes"))
@@ -2641,8 +2634,8 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	else:
 		texture_type = "brick"  # Остальное - кирпич
 
-	# Используем многопоточную генерацию зданий с LOD
-	_queue_building_for_thread(points, building_height, texture_type, parent, base_elev, distance_to_player)
+	# Используем многопоточную генерацию зданий
+	_queue_building_for_thread(points, building_height, texture_type, parent, base_elev)
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
@@ -3509,17 +3502,13 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 # === МНОГОПОТОЧНАЯ ГЕНЕРАЦИЯ ЗДАНИЙ ===
 
 ## Добавляет здание в очередь для генерации в worker thread
-func _queue_building_for_thread(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float, distance: float) -> void:
-	var lod_level := _calculate_lod_level(distance)
-
+func _queue_building_for_thread(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float) -> void:
 	var task_data := {
 		"points": points,
 		"building_height": building_height,
 		"texture_type": texture_type,
 		"parent": parent,
-		"base_elev": base_elev,
-		"lod_level": lod_level,  # NEW: LOD level based on distance
-		"distance": distance      # NEW: for debugging
+		"base_elev": base_elev
 	}
 
 	# Добавляем задачу в пул потоков
@@ -3527,65 +3516,11 @@ func _queue_building_for_thread(points: PackedVector2Array, building_height: flo
 	WorkerThreadPool.add_task(_compute_building_mesh_thread.bind(task_data))
 
 
-## Вычисляет LOD level на основе расстояния до игрока
-func _calculate_lod_level(distance: float) -> int:
-	if distance < 100.0:
-		return 0  # Full detail
-	elif distance < 250.0:
-		return 1  # Medium detail
-	else:
-		return 2  # Low detail
-
-
-## Упрощает polygon для LOD 1 (каждая вторая точка)
-func _simplify_polygon_douglas_peucker(points: PackedVector2Array, _tolerance: float) -> PackedVector2Array:
-	if points.size() <= 4:
-		return points  # Слишком мало точек для упрощения
-
-	# Простой подход: каждая вторая точка для LOD 1
-	var simplified := PackedVector2Array()
-	for i in range(0, points.size(), 2):  # Every 2nd point
-		simplified.append(points[i])
-
-	# Ensure closed polygon
-	if simplified.size() > 0 and simplified[0].distance_to(simplified[simplified.size() - 1]) > 0.1:
-		simplified.append(simplified[0])
-
-	return simplified if simplified.size() >= 3 else points
-
-
-## Создаёт упрощенный bounding box для LOD 2
-func _create_bounding_box_polygon(points: PackedVector2Array) -> PackedVector2Array:
-	if points.size() < 3:
-		return points
-
-	var min_x := points[0].x
-	var max_x := points[0].x
-	var min_y := points[0].y
-	var max_y := points[0].y
-
-	for p in points:
-		min_x = min(min_x, p.x)
-		max_x = max(max_x, p.x)
-		min_y = min(min_y, p.y)
-		max_y = max(max_y, p.y)
-
-	# Create box (4 points)
-	var box := PackedVector2Array()
-	box.append(Vector2(min_x, min_y))
-	box.append(Vector2(max_x, min_y))
-	box.append(Vector2(max_x, max_y))
-	box.append(Vector2(min_x, max_y))
-
-	return box
-
-
 ## Вычисляет геометрию здания в worker thread (без создания Node)
 func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 	var points: PackedVector2Array = task_data.points
 	var building_height: float = task_data.building_height
 	var base_elev: float = task_data.base_elev
-	var lod_level: int = task_data.get("lod_level", 0)  # NEW: LOD level
 
 	# Валидация (повторяем проверки без раннего выхода - просто отмечаем как invalid)
 	var valid := true
@@ -3639,20 +3574,6 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		_building_mutex.unlock()
 		return
 
-	# === APPLY LOD SIMPLIFICATION ===
-	var roof_points := points  # Default: full detail
-	var original_points := points  # Keep original for collision
-
-	if lod_level == 2:
-		# LOD 2: Simple bounding box (4 points)
-		roof_points = _create_bounding_box_polygon(points)
-	elif lod_level == 1:
-		# LOD 1: Simplify polygon (every 2nd point)
-		roof_points = _simplify_polygon_douglas_peucker(points, 2.0)
-
-	# Use simplified points for BOTH walls and roof for consistency
-	var wall_source_points := roof_points
-
 	# === ВЫЧИСЛЕНИЕ ГЕОМЕТРИИ СТЕН ===
 	var floor_y := base_elev + 0.1
 	var roof_y := base_elev + building_height
@@ -3667,12 +3588,12 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 	var accumulated_width := 0.0
 
 	# Определяем направление полигона для корректных нормалей
-	var is_ccw := _is_polygon_ccw(wall_source_points)
+	var is_ccw := _is_polygon_ccw(points)
 	var normal_sign := 1.0 if is_ccw else -1.0
 
-	for i in range(wall_source_points.size()):
-		var p1 := wall_source_points[i]
-		var p2 := wall_source_points[(i + 1) % wall_source_points.size()]
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
 		var wall_width := p1.distance_to(p2)
 
 		var v1 := Vector3(p1.x, floor_y, p1.y)
@@ -3721,15 +3642,12 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 	var roof_normals := PackedVector3Array()
 	var roof_indices := PackedInt32Array()
 
-	# Ограничиваем сложность полигонов
-	# LOD 2: only 4 points (box), LOD 1: ~half points, LOD 0: up to 100 points
-	var max_points := 100 if lod_level == 0 else (50 if lod_level == 1 else 4)
-
-	if roof_points.size() <= max_points:
-		var roof_indices_2d := Geometry2D.triangulate_polygon(roof_points)
+	# Ограничиваем сложность полигонов (слишком много точек могут вызвать зависание)
+	if points.size() <= 100:
+		var roof_indices_2d := Geometry2D.triangulate_polygon(points)
 
 		if roof_indices_2d.size() >= 3:
-			for p in roof_points:
+			for p in points:
 				roof_vertices.append(Vector3(p.x, roof_y, p.y))
 				roof_uvs.append(Vector2(p.x * 0.1, p.y * 0.1))
 				roof_normals.append(Vector3.UP)
@@ -3739,13 +3657,11 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 	# Сохраняем результат
 	var result := {
 		"valid": true,
-		"points": original_points,  # Original points for collision
-		"roof_points": roof_points,  # Simplified points for roof/walls
+		"points": points,
 		"building_height": building_height,
 		"texture_type": task_data.texture_type,
 		"parent": task_data.parent,
 		"base_elev": base_elev,
-		"lod_level": lod_level,  # NEW: LOD level
 		"wall_vertices": wall_vertices,
 		"wall_uvs": wall_uvs,
 		"wall_normals": wall_normals,
@@ -3776,7 +3692,6 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 	var building_height: float = result.building_height
 	var base_elev: float = result.base_elev
 	var points: PackedVector2Array = result.points
-	var lod_level: int = result.get("lod_level", 0)  # NEW: LOD level
 
 	# === СОЗДАНИЕ МЕША СТЕН ===
 	var wall_arrays := []
@@ -3791,13 +3706,7 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 
 	var wall_mesh_instance := MeshInstance3D.new()
 	wall_mesh_instance.mesh = wall_mesh
-
-	# LOD 2: disable shadows for performance
-	if lod_level >= 2:
-		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	else:
-		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-
+	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	# Visibility range для автоматического скрытия далёких зданий
 	wall_mesh_instance.visibility_range_end = 400.0
 	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
@@ -3848,10 +3757,8 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 	parent.add_child(body)
 
 	# Коллизии и декорации - отложенно
-	# Use original points for collision (not simplified)
 	_create_building_collisions_deferred.call_deferred(body, points, base_elev, building_height)
-	# Pass lod_level to decorations for window LOD
-	_add_building_night_decorations_lod.call_deferred(wall_mesh_instance, result.get("roof_points", points), building_height, parent, lod_level)
+	_add_building_night_decorations.call_deferred(wall_mesh_instance, points, building_height, parent)
 
 
 ## Обрабатывает готовые результаты из worker threads (вызывается из _process)
@@ -6524,17 +6431,7 @@ const NEON_COLORS := [
 
 var _neon_signs_created := 0
 
-## Wrapper для _add_building_night_decorations с LOD support
-func _add_building_night_decorations_lod(building_mesh: MeshInstance3D, points: PackedVector2Array, building_height: float, parent: Node3D, lod_level: int) -> void:
-	# LOD 2: No windows at all
-	if lod_level >= 2:
-		return
-
-	# Call original function with lod_level
-	_add_building_night_decorations(building_mesh, points, building_height, parent, lod_level)
-
-
-func _add_building_night_decorations(building_mesh: MeshInstance3D, points: PackedVector2Array, building_height: float, parent: Node3D, lod_level: int = 0) -> void:
+func _add_building_night_decorations(building_mesh: MeshInstance3D, points: PackedVector2Array, building_height: float, parent: Node3D) -> void:
 	"""Добавляет неоновые вывески и освещённые окна к зданию"""
 	# Проверка на дублирование - ищем уже существующие окна по позиции
 	var center := _get_polygon_center(points)
@@ -6572,9 +6469,9 @@ func _add_building_night_decorations(building_mesh: MeshInstance3D, points: Pack
 		_add_neon_sign(center, building_height, building_width, rng, parent, building_depth)
 		_neon_signs_created += 1
 
-	# Добавляем светящиеся окна для зданий выше 1 этажа (LOD-aware)
+	# Добавляем светящиеся окна для зданий выше 1 этажа
 	if building_height > 3.5:
-		_add_building_windows(points, building_height, rng, parent, lod_level)
+		_add_building_windows(points, building_height, rng, parent)
 
 
 func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNumberGenerator, parent: Node3D, depth: float = 0.0) -> void:
@@ -6654,7 +6551,7 @@ func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNum
 	parent.add_child(sign_container)
 
 
-func _add_building_windows(points: PackedVector2Array, height: float, rng: RandomNumberGenerator, parent: Node3D, lod_level: int = 0) -> void:
+func _add_building_windows(points: PackedVector2Array, height: float, rng: RandomNumberGenerator, parent: Node3D) -> void:
 	"""Добавляет светящиеся окна по периметру здания используя MultiMesh"""
 	if points.size() < 3:
 		return
@@ -6665,10 +6562,8 @@ func _add_building_windows(points: PackedVector2Array, height: float, rng: Rando
 	if num_floors < 1:
 		return
 
-	# LOD-aware window spacing
-	# LOD 0: 2.5m (dense), LOD 1: 5.0m (sparse), LOD 2: none (handled above)
-	var window_spacing := 2.5 if lod_level == 0 else 5.0
 	var window_size := 1.2  # Квадратные окна
+	var window_spacing := 2.5  # Расстояние между окнами
 	var wall_offset := 0.05  # Отступ окна от стены
 
 	# Цвета окон: тёплые-холодные и фитолампы
