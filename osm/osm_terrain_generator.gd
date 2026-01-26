@@ -99,6 +99,9 @@ var _infrastructure_queue: Array = []  # Очередь {type, pos, elevation, p
 # Отложенная генерация дорог и других тяжёлых объектов
 var _road_queue: Array = []  # Очередь {nodes, tags, parent, elev_data}
 var _curb_queue: Array = []  # Очередь бордюров (создаются после детекции перекрёстков)
+
+# Road batching system - накопление geometry данных для mesh merging
+var _road_batch_data: Dictionary = {}  # key: chunk_key -> { "highway": {vertices, uvs, normals, indices}, "primary": {...}, ...}
 var _curb_smoothed_queue: Array = []  # Очередь сглаженных бордюров для генерации меша
 var _curb_mesh_state: Dictionary = {}  # Текущее состояние генерации меша бордюра (для разбивки по кадрам)
 var _curb_collision_results: Array = []  # Результаты расчёта коллизий из worker threads
@@ -1625,6 +1628,10 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 
 	print("OSM: Generated %d roads, %d buildings, %d trees, %d signs, %d lamps, %d intersections" % [road_count, building_count, tree_count, sign_count, lamp_count, intersection_count])
 
+	# OPTIMIZATION: Finalize road batches - create merged meshes
+	if chunk_key != "":
+		_finalize_road_batches_for_chunk(chunk_key)
+
 func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	# Добавляем в очередь для отложенного создания
 	_road_queue.append({
@@ -1688,7 +1695,8 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 			height_offset = 0.09
 			curb_height = 0.05
 
-	_create_road_mesh_with_texture(nodes, width, texture_key, height_offset, parent, elev_data)
+	# OPTIMIZATION: Road batching - добавляем данные в batch вместо создания MeshInstance3D
+	_add_road_to_batch(nodes, width, texture_key, height_offset, parent, elev_data)
 
 	if curb_height > 0.0:
 		# Бордюры добавляем в очередь - создадим после детекции всех перекрёстков
@@ -1837,6 +1845,183 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 			child.queue_free()
 
 	parent.add_child(road_body)
+
+# OPTIMIZATION: Road Batching System (Mesh Merging)
+# Добавляет дорогу в batch вместо создания отдельного MeshInstance3D
+func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_offset: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
+	if nodes.size() < 2:
+		return
+
+	# Извлекаем chunk_key из parent node name
+	var chunk_key := ""
+	if parent.name.begins_with("Chunk_"):
+		chunk_key = parent.name.substr(6)  # Убираем "Chunk_" префикс
+	else:
+		# Fallback: создаём дорогу старым способом если не можем определить чанк
+		_create_road_mesh_with_texture(nodes, width, texture_key, height_offset, parent, elev_data)
+		return
+
+	# Инициализируем batch data для этого чанка если ещё нет
+	if not _road_batch_data.has(chunk_key):
+		_road_batch_data[chunk_key] = {}
+
+	if not _road_batch_data[chunk_key].has(texture_key):
+		_road_batch_data[chunk_key][texture_key] = {
+			"vertices": PackedVector3Array(),
+			"uvs": PackedVector2Array(),
+			"normals": PackedVector3Array(),
+			"indices": PackedInt32Array(),
+			"parent": parent  # Сохраняем parent для создания MeshInstance3D позже
+		}
+
+	# Convert to local coordinates and smooth
+	var raw_points: PackedVector2Array = []
+	for node in nodes:
+		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+		raw_points.append(local)
+
+	var points: PackedVector2Array = _smooth_road_corners(raw_points)
+
+	# Z-fighting offset
+	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
+	var z_offset: float = hash_val * 0.0003
+
+	# Генерируем geometry для этого road segment
+	var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
+	var vertex_offset: int = batch["vertices"].size()  # Offset для индексов
+
+	var uv_scale: float = 0.1
+	var accumulated_length: float = 0.0
+	var half_w: float = width * 0.5
+
+	# Precompute averaged perpendiculars
+	var perpendiculars: PackedVector2Array = PackedVector2Array()
+	for i in range(points.size()):
+		var perp: Vector2
+		if i == 0:
+			var dir: Vector2 = (points[1] - points[0]).normalized()
+			perp = Vector2(-dir.y, dir.x)
+		elif i == points.size() - 1:
+			var dir: Vector2 = (points[i] - points[i - 1]).normalized()
+			perp = Vector2(-dir.y, dir.x)
+		else:
+			var dir_in: Vector2 = (points[i] - points[i - 1]).normalized()
+			var dir_out: Vector2 = (points[i + 1] - points[i]).normalized()
+			var perp_in: Vector2 = Vector2(-dir_in.y, dir_in.x)
+			var perp_out: Vector2 = Vector2(-dir_out.y, dir_out.x)
+			perp = ((perp_in + perp_out) * 0.5).normalized()
+		perpendiculars.append(perp)
+
+	# Generate vertices (добавляем в существующий batch)
+	for i in range(points.size()):
+		var p: Vector2 = points[i]
+		var perp: Vector2 = perpendiculars[i]
+		var h: float = _get_elevation_at_point(p, elev_data) + height_offset + z_offset
+
+		if i > 0:
+			accumulated_length += points[i - 1].distance_to(p)
+		var uv_y: float = accumulated_length * uv_scale
+
+		# Left vertex
+		batch["vertices"].append(Vector3(p.x - perp.x * half_w, h, p.y - perp.y * half_w))
+		batch["uvs"].append(Vector2(0.0, uv_y))
+		batch["normals"].append(Vector3.UP)
+
+		# Right vertex
+		batch["vertices"].append(Vector3(p.x + perp.x * half_w, h, p.y + perp.y * half_w))
+		batch["uvs"].append(Vector2(1.0, uv_y))
+		batch["normals"].append(Vector3.UP)
+
+	# Generate indices (с учётом vertex_offset)
+	for i in range(points.size() - 1):
+		var idx: int = vertex_offset + i * 2
+
+		batch["indices"].append(idx + 0)
+		batch["indices"].append(idx + 3)
+		batch["indices"].append(idx + 1)
+
+		batch["indices"].append(idx + 0)
+		batch["indices"].append(idx + 2)
+		batch["indices"].append(idx + 3)
+
+# Финализирует road batches для чанка - создаёт merged meshes
+func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
+	if not _road_batch_data.has(chunk_key):
+		return  # Нет дорог в этом чанке
+
+	var chunk_batches: Dictionary = _road_batch_data[chunk_key]
+
+	# Создаём один merged mesh для каждого типа дороги
+	for texture_key in chunk_batches.keys():
+		var batch: Dictionary = chunk_batches[texture_key]
+
+		# Проверяем что есть geometry
+		if batch["vertices"].size() == 0:
+			continue
+
+		# Создаём ArrayMesh из накопленных данных
+		var arrays: Array = []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = batch["vertices"]
+		arrays[Mesh.ARRAY_TEX_UV] = batch["uvs"]
+		arrays[Mesh.ARRAY_NORMAL] = batch["normals"]
+		arrays[Mesh.ARRAY_INDEX] = batch["indices"]
+
+		var arr_mesh: ArrayMesh = ArrayMesh.new()
+		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+		# Создаём MeshInstance3D
+		var mesh_instance := MeshInstance3D.new()
+		mesh_instance.mesh = arr_mesh
+		mesh_instance.name = "RoadBatch_" + texture_key
+
+		# Создаём материал (копируем логику из _create_road_mesh_with_texture)
+		var material: StandardMaterial3D = StandardMaterial3D.new()
+		material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация
+		if _road_textures.has(texture_key):
+			material.albedo_texture = _road_textures[texture_key]
+			material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+			if _normal_textures.has("asphalt"):
+				material.normal_enabled = true
+				material.normal_texture = _normal_textures["asphalt"]
+				material.normal_scale = 0.3
+		else:
+			material.albedo_color = COLORS.get("road_residential", Color(0.4, 0.4, 0.4))
+
+		if _is_wet_mode:
+			WetRoadMaterial.apply_wet_properties(material, true, _is_night_mode)
+
+		mesh_instance.material_override = material
+
+		# Создаём коллизию для merged road mesh
+		var road_body := StaticBody3D.new()
+		road_body.name = "RoadBatchCollision_" + texture_key
+		road_body.collision_layer = 1
+		road_body.collision_mask = 1
+		road_body.add_to_group("Road")  # GEVP - дорога
+		road_body.add_child(mesh_instance)
+
+		# Создаём trimesh коллизию
+		mesh_instance.create_trimesh_collision()
+		for child in mesh_instance.get_children():
+			if child is StaticBody3D:
+				var col_shape := child.get_child(0)
+				if col_shape is CollisionShape3D:
+					child.remove_child(col_shape)
+					road_body.add_child(col_shape)
+				child.queue_free()
+
+		# Добавляем в parent (chunk node)
+		var parent: Node3D = batch["parent"]
+		parent.add_child(road_body)
+
+		if debug_print:
+			print("OSM: Finalized road batch %s/%s: %d vertices, %d triangles" % [
+				chunk_key, texture_key, batch["vertices"].size(), batch["indices"].size() / 3
+			])
+
+	# Очищаем batch data для этого чанка
+	_road_batch_data.erase(chunk_key)
 
 # Создаёт бордюры вдоль дороги (старая версия для обратной совместимости)
 func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_height: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
@@ -3543,7 +3728,7 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
 		var roof_material := StandardMaterial3D.new()
-		roof_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		roof_material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация: включить backface culling
 		if _building_textures.has("roof"):
 			roof_material.albedo_texture = _building_textures["roof"]
 			roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
@@ -4343,7 +4528,7 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 
 		# Материал крыши с текстурой
 		var roof_material := StandardMaterial3D.new()
-		roof_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		roof_material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация: включить backface culling
 		if _building_textures.has("roof"):
 			roof_material.albedo_texture = _building_textures["roof"]
 			roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
