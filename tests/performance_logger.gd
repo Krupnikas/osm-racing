@@ -66,6 +66,10 @@ func get_summary() -> Dictionary:
 	if _fps_samples.is_empty():
 		return {}
 
+	# Sort FPS samples для расчёта перцентилей
+	var sorted_fps := _fps_samples.duplicate()
+	sorted_fps.sort()
+
 	var summary = {
 		"test_name": test_name,
 		"duration": Time.get_ticks_msec() / 1000.0 - start_time,
@@ -73,6 +77,9 @@ func get_summary() -> Dictionary:
 		"avg_fps": _calculate_average(_fps_samples),
 		"min_fps": _fps_samples.min(),
 		"max_fps": _fps_samples.max(),
+		"median_fps": _calculate_percentile(sorted_fps, 50.0),  # NEW: Median (50th percentile)
+		"percentile_95_fps": _calculate_percentile(sorted_fps, 95.0),  # NEW: 95th percentile
+		"percentile_5_fps": _calculate_percentile(sorted_fps, 5.0),  # NEW: 5th percentile (low end)
 		"avg_frame_time": _calculate_average(_frame_times),
 		"min_frame_time": _frame_times.min(),
 		"max_frame_time": _frame_times.max(),
@@ -127,6 +134,9 @@ func print_summary(summary: Dictionary = {}) -> void:
 	print("")
 	print("FPS:")
 	print("  Average: %.1f" % summary.get("avg_fps", 0.0))
+	print("  Median (50th): %.1f" % summary.get("median_fps", 0.0))
+	print("  95th Percentile: %.1f" % summary.get("percentile_95_fps", 0.0))
+	print("  5th Percentile: %.1f" % summary.get("percentile_5_fps", 0.0))
 	print("  Min: %.1f" % summary.get("min_fps", 0.0))
 	print("  Max: %.1f" % summary.get("max_fps", 0.0))
 	print("")
@@ -164,3 +174,19 @@ func _calculate_average_int(values: Array[int]) -> int:
 	for v in values:
 		sum += v
 	return sum / values.size()
+
+func _calculate_percentile(sorted_values: Array[float], percentile: float) -> float:
+	"""Вычисляет заданный перцентиль из отсортированного массива значений"""
+	if sorted_values.is_empty():
+		return 0.0
+
+	var index := (percentile / 100.0) * (sorted_values.size() - 1)
+	var lower_index := int(floor(index))
+	var upper_index := int(ceil(index))
+
+	if lower_index == upper_index:
+		return sorted_values[lower_index]
+
+	# Линейная интерполяция между двумя значениями
+	var fraction := index - lower_index
+	return sorted_values[lower_index] * (1.0 - fraction) + sorted_values[upper_index] * fraction

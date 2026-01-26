@@ -3,7 +3,7 @@ extends Node
 # Automatic performance test for OSM Racing Game
 # Test: Drive straight in Cherepovets at night for 30 seconds
 
-@export var test_duration: float = 30.0
+@export var test_duration: float = 60.0  # Увеличено до 1 минуты для better statistics
 @export var test_speed: float = 20.0  # m/s (~72 km/h)
 @export var enable_night_mode: bool = true
 @export var test_location: Vector2 = Vector2(59.1167, 37.9000)  # Cherepovets coordinates
