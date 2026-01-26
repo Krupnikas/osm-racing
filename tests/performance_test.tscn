@@ -1,0 +1,131 @@
+[gd_scene load_steps=19 format=3 uid="uid://perf_test_scene_001"]
+
+[ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="car"]
+[ext_resource type="Script" path="res://tests/performance_test.gd" id="test_script"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/vehicle_input.gd" id="vehicle_input"]
+[ext_resource type="Script" path="res://camera/follow_camera.gd" id="camera"]
+[ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="osm"]
+[ext_resource type="Script" path="res://traffic/traffic_manager.gd" id="traffic"]
+[ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="night"]
+[ext_resource type="Script" path="res://settings/graphics_settings.gd" id="graphics"]
+[ext_resource type="Script" path="res://textures/ground_setup.gd" id="ground"]
+[ext_resource type="Script" path="res://tests/bottleneck_analyzer.gd" id="bottleneck"]
+
+[sub_resource type="ProceduralSkyMaterial" id="sky_mat"]
+sky_top_color = Color(0.4, 0.6, 0.9, 1)
+sky_horizon_color = Color(0.7, 0.8, 0.9, 1)
+ground_bottom_color = Color(0.2, 0.2, 0.2, 1)
+ground_horizon_color = Color(0.5, 0.5, 0.5, 1)
+
+[sub_resource type="Sky" id="sky"]
+sky_material = SubResource("sky_mat")
+
+[sub_resource type="Environment" id="env"]
+background_mode = 2
+sky = SubResource("sky")
+ambient_light_source = 2
+ambient_light_color = Color(0.5, 0.5, 0.5, 1)
+tonemap_mode = 2
+tonemap_white = 5.0
+adjustment_enabled = true
+adjustment_brightness = 1.0
+adjustment_contrast = 1.05
+adjustment_saturation = 1.08
+ssao_enabled = true
+ssr_enabled = true
+ssr_max_steps = 24
+ssr_fade_in = 0.15
+ssr_fade_out = 2.0
+glow_enabled = true
+glow_intensity = 0.15
+glow_bloom = 0.05
+glow_hdr_threshold = 1.2
+fog_enabled = true
+fog_light_color = Color(0.75, 0.8, 0.9, 1)
+fog_density = 0.0003
+fog_sky_affect = 0.15
+
+[sub_resource type="BoxShape3D" id="ground_shape"]
+size = Vector3(10000, 1, 10000)
+
+[sub_resource type="PlaneMesh" id="ground_mesh"]
+size = Vector2(10000, 10000)
+
+[sub_resource type="StandardMaterial3D" id="ground_mat"]
+albedo_color = Color(0.4, 0.5, 0.4, 1)
+
+[node name="PerformanceTest" type="Node3D"]
+script = ExtResource("test_script")
+test_duration = 30.0
+test_speed = 20.0
+enable_night_mode = true
+test_location = Vector2(59.1167, 37.9)
+auto_quit_after_test = false
+
+[node name="StaticGround" type="StaticBody3D" parent="." groups=["Grass"]]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="StaticGround"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+shape = SubResource("ground_shape")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="StaticGround"]
+mesh = SubResource("ground_mesh")
+surface_material_override/0 = SubResource("ground_mat")
+
+[node name="OSMTerrain" type="Node3D" parent="." groups=["osm_terrain"]]
+script = ExtResource("osm")
+start_lat = 59.1167
+start_lon = 37.9
+chunk_size = 300.0
+load_distance = 500.0
+unload_distance = 800.0
+car_path = NodePath("../Car")
+
+[node name="Car" parent="." groups=["car", "player"] instance=ExtResource("car")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)
+
+[node name="VehicleInput" type="Node" parent="Car" node_paths=PackedStringArray("vehicle_node")]
+script = ExtResource("vehicle_input")
+vehicle_node = NodePath("..")
+
+[node name="Camera3D" type="Camera3D" parent="Car"]
+transform = Transform3D(1, 0, 0, 0, 0.866025, 0.5, 0, -0.5, 0.866025, 0, 3, 6)
+current = true
+script = ExtResource("camera")
+target = NodePath("..")
+distance = 6.0
+height = 3.0
+smoothing_speed = 5.0
+follow_rotation = true
+
+[node name="TrafficManager" type="Node" parent="."]
+script = ExtResource("traffic")
+car_path = NodePath("../Car")
+osm_terrain_path = NodePath("../OSMTerrain")
+
+[node name="NightModeManager" type="Node" parent="." groups=["night_mode_manager"]]
+script = ExtResource("night")
+is_night = true
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.5, 0.866025, 0, -0.866025, 0.5, 0, 10, 0)
+light_energy = 0.8
+shadow_enabled = true
+directional_shadow_max_distance = 500.0
+directional_shadow_split_1 = 0.1
+directional_shadow_split_2 = 0.2
+directional_shadow_split_3 = 0.5
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("env")
+
+[node name="GraphicsSettings" type="Node" parent="."]
+script = ExtResource("graphics")
+
+[node name="GroundSetup" type="Node" parent="."]
+script = ExtResource("ground")
+
+[node name="BottleneckAnalyzer" type="Node" parent="."]
+script = ExtResource("bottleneck")
+update_interval = 2.0
+detailed_logging = true

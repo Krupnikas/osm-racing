@@ -169,11 +169,11 @@ func _position_car_on_road() -> void:
 		var end: Vector2 = segment.end
 
 		# Найти ближайшую точку на сегменте к origin (0, 0)
-		var segment_vec := end - start
-		var to_origin := Vector2.ZERO - start
-		var t := clamp(to_origin.dot(segment_vec) / segment_vec.length_squared(), 0.0, 1.0)
-		var closest_2d := start + segment_vec * t
-		var distance := closest_2d.length()
+		var segment_vec: Vector2 = end - start
+		var to_origin: Vector2 = Vector2.ZERO - start
+		var t: float = clamp(to_origin.dot(segment_vec) / segment_vec.length_squared(), 0.0, 1.0)
+		var closest_2d: Vector2 = start + segment_vec * t
+		var distance: float = closest_2d.length()
 
 		if distance < closest_distance:
 			closest_distance = distance

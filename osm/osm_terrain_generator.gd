@@ -63,7 +63,7 @@ var _check_timer := 0.0
 var _initial_loading := false  # Флаг начальной загрузки
 var _initial_chunks_needed: Array[String] = []  # Чанки нужные для старта
 var _initial_chunks_loaded: int = 0  # Количество загруженных начальных чанков
-var _loading_paused := true  # Загрузка на паузе до команды
+var _loading_paused := false  # Загрузка НЕ на паузе - автоматический старт
 var _load_generation := 0  # Инкрементируется при reset для игнорирования старых callback'ов
 var _entrance_nodes: Array = []  # Входы в здания/заведения из OSM
 var _poi_nodes: Array = []  # Точечные заведения (shop/amenity как node)
@@ -102,6 +102,7 @@ var _curb_queue: Array = []  # Очередь бордюров (создаютс
 
 # Road batching system - накопление geometry данных для mesh merging
 var _road_batch_data: Dictionary = {}  # key: chunk_key -> { "highway": {vertices, uvs, normals, indices}, "primary": {...}, ...}
+var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batches (нужно финализировать)
 var _curb_smoothed_queue: Array = []  # Очередь сглаженных бордюров для генерации меша
 var _curb_mesh_state: Dictionary = {}  # Текущее состояние генерации меша бордюра (для разбивки по кадрам)
 var _curb_collision_results: Array = []  # Результаты расчёта коллизий из worker threads
@@ -1628,9 +1629,11 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 
 	print("OSM: Generated %d roads, %d buildings, %d trees, %d signs, %d lamps, %d intersections" % [road_count, building_count, tree_count, sign_count, lamp_count, intersection_count])
 
-	# OPTIMIZATION: Finalize road batches - create merged meshes
-	if chunk_key != "":
-		_finalize_road_batches_for_chunk(chunk_key)
+	# OPTIMIZATION: Помечаем чанк для финализации road batches (когда road_queue опустеет)
+	var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
+	if not _pending_batch_chunks.has(batch_chunk_key):
+		_pending_batch_chunks.append(batch_chunk_key)
+		print("OSM: Marked chunk '%s' for road batch finalization" % batch_chunk_key)
 
 func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	# Добавляем в очередь для отложенного создания
@@ -1857,9 +1860,12 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 	if parent.name.begins_with("Chunk_"):
 		chunk_key = parent.name.substr(6)  # Убираем "Chunk_" префикс
 	else:
-		# Fallback: создаём дорогу старым способом если не можем определить чанк
-		_create_road_mesh_with_texture(nodes, width, texture_key, height_offset, parent, elev_data)
-		return
+		# Для начальной загрузки (parent = root) используем "initial"
+		chunk_key = "initial"
+
+	# DEBUG: первый вызов для каждого чанка
+	if not _road_batch_data.has(chunk_key):
+		print("OSM: DEBUG _add_road_to_batch - first road for chunk '%s', parent.name='%s'" % [chunk_key, parent.name])
 
 	# Инициализируем batch data для этого чанка если ещё нет
 	if not _road_batch_data.has(chunk_key):
@@ -1946,7 +1952,10 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 
 # Финализирует road batches для чанка - создаёт merged meshes
 func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
+	print("OSM: DEBUG _finalize_road_batches_for_chunk called for chunk_key='%s', has data: %s" % [chunk_key, _road_batch_data.has(chunk_key)])
+
 	if not _road_batch_data.has(chunk_key):
+		print("OSM: DEBUG No road batch data for chunk '%s'" % chunk_key)
 		return  # Нет дорог в этом чанке
 
 	var chunk_batches: Dictionary = _road_batch_data[chunk_key]
@@ -1974,10 +1983,11 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		var mesh_instance := MeshInstance3D.new()
 		mesh_instance.mesh = arr_mesh
 		mesh_instance.name = "RoadBatch_" + texture_key
+		mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # Дороги не должны отбрасывать тени
 
 		# Создаём материал (копируем логику из _create_road_mesh_with_texture)
 		var material: StandardMaterial3D = StandardMaterial3D.new()
-		material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация
+		material.cull_mode = BaseMaterial3D.CULL_DISABLED  # Оставляем DISABLED как в оригинале
 		if _road_textures.has(texture_key):
 			material.albedo_texture = _road_textures[texture_key]
 			material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
@@ -2015,10 +2025,11 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		var parent: Node3D = batch["parent"]
 		parent.add_child(road_body)
 
-		if debug_print:
-			print("OSM: Finalized road batch %s/%s: %d vertices, %d triangles" % [
-				chunk_key, texture_key, batch["vertices"].size(), batch["indices"].size() / 3
-			])
+		# DEBUG: Всегда выводим информацию о созданных road batches
+		print("OSM: ✅ Finalized road batch %s/%s: %d vertices, %d triangles, material: %s" % [
+			chunk_key, texture_key, batch["vertices"].size(), batch["indices"].size() / 3,
+			material.albedo_texture if material.albedo_texture else "color only"
+		])
 
 	# Очищаем batch data для этого чанка
 	_road_batch_data.erase(chunk_key)
@@ -3843,6 +3854,11 @@ Chunks: %d loaded""" % [fps, avg_fps, fps_1pct, min_fps, road_q, terrain_q, infr
 ## Обрабатывает очередь дорог (3 дороги за кадр)
 func _process_road_queue() -> void:
 	if _road_queue.is_empty():
+		# OPTIMIZATION: Финализируем все pending road batches
+		for chunk_key in _pending_batch_chunks:
+			_finalize_road_batches_for_chunk(chunk_key)
+		_pending_batch_chunks.clear()
+
 		# Когда все дороги созданы, обрабатываем бордюры
 		_process_curb_queue()
 		return
