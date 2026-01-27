@@ -145,16 +145,20 @@ func _update_ai_driver() -> void:
 			forward_flat = forward_flat.normalized()
 
 			# Вычисляем lateral error через cross product (только Y компонента)
-			var lateral_error := to_target_flat.cross(forward_flat).y
+			# forward.cross(to_target).y: положительный если цель справа, отрицательный если слева
+			# steering > 0 = поворот влево, steering < 0 = поворот вправо
+			# Поэтому нужен знак минус: если цель справа, крутим вправо (отрицательный steering)
+			var lateral_error := forward_flat.cross(to_target_flat).y
 
-				# Проверяем что lookahead достаточно далеко
+			# Проверяем что lookahead достаточно далеко
 			var distance_to_lookahead := global_position.distance_to(lookahead_point)
 			if distance_to_lookahead < 2.0:
 				# Слишком близко - едем прямо
 				steering_input = 0.0
 			else:
 				# Steering пропорционален lateral error с ограничением
-				steering_input = clamp(lateral_error * 1.5, -1.0, 1.0)
+				# Минус потому что положительный lateral_error (цель справа) требует поворота вправо (steering < 0)
+				steering_input = clamp(-lateral_error * 1.5, -1.0, 1.0)
 	else:
 		# Нет lookahead point - едем прямо
 		steering_input = 0.0

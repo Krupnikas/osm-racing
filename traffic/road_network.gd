@@ -54,7 +54,8 @@ const SPEED_LIMITS := {
 
 func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_key: String, elev_data: Dictionary) -> void:
 	"""Добавляет дорожный сегмент в навигационную сеть
-	Примечание: _chunk_key не используется, каждый waypoint определяет свой чанк по позиции"""
+	Примечание: _chunk_key не используется, каждый waypoint определяет свой чанк по позиции
+	Создаёт waypoints в ОБОИХ направлениях для двустороннего движения"""
 	if points.size() < 2:
 		return
 
@@ -68,14 +69,41 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_k
 	var width: float = _get_road_width(highway_type)
 	var lanes: int = _get_lanes_per_direction(highway_type)
 
-	var all_road_waypoints: Array[Waypoint] = []  # Все waypoints этой дороги
-	var prev_segment_last: Waypoint = null  # Последний waypoint предыдущего сегмента
+	# Создаём waypoints в прямом направлении
+	var forward_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, false)
+
+	# Создаём waypoints в обратном направлении
+	var reverse_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, true)
+
+	# Проверяем пересечения с другими дорогами для создания связей
+	# Важно: проверяем каждое направление отдельно, чтобы не связывать forward и reverse между собой
+	_connect_intersections_fast(forward_waypoints)
+	_connect_intersections_fast(reverse_waypoints)
+
+
+func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictionary, speed_limit: float, width: float, lanes: int, reverse: bool) -> Array[Waypoint]:
+	"""Создаёт waypoints вдоль дороги в одном направлении"""
+	var all_road_waypoints: Array[Waypoint] = []
+	var prev_segment_last: Waypoint = null
+
+	# Определяем порядок обхода точек
+	var start_idx: int
+	var end_idx: int
+	var step: int
+	if reverse:
+		start_idx = points.size() - 1
+		end_idx = 0
+		step = -1
+	else:
+		start_idx = 0
+		end_idx = points.size() - 1
+		step = 1
 
 	# Генерируем waypoints вдоль дороги
-	var i := 0
-	while i < points.size() - 1:
+	var i := start_idx
+	while (step > 0 and i < end_idx) or (step < 0 and i > end_idx):
 		var start_2d := points[i]
-		var end_2d := points[i + 1]
+		var end_2d := points[i + step]
 
 		# Получаем высоты
 		var start_height := _get_elevation_at_point(start_2d, elev_data)
@@ -92,7 +120,7 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_k
 		# Минимум 2 waypoints чтобы избежать деления на 0 в интерполяции
 		var num_waypoints: int = max(2, int(ceil(segment_length / WAYPOINT_SPACING)))
 
-		var segment_waypoints: Array[Waypoint] = []  # Waypoints только этого сегмента
+		var segment_waypoints: Array[Waypoint] = []
 
 		for j in range(num_waypoints):
 			var t := float(j) / float(num_waypoints - 1)
@@ -126,10 +154,9 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_k
 		if segment_waypoints.size() > 0:
 			prev_segment_last = segment_waypoints[segment_waypoints.size() - 1]
 
-		i += 1
+		i += step
 
-	# Проверяем пересечения с другими дорогами для создания связей
-	_connect_intersections_fast(all_road_waypoints)
+	return all_road_waypoints
 
 
 ## Получает ключ чанка по позиции waypoint
@@ -171,7 +198,8 @@ func _get_nearby_waypoints(pos: Vector3) -> Array:
 
 ## Быстрый поиск пересечений с использованием пространственного индекса
 func _connect_intersections_fast(new_waypoints: Array) -> void:
-	"""Находит пересечения используя пространственный индекс O(1) вместо O(n)"""
+	"""Находит пересечения используя пространственный индекс O(1) вместо O(n)
+	Связывает только waypoints с близким направлением (не встречные)"""
 	# Проверяем только концы сегмента
 	var endpoints := []
 	if new_waypoints.size() > 0:
@@ -192,6 +220,12 @@ func _connect_intersections_fast(new_waypoints: Array) -> void:
 			var distance: float = new_wp.position.distance_to(existing_wp.position)
 
 			if distance < INTERSECTION_THRESHOLD:
+				# Проверяем что направления не противоположные (dot > 0 = схожее направление)
+				# Это предотвращает связывание встречных полос
+				var dir_dot: float = new_wp.direction.dot(existing_wp.direction)
+				if dir_dot < -0.3:  # Почти противоположные направления - не связываем
+					continue
+
 				if not new_wp.next_waypoints.has(existing_wp):
 					new_wp.next_waypoints.append(existing_wp)
 				if not existing_wp.next_waypoints.has(new_wp):
