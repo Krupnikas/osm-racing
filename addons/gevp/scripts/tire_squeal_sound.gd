@@ -1,28 +1,24 @@
 extends AudioStreamPlayer3D
 
 ## Звук визга резины при скольжении колес
-## Работает аналогично engine_sound.gd - звук всегда играет, громкость регулируется
+## Best practice: сравниваем линейную скорость колеса с расчетной через угловую скорость
 
 @export var vehicle: Vehicle
-@export var min_slip_for_sound := 0.02  # Начинаем тихо при малом скольжении
-@export var max_pitch := 1.8  # Максимальный pitch при сильном скольжении
+@export var slip_threshold := 2.0  # м/с разница для начала звука
+@export var max_slip := 8.0  # м/с разница для максимальной громкости
 
 func _physics_process(_delta):
 	if not vehicle:
 		return
 
-	# Не играть звук если машина заморожена или скрыта (как у двигателя)
+	# Не играть звук если машина заморожена или скрыта
 	if vehicle.freeze or not vehicle.visible:
 		if playing:
 			stop()
 		return
 
-	# Включить звук если не играет (как у двигателя - всегда включен)
-	if not playing:
-		play()
-
 	# Вычисляем максимальное скольжение среди всех колес
-	var max_slip := 0.0
+	var max_slip_speed := 0.0
 	var wheels := [
 		vehicle.front_left_wheel,
 		vehicle.front_right_wheel,
@@ -32,21 +28,31 @@ func _physics_process(_delta):
 
 	for wheel in wheels:
 		if wheel and wheel.is_colliding():
-			# Комбинированное скольжение (латеральное + продольное)
-			var slip_magnitude := wheel.slip_vector.length()
-			max_slip = max(max_slip, slip_magnitude)
+			# Линейная скорость колеса (скорость точки контакта с дорогой)
+			var wheel_linear_velocity := wheel.local_velocity.length()
 
-	# Pitch зависит от величины скольжения (аналогично RPM у двигателя)
-	# При скольжении 0.0 -> pitch 1.0, при 0.5+ -> pitch max_pitch
-	pitch_scale = 1.0 + (clampf(max_slip / 0.5, 0.0, 1.0) * (max_pitch - 1.0))
+			# Расчетная скорость на основе угловой скорости вращения колеса
+			var wheel_rotational_speed := abs(wheel.spin * wheel.tire_radius)
 
-	# Громкость зависит от скольжения
-	# Если нет скольжения - полная тишина (-80 dB)
-	if max_slip < min_slip_for_sound:
-		volume_db = -80.0  # Практически беззвучно
-	else:
-		# Нормализуем скольжение от min_slip_for_sound до 0.3 (сильное скольжение)
-		var slip_normalized := clampf((max_slip - min_slip_for_sound) / (0.3 - min_slip_for_sound), 0.0, 1.0)
-		# Диапазон громкости: от 0.2 до 0.9 (чуть тише двигателя)
-		var volume_factor := (slip_normalized * 0.7) + 0.2
+			# Разница = величина скольжения (проскальзывание/блокировка)
+			var slip_speed := abs(wheel_linear_velocity - wheel_rotational_speed)
+			max_slip_speed = max(max_slip_speed, slip_speed)
+
+	# Если скольжение выше порога - включаем звук
+	if max_slip_speed > slip_threshold:
+		if not playing:
+			play()
+
+		# Нормализуем скольжение для pitch и громкости
+		var slip_normalized := clampf((max_slip_speed - slip_threshold) / (max_slip - slip_threshold), 0.0, 1.0)
+
+		# Pitch: от 1.0 до 1.6 (выше = более пронзительный визг)
+		pitch_scale = 1.0 + (slip_normalized * 0.6)
+
+		# Громкость: от 0.3 до 0.85
+		var volume_factor := 0.3 + (slip_normalized * 0.55)
 		volume_db = linear_to_db(volume_factor)
+	else:
+		# Скольжение слишком маленькое - выключаем звук
+		if playing:
+			stop()

@@ -467,18 +467,17 @@ vehicle = NodePath("../NexiaModel")
 
 [node name="EngineSound" type="AudioStreamPlayer3D" parent="." node_paths=PackedStringArray("vehicle")]
 stream = ExtResource("8_engine_wav")
-autoplay = true
+autoplay = false
 max_db = 10.0
 script = ExtResource("7_engine_sound")
 sample_rpm = 4000.0
 vehicle = NodePath("..")
-min_slip_for_sound = 0.02
 
 [node name="TireSquealSound" type="AudioStreamPlayer3D" parent="." node_paths=PackedStringArray("vehicle")]
 stream = ExtResource("10_tire_squeal.wav")
-autoplay = true
+autoplay = false
 max_db = 10.0
 script = ExtResource("9_tire_squeal")
 vehicle = NodePath("..")
-min_slip_for_sound = 0.02
-max_pitch = 1.8
+slip_threshold = 2.0
+max_slip = 8.0
