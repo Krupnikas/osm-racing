@@ -174,17 +174,21 @@ func _attempt_spawn_in_chunk(chunk_key: String, player_pos: Vector3) -> bool:
 
 func _count_npcs_in_chunk(chunk_key: String) -> int:
 	"""Считает реальное количество NPC в чанке по их позициям"""
+	# Используем тот же метод что и road_network для вычисления chunk_key
 	var count := 0
-	var waypoints: Array = road_network.get_waypoints_in_chunk(chunk_key)
-	if waypoints.is_empty():
+	var parts := chunk_key.split(",")
+	if parts.size() != 2:
 		return 0
 
-	# Берём первый waypoint для определения примерного центра чанка
-	var chunk_center: Vector3 = waypoints[0].position
-	var chunk_radius := 200.0  # Примерный радиус чанка
+	var chunk_x := int(parts[0])
+	var chunk_z := int(parts[1])
+	const CHUNK_SIZE := 300.0
 
 	for npc in active_npcs:
-		if npc.global_position.distance_to(chunk_center) < chunk_radius:
+		var pos: Vector3 = npc.global_position
+		var npc_chunk_x := int(floor(pos.x / CHUNK_SIZE))
+		var npc_chunk_z := int(floor(pos.z / CHUNK_SIZE))
+		if npc_chunk_x == chunk_x and npc_chunk_z == chunk_z:
 			count += 1
 
 	return count
@@ -209,7 +213,9 @@ func _update_despawning() -> void:
 	"""Удаляет далёкие NPC машины"""
 	var player_pos := _get_player_position()
 
-	for npc in active_npcs.duplicate():
+	# Итерируем в обратном порядке чтобы безопасно удалять элементы
+	for i in range(active_npcs.size() - 1, -1, -1):
+		var npc = active_npcs[i]
 		var distance: float = npc.global_position.distance_to(player_pos)
 		if distance > DESPAWN_DISTANCE:
 			_return_npc_to_pool(npc)
@@ -217,8 +223,10 @@ func _update_despawning() -> void:
 
 func _check_spawn_separation(position: Vector3) -> bool:
 	"""Проверяет минимальную дистанцию до других NPC"""
+	# Используем distance_squared для оптимизации (избегаем sqrt)
+	var min_dist_sq := MIN_SPAWN_SEPARATION * MIN_SPAWN_SEPARATION
 	for npc in active_npcs:
-		if npc.global_position.distance_to(position) < MIN_SPAWN_SEPARATION:
+		if npc.global_position.distance_squared_to(position) < min_dist_sq:
 			return false
 	return true
 

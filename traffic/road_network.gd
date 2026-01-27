@@ -199,17 +199,33 @@ func _connect_intersections_fast(new_waypoints: Array) -> void:
 
 
 func get_nearest_waypoint(position: Vector3) -> Waypoint:
-	"""Находит ближайший waypoint к заданной позиции"""
+	"""Находит ближайший waypoint к заданной позиции используя пространственный индекс"""
 	if all_waypoints.is_empty():
 		return null
 
+	# Сначала ищем в соседних ячейках (быстрый путь)
+	var nearby := _get_nearby_waypoints(position)
+	if not nearby.is_empty():
+		var nearest: Waypoint = null
+		var min_distance_sq := INF
+
+		for wp in nearby:
+			var dist_sq := position.distance_squared_to(wp.position)
+			if dist_sq < min_distance_sq:
+				min_distance_sq = dist_sq
+				nearest = wp
+
+		if nearest:
+			return nearest
+
+	# Fallback - полный поиск (редко должен срабатывать)
 	var nearest: Waypoint = null
-	var min_distance := INF
+	var min_distance_sq := INF
 
 	for wp in all_waypoints:
-		var distance := position.distance_to(wp.position)
-		if distance < min_distance:
-			min_distance = distance
+		var dist_sq := position.distance_squared_to(wp.position)
+		if dist_sq < min_distance_sq:
+			min_distance_sq = dist_sq
 			nearest = wp
 
 	return nearest
@@ -218,10 +234,21 @@ func get_nearest_waypoint(position: Vector3) -> Waypoint:
 func get_waypoints_in_radius(position: Vector3, radius: float) -> Array:
 	"""Возвращает все waypoints в заданном радиусе от позиции"""
 	var result: Array = []
+	var radius_sq := radius * radius
 
-	for wp in all_waypoints:
-		if position.distance_to(wp.position) <= radius:
-			result.append(wp)
+	# Используем пространственный индекс для ускорения поиска
+	# Определяем сколько ячеек нужно проверить
+	var cells_to_check := int(ceil(radius / GRID_CELL_SIZE)) + 1
+	var gx := int(floor(position.x / GRID_CELL_SIZE))
+	var gz := int(floor(position.z / GRID_CELL_SIZE))
+
+	for dx in range(-cells_to_check, cells_to_check + 1):
+		for dz in range(-cells_to_check, cells_to_check + 1):
+			var key := "%d,%d" % [gx + dx, gz + dz]
+			if _spatial_grid.has(key):
+				for wp in _spatial_grid[key]:
+					if position.distance_squared_to(wp.position) <= radius_sq:
+						result.append(wp)
 
 	return result
 

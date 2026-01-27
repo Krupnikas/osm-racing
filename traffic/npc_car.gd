@@ -83,9 +83,8 @@ func _physics_process(delta: float) -> void:
 	if update_timer >= UPDATE_INTERVAL:
 		update_timer = 0.0
 		_update_ai_driver()
-
-		# Отладка контакта колёс (каждые UPDATE_INTERVAL секунд)
-		_debug_wheel_contact()
+		# Debug disabled for performance
+		# _debug_wheel_contact()
 
 	# Вызываем базовую физику (скорость, руление, силы, auto-shift)
 	_base_physics_process(delta)
@@ -476,7 +475,7 @@ func enable_lights() -> void:
 	if _lights_enabled:
 		return
 	_lights_enabled = true
-	if _lights and _lights.has_method("enable_lights"):
+	if _lights:
 		_lights.enable_lights()
 
 
@@ -485,7 +484,7 @@ func disable_lights() -> void:
 	if not _lights_enabled:
 		return
 	_lights_enabled = false
-	if _lights and _lights.has_method("disable_lights"):
+	if _lights:
 		_lights.disable_lights()
 
 
@@ -494,13 +493,9 @@ func _update_light_states() -> void:
 	if not _lights or not _lights_enabled:
 		return
 
-	# Стоп-сигналы при торможении
-	if _lights.has_method("set_braking"):
-		_lights.set_braking(brake_input > 0.1)
-
-	# Задний ход
-	if _lights.has_method("set_reversing"):
-		_lights.set_reversing(current_gear == 0)
+	# Вызываем напрямую - мы знаем что NPCCarLights имеет эти методы
+	_lights.set_braking(brake_input > 0.1)
+	_lights.set_reversing(current_gear == 0)
 
 
 func _debug_wheel_contact() -> void:
