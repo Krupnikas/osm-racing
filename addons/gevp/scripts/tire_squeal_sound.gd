@@ -4,12 +4,26 @@ extends AudioStreamPlayer3D
 ## Работает аналогично engine_sound.gd
 
 @export var vehicle: Vehicle
-@export var slip_threshold := 0.15  # Минимальное скольжение для начала звука
+@export var slip_threshold := 0.05  # Минимальное скольжение для начала звука (снижено с 0.15)
 @export var max_pitch := 1.5  # Максимальный pitch при сильном скольжении
 
-func _physics_process(_delta):
+var _debug_timer := 0.0
+
+func _ready() -> void:
+	print("TireSquealSound: Ready, vehicle = ", vehicle)
+	if stream:
+		print("TireSquealSound: Stream loaded = ", stream.resource_path if stream.resource_path else "no path")
+	else:
+		print("TireSquealSound: WARNING - No stream assigned!")
+
+func _physics_process(delta):
 	if not vehicle:
 		return
+
+	# Debug каждые 2 секунды
+	_debug_timer += delta
+	if _debug_timer > 2.0:
+		_debug_timer = 0.0
 
 	# Не играть звук если машина заморожена или скрыта
 	if vehicle.freeze or not vehicle.visible:
@@ -31,6 +45,10 @@ func _physics_process(_delta):
 			# Комбинированное скольжение (латеральное + продольное)
 			var slip_magnitude := wheel.slip_vector.length()
 			max_slip = max(max_slip, slip_magnitude)
+
+	# Debug вывод
+	if _debug_timer == 0.0:
+		print("TireSquealSound: max_slip=%.3f, threshold=%.3f, playing=%s" % [max_slip, slip_threshold, playing])
 
 	# Если скольжение выше порога - включаем звук
 	if max_slip > slip_threshold:
