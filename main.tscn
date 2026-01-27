@@ -159,6 +159,7 @@ camera_path = NodePath("../../CameraManager/FollowCamera")
 
 [node name="HUD" parent="UI" instance=ExtResource("10_hud")]
 car_path = NodePath("../../Car")
+terrain_generator_path = NodePath("../../OSMTerrain")
 
 [node name="RaceHUD" parent="UI" instance=ExtResource("21_race_hud")]
 race_manager_path = NodePath("../../RaceManager")

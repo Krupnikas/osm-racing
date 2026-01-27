@@ -129,6 +129,10 @@ var _fps_update_timer := 0.0
 var _debug_label: Label = null
 @export var show_debug_stats := true  # Показывать статистику на экране
 
+# Debug визуализация границ чанков
+var _show_chunk_boundaries := false
+var _chunk_boundary_meshes: Dictionary = {}  # chunk_key -> MeshInstance3D
+
 # Предиктивная загрузка чанков
 @export_group("Predictive Loading")
 @export var prediction_time_horizon := 15.0  # Горизонт предсказания (секунд)
@@ -7251,6 +7255,99 @@ func _get_road_priority(highway_type: String) -> int:
 			return 1
 		_:
 			return 0
+
+
+## Переключает отображение границ чанков для отладки
+func toggle_chunk_boundaries() -> void:
+	_show_chunk_boundaries = not _show_chunk_boundaries
+
+	if _show_chunk_boundaries:
+		# Создаём визуализацию границ для всех загруженных чанков
+		for chunk_key in _loaded_chunks.keys():
+			_create_chunk_boundary_mesh(chunk_key)
+	else:
+		# Удаляем все визуализации
+		for mesh_instance in _chunk_boundary_meshes.values():
+			if mesh_instance:
+				mesh_instance.queue_free()
+		_chunk_boundary_meshes.clear()
+
+
+## Создаёт mesh для визуализации границы чанка
+func _create_chunk_boundary_mesh(chunk_key: String) -> void:
+	if _chunk_boundary_meshes.has(chunk_key):
+		return  # Уже создан
+
+	var coords := chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+
+	var x := chunk_x * chunk_size
+	var z := chunk_z * chunk_size
+
+	# Создаём линии по периметру чанка
+	var immediate_mesh := ImmediateMesh.new()
+	immediate_mesh.surface_begin(Mesh.PRIMITIVE_LINES)
+
+	var height := 50.0  # Высота линий
+	var color := Color.YELLOW
+
+	# Нижняя рамка
+	immediate_mesh.surface_set_color(color)
+	immediate_mesh.surface_add_vertex(Vector3(x, 0, z))
+	immediate_mesh.surface_add_vertex(Vector3(x + chunk_size, 0, z))
+
+	immediate_mesh.surface_add_vertex(Vector3(x + chunk_size, 0, z))
+	immediate_mesh.surface_add_vertex(Vector3(x + chunk_size, 0, z + chunk_size))
+
+	immediate_mesh.surface_add_vertex(Vector3(x + chunk_size, 0, z + chunk_size))
+	immediate_mesh.surface_add_vertex(Vector3(x, 0, z + chunk_size))
+
+	immediate_mesh.surface_add_vertex(Vector3(x, 0, z + chunk_size))
+	immediate_mesh.surface_add_vertex(Vector3(x, 0, z))
+
+	# Вертикальные линии по углам
+	immediate_mesh.surface_add_vertex(Vector3(x, 0, z))
+	immediate_mesh.surface_add_vertex(Vector3(x, height, z))
+
+	immediate_mesh.surface_add_vertex(Vector3(x + chunk_size, 0, z))
+	immediate_mesh.surface_add_vertex(Vector3(x + chunk_size, height, z))
+
+	immediate_mesh.surface_add_vertex(Vector3(x + chunk_size, 0, z + chunk_size))
+	immediate_mesh.surface_add_vertex(Vector3(x + chunk_size, height, z + chunk_size))
+
+	immediate_mesh.surface_add_vertex(Vector3(x, 0, z + chunk_size))
+	immediate_mesh.surface_add_vertex(Vector3(x, height, z + chunk_size))
+
+	# Верхняя рамка
+	immediate_mesh.surface_add_vertex(Vector3(x, height, z))
+	immediate_mesh.surface_add_vertex(Vector3(x + chunk_size, height, z))
+
+	immediate_mesh.surface_add_vertex(Vector3(x + chunk_size, height, z))
+	immediate_mesh.surface_add_vertex(Vector3(x + chunk_size, height, z + chunk_size))
+
+	immediate_mesh.surface_add_vertex(Vector3(x + chunk_size, height, z + chunk_size))
+	immediate_mesh.surface_add_vertex(Vector3(x, height, z + chunk_size))
+
+	immediate_mesh.surface_add_vertex(Vector3(x, height, z + chunk_size))
+	immediate_mesh.surface_add_vertex(Vector3(x, height, z))
+
+	immediate_mesh.surface_end()
+
+	# Создаём MeshInstance3D
+	var mesh_instance := MeshInstance3D.new()
+	mesh_instance.mesh = immediate_mesh
+
+	# Создаём материал
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.albedo_color = color
+	material.no_depth_test = true  # Всегда видим
+	mesh_instance.material_override = material
+
+	# Добавляем в сцену
+	add_child(mesh_instance)
+	_chunk_boundary_meshes[chunk_key] = mesh_instance
 
 
 ## Проверяет, находится ли точка рядом с перекрёстком

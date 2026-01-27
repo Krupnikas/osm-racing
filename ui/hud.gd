@@ -1,10 +1,12 @@
 extends Control
 
 @export var car_path: NodePath
+@export var terrain_generator_path: NodePath
 
 var _car: Node3D  # Может быть VehicleBody3D или GEVP Vehicle
 var _car_rigidbody: RigidBody3D  # Для GEVP - доступ к RigidBody3D
 var _speedometer: Control
+var _terrain_generator: Node3D
 
 # Текущие значения
 var _current_speed: float = 0.0
@@ -21,6 +23,9 @@ func _ready() -> void:
 		_car = get_node(car_path)
 	else:
 		_car = get_tree().get_first_node_in_group("car")
+
+	if terrain_generator_path:
+		_terrain_generator = get_node(terrain_generator_path)
 
 	# Теперь _car указывает прямо на RigidBody3D (как в аркаде)
 	if _car is RigidBody3D:
@@ -85,3 +90,8 @@ func show_hud() -> void:
 
 func hide_hud() -> void:
 	visible = false
+
+
+func _on_debug_button_pressed() -> void:
+	if _terrain_generator and _terrain_generator.has_method("toggle_chunk_boundaries"):
+		_terrain_generator.toggle_chunk_boundaries()

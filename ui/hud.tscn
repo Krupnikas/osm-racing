@@ -11,6 +11,14 @@ anchor_bottom = 1.0
 mouse_filter = 2
 script = ExtResource("1_hud")
 
+[node name="DebugButton" type="Button" parent="."]
+layout_mode = 0
+offset_left = 10.0
+offset_top = 10.0
+offset_right = 120.0
+offset_bottom = 45.0
+text = "Debug Chunks"
+
 [node name="Speedometer" type="Control" parent="."]
 layout_mode = 1
 anchors_preset = 3
@@ -25,3 +33,5 @@ offset_bottom = -20.0
 grow_horizontal = 0
 grow_vertical = 0
 script = ExtResource("2_speedo")
+
+[connection signal="pressed" from="DebugButton" to="." method="_on_debug_button_pressed"]
