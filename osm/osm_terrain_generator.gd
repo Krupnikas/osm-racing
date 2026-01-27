@@ -27,6 +27,7 @@ var _bush_model: PackedScene
 # Кэш текстур (создаются один раз)
 var _road_textures: Dictionary = {}
 var _building_textures: Dictionary = {}
+var _window_shader: Shader = null  # Кэш шейдера окон (создается один раз)
 var _ground_textures: Dictionary = {}
 var _normal_textures: Dictionary = {}  # Normal maps
 var _textures_initialized := false
@@ -48,6 +49,7 @@ var _textures_initialized := false
 var osm_loader: Node
 var _car: Node3D
 var _camera: Camera3D
+var _profiler: PerformanceProfiler  # Для измерения производительности
 var _loaded_chunks: Dictionary = {}  # key: "x,z" -> value: Node3D (chunk node)
 var _loading_chunks: Dictionary = {}  # key: "x,z" -> value: timestamp (start time in msec)
 const CHUNK_LOAD_TIMEOUT := 30.0  # Таймаут загрузки чанка (секунд)
@@ -209,10 +211,22 @@ func _ready() -> void:
 	# Инициализируем текстуры
 	_init_textures()
 
+	# Инициализируем шейдер окон (один раз для всех батчей)
+	_init_window_shader()
+
 	# Загружаем сцены для припаркованных машин
 	_parked_car_scene = preload("res://traffic/npc_car.tscn")
 	_parked_lada_scene = preload("res://traffic/npc_lada_2109.tscn")
 	_parked_taxi_scene = preload("res://traffic/npc_taxi.tscn")
+
+	# Найти профайлер для измерения производительности
+	_profiler = get_node_or_null("/root/Main/PerformanceProfiler")
+	if not _profiler:
+		_profiler = get_tree().get_first_node_in_group("profiler")
+	if _profiler:
+		print("OSMTerrainGenerator: Profiler connected - road performance will be measured")
+	else:
+		print("OSMTerrainGenerator: WARNING - Profiler not found, performance won't be measured")
 
 	# Найти машину
 	if car_path:
@@ -277,6 +291,36 @@ func _init_textures() -> void:
 	_textures_initialized = true
 	var elapsed := Time.get_ticks_msec() - start_time
 	print("OSM: Textures initialized in %d ms" % elapsed)
+
+func _init_window_shader() -> void:
+	if _window_shader:
+		return
+
+	print("OSM: Initializing window shader (compile once, reuse for all batches)...")
+	_window_shader = Shader.new()
+	_window_shader.code = """
+shader_type spatial;
+
+uniform bool is_night = false;
+
+void fragment() {
+	// Проверяем, выключено ли окно (чёрный цвет = выключено)
+	bool is_off = (COLOR.r < 0.01 && COLOR.g < 0.01 && COLOR.b < 0.01);
+
+	if (is_night && !is_off) {
+		// Ночью включенные окна светятся
+		// Альфа-канал = яркость (0-1)
+		float brightness = COLOR.a;
+		ALBEDO = COLOR.rgb * brightness;
+		EMISSION = COLOR.rgb * brightness;
+	} else {
+		// Днём все окна тёмные, ночью выключенные тоже тёмные
+		ALBEDO = vec3(0.08, 0.1, 0.12);
+		EMISSION = vec3(0.0);
+	}
+}
+"""
+	print("OSM: Window shader compiled")
 
 func _process(delta: float) -> void:
 	var _frame_start := Time.get_ticks_usec()
@@ -1728,7 +1772,13 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 	_extract_road_for_traffic(nodes, tags, elev_data)
 
 func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: String, height_offset: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
+	var prof_start := 0
+	if _profiler:
+		prof_start = _profiler.start_measure("road_generation")
+
 	if nodes.size() < 2:
+		if _profiler:
+			_profiler.end_measure("road_generation", prof_start)
 		return
 
 	# Convert to local coordinates
@@ -1738,10 +1788,20 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 		raw_points.append(local)
 
 	# Smooth sharp corners with Catmull-Rom interpolation
+	var smooth_start := 0
+	if _profiler:
+		smooth_start = _profiler.start_measure("road_smoothing")
 	var points: PackedVector2Array = _smooth_road_corners(raw_points)
+	if _profiler:
+		_profiler.end_measure("road_smoothing", smooth_start)
 
 	# Validate and fix points that create loops/flips
+	var validate_start := 0
+	if _profiler:
+		validate_start = _profiler.start_measure("road_validation")
 	points = _validate_road_direction(points)
+	if _profiler:
+		_profiler.end_measure("road_validation", validate_start)
 
 	# Z-fighting offset based on hash
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
@@ -1857,6 +1917,9 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 			child.queue_free()
 
 	parent.add_child(road_body)
+
+	if _profiler:
+		_profiler.end_measure("road_generation", prof_start)
 
 # OPTIMIZATION: Road Batching System (Mesh Merging)
 # Добавляет дорогу в batch вместо создания отдельного MeshInstance3D
@@ -2083,32 +2146,13 @@ func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
 		if i < colors.size():
 			mm.set_instance_color(i, colors[i])
 
-	# Создаём материал с emissive shader (как в оригинале - inline shader)
-	var shader := Shader.new()
-	shader.code = """
-shader_type spatial;
+	# Используем КЭШИРОВАННЫЙ шейдер (компилируется один раз в _ready)
+	if not _window_shader:
+		push_error("OSM: Window shader not initialized!")
+		return
 
-uniform bool is_night = false;
-
-void fragment() {
-	// Проверяем, выключено ли окно (чёрный цвет = выключено)
-	bool is_off = (COLOR.r < 0.01 && COLOR.g < 0.01 && COLOR.b < 0.01);
-
-	if (is_night && !is_off) {
-		// Ночью включенные окна светятся
-		// Альфа-канал = яркость (0-1)
-		float brightness = COLOR.a;
-		ALBEDO = COLOR.rgb * brightness;
-		EMISSION = COLOR.rgb * brightness;
-	} else {
-		// Днём все окна тёмные, ночью выключенные тоже тёмные
-		ALBEDO = vec3(0.08, 0.1, 0.12);
-		EMISSION = vec3(0.0);
-	}
-}
-"""
 	var mat := ShaderMaterial.new()
-	mat.shader = shader
+	mat.shader = _window_shader
 
 	# Сохраняем материал для динамического обновления
 	_window_batch_materials.append(mat)
@@ -3979,13 +4023,19 @@ Chunks: %d loaded""" % [fps, avg_fps, fps_1pct, min_fps, road_q, terrain_q, infr
 func _process_road_queue() -> void:
 	if _road_queue.is_empty():
 		# OPTIMIZATION: Финализируем все pending road batches
+		var t_batch := Time.get_ticks_usec()
 		for chunk_key in _pending_batch_chunks:
 			_finalize_road_batches_for_chunk(chunk_key)
 		_pending_batch_chunks.clear()
+		if Time.get_ticks_usec() - t_batch > 100:  # Только если >0.1ms
+			_record_perf("road_batch_finalize", Time.get_ticks_usec() - t_batch)
 
 		# OPTIMIZATION: Финализируем все pending window batches
+		var t_window := Time.get_ticks_usec()
 		for chunk_key in _window_batch_data.keys():
 			_finalize_window_batches_for_chunk(chunk_key)
+		if Time.get_ticks_usec() - t_window > 100:  # Только если >0.1ms
+			_record_perf("window_batch_finalize", Time.get_ticks_usec() - t_window)
 
 		# Когда все дороги созданы, обрабатываем бордюры
 		_process_curb_queue()
