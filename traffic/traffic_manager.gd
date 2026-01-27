@@ -31,7 +31,7 @@ var spawn_cooldown := 0.0  # Задержка между spawns
 const SPAWN_COOLDOWN_TIME := 1.0  # Spawn каждую секунду
 
 # Debug визуализация
-var debug_visualize := true  # Включить/выключить визуализацию waypoints
+var debug_visualize := false  # Включить/выключить визуализацию waypoints
 var waypoint_spheres: Array = []  # Визуальные маркеры waypoints
 var npc_path_visuals: Dictionary = {}  # npc -> Array[MeshInstance3D] для визуализации путей
 
