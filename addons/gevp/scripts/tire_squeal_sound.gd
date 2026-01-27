@@ -4,7 +4,7 @@ extends AudioStreamPlayer3D
 ## Best practice: сравниваем линейную скорость колеса с расчетной через угловую скорость
 
 @export var vehicle: Vehicle
-@export var slip_threshold: float = 2.0  # Порог slip_vector.length() для звука (было 0.25→0.5→1.0→2.0)
+@export var slip_threshold: float = 1.0  # Порог slip_vector.length() для звука
 @export var max_slip: float = 4.0  # Максимальный slip_vector.length() для полной громкости
 
 var _debug_timer: float = 0.0

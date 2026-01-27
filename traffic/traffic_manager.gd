@@ -5,11 +5,11 @@ class_name TrafficManager
 ## Управляет spawning, despawning и жизненным циклом NPC машин
 
 # Параметры spawning
-const MAX_NPCS := 100  # Максимум машин одновременно
+const MAX_NPCS := 200  # Максимум машин одновременно
 const SPAWN_DISTANCE := 200.0  # Радиус spawning от игрока
 const DESPAWN_DISTANCE := 300.0  # Дистанция despawning
-const MIN_SPAWN_SEPARATION := 15.0  # Мин. расстояние между NPC (уменьшено для плотного трафика)
-const NPCS_PER_CHUNK := 20  # Машин на чанк
+const MIN_SPAWN_SEPARATION := 15.0  # Мин. расстояние между NPC
+const NPCS_PER_CHUNK := 40  # Машин на чанк
 
 # Ссылки
 var npc_car_scene: PackedScene
