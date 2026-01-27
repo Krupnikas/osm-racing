@@ -486,7 +486,7 @@ func show_menu() -> void:
 	# Показываем кнопку "Продолжить" если игра уже запущена
 	$VBox/ContinueButton.visible = _game_started
 	# Меняем текст кнопки "Старт" если игра уже запущена
-	$VBox/StartButton.text = "Новая игра" if _game_started else "Старт"
+	$VBox/StartButton.text = "Новая игра" if _game_started else "▶ ВЫЕХАТЬ В ГОРОД"
 
 func hide_menu() -> void:
 	visible = false

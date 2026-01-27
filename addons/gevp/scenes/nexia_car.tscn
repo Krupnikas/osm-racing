@@ -479,5 +479,5 @@ autoplay = false
 max_db = 10.0
 script = ExtResource("9_tire_squeal")
 vehicle = NodePath("..")
-slip_threshold = 2.0
-max_slip = 8.0
+slip_threshold = 0.9
+max_slip = 4.0

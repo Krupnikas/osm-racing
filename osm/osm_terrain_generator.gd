@@ -2937,8 +2937,8 @@ func _create_parking_surface(points: PackedVector2Array, elev_data: Dictionary, 
 
 	st.set_material(material)
 
-	# Высота поверхности чуть выше земли
-	var height_offset := 0.03
+	# Высота парковки ниже самых низких дорог (service = 0.012)
+	var height_offset := 0.01
 
 	# Добавляем вершины треугольников
 	for i in range(0, indices.size(), 3):
