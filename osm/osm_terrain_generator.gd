@@ -7243,7 +7243,7 @@ func _smooth_points(raw_points: PackedVector2Array, meters_per_point: float, max
 
 
 ## Validates road direction to remove points that create loops/flips
-## Removes points where the direction changes by more than 135 degrees
+## Removes points where the direction changes by more than 75 degrees
 func _validate_road_direction(points: PackedVector2Array) -> PackedVector2Array:
 	if points.size() < 3:
 		return points
@@ -7257,10 +7257,11 @@ func _validate_road_direction(points: PackedVector2Array) -> PackedVector2Array:
 		var current_dir: Vector2 = (points[i + 1] - points[i]).normalized()
 		var dot: float = prev_dir.dot(current_dir)
 
-		# If direction changed by more than 135 degrees, skip this point
-		# dot = -0.7 corresponds to ~135 degrees
-		if dot < -0.7:
-			# Skip this point as it creates a sharp reversal
+		# If direction changed by more than 75 degrees, skip this point
+		# dot = 0.26 corresponds to ~75 degrees
+		# This aggressively removes problematic smoothed points at intersections
+		if dot < 0.26:
+			# Skip this point as it creates a sharp turn
 			continue
 
 		result.append(points[i])
