@@ -9,14 +9,16 @@ class Waypoint:
 	var direction: Vector3  # Направление движения (нормализованный вектор)
 	var speed_limit: float  # Лимит скорости в км/ч
 	var width: float  # Ширина дороги в метрах
+	var lanes_count: int  # Количество полос В ОДНОМ направлении (1 или 2)
 	var next_waypoints: Array[Waypoint] = []  # Связи с следующими точками
 	var chunk_key: String  # Ключ чанка для cleanup
 
-	func _init(pos: Vector3, dir: Vector3, speed: float, w: float, chunk: String):
+	func _init(pos: Vector3, dir: Vector3, speed: float, w: float, lanes: int, chunk: String):
 		position = pos
 		direction = dir.normalized()
 		speed_limit = speed
 		width = w
+		lanes_count = lanes
 		chunk_key = chunk
 
 # Хранение waypoints по чанкам
@@ -31,6 +33,7 @@ const GRID_CELL_SIZE := 20.0  # Размер ячейки сетки в метр
 const WAYPOINT_SPACING := 8.0  # Расстояние между waypoints в метрах
 const INTERSECTION_THRESHOLD := 8.0  # Расстояние для определения пересечений
 const RIGHT_SIDE_OFFSET := 0.75  # Смещение вправо (75% от половины ширины дороги для встречного движения)
+const CHUNK_SIZE := 300.0  # Размер чанка в метрах (должен совпадать с osm_terrain_generator)
 
 # Speed limits по типам дорог (км/ч)
 const SPEED_LIMITS := {
@@ -49,8 +52,9 @@ const SPEED_LIMITS := {
 }
 
 
-func add_road_segment(points: PackedVector2Array, highway_type: String, chunk_key: String, elev_data: Dictionary) -> void:
-	"""Добавляет дорожный сегмент в навигационную сеть"""
+func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_key: String, elev_data: Dictionary) -> void:
+	"""Добавляет дорожный сегмент в навигационную сеть
+	Примечание: _chunk_key не используется, каждый waypoint определяет свой чанк по позиции"""
 	if points.size() < 2:
 		return
 
@@ -62,12 +66,10 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, chunk_ke
 	# Получаем параметры дороги
 	var speed_limit: float = SPEED_LIMITS.get(highway_type, 25.0)
 	var width: float = _get_road_width(highway_type)
+	var lanes: int = _get_lanes_per_direction(highway_type)
 
-	# Создаём массив waypoints для этого чанка
-	if not waypoints_by_chunk.has(chunk_key):
-		waypoints_by_chunk[chunk_key] = []
-
-	var segment_waypoints: Array[Waypoint] = []
+	var all_road_waypoints: Array[Waypoint] = []  # Все waypoints этой дороги
+	var prev_segment_last: Waypoint = null  # Последний waypoint предыдущего сегмента
 
 	# Генерируем waypoints вдоль дороги
 	var i := 0
@@ -87,28 +89,54 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, chunk_ke
 
 		# Создаём waypoints ПО ЦЕНТРУ дороги
 		# Машины сами будут смещаться вправо при следовании по пути
-		var num_waypoints: int = max(2, int(segment_length / WAYPOINT_SPACING))
+		# Минимум 2 waypoints чтобы избежать деления на 0 в интерполяции
+		var num_waypoints: int = max(2, int(ceil(segment_length / WAYPOINT_SPACING)))
+
+		var segment_waypoints: Array[Waypoint] = []  # Waypoints только этого сегмента
 
 		for j in range(num_waypoints):
 			var t := float(j) / float(num_waypoints - 1)
 			var pos := start_pos.lerp(end_pos, t)
 
-			var waypoint := Waypoint.new(pos, direction, speed_limit, width, chunk_key)
+			# Определяем chunk_key для этого waypoint на основе его позиции
+			var wp_chunk_key := _get_chunk_key_for_position(pos)
+
+			var waypoint := Waypoint.new(pos, direction, speed_limit, width, lanes, wp_chunk_key)
 			segment_waypoints.append(waypoint)
+			all_road_waypoints.append(waypoint)
 			all_waypoints.append(waypoint)
-			waypoints_by_chunk[chunk_key].append(waypoint)
+
+			# Добавляем в правильный чанк по позиции waypoint
+			if not waypoints_by_chunk.has(wp_chunk_key):
+				waypoints_by_chunk[wp_chunk_key] = []
+			waypoints_by_chunk[wp_chunk_key].append(waypoint)
 
 			# Добавляем в пространственный индекс
 			_add_to_spatial_grid(waypoint)
 
-		# Связываем waypoints последовательно
+		# Связываем waypoints внутри сегмента
 		for j in range(segment_waypoints.size() - 1):
 			segment_waypoints[j].next_waypoints.append(segment_waypoints[j + 1])
+
+		# Связываем с предыдущим сегментом
+		if prev_segment_last != null and segment_waypoints.size() > 0:
+			prev_segment_last.next_waypoints.append(segment_waypoints[0])
+
+		# Запоминаем последний waypoint для связи со следующим сегментом
+		if segment_waypoints.size() > 0:
+			prev_segment_last = segment_waypoints[segment_waypoints.size() - 1]
 
 		i += 1
 
 	# Проверяем пересечения с другими дорогами для создания связей
-	_connect_intersections_fast(segment_waypoints)
+	_connect_intersections_fast(all_road_waypoints)
+
+
+## Получает ключ чанка по позиции waypoint
+func _get_chunk_key_for_position(pos: Vector3) -> String:
+	var cx := int(floor(pos.x / CHUNK_SIZE))
+	var cz := int(floor(pos.z / CHUNK_SIZE))
+	return "%d,%d" % [cx, cz]
 
 
 ## Получает ключ ячейки пространственной сетки
@@ -214,6 +242,14 @@ func clear_chunk(chunk_key: String) -> void:
 	for wp in chunk_waypoints:
 		all_waypoints.erase(wp)
 
+		# Удаляем из пространственного индекса
+		var grid_key := _get_grid_key(wp.position)
+		if _spatial_grid.has(grid_key):
+			_spatial_grid[grid_key].erase(wp)
+			# Удаляем пустые ячейки
+			if _spatial_grid[grid_key].is_empty():
+				_spatial_grid.erase(grid_key)
+
 		# Удаляем связи от других waypoints к удаляемым
 		for other_wp in all_waypoints:
 			other_wp.next_waypoints.erase(wp)
@@ -238,6 +274,18 @@ func _get_road_width(highway_type: String) -> float:
 		"track": 3.5,
 	}
 	return ROAD_WIDTHS.get(highway_type, 6.0)
+
+
+func _get_lanes_per_direction(highway_type: String) -> int:
+	"""Получает количество полос в одном направлении (должно совпадать с текстурой)"""
+	# Синхронизировано с osm_terrain_generator.gd:
+	# motorway, trunk, primary, secondary, tertiary - используют текстуру с 4 полосами
+	# residential и меньше - используют текстуру с 2 полосами
+	match highway_type:
+		"motorway", "trunk", "primary", "secondary", "tertiary":
+			return 2  # 2 полосы в каждом направлении (4 всего)
+		_:
+			return 1  # 1 полоса в каждом направлении (2 всего)
 
 
 func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
@@ -269,10 +317,20 @@ func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
 	var fx: float = normalized_x - x0
 	var fy: float = normalized_y - y0
 
-	var h00: float = elevations[y0 * grid_size + x0]
-	var h10: float = elevations[y0 * grid_size + x1]
-	var h01: float = elevations[y1 * grid_size + x0]
-	var h11: float = elevations[y1 * grid_size + x1]
+	# Проверяем что индексы в пределах массива
+	var idx00: int = y0 * grid_size + x0
+	var idx10: int = y0 * grid_size + x1
+	var idx01: int = y1 * grid_size + x0
+	var idx11: int = y1 * grid_size + x1
+	var max_idx: int = elevations.size() - 1
+
+	if idx00 > max_idx or idx10 > max_idx or idx01 > max_idx or idx11 > max_idx:
+		return 0.0  # Fallback если данные некорректны
+
+	var h00: float = elevations[idx00]
+	var h10: float = elevations[idx10]
+	var h01: float = elevations[idx01]
+	var h11: float = elevations[idx11]
 
 	var h0: float = lerp(h00, h10, fx)
 	var h1: float = lerp(h01, h11, fx)

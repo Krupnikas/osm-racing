@@ -147,6 +147,9 @@ func _get_torque_curve(rpm_normalized: float) -> float:
 	- Средние обороты (0.2-0.6): нарастание до пика (0.8-1.0)
 	- Высокие обороты (> 0.6): падение мощности (1.0-0.7)
 	"""
+	# Clamp to prevent invalid values at extreme RPMs
+	rpm_normalized = clamp(rpm_normalized, 0.0, 1.0)
+
 	if rpm_normalized < 0.2:
 		return lerp(0.4, 0.8, rpm_normalized / 0.2)
 	elif rpm_normalized < 0.6:
@@ -185,14 +188,16 @@ func _auto_shift() -> void:
 
 func _get_average_wheel_rpm() -> float:
 	"""Возвращает среднее значение RPM ведущих колёс"""
-	if wheels_rear.is_empty():
+	# Сначала пробуем задние колёса (заднеприводные/полноприводные)
+	var drive_wheels := wheels_rear if not wheels_rear.is_empty() else wheels_front
+	if drive_wheels.is_empty():
 		return 0.0
 
 	var avg_rotation := 0.0
-	for wheel in wheels_rear:
+	for wheel in drive_wheels:
 		avg_rotation += abs(wheel.get_rpm())
 
-	return avg_rotation / wheels_rear.size()
+	return avg_rotation / drive_wheels.size()
 
 
 # ===== PHYSICS UPDATE =====

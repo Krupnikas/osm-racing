@@ -9,7 +9,7 @@ const MAX_NPCS := 50  # Максимум машин одновременно (б
 const SPAWN_DISTANCE := 200.0  # Радиус spawning от игрока
 const DESPAWN_DISTANCE := 300.0  # Дистанция despawning
 const MIN_SPAWN_SEPARATION := 35.0  # Мин. расстояние между NPC (было 20.0)
-const NPCS_PER_CHUNK := 4  # Машин на чанк (увеличено для большей загруженности)
+const NPCS_PER_CHUNK := 10  # Машин на чанк
 
 # Ссылки
 var npc_car_scene: PackedScene
@@ -28,10 +28,10 @@ var inactive_npcs: Array = []  # Array[NPCCar]
 # Spawn tracking
 var spawned_positions: Dictionary = {}  # chunk_key -> Array[Vector3]
 var spawn_cooldown := 0.0  # Задержка между spawns
-const SPAWN_COOLDOWN_TIME := 1.0  # Spawn каждую секунду максимум
+const SPAWN_COOLDOWN_TIME := 1.0  # Spawn каждую секунду
 
 # Debug визуализация
-var debug_visualize := false  # Включить/выключить визуализацию waypoints (отключено для производительности)
+var debug_visualize := true  # Включить/выключить визуализацию waypoints
 var waypoint_spheres: Array = []  # Визуальные маркеры waypoints
 var npc_path_visuals: Dictionary = {}  # npc -> Array[MeshInstance3D] для визуализации путей
 
@@ -96,9 +96,15 @@ func _update_spawning() -> void:
 	if loaded_chunks.is_empty():
 		return
 
+	# Спавним несколько машин за раз для быстрого заполнения
+	var spawns_this_frame := 0
+	const MAX_SPAWNS_PER_FRAME := 3
+
 	# Проходим по всем загруженным чанкам
 	for chunk_key in loaded_chunks.keys():
 		if active_npcs.size() >= MAX_NPCS:
+			break
+		if spawns_this_frame >= MAX_SPAWNS_PER_FRAME:
 			break
 
 		# Инициализируем tracking для чанка
@@ -108,18 +114,19 @@ func _update_spawning() -> void:
 			if debug_visualize:
 				visualize_waypoints_in_chunk(chunk_key)
 
-		# Проверяем сколько уже заспавнено в этом чанке
-		var current_count: int = spawned_positions[chunk_key].size()
+		# Считаем реальное количество NPC в чанке (не по spawned_positions)
+		var current_count := _count_npcs_in_chunk(chunk_key)
 		if current_count < NPCS_PER_CHUNK:
-			_attempt_spawn_in_chunk(chunk_key, player_pos)
+			if _attempt_spawn_in_chunk(chunk_key, player_pos):
+				spawns_this_frame += 1
 
 
-func _attempt_spawn_in_chunk(chunk_key: String, player_pos: Vector3) -> void:
-	"""Пытается spawить NPC машину в чанке"""
+func _attempt_spawn_in_chunk(chunk_key: String, player_pos: Vector3) -> bool:
+	"""Пытается spawить NPC машину в чанке. Возвращает true если успешно."""
 	# Получаем waypoints из road network
 	var waypoints: Array = road_network.get_waypoints_in_chunk(chunk_key)
 	if waypoints.is_empty():
-		return  # Тихо выходим - нет waypoints в этом чанке
+		return false  # Нет waypoints в этом чанке
 
 	# Фильтруем waypoints по дистанции от игрока
 	var nearby_waypoints: Array = []
@@ -129,35 +136,73 @@ func _attempt_spawn_in_chunk(chunk_key: String, player_pos: Vector3) -> void:
 			nearby_waypoints.append(wp)
 
 	if nearby_waypoints.is_empty():
-		return
+		return false
 
 	# Случайный waypoint для spawning
 	var spawn_waypoint = nearby_waypoints[randi() % nearby_waypoints.size()]
 
-	# Проверяем separation от других NPC
-	if not _check_spawn_separation(spawn_waypoint.position):
-		return
-
 	# Spawим NPC
 	var npc: Node = _get_npc_from_pool()
 	if not npc:
-		return
-
-	# Позиция и ориентация
-	npc.global_position = spawn_waypoint.position
-	# VehicleBody3D "вперёд" = -Z axis, direction(x,z) -> rotation_y
-	npc.global_rotation.y = atan2(spawn_waypoint.direction.x, spawn_waypoint.direction.z)
+		return false
 
 	# Случайный цвет
 	npc.randomize_color()
 
-	# Создаём путь
+	# Создаём путь - машина сама выберет полосу в set_path
 	var path: Array = _build_path_from_waypoint(spawn_waypoint, 20)
 	npc.set_path(path)
 
+	# Вычисляем позицию спавна на выбранной машиной полосе
+	var spawn_pos := _calculate_spawn_position_on_lane(spawn_waypoint, npc.chosen_lane)
+
+	# Проверяем separation от других NPC
+	if not _check_spawn_separation(spawn_pos):
+		_return_npc_to_pool(npc)
+		return false
+
+	# Позиция на полосе и ориентация
+	npc.global_position = spawn_pos
+	# VehicleBody3D "вперёд" = -Z axis, direction(x,z) -> rotation_y
+	npc.global_rotation.y = atan2(spawn_waypoint.direction.x, spawn_waypoint.direction.z)
+
 	# Добавляем в списки
 	active_npcs.append(npc)
-	spawned_positions[chunk_key].append(spawn_waypoint.position)
+
+	return true
+
+
+func _count_npcs_in_chunk(chunk_key: String) -> int:
+	"""Считает реальное количество NPC в чанке по их позициям"""
+	var count := 0
+	var waypoints: Array = road_network.get_waypoints_in_chunk(chunk_key)
+	if waypoints.is_empty():
+		return 0
+
+	# Берём первый waypoint для определения примерного центра чанка
+	var chunk_center: Vector3 = waypoints[0].position
+	var chunk_radius := 200.0  # Примерный радиус чанка
+
+	for npc in active_npcs:
+		if npc.global_position.distance_to(chunk_center) < chunk_radius:
+			count += 1
+
+	return count
+
+
+func _calculate_spawn_position_on_lane(wp: Variant, lane: int) -> Vector3:
+	"""Вычисляет позицию спавна на конкретной полосе"""
+	# Логика как в NPCCar._calculate_lane_offset
+	var lanes: int = wp.lanes_count if wp.lanes_count > 0 else 1
+	var half_road: float = wp.width / 2.0
+	var lane_width: float = half_road / lanes
+
+	var effective_lane: int = min(lane, lanes - 1)
+	var offset: float = half_road - lane_width * (0.5 + effective_lane)
+
+	# Вычисляем вектор вправо
+	var right_vector := Vector3(-wp.direction.z, 0, wp.direction.x).normalized()
+	return wp.position + right_vector * offset
 
 
 func _update_despawning() -> void:
@@ -178,7 +223,7 @@ func _check_spawn_separation(position: Vector3) -> bool:
 	return true
 
 
-func _build_path_from_waypoint(start, count: int) -> Array:
+func _build_path_from_waypoint(start: Variant, count: int) -> Array:
 	"""Строит путь из waypoints начиная с заданного"""
 	var path := [start]
 	var current = start
@@ -200,6 +245,10 @@ func _build_path_from_waypoint(start, count: int) -> Array:
 			else:
 				# Поворот - случайный из доступных
 				next = current.next_waypoints[randi() % current.next_waypoints.size()]
+
+		# Защита от циклов - не добавляем waypoint если он уже в пути
+		if next in path:
+			break
 
 		path.append(next)
 		current = next
@@ -254,19 +303,45 @@ func _return_npc_to_pool(npc) -> void:
 	# Убираем из активных
 	active_npcs.erase(npc)
 
+	# Очищаем визуализацию пути сразу при возврате в pool
+	_clear_npc_path_visual(npc)
+
 	# Убираем из spawn tracking
+	# Примечание: машина могла уехать далеко от spawn точки,
+	# поэтому удаляем одну позицию из чанка где машина была заспавнена
+	# Это приблизительный подход - чанк с меньшим количеством NPC получит новый spawn
 	for chunk_key in spawned_positions.keys():
 		var positions: Array = spawned_positions[chunk_key]
-		# Находим и удаляем позицию этой машины
-		for i in range(positions.size() - 1, -1, -1):
-			if npc.global_position.distance_to(positions[i]) < 5.0:
-				positions.remove_at(i)
+		if positions.size() > 0:
+			# Удаляем последнюю позицию (FIFO-подобное поведение)
+			# Не идеально, но предотвращает утечку памяти
+			var found := false
+			for i in range(positions.size() - 1, -1, -1):
+				if npc.global_position.distance_to(positions[i]) < 50.0:
+					positions.remove_at(i)
+					found = true
+					break
+			if found:
+				break
 
 	# Сбрасываем состояние
 	npc.visible = false
 	npc.process_mode = Node.PROCESS_MODE_DISABLED
 	npc.linear_velocity = Vector3.ZERO
 	npc.angular_velocity = Vector3.ZERO
+
+	# Сбрасываем AI состояние
+	npc.waypoint_path = []
+	npc.current_waypoint_index = 0
+	npc.chosen_lane = 0
+	npc.target_speed = 30.0
+	npc.ai_state = NPCCar.AIState.DRIVING
+	npc.spawn_grace_timer = 0.0
+	npc.update_timer = 0.0
+	npc.steering_input = 0.0
+	npc.throttle_input = 0.0
+	npc.brake_input = 0.0
+	npc._lights_enabled = false  # Сбрасываем состояние освещения
 
 	# Добавляем в pool
 	inactive_npcs.append(npc)
@@ -355,10 +430,15 @@ func clear_waypoint_visualization() -> void:
 
 func _update_npc_path_visualization() -> void:
 	"""Обновляет визуализацию путей всех активных NPC"""
-	# Очищаем старые визуализации
+	# Очищаем старые визуализации для неактивных NPC
+	# Копируем ключи чтобы избежать изменения словаря во время итерации
+	var npcs_to_clear: Array = []
 	for npc in npc_path_visuals.keys():
 		if npc not in active_npcs:
-			_clear_npc_path_visual(npc)
+			npcs_to_clear.append(npc)
+
+	for npc in npcs_to_clear:
+		_clear_npc_path_visual(npc)
 
 	# Создаём/обновляем визуализацию для активных NPC
 	for npc in active_npcs:
@@ -417,6 +497,10 @@ func _create_arrow(from: Vector3, to: Vector3, color: Color) -> MeshInstance3D:
 	var mesh := CylinderMesh.new()
 
 	var length := from.distance_to(to)
+	# Защита от нулевой длины
+	if length < 0.01:
+		length = 0.01
+
 	mesh.top_radius = 0.3
 	mesh.bottom_radius = 0.3
 	mesh.height = length
@@ -432,8 +516,12 @@ func _create_arrow(from: Vector3, to: Vector3, color: Color) -> MeshInstance3D:
 	# Позиционируем и поворачиваем
 	var midpoint := (from + to) / 2.0 + Vector3(0, 3, 0)
 	arrow.global_position = midpoint
-	arrow.look_at(to + Vector3(0, 3, 0), Vector3.UP)
-	arrow.rotate_object_local(Vector3.RIGHT, PI / 2)
+
+	# Защита от look_at с одинаковыми точками
+	var target := to + Vector3(0, 3, 0)
+	if midpoint.distance_to(target) > 0.01:
+		arrow.look_at(target, Vector3.UP)
+		arrow.rotate_object_local(Vector3.RIGHT, PI / 2)
 
 	return arrow
 
@@ -443,8 +531,11 @@ func _get_npc_color(npc) -> Color:
 	# Пытаемся получить цвет из Chassis
 	if npc.has_node("Chassis"):
 		var chassis = npc.get_node("Chassis")
-		if chassis.material_override:
-			return chassis.material_override.albedo_color
+		if chassis.material_override and chassis.material_override is StandardMaterial3D:
+			var mat: StandardMaterial3D = chassis.material_override
+			var color: Color = mat.albedo_color
+			color.a = 0.7  # Делаем полупрозрачным для визуализации
+			return color
 	return Color(1, 1, 0, 0.7)  # Fallback - жёлтый
 
 

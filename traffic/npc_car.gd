@@ -11,6 +11,7 @@ enum AIState { DRIVING, STOPPED, YIELDING }
 var waypoint_path: Array = []  # Array[RoadNetwork.Waypoint]
 var current_waypoint_index: int = 0
 var target_speed: float = 30.0
+var chosen_lane: int = 0  # Выбранная полоса (0 = крайняя правая, 1 = вторая справа)
 
 # AI parameters
 const LOOKAHEAD_MIN := 8.0  # Минимальный lookahead
@@ -20,7 +21,7 @@ const FOLLOWING_DISTANCE := 10.0  # Дистанция следования за
 const CAUTIOUS_FACTOR := 0.95  # Множитель скорости (почти полная скорость)
 const UPDATE_INTERVAL := 0.1  # Интервал обновления AI (100ms)
 const CAR_WIDTH := 2.0  # Ширина машины в метрах
-const RIGHT_LANE_OFFSET := 1.2  # Смещение вправо от центра (чуть больше полкорпуса)
+const LANE_WIDTH := 3.5  # Стандартная ширина полосы в метрах
 
 # Internal state (AI-specific)
 var ai_state := AIState.DRIVING
@@ -133,21 +134,28 @@ func _update_ai_driver() -> void:
 	var lookahead_point: Vector3 = _get_lookahead_point(lookahead_dist)
 	if lookahead_point != Vector3.ZERO:
 		var to_target := lookahead_point - global_position
-		var to_target_flat := Vector3(to_target.x, 0, to_target.z).normalized()
+		var to_target_flat := Vector3(to_target.x, 0, to_target.z)
 		var forward := -global_transform.basis.z
-		var forward_flat := Vector3(forward.x, 0, forward.z).normalized()
+		var forward_flat := Vector3(forward.x, 0, forward.z)
 
-		# Вычисляем lateral error через cross product (только Y компонента)
-		var lateral_error := to_target_flat.cross(forward_flat).y
-
-		# Проверяем что lookahead достаточно далеко
-		var distance_to_lookahead := global_position.distance_to(lookahead_point)
-		if distance_to_lookahead < 2.0:
-			# Слишком близко - едем прямо
+		# Защита от нулевых векторов (машина перевернулась или цель совпадает с позицией)
+		if to_target_flat.length_squared() < 0.0001 or forward_flat.length_squared() < 0.0001:
 			steering_input = 0.0
 		else:
-			# Steering пропорционален lateral error с ограничением
-			steering_input = clamp(lateral_error * 1.5, -1.0, 1.0)
+			to_target_flat = to_target_flat.normalized()
+			forward_flat = forward_flat.normalized()
+
+			# Вычисляем lateral error через cross product (только Y компонента)
+			var lateral_error := to_target_flat.cross(forward_flat).y
+
+				# Проверяем что lookahead достаточно далеко
+			var distance_to_lookahead := global_position.distance_to(lookahead_point)
+			if distance_to_lookahead < 2.0:
+				# Слишком близко - едем прямо
+				steering_input = 0.0
+			else:
+				# Steering пропорционален lateral error с ограничением
+				steering_input = clamp(lateral_error * 1.5, -1.0, 1.0)
 	else:
 		# Нет lookahead point - едем прямо
 		steering_input = 0.0
@@ -191,7 +199,7 @@ func _update_ai_driver() -> void:
 
 
 func _get_lookahead_point(distance: float) -> Vector3:
-	"""Находит lookahead point на пути на заданном расстоянии, со смещением вправо"""
+	"""Находит lookahead point на пути на заданном расстоянии, со смещением в выбранную полосу"""
 	if waypoint_path.is_empty():
 		return Vector3.ZERO
 
@@ -209,17 +217,19 @@ func _get_lookahead_point(distance: float) -> Vector3:
 			var direction: Vector3
 
 			var remaining := distance - accumulated_dist
-			if i > current_waypoint_index:
-				var prev_wp = waypoint_path[i - 1]
-				direction = (wp_pos - prev_wp.position).normalized()
-				center_point = prev_wp.position + direction * remaining
+			# Интерполируем от current_pos (текущая позиция на пути) к wp_pos
+			# Защита от нулевого вектора при совпадающих точках
+			var diff := wp_pos - current_pos
+			if diff.length_squared() < 0.0001:
+				direction = wp.direction  # Используем направление waypoint'а
 			else:
-				center_point = wp_pos
-				direction = wp.direction
+				direction = diff.normalized()
+			center_point = current_pos + direction * remaining
 
-			# Вычисляем вектор вправо (для правостороннего движения)
+			# Вычисляем смещение в полосу
+			var lane_offset := _calculate_lane_offset(wp)
 			var right_vector := Vector3(-direction.z, 0, direction.x).normalized()
-			return center_point + right_vector * RIGHT_LANE_OFFSET
+			return center_point + right_vector * lane_offset
 
 		accumulated_dist += dist_to_wp
 		current_pos = wp_pos
@@ -227,10 +237,36 @@ func _get_lookahead_point(distance: float) -> Vector3:
 	# Если дошли до конца пути - возвращаем последний waypoint со смещением
 	if waypoint_path.size() > 0:
 		var last_wp = waypoint_path[-1]
+		var lane_offset := _calculate_lane_offset(last_wp)
 		var right_vector := Vector3(-last_wp.direction.z, 0, last_wp.direction.x).normalized()
-		return last_wp.position + right_vector * RIGHT_LANE_OFFSET
+		return last_wp.position + right_vector * lane_offset
 
 	return Vector3.ZERO
+
+
+func _calculate_lane_offset(wp: Variant) -> float:
+	"""Вычисляет смещение от центра дороги для текущей полосы"""
+	# Waypoint находится в центре дороги
+	# Нужно сместиться вправо в нашу полосу
+	#
+	# Логика для правостороннего движения:
+	# - Центр дороги = 0
+	# - Правая половина дороги = полосы в нашем направлении
+	# - Ширина одного направления = width / 2
+	# - Если 2 полосы: полоса 0 = правая, полоса 1 = левая (ближе к центру)
+	# - Если 1 полоса: полоса 0 = единственная
+
+	var lanes: int = wp.lanes_count if wp.lanes_count > 0 else 1
+	var half_road: float = wp.width / 2.0  # Ширина нашей стороны дороги
+	var lane_width: float = half_road / lanes  # Ширина одной полосы
+
+	# Смещение в центр нашей полосы
+	# Полоса 0 = крайняя правая = смещение на (half_road - lane_width/2)
+	# Полоса 1 = вторая справа = смещение на (half_road - lane_width * 1.5)
+	var effective_lane: int = min(chosen_lane, lanes - 1)  # Не выходим за пределы полос
+	var offset: float = half_road - lane_width * (0.5 + effective_lane)
+
+	return offset
 
 
 func _check_obstacle_ahead() -> bool:
@@ -257,13 +293,19 @@ func _check_obstacle_ahead() -> bool:
 
 func _get_turn_sharpness_ahead() -> float:
 	"""Определяет крутизну поворота впереди (0.0 = прямо, 1.0 = разворот)"""
-	if waypoint_path.is_empty() or current_waypoint_index >= waypoint_path.size() - 2:
+	# Нужно минимум 2 waypoint'а впереди для анализа поворота
+	if waypoint_path.is_empty() or current_waypoint_index >= waypoint_path.size() - 1:
 		return 0.0
 
 	# Берём 3-5 waypoints вперёд для анализа
 	var look_distance := 25.0  # Смотрим на 25м вперёд
 	var forward := -global_transform.basis.z
-	var forward_flat := Vector3(forward.x, 0, forward.z).normalized()
+	var forward_flat := Vector3(forward.x, 0, forward.z)
+
+	# Защита от нулевого вектора (машина перевернулась)
+	if forward_flat.length_squared() < 0.0001:
+		return 0.0
+	forward_flat = forward_flat.normalized()
 
 	var max_angle := 0.0
 
@@ -312,8 +354,16 @@ func set_path(new_waypoints: Array) -> void:
 	if not waypoint_path.is_empty():
 		var first_wp = waypoint_path[0]
 		target_speed = first_wp.speed_limit * CAUTIOUS_FACTOR
+		# Выбираем случайную полосу при старте
+		_choose_random_lane(first_wp)
 	else:
 		target_speed = 30.0
+
+
+func _choose_random_lane(wp: Variant) -> void:
+	"""Выбирает случайную полосу на основе количества полос"""
+	var lanes: int = wp.lanes_count if wp.lanes_count > 0 else 1
+	chosen_lane = randi() % lanes
 
 
 func randomize_color() -> void:
@@ -323,25 +373,21 @@ func randomize_color() -> void:
 	# Применяем цвет к видимым частям кузова
 	if has_node("Chassis"):
 		var chassis = get_node("Chassis")
-		if chassis.material_override:
-			chassis.material_override.albedo_color = color
-		else:
-			var mat = StandardMaterial3D.new()
-			mat.albedo_color = color
-			mat.metallic = 0.7
-			mat.roughness = 0.3
-			chassis.material_override = mat
+		# Всегда создаём новый материал чтобы не шарить между инстансами
+		var mat = StandardMaterial3D.new()
+		mat.albedo_color = color
+		mat.metallic = 0.7
+		mat.roughness = 0.3
+		chassis.material_override = mat
 
 	if has_node("Hood"):
 		var hood = get_node("Hood")
-		if hood.material_override:
-			hood.material_override.albedo_color = color
-		else:
-			var mat = StandardMaterial3D.new()
-			mat.albedo_color = color
-			mat.metallic = 0.7
-			mat.roughness = 0.3
-			hood.material_override = mat
+		# Всегда создаём новый материал
+		var mat = StandardMaterial3D.new()
+		mat.albedo_color = color
+		mat.metallic = 0.7
+		mat.roughness = 0.3
+		hood.material_override = mat
 
 
 # === Физика теперь в VehicleBase ===
@@ -364,6 +410,7 @@ func _extend_path() -> void:
 	# Строим продолжение пути на 15 waypoints вперёд
 	var current = last_wp
 	var new_waypoints := []
+	var is_turning := false
 
 	for i in range(15):
 		if current.next_waypoints.is_empty():
@@ -379,9 +426,19 @@ func _extend_path() -> void:
 				next = current.next_waypoints[0]  # Прямо
 			else:
 				next = current.next_waypoints[randi() % current.next_waypoints.size()]  # Поворот
+				is_turning = true
+
+		# Проверяем что waypoint ещё не в пути (избегаем циклов и дубликатов)
+		if next in waypoint_path or next in new_waypoints:
+			break
 
 		new_waypoints.append(next)
 		current = next
+
+	# При повороте на новую дорогу выбираем новую полосу
+	if is_turning and new_waypoints.size() > 0:
+		var new_road_wp = new_waypoints[0]
+		_choose_random_lane(new_road_wp)
 
 	# Добавляем новые waypoints к существующему пути
 	waypoint_path.append_array(new_waypoints)

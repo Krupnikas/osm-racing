@@ -331,7 +331,9 @@ func _create_taillight_mesh(mesh_name: String, pos: Vector3, size: Vector3) -> M
 	var box_mesh = BoxMesh.new()
 	box_mesh.size = size
 	mesh_inst.mesh = box_mesh
-	mesh_inst.material_override = _taillight_mat
+	# Создаём уникальный материал для каждого меша чтобы избежать shared state
+	var unique_mat := _taillight_mat.duplicate() as StandardMaterial3D
+	mesh_inst.material_override = unique_mat
 	mesh_inst.position = pos
 	mesh_inst.visible = false
 	_npc.add_child(mesh_inst)
@@ -378,6 +380,9 @@ func disable_lights() -> void:
 		return
 	_lights_enabled = false
 
+	# Сбрасываем состояние торможения перед выключением
+	set_braking(false)
+
 	if _use_split_lights:
 		if headlight_left:
 			headlight_left.visible = false
@@ -412,20 +417,28 @@ func disable_lights() -> void:
 
 
 func set_braking(is_braking: bool) -> void:
-	if not _lights_enabled:
+	# Разрешаем сброс состояния даже когда свет выключен (для cleanup)
+	if not _lights_enabled and is_braking:
 		return
 	# Увеличиваем яркость при торможении
 	var energy := 3.0 if is_braking else 1.0
+	var emission := 6.0 if is_braking else 2.0
+
 	if _use_split_lights:
 		if taillight_left:
 			taillight_left.light_energy = energy
 		if taillight_right:
 			taillight_right.light_energy = energy
+		# Обновляем материалы напрямую (они уникальны для каждого меша)
+		if taillight_mesh_left and taillight_mesh_left.material_override:
+			taillight_mesh_left.material_override.emission_energy_multiplier = emission
+		if taillight_mesh_right and taillight_mesh_right.material_override:
+			taillight_mesh_right.material_override.emission_energy_multiplier = emission
 	else:
 		if taillight:
 			taillight.light_energy = energy
-	if _taillight_mat:
-		_taillight_mat.emission_energy_multiplier = 6.0 if is_braking else 2.0
+		if taillight_mesh and taillight_mesh.material_override:
+			taillight_mesh.material_override.emission_energy_multiplier = emission
 
 
 func set_reversing(is_reversing: bool) -> void:
