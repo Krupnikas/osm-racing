@@ -92,6 +92,16 @@ func hide_hud() -> void:
 	visible = false
 
 
-func _on_debug_button_pressed() -> void:
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_B:
+			_toggle_chunk_debug()
+
+
+func _toggle_chunk_debug() -> void:
 	if _terrain_generator and _terrain_generator.has_method("toggle_chunk_boundaries"):
 		_terrain_generator.toggle_chunk_boundaries()
+
+
+func _on_debug_button_pressed() -> void:
+	_toggle_chunk_debug()
