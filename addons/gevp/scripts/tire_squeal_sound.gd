@@ -9,12 +9,25 @@ extends AudioStreamPlayer3D
 
 var _debug_timer := 0.0
 
+func _init() -> void:
+	print("TireSquealSound: _init() called")
+
 func _ready() -> void:
-	print("TireSquealSound: Ready, vehicle = ", vehicle)
+	print("TireSquealSound: _ready() called")
+	print("TireSquealSound: vehicle = ", vehicle)
+	print("TireSquealSound: parent = ", get_parent())
+	print("TireSquealSound: stream = ", stream)
 	if stream:
-		print("TireSquealSound: Stream loaded = ", stream.resource_path if stream.resource_path else "no path")
+		print("TireSquealSound: Stream loaded OK, path = ", stream.resource_path if "resource_path" in stream else "no path")
 	else:
-		print("TireSquealSound: WARNING - No stream assigned!")
+		push_error("TireSquealSound: FATAL - No stream assigned!")
+
+	# Пробуем сыграть тестовый звук
+	print("TireSquealSound: Attempting test play...")
+	play()
+	await get_tree().create_timer(0.5).timeout
+	stop()
+	print("TireSquealSound: Test play completed")
 
 func _physics_process(delta):
 	if not vehicle:
