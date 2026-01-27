@@ -1729,10 +1729,14 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 			texture_key = "primary"
 			height_offset = 0.018
 			curb_height = 0.018
-		"secondary", "tertiary":
+		"secondary":
 			texture_key = "primary"
 			height_offset = 0.016
 			curb_height = 0.014
+		"tertiary":
+			texture_key = "residential"  # 2 полосы для узкой дороги (8м)
+			height_offset = 0.015
+			curb_height = 0.012
 		"residential", "unclassified":
 			texture_key = "residential"
 			height_offset = 0.014

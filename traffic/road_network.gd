@@ -306,10 +306,10 @@ func _get_road_width(highway_type: String) -> float:
 func _get_lanes_per_direction(highway_type: String) -> int:
 	"""Получает количество полос в одном направлении (должно совпадать с текстурой)"""
 	# Синхронизировано с osm_terrain_generator.gd:
-	# motorway, trunk, primary, secondary, tertiary - используют текстуру с 4 полосами
-	# residential и меньше - используют текстуру с 2 полосами
+	# motorway, trunk, primary, secondary - используют текстуру с 4 полосами (highway/primary)
+	# tertiary, residential и меньше - используют текстуру с 2 полосами (residential)
 	match highway_type:
-		"motorway", "trunk", "primary", "secondary", "tertiary":
+		"motorway", "trunk", "primary", "secondary":
 			return 2  # 2 полосы в каждом направлении (4 всего)
 		_:
 			return 1  # 1 полоса в каждом направлении (2 всего)
