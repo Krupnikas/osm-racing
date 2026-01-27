@@ -1740,6 +1740,9 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 	# Smooth sharp corners with Catmull-Rom interpolation
 	var points: PackedVector2Array = _smooth_road_corners(raw_points)
 
+	# Validate and fix points that create loops/flips
+	points = _validate_road_direction(points)
+
 	# Z-fighting offset based on hash
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
 	var z_offset: float = hash_val * 0.0003
@@ -1767,11 +1770,9 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 			var dir: Vector2 = (points[i] - points[i - 1]).normalized()
 			perp = Vector2(-dir.y, dir.x)
 		else:
-			var dir_in: Vector2 = (points[i] - points[i - 1]).normalized()
+			# Use outgoing direction only - no averaging to prevent flip
 			var dir_out: Vector2 = (points[i + 1] - points[i]).normalized()
-			var perp_in: Vector2 = Vector2(-dir_in.y, dir_in.x)
-			var perp_out: Vector2 = Vector2(-dir_out.y, dir_out.x)
-			perp = ((perp_in + perp_out) * 0.5).normalized()
+			perp = Vector2(-dir_out.y, dir_out.x)
 		perpendiculars.append(perp)
 
 	# Generate 2 vertices per point (left and right edge) - shared between segments
@@ -1896,6 +1897,9 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 
 	var points: PackedVector2Array = _smooth_road_corners(raw_points)
 
+	# Validate and fix points that create loops/flips
+	points = _validate_road_direction(points)
+
 	# Z-fighting offset
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
 	var z_offset: float = hash_val * 0.0003
@@ -1919,11 +1923,9 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 			var dir: Vector2 = (points[i] - points[i - 1]).normalized()
 			perp = Vector2(-dir.y, dir.x)
 		else:
-			var dir_in: Vector2 = (points[i] - points[i - 1]).normalized()
+			# Use outgoing direction only - no averaging to prevent flip
 			var dir_out: Vector2 = (points[i + 1] - points[i]).normalized()
-			var perp_in: Vector2 = Vector2(-dir_in.y, dir_in.x)
-			var perp_out: Vector2 = Vector2(-dir_out.y, dir_out.x)
-			perp = ((perp_in + perp_out) * 0.5).normalized()
+			perp = Vector2(-dir_out.y, dir_out.x)
 		perpendiculars.append(perp)
 
 	# Generate vertices (добавляем в существующий batch)
@@ -7237,6 +7239,34 @@ func _smooth_points(raw_points: PackedVector2Array, meters_per_point: float, max
 	if result[result.size() - 1].distance_to(last_point) > 0.1:
 		result.append(last_point)
 
+	return result
+
+
+## Validates road direction to remove points that create loops/flips
+## Removes points where the direction changes by more than 135 degrees
+func _validate_road_direction(points: PackedVector2Array) -> PackedVector2Array:
+	if points.size() < 3:
+		return points
+
+	var result: PackedVector2Array = PackedVector2Array()
+	result.append(points[0])  # Always keep first point
+
+	var prev_dir: Vector2 = (points[1] - points[0]).normalized()
+
+	for i in range(1, points.size() - 1):
+		var current_dir: Vector2 = (points[i + 1] - points[i]).normalized()
+		var dot: float = prev_dir.dot(current_dir)
+
+		# If direction changed by more than 135 degrees, skip this point
+		# dot = -0.7 corresponds to ~135 degrees
+		if dot < -0.7:
+			# Skip this point as it creates a sharp reversal
+			continue
+
+		result.append(points[i])
+		prev_dir = current_dir
+
+	result.append(points[points.size() - 1])  # Always keep last point
 	return result
 
 
