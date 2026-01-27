@@ -2104,20 +2104,23 @@ void fragment() {
 	var mat := ShaderMaterial.new()
 	mat.shader = shader
 
-	# Устанавливаем is_night параметр из night_mode_manager
-	var night_mgr = get_tree().get_first_node_in_group("night_mode_manager")
-	var is_night := false
-	if night_mgr and "is_night" in night_mgr:
-		is_night = night_mgr.is_night
+	# Сохраняем материал для динамического обновления
+	_window_batch_materials.append(mat)
 
+	# Получаем АКТУАЛЬНОЕ состояние night mode из КЭШИРОВАННОЙ ссылки
+	var is_night := false
+	if _night_mode_manager and is_instance_valid(_night_mode_manager) and "is_night" in _night_mode_manager:
+		is_night = _night_mode_manager.is_night
+
+	# Устанавливаем shader параметр
 	mat.set_shader_parameter("is_night", is_night)
 
-	# DEBUG: Логируем состояние ночи при создании батча
-	if is_night:
-		print("OSM: 🌙 Window batch %s created in NIGHT mode (windows will glow)" % chunk_key)
-
-	# Сохраняем материал для динамического обновления is_night при переключении ночи
-	_window_batch_materials.append(mat)
+	# DEBUG: Логируем (с детальной информацией для диагностики)
+	var mode_str := "🌙 NIGHT" if is_night else "☀️ DAY"
+	var mgr_status := "CACHED" if _night_mode_manager else "NOT CACHED"
+	print("OSM: %s Window batch %s | night_mgr: %s | is_night value: %s" % [
+		mode_str, chunk_key, mgr_status, is_night
+	])
 
 	# Создаём MultiMeshInstance3D
 	var mm_instance := MultiMeshInstance3D.new()
@@ -6367,6 +6370,7 @@ func _extract_road_for_traffic(nodes: Array, tags: Dictionary, elev_data: Dictio
 
 var _is_wet_mode := false
 var _night_mode_connected := false
+var _night_mode_manager = null  # Кэш ссылки на NightModeManager (для избежания повторных поисков)
 var _building_night_lights: Array[Node3D] = []  # Храним ссылки на созданные источники света
 
 var _is_night_mode := false
@@ -6433,6 +6437,7 @@ func _connect_to_night_mode() -> void:
 
 	var night_manager := get_tree().current_scene.find_child("NightModeManager", true, false)
 	if night_manager:
+		_night_mode_manager = night_manager  # Кэшируем ссылку
 		night_manager.night_mode_changed.connect(_on_night_mode_changed)
 		_night_mode_connected = true
 		# Если уже ночь - включаем фонари
@@ -6700,6 +6705,8 @@ func _add_building_windows(points: PackedVector2Array, height: float, rng: Rando
 
 	# Случайное распределение для этого здания:
 	# Выключено: 30-80%, Включено: 17-65%, Фитолампы: 3-5%
+	# NOTE: Цвета генерируются независимо от времени суток
+	# Shader сам решит показывать их или нет на основе is_night uniform
 	var off_percent := 0.30 + rng.randf() * 0.50  # 30% - 80%
 	var phyto_percent := 0.03 + rng.randf() * 0.02  # 3% - 5%
 	# Включённые = остаток (17% - 65%)
