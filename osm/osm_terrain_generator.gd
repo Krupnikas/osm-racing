@@ -103,6 +103,10 @@ var _curb_queue: Array = []  # Очередь бордюров (создаютс
 # Road batching system - накопление geometry данных для mesh merging
 var _road_batch_data: Dictionary = {}  # key: chunk_key -> { "highway": {vertices, uvs, normals, indices}, "primary": {...}, ...}
 var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batches (нужно финализировать)
+
+# Window batching system - ONE MultiMesh per chunk instead of per-building
+var _window_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], colors: Array[Color], parent: Node3D}
+var _window_batch_materials: Array[ShaderMaterial] = []  # Материалы всех window batches для обновления is_night параметра
 var _curb_smoothed_queue: Array = []  # Очередь сглаженных бордюров для генерации меша
 var _curb_mesh_state: Dictionary = {}  # Текущее состояние генерации меша бордюра (для разбивки по кадрам)
 var _curb_collision_results: Array = []  # Результаты расчёта коллизий из worker threads
@@ -1952,10 +1956,7 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 
 # Финализирует road batches для чанка - создаёт merged meshes
 func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
-	print("OSM: DEBUG _finalize_road_batches_for_chunk called for chunk_key='%s', has data: %s" % [chunk_key, _road_batch_data.has(chunk_key)])
-
 	if not _road_batch_data.has(chunk_key):
-		print("OSM: DEBUG No road batch data for chunk '%s'" % chunk_key)
 		return  # Нет дорог в этом чанке
 
 	var chunk_batches: Dictionary = _road_batch_data[chunk_key]
@@ -2023,6 +2024,12 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 
 		# Добавляем в parent (chunk node)
 		var parent: Node3D = batch["parent"]
+
+		# SAFETY: Проверяем что parent ещё существует (чанк не был выгружен)
+		if not is_instance_valid(parent):
+			print("OSM: ⚠️ Skipped road batch %s/%s - chunk was unloaded" % [chunk_key, texture_key])
+			continue
+
 		parent.add_child(road_body)
 
 		# DEBUG: Всегда выводим информацию о созданных road batches
@@ -2033,6 +2040,114 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 
 	# Очищаем batch data для этого чанка
 	_road_batch_data.erase(chunk_key)
+
+# Финализирует window batches для чанка (создаёт ONE MultiMesh для всех окон в чанке)
+func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
+	if not _window_batch_data.has(chunk_key):
+		return
+
+	var batch: Dictionary = _window_batch_data[chunk_key]
+	var transforms: Array = batch.get("transforms", [])
+	var colors: Array = batch.get("colors", [])
+	var parent: Node3D = batch.get("parent", null)
+
+	# SAFETY: Проверяем что parent ещё существует (чанк не был выгружен)
+	if transforms.is_empty() or not parent or not is_instance_valid(parent):
+		if not is_instance_valid(parent):
+			print("OSM: ⚠️ Skipped window batch %s - chunk was unloaded" % chunk_key)
+		_window_batch_data.erase(chunk_key)
+		return
+
+	# Создаём MultiMesh для всех окон в чанке
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.use_custom_data = false
+
+	# Используем BoxMesh как базовый mesh (как в оригинале)
+	var box := BoxMesh.new()
+	box.size = Vector3(1.2, 1.2, 0.05)
+	mm.mesh = box
+
+	mm.instance_count = transforms.size()
+
+	# Устанавливаем трансформы и цвета
+	for i in range(transforms.size()):
+		mm.set_instance_transform(i, transforms[i])
+		if i < colors.size():
+			mm.set_instance_color(i, colors[i])
+
+	# Создаём материал с emissive shader (как в оригинале - inline shader)
+	var shader := Shader.new()
+	shader.code = """
+shader_type spatial;
+
+uniform bool is_night = false;
+
+void fragment() {
+	// Проверяем, выключено ли окно (чёрный цвет = выключено)
+	bool is_off = (COLOR.r < 0.01 && COLOR.g < 0.01 && COLOR.b < 0.01);
+
+	if (is_night && !is_off) {
+		// Ночью включенные окна светятся
+		// Альфа-канал = яркость (0-1)
+		float brightness = COLOR.a;
+		ALBEDO = COLOR.rgb * brightness;
+		EMISSION = COLOR.rgb * brightness;
+	} else {
+		// Днём все окна тёмные, ночью выключенные тоже тёмные
+		ALBEDO = vec3(0.08, 0.1, 0.12);
+		EMISSION = vec3(0.0);
+	}
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+
+	# Устанавливаем is_night параметр из night_mode_manager
+	var night_mgr = get_tree().get_first_node_in_group("night_mode_manager")
+	var is_night := false
+	if night_mgr and "is_night" in night_mgr:
+		is_night = night_mgr.is_night
+
+	mat.set_shader_parameter("is_night", is_night)
+
+	# DEBUG: Логируем состояние ночи при создании батча
+	if is_night:
+		print("OSM: 🌙 Window batch %s created in NIGHT mode (windows will glow)" % chunk_key)
+
+	# Сохраняем материал для динамического обновления is_night при переключении ночи
+	_window_batch_materials.append(mat)
+
+	# Создаём MultiMeshInstance3D
+	var mm_instance := MultiMeshInstance3D.new()
+	mm_instance.multimesh = mm
+	mm_instance.material_override = mat
+	mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mm_instance.name = "WindowBatch"
+
+	# Добавляем к родителю (ChunkRoot)
+	parent.add_child(mm_instance)
+
+	print("OSM: ✅ Finalized window batch %s: %d windows (was %d draw calls before batching)" % [
+		chunk_key, transforms.size(), transforms.size()
+	])
+
+	# Очищаем batch data для этого чанка
+	_window_batch_data.erase(chunk_key)
+
+# Обновляет is_night параметр для всех window batch материалов (вызывается при переключении ночного режима)
+func update_window_night_mode(is_night: bool) -> void:
+	var updated_count := 0
+	for mat in _window_batch_materials:
+		if is_instance_valid(mat):
+			mat.set_shader_parameter("is_night", is_night)
+			updated_count += 1
+
+	var icon := "🌙" if is_night else "☀️"
+	print("OSM: %s Updated %d/%d window batch materials: is_night=%s" % [
+		icon, updated_count, _window_batch_materials.size(), is_night
+	])
 
 # Создаёт бордюры вдоль дороги (старая версия для обратной совместимости)
 func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_height: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
@@ -3858,6 +3973,10 @@ func _process_road_queue() -> void:
 		for chunk_key in _pending_batch_chunks:
 			_finalize_road_batches_for_chunk(chunk_key)
 		_pending_batch_chunks.clear()
+
+		# OPTIMIZATION: Финализируем все pending window batches
+		for chunk_key in _window_batch_data.keys():
+			_finalize_window_batches_for_chunk(chunk_key)
 
 		# Когда все дороги созданы, обрабатываем бордюры
 		_process_curb_queue()
@@ -6659,63 +6778,31 @@ func _add_building_windows(points: PackedVector2Array, height: float, rng: Rando
 	if window_transforms.is_empty():
 		return
 
-	# Создаём MultiMesh с цветами
-	var multimesh := MultiMesh.new()
-	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	multimesh.use_colors = true
-	multimesh.instance_count = window_transforms.size()
+	# OPTIMIZATION: Window Batching - накапливаем трансформы вместо создания MultiMesh
+	# Один MultiMesh per chunk вместо per building (620 buildings → 1 MultiMesh)
 
-	# Создаём базовый меш окна
-	var box := BoxMesh.new()
-	box.size = Vector3(window_size, window_size, 0.05)
-	multimesh.mesh = box
+	# Определяем chunk_key из parent
+	var chunk_key := ""
+	if parent.name.begins_with("Chunk_"):
+		chunk_key = parent.name.substr(6)
+	else:
+		chunk_key = "initial"
 
-	# Заполняем трансформы и цвета
-	for i in range(window_transforms.size()):
-		multimesh.set_instance_transform(i, window_transforms[i])
-		multimesh.set_instance_color(i, window_colors[i])
+	# Инициализируем batch data для этого чанка если ещё нет
+	if not _window_batch_data.has(chunk_key):
+		_window_batch_data[chunk_key] = {
+			"transforms": [],
+			"colors": [],
+			"parent": parent.get_parent()  # ChunkRoot, а не Building
+		}
 
-	# Шейдер для emission из instance color
-	# Днём все окна тёмные, ночью светятся (кроме чёрных - они выключены)
-	# Альфа-канал хранит яркость окна (0-1)
-	var shader := Shader.new()
-	shader.code = """
-shader_type spatial;
+	# Добавляем трансформы и цвета этого здания в чанк
+	var batch: Dictionary = _window_batch_data[chunk_key]
+	batch.transforms.append_array(window_transforms)
+	batch.colors.append_array(window_colors)
 
-uniform bool is_night = false;
-
-void fragment() {
-	// Проверяем, выключено ли окно (чёрный цвет = выключено)
-	bool is_off = (COLOR.r < 0.01 && COLOR.g < 0.01 && COLOR.b < 0.01);
-
-	if (is_night && !is_off) {
-		// Ночью включенные окна светятся
-		// Альфа-канал = яркость (0-1)
-		float brightness = COLOR.a;
-		ALBEDO = COLOR.rgb * brightness;
-		EMISSION = COLOR.rgb * brightness;
-	} else {
-		// Днём все окна тёмные, ночью выключенные тоже тёмные
-		ALBEDO = vec3(0.08, 0.1, 0.12);
-		EMISSION = vec3(0.0);
-	}
-}
-"""
-	var mat := ShaderMaterial.new()
-	mat.shader = shader
-	mat.set_shader_parameter("is_night", false)
-
-	# Создаём MultiMeshInstance3D
-	var mm_instance := MultiMeshInstance3D.new()
-	mm_instance.name = "Windows_%d" % rng.randi()
-	mm_instance.multimesh = multimesh
-	mm_instance.material_override = mat
-	mm_instance.visible = true  # Теперь видны всегда, шейдер управляет внешним видом
-
-	# Без LOD - visibility_range плохо работает для длинных зданий
-	# (считается от центра объекта, а не от ближайшей точки)
-
-	parent.add_child(mm_instance)
+	# MultiMesh будет создан один раз после генерации всех зданий в чанке
+	# См. _finalize_window_batches_for_chunk()
 
 
 ## ============================================================================

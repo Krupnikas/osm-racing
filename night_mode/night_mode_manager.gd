@@ -353,6 +353,10 @@ func enable_night_mode() -> void:
 	# Переключаем небо СРАЗУ
 	_switch_to_night_sky()
 
+	# Обновляем window batches чтобы окна светились
+	if _terrain_generator and _terrain_generator.has_method("update_window_night_mode"):
+		_terrain_generator.update_window_night_mode(true)
+
 	# Обновляем отражения на дорогах (больше ночью)
 	if is_raining and _terrain_generator and _terrain_generator.has_method("set_wet_mode"):
 		_terrain_generator.set_wet_mode(true, true)  # wet=true, night=true
@@ -404,6 +408,10 @@ func disable_night_mode() -> void:
 
 	# Переключаем небо обратно
 	_switch_to_day_sky()
+
+	# Обновляем window batches чтобы окна погасли
+	if _terrain_generator and _terrain_generator.has_method("update_window_night_mode"):
+		_terrain_generator.update_window_night_mode(false)
 
 	# Обновляем отражения на дорогах (меньше днём)
 	if is_raining and _terrain_generator and _terrain_generator.has_method("set_wet_mode"):
