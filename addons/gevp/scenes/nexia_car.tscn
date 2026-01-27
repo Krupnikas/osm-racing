@@ -1,4 +1,4 @@
-[gd_scene load_steps=22 format=3 uid="uid://fo6kt54q87tf"]
+[gd_scene load_steps=23 format=3 uid="uid://fo6kt54q87tf"]
 
 [ext_resource type="Script" path="res://addons/gevp/scripts/vehicle.gd" id="1_wr17c"]
 [ext_resource type="Script" path="res://addons/gevp/scripts/wheel.gd" id="2_67xbp"]
@@ -9,6 +9,7 @@
 [ext_resource type="Script" path="res://addons/gevp/scripts/engine_sound.gd" id="7_engine_sound"]
 [ext_resource type="Script" path="res://addons/gevp/scripts/tire_squeal_sound.gd" id="9_tire_squeal"]
 [ext_resource type="AudioStream" path="res://addons/gevp/sounds/4000.wav" id="8_engine_wav"]
+[ext_resource type="AudioStream" path="res://addons/gevp/sounds/tire_squeal.ogg" id="10_tire_squeal_ogg"]
 [sub_resource type="Curve" id="Curve_bt7kc"]
 _data = [Vector2(0, 0.494505), 0.0, 2.04495, 0, 0, Vector2(0.617978, 1), 0.0, 0.0, 0, 0, Vector2(1, 0.692308), -1.4839, 0.0, 0, 0]
 point_count = 3
@@ -473,7 +474,10 @@ sample_rpm = 4000.0
 vehicle = NodePath("..")
 
 [node name="TireSquealSound" type="AudioStreamPlayer3D" parent="." node_paths=PackedStringArray("vehicle")]
+stream = ExtResource("10_tire_squeal_ogg")
+autoplay = false
+max_db = 3.0
 script = ExtResource("9_tire_squeal")
 vehicle = NodePath("..")
-volume_multiplier = 0.6
 slip_threshold = 0.15
+max_pitch = 1.5
