@@ -12,14 +12,16 @@ class Waypoint:
 	var lanes_count: int  # Количество полос В ОДНОМ направлении (1 или 2)
 	var next_waypoints: Array[Waypoint] = []  # Связи с следующими точками
 	var chunk_key: String  # Ключ чанка для cleanup
+	var road_id: int  # Уникальный ID дороги (для предотвращения связи forward/reverse)
 
-	func _init(pos: Vector3, dir: Vector3, speed: float, w: float, lanes: int, chunk: String):
+	func _init(pos: Vector3, dir: Vector3, speed: float, w: float, lanes: int, chunk: String, rid: int = 0):
 		position = pos
 		direction = dir.normalized()
 		speed_limit = speed
 		width = w
 		lanes_count = lanes
 		chunk_key = chunk
+		road_id = rid
 
 # Хранение waypoints по чанкам
 var waypoints_by_chunk: Dictionary = {}  # "x,z" -> Array[Waypoint]
@@ -28,6 +30,9 @@ var all_waypoints: Array[Waypoint] = []
 # Пространственный индекс для быстрого поиска пересечений
 var _spatial_grid: Dictionary = {}  # "gx,gz" -> Array[Waypoint]
 const GRID_CELL_SIZE := 20.0  # Размер ячейки сетки в метрах
+
+# Счётчик для уникальных ID дорог
+var _next_road_id: int = 0
 
 # Константы
 const WAYPOINT_SPACING := 8.0  # Расстояние между waypoints в метрах
@@ -69,11 +74,15 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_k
 	var width: float = _get_road_width(highway_type)
 	var lanes: int = _get_lanes_per_direction(highway_type)
 
+	# Уникальный ID для этой дороги (оба направления имеют один road_id)
+	var road_id := _next_road_id
+	_next_road_id += 1
+
 	# Создаём waypoints в прямом направлении
-	var forward_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, false)
+	var forward_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, false, road_id)
 
 	# Создаём waypoints в обратном направлении
-	var reverse_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, true)
+	var reverse_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, true, road_id)
 
 	# Проверяем пересечения с другими дорогами для создания связей
 	# Важно: проверяем каждое направление отдельно, чтобы не связывать forward и reverse между собой
@@ -81,7 +90,7 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_k
 	_connect_intersections_fast(reverse_waypoints)
 
 
-func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictionary, speed_limit: float, width: float, lanes: int, reverse: bool) -> Array[Waypoint]:
+func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictionary, speed_limit: float, width: float, lanes: int, reverse: bool, road_id: int = 0) -> Array[Waypoint]:
 	"""Создаёт waypoints вдоль дороги в одном направлении"""
 	var all_road_waypoints: Array[Waypoint] = []
 	var prev_segment_last: Waypoint = null
@@ -113,6 +122,10 @@ func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictio
 		var end_pos := Vector3(end_2d.x, end_height, end_2d.y)
 
 		var segment_length := start_pos.distance_to(end_pos)
+		# Защита от нулевого вектора при совпадающих точках
+		if segment_length < 0.01:
+			i += step
+			continue
 		var direction := (end_pos - start_pos).normalized()
 
 		# Создаём waypoints ПО ЦЕНТРУ дороги
@@ -129,7 +142,7 @@ func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictio
 			# Определяем chunk_key для этого waypoint на основе его позиции
 			var wp_chunk_key := _get_chunk_key_for_position(pos)
 
-			var waypoint := Waypoint.new(pos, direction, speed_limit, width, lanes, wp_chunk_key)
+			var waypoint := Waypoint.new(pos, direction, speed_limit, width, lanes, wp_chunk_key, road_id)
 			segment_waypoints.append(waypoint)
 			all_road_waypoints.append(waypoint)
 			all_waypoints.append(waypoint)
@@ -199,12 +212,11 @@ func _get_nearby_waypoints(pos: Vector3) -> Array:
 ## Быстрый поиск пересечений с использованием пространственного индекса
 func _connect_intersections_fast(new_waypoints: Array) -> void:
 	"""Находит пересечения используя пространственный индекс O(1) вместо O(n)
-	Связывает только waypoints с близким направлением (не встречные)
+	Связывает только waypoints с совместимым направлением для правостороннего движения.
 
-	На T-образных перекрёстках:
-	- Конец дороги A должен связаться с waypoint дороги B (которая проходит мимо)
-	- Проверяем endpoints новой дороги против ВСЕХ существующих waypoints
-	- Проверяем ВСЕ waypoints новой дороги против endpoints существующих (тупиков)"""
+	Ключевая проверка: машина поворачивающая с дороги A на дорогу B должна
+	оказаться на ПРАВОЙ стороне дороги B (не на встречке).
+	Для этого проверяем что existing_wp находится СПРАВА от направления new_wp."""
 
 	if new_waypoints.is_empty():
 		return
@@ -225,15 +237,13 @@ func _connect_intersections_fast(new_waypoints: Array) -> void:
 			if distance >= INTERSECTION_THRESHOLD:
 				continue
 
-			# Проверяем что направления не противоположные
-			var dir_dot: float = new_wp.direction.dot(existing_wp.direction)
-			if dir_dot < -0.3:
-				continue
-
-			if not new_wp.next_waypoints.has(existing_wp):
-				new_wp.next_waypoints.append(existing_wp)
-			if not existing_wp.next_waypoints.has(new_wp):
-				existing_wp.next_waypoints.append(new_wp)
+			# Проверяем совместимость направлений для правостороннего движения
+			if _can_connect_waypoints(new_wp, existing_wp):
+				if not new_wp.next_waypoints.has(existing_wp):
+					new_wp.next_waypoints.append(existing_wp)
+			if _can_connect_waypoints(existing_wp, new_wp):
+				if not existing_wp.next_waypoints.has(new_wp):
+					existing_wp.next_waypoints.append(new_wp)
 
 	# 2. Проверяем ВСЕ waypoints новой дороги против "тупиков" (waypoints без next)
 	#    Это нужно для T-образных перекрёстков где старая дорога заканчивается
@@ -253,16 +263,74 @@ func _connect_intersections_fast(new_waypoints: Array) -> void:
 			if distance >= INTERSECTION_THRESHOLD:
 				continue
 
-			# Проверяем что направления не противоположные
-			var dir_dot: float = new_wp.direction.dot(existing_wp.direction)
-			if dir_dot < -0.3:
+			# Связываем тупик с новой дорогой если направления совместимы
+			if _can_connect_waypoints(existing_wp, new_wp):
+				if not existing_wp.next_waypoints.has(new_wp):
+					existing_wp.next_waypoints.append(new_wp)
+
+	# 3. КРИТИЧНО для T-перекрёстков: проверяем endpoint'ы новой дороги
+	#    которые сами являются тупиками - им нужно ОБЯЗАТЕЛЬНО найти продолжение
+	#    на пересекающей дороге, иначе машины проедут мимо и развернутся на траве
+	for new_wp in new_endpoints:
+		# Если у endpoint'а УЖЕ есть next_waypoints - всё ок
+		if not new_wp.next_waypoints.is_empty():
+			continue
+
+		# Это тупик! Ищем ЛЮБОЙ совместимый waypoint рядом с увеличенным радиусом
+		var search_radius := INTERSECTION_THRESHOLD * 1.5  # Увеличиваем радиус поиска
+		var nearby := _get_nearby_waypoints(new_wp.position)
+
+		var best_candidate = null
+		var best_score := -INF
+
+		for existing_wp in nearby:
+			if existing_wp == new_wp or existing_wp in new_waypoints:
 				continue
 
-			# Связываем тупик с новой дорогой
-			if not existing_wp.next_waypoints.has(new_wp):
-				existing_wp.next_waypoints.append(new_wp)
-			if not new_wp.next_waypoints.has(existing_wp):
-				new_wp.next_waypoints.append(existing_wp)
+			var distance: float = new_wp.position.distance_to(existing_wp.position)
+			if distance >= search_radius:
+				continue
+
+			# Проверяем совместимость направлений
+			if not _can_connect_waypoints(new_wp, existing_wp):
+				continue
+
+			# Оцениваем кандидата: предпочитаем близкие waypoints с похожим направлением
+			var dir_dot: float = new_wp.direction.dot(existing_wp.direction)
+			var score := dir_dot - distance / search_radius  # Баланс направления и расстояния
+
+			if score > best_score:
+				best_score = score
+				best_candidate = existing_wp
+
+		# Подключаем лучшего кандидата
+		if best_candidate != null:
+			if not new_wp.next_waypoints.has(best_candidate):
+				new_wp.next_waypoints.append(best_candidate)
+
+
+## Проверяет можно ли создать связь from_wp -> to_wp для правостороннего движения
+func _can_connect_waypoints(from_wp: Waypoint, to_wp: Waypoint) -> bool:
+	"""Проверяет что переход from_wp -> to_wp валиден для правостороннего движения.
+
+	Правила:
+	1. НЕЛЬЗЯ связывать waypoints ОДНОЙ дороги (forward с reverse) - это встречка!
+	2. Противоположные направления (разворот) - запрещено
+	3. Одинаковые направления - разрешено (продолжение/слияние)
+	4. Повороты - разрешены
+	"""
+	# КРИТИЧНО: waypoints одной дороги с противоположными направлениями = встречка!
+	if from_wp.road_id == to_wp.road_id:
+		return false
+
+	var dir_dot: float = from_wp.direction.dot(to_wp.direction)
+
+	# Противоположные направления - запрещено (разворот на 180°)
+	if dir_dot < -0.3:
+		return false
+
+	# Всё остальное разрешено (прямо, слияние, повороты)
+	return true
 
 
 func get_nearest_waypoint(position: Vector3) -> Waypoint:

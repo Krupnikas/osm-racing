@@ -5,11 +5,11 @@ class_name TrafficManager
 ## Управляет spawning, despawning и жизненным циклом NPC машин
 
 # Параметры spawning
-const MAX_NPCS := 50  # Максимум машин одновременно (было 40)
+const MAX_NPCS := 100  # Максимум машин одновременно (увеличено в 4 раза)
 const SPAWN_DISTANCE := 200.0  # Радиус spawning от игрока
 const DESPAWN_DISTANCE := 300.0  # Дистанция despawning
 const MIN_SPAWN_SEPARATION := 35.0  # Мин. расстояние между NPC (было 20.0)
-const NPCS_PER_CHUNK := 10  # Машин на чанк
+const NPCS_PER_CHUNK := 20  # Машин на чанк (увеличено в 4 раза)
 
 # Ссылки
 var npc_car_scene: PackedScene
@@ -34,6 +34,7 @@ const SPAWN_COOLDOWN_TIME := 1.0  # Spawn каждую секунду
 var debug_visualize := false  # Включить/выключить визуализацию waypoints
 var waypoint_spheres: Array = []  # Визуальные маркеры waypoints
 var npc_path_visuals: Dictionary = {}  # npc -> Array[MeshInstance3D] для визуализации путей
+var npc_target_cubes: Dictionary = {}  # npc -> MeshInstance3D для визуализации целевой точки
 
 
 func _ready() -> void:
@@ -76,6 +77,33 @@ func _process(delta: float) -> void:
 	# Обновляем визуализацию путей NPC
 	if debug_visualize:
 		_update_npc_path_visualization()
+
+
+func _input(event: InputEvent) -> void:
+	# V key toggles waypoint visualization
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_V:
+			toggle_waypoint_visualization()
+
+
+func toggle_waypoint_visualization() -> void:
+	"""Переключает визуализацию waypoints по нажатию V"""
+	debug_visualize = not debug_visualize
+
+	if debug_visualize:
+		print("[TrafficManager] Waypoint visualization ON")
+		# Визуализируем все загруженные чанки
+		for chunk_key in spawned_positions.keys():
+			visualize_waypoints_in_chunk(chunk_key)
+	else:
+		print("[TrafficManager] Waypoint visualization OFF")
+		clear_waypoint_visualization()
+		# Очищаем визуализацию путей NPC
+		for npc in npc_path_visuals.keys().duplicate():
+			_clear_npc_path_visual(npc)
+		# Очищаем целевые кубики NPC
+		for npc in npc_target_cubes.keys().duplicate():
+			_clear_npc_target_cube(npc)
 
 
 func _update_spawning() -> void:
@@ -204,8 +232,11 @@ func _calculate_spawn_position_on_lane(wp: Variant, lane: int) -> Vector3:
 	var effective_lane: int = min(lane, lanes - 1)
 	var offset: float = half_road - lane_width * (0.5 + effective_lane)
 
-	# Вычисляем вектор вправо
-	var right_vector := Vector3(-wp.direction.z, 0, wp.direction.x).normalized()
+	# Вычисляем вектор вправо (защита от нулевого direction)
+	var dir_flat := Vector3(wp.direction.x, 0, wp.direction.z)
+	if dir_flat.length_squared() < 0.0001:
+		return wp.position
+	var right_vector := Vector3(-dir_flat.z, 0, dir_flat.x).normalized()
 	return wp.position + right_vector * offset
 
 
@@ -240,19 +271,10 @@ func _build_path_from_waypoint(start: Variant, count: int) -> Array:
 		if current.next_waypoints.is_empty():
 			break
 
-		# Выбираем следующий waypoint
-		# 60% шанс продолжить прямо, 40% повернуть
-		var next
-		if current.next_waypoints.size() == 1:
-			next = current.next_waypoints[0]
-		else:
-			var rand := randf()
-			if rand < 0.6:
-				# Прямо - берём первый (обычно продолжение дороги)
-				next = current.next_waypoints[0]
-			else:
-				# Поворот - случайный из доступных
-				next = current.next_waypoints[randi() % current.next_waypoints.size()]
+		# Выбираем следующий waypoint с приоритетом прямого направления
+		var next = _choose_next_waypoint(current)
+		if next == null:
+			break
 
 		# Защита от циклов - не добавляем waypoint если он уже в пути
 		if next in path:
@@ -264,12 +286,47 @@ func _build_path_from_waypoint(start: Variant, count: int) -> Array:
 	return path
 
 
+func _choose_next_waypoint(current: Variant) -> Variant:
+	"""Выбирает следующий waypoint с приоритетом прямого направления.
+	60% шанс ехать прямо, 40% шанс повернуть."""
+	if current.next_waypoints.is_empty():
+		return null
+
+	if current.next_waypoints.size() == 1:
+		return current.next_waypoints[0]
+
+	# Находим waypoint с наиболее близким направлением (прямо)
+	var straight_wp = null
+	var best_dot := -INF
+	var turn_candidates := []
+
+	for wp in current.next_waypoints:
+		var dir_dot: float = current.direction.dot(wp.direction)
+		if dir_dot > best_dot:
+			best_dot = dir_dot
+			straight_wp = wp
+		if dir_dot < 0.7:  # Это поворот
+			turn_candidates.append(wp)
+
+	# 60% шанс ехать прямо
+	if randf() < 0.6 and straight_wp != null:
+		return straight_wp
+
+	# 40% шанс повернуть (если есть куда)
+	if not turn_candidates.is_empty():
+		return turn_candidates[randi() % turn_candidates.size()]
+
+	# Fallback - едем прямо
+	return straight_wp
+
+
 func _get_npc_from_pool():
 	"""Получает NPC из pool или создаёт новый"""
 	if inactive_npcs.size() > 0:
 		var npc = inactive_npcs.pop_back()
 		npc.visible = true
 		npc.process_mode = Node.PROCESS_MODE_INHERIT
+		# Сигнал уже подключён при первом создании, не переподключаем
 		return npc
 
 	if active_npcs.size() < MAX_NPCS:
@@ -301,9 +358,17 @@ func _get_npc_from_pool():
 
 		var npc = scene_to_use.instantiate()
 		get_parent().add_child(npc)
+		# Подключаем сигнал despawn
+		npc.request_despawn.connect(_on_npc_request_despawn.bind(npc))
 		return npc
 
 	return null
+
+
+func _on_npc_request_despawn(npc) -> void:
+	"""Обработчик запроса на despawn от NPC"""
+	if npc in active_npcs:
+		_return_npc_to_pool(npc)
 
 
 func _return_npc_to_pool(npc) -> void:
@@ -311,8 +376,9 @@ func _return_npc_to_pool(npc) -> void:
 	# Убираем из активных
 	active_npcs.erase(npc)
 
-	# Очищаем визуализацию пути сразу при возврате в pool
+	# Очищаем визуализацию пути и целевого кубика сразу при возврате в pool
 	_clear_npc_path_visual(npc)
+	_clear_npc_target_cube(npc)
 
 	# Убираем из spawn tracking
 	# Примечание: машина могла уехать далеко от spawn точки,
@@ -346,10 +412,14 @@ func _return_npc_to_pool(npc) -> void:
 	npc.ai_state = NPCCar.AIState.DRIVING
 	npc.spawn_grace_timer = 0.0
 	npc.update_timer = 0.0
+	npc.stuck_timer = 0.0
+	npc.off_road_timer = 0.0
 	npc.steering_input = 0.0
 	npc.throttle_input = 0.0
 	npc.brake_input = 0.0
-	npc._lights_enabled = false  # Сбрасываем состояние освещения
+	# Выключаем освещение через метод (не просто флаг)
+	if npc._lights_enabled:
+		npc.disable_lights()
 
 	# Добавляем в pool
 	inactive_npcs.append(npc)
@@ -403,7 +473,12 @@ func get_debug_info() -> String:
 
 
 func visualize_waypoints_in_chunk(chunk_key: String) -> void:
-	"""Визуализирует waypoints в чанке"""
+	"""Визуализирует waypoints в чанке
+	Цвета:
+	- Зелёный: нормальный waypoint с продолжением
+	- Красный: ТУПИК (нет next_waypoints) - машины тут застрянут!
+	- Жёлтый: waypoint с несколькими вариантами (перекрёсток)
+	"""
 	if not debug_visualize:
 		return
 
@@ -419,7 +494,20 @@ func visualize_waypoints_in_chunk(chunk_key: String) -> void:
 		sphere.mesh = mesh
 
 		var material := StandardMaterial3D.new()
-		material.albedo_color = Color(0, 1, 0, 0.6)  # Зелёный полупрозрачный
+
+		# Выбираем цвет в зависимости от количества связей
+		if wp.next_waypoints.is_empty():
+			# ТУПИК - красный, машины тут застрянут!
+			material.albedo_color = Color(1, 0, 0, 0.8)
+			mesh.radius = 1.2  # Увеличенный размер для видимости
+			mesh.height = 2.4
+		elif wp.next_waypoints.size() > 1:
+			# Перекрёсток - жёлтый
+			material.albedo_color = Color(1, 1, 0, 0.6)
+		else:
+			# Нормальный waypoint - зелёный
+			material.albedo_color = Color(0, 1, 0, 0.6)
+
 		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		sphere.material_override = material
@@ -448,9 +536,19 @@ func _update_npc_path_visualization() -> void:
 	for npc in npcs_to_clear:
 		_clear_npc_path_visual(npc)
 
+	# Очищаем целевые кубики для неактивных NPC
+	var cubes_to_clear: Array = []
+	for npc in npc_target_cubes.keys():
+		if npc not in active_npcs:
+			cubes_to_clear.append(npc)
+
+	for npc in cubes_to_clear:
+		_clear_npc_target_cube(npc)
+
 	# Создаём/обновляем визуализацию для активных NPC
 	for npc in active_npcs:
 		_visualize_npc_path(npc)
+		_visualize_npc_target(npc)
 
 
 func _visualize_npc_path(npc) -> void:
@@ -553,3 +651,50 @@ func _clear_npc_path_visual(npc) -> void:
 		for visual in npc_path_visuals[npc]:
 			visual.queue_free()
 		npc_path_visuals.erase(npc)
+
+
+func _visualize_npc_target(npc) -> void:
+	"""Визуализирует целевую точку (lookahead point) NPC маленьким кубиком цвета машины"""
+	# Получаем lookahead point из NPC (используем тот же метод что и AI)
+	if not npc.has_method("_get_lookahead_point"):
+		return
+
+	# Адаптивный lookahead как в AI
+	var speed_factor: float = clamp(npc.current_speed_kmh / 40.0, 0.0, 1.0)
+	var lookahead_dist: float = lerp(8.0, 20.0, speed_factor)  # LOOKAHEAD_MIN, LOOKAHEAD_MAX
+	var target_point: Vector3 = npc._get_lookahead_point(lookahead_dist)
+
+	if target_point == Vector3.ZERO:
+		_clear_npc_target_cube(npc)
+		return
+
+	var npc_color := _get_npc_color(npc)
+
+	# Создаём или обновляем кубик
+	var cube: MeshInstance3D
+	if npc_target_cubes.has(npc):
+		cube = npc_target_cubes[npc]
+	else:
+		cube = MeshInstance3D.new()
+		var mesh := BoxMesh.new()
+		mesh.size = Vector3(0.8, 0.8, 0.8)  # Маленький кубик
+		cube.mesh = mesh
+
+		var material := StandardMaterial3D.new()
+		material.albedo_color = npc_color
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		cube.material_override = material
+
+		get_parent().add_child(cube)
+		npc_target_cubes[npc] = cube
+
+	# Обновляем позицию кубика
+	cube.global_position = target_point + Vector3(0, 1.5, 0)  # Немного над землёй
+
+
+func _clear_npc_target_cube(npc) -> void:
+	"""Очищает кубик целевой точки одной NPC"""
+	if npc_target_cubes.has(npc):
+		npc_target_cubes[npc].queue_free()
+		npc_target_cubes.erase(npc)

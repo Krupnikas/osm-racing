@@ -26,10 +26,15 @@ const LANE_WIDTH := 3.5  # Стандартная ширина полосы в �
 # Internal state (AI-specific)
 var ai_state := AIState.DRIVING
 var update_timer := 0.0
+var stuck_timer := 0.0  # Таймер застревания (не движемся > 10 сек = despawn)
+var off_road_timer := 0.0  # Таймер езды по траве (> 1 сек = despawn)
 
 # Raycast для obstacle detection
 var obstacle_check_ray: RayCast3D
 var spawn_grace_timer := 0.0  # Grace period after spawn
+
+# Сигнал для TrafficManager - машина застряла и должна быть despawn'ена
+signal request_despawn
 
 # Night mode lights
 var _lights: Node3D
@@ -92,10 +97,23 @@ func _physics_process(delta: float) -> void:
 	# Обновляем стоп-сигналы и задний ход
 	_update_light_states()
 
-	# Debug: если застряли на месте слишком долго, сбрасываем состояние
-	if current_speed_kmh < 1.0 and ai_state == AIState.STOPPED:
-		if randf() < 0.01:  # 1% шанс каждый frame
-			ai_state = AIState.DRIVING
+	# Despawn если не движемся больше 10 секунд
+	if current_speed_kmh < 3.0:
+		stuck_timer += delta
+		if stuck_timer > 10.0:
+			request_despawn.emit()
+			stuck_timer = 0.0
+	else:
+		stuck_timer = 0.0
+
+	# Despawn если выехали на траву (далеко от waypoint пути)
+	if _is_off_road():
+		off_road_timer += delta
+		if off_road_timer > 1.0:  # 1 секунда на траве = despawn
+			request_despawn.emit()
+			off_road_timer = 0.0
+	else:
+		off_road_timer = 0.0
 
 
 # ===== РЕАЛИЗАЦИЯ АБСТРАКТНЫХ МЕТОДОВ VehicleBase =====
@@ -123,16 +141,6 @@ func _update_ai_driver() -> void:
 		throttle_input = 0.0
 		brake_input = 1.0
 		steering_input = 0.0
-		return
-
-	# Проверяем приближение к тупику (конец пути без продолжения)
-	var at_dead_end := _is_approaching_dead_end()
-	if at_dead_end:
-		# Тормозим до полной остановки
-		throttle_input = 0.0
-		brake_input = 1.0
-		steering_input = 0.0
-		ai_state = AIState.STOPPED
 		return
 
 	# Pure Pursuit steering с адаптивным lookahead
@@ -251,7 +259,11 @@ func _get_lookahead_point(distance: float) -> Vector3:
 	if waypoint_path.size() > 0:
 		var last_wp = waypoint_path[-1]
 		var lane_offset := _calculate_lane_offset(last_wp)
-		var right_vector := Vector3(-last_wp.direction.z, 0, last_wp.direction.x).normalized()
+		var dir_flat := Vector3(last_wp.direction.x, 0, last_wp.direction.z)
+		# Защита от нулевого вектора
+		if dir_flat.length_squared() < 0.0001:
+			return last_wp.position
+		var right_vector := Vector3(-dir_flat.z, 0, dir_flat.x).normalized()
 		return last_wp.position + right_vector * lane_offset
 
 	return Vector3.ZERO
@@ -331,7 +343,11 @@ func _get_turn_sharpness_ahead() -> float:
 			break
 
 		# Вычисляем угол между текущим направлением и направлением к waypoint
-		var wp_dir := Vector3(wp.direction.x, 0, wp.direction.z).normalized()
+		var wp_dir := Vector3(wp.direction.x, 0, wp.direction.z)
+		# Защита от нулевого вектора
+		if wp_dir.length_squared() < 0.0001:
+			continue
+		wp_dir = wp_dir.normalized()
 		var angle := forward_flat.angle_to(wp_dir)
 
 		max_angle = max(max_angle, angle)
@@ -408,23 +424,28 @@ func randomize_color() -> void:
 # _get_torque_curve, _auto_shift) теперь в базовом классе
 
 
-func _is_approaching_dead_end() -> bool:
-	"""Проверяет приближается ли машина к тупику (конец пути без продолжения)"""
-	if waypoint_path.is_empty():
-		return false
+func _is_off_road() -> bool:
+	"""Проверяет находится ли машина вне дороги (raycast вниз)"""
+	# Используем raycast вниз чтобы определить тип поверхности
+	var space_state := get_world_3d().direct_space_state
+	var from := global_position + Vector3(0, 1.0, 0)
+	var to := global_position + Vector3(0, -2.0, 0)
 
-	# Проверяем последний waypoint в пути
-	var last_wp = waypoint_path[waypoint_path.size() - 1]
+	var query := PhysicsRayQueryParameters3D.create(from, to)
+	query.collision_mask = 1  # Terrain layer (дороги и земля)
+	query.exclude = [self]
 
-	# Если у последнего waypoint есть продолжение - не тупик
-	if not last_wp.next_waypoints.is_empty():
-		return false
+	var result := space_state.intersect_ray(query)
+	if result.is_empty():
+		return true  # Нет поверхности под машиной = не на дороге
 
-	# Это тупик - проверяем расстояние до него
-	var distance_to_end := global_position.distance_to(last_wp.position)
+	# Проверяем группу коллайдера
+	var collider = result.get("collider")
+	if collider and collider.is_in_group("Road"):
+		return false  # На дороге
 
-	# Начинаем тормозить за 15м до тупика
-	return distance_to_end < 15.0
+	# Grass, Park или что-то другое = не на дороге
+	return true
 
 
 func _extend_path() -> void:
@@ -448,17 +469,15 @@ func _extend_path() -> void:
 		if current.next_waypoints.is_empty():
 			break
 
-		# Выбираем следующий waypoint (60% прямо, 40% поворот)
-		var next
-		if current.next_waypoints.size() == 1:
-			next = current.next_waypoints[0]
-		else:
-			var rand := randf()
-			if rand < 0.6:
-				next = current.next_waypoints[0]  # Прямо
-			else:
-				next = current.next_waypoints[randi() % current.next_waypoints.size()]  # Поворот
-				is_turning = true
+		# Выбираем следующий waypoint
+		var next = _choose_next_waypoint(current)
+		if next == null:
+			break
+
+		# Проверяем это поворот или прямо
+		var dir_dot: float = current.direction.dot(next.direction)
+		if dir_dot < 0.7:  # Угол > ~45 градусов = поворот
+			is_turning = true
 
 		# Проверяем что waypoint ещё не в пути (избегаем циклов и дубликатов)
 		if next in waypoint_path or next in new_waypoints:
@@ -474,6 +493,40 @@ func _extend_path() -> void:
 
 	# Добавляем новые waypoints к существующему пути
 	waypoint_path.append_array(new_waypoints)
+
+
+func _choose_next_waypoint(current) -> Variant:
+	"""Выбирает следующий waypoint с приоритетом прямого направления.
+	60% шанс ехать прямо, 40% шанс повернуть."""
+	if current.next_waypoints.is_empty():
+		return null
+
+	if current.next_waypoints.size() == 1:
+		return current.next_waypoints[0]
+
+	# Находим waypoint с наиболее близким направлением (прямо)
+	var straight_wp = null
+	var best_dot := -INF
+	var turn_candidates := []
+
+	for wp in current.next_waypoints:
+		var dir_dot: float = current.direction.dot(wp.direction)
+		if dir_dot > best_dot:
+			best_dot = dir_dot
+			straight_wp = wp
+		if dir_dot < 0.7:  # Это поворот
+			turn_candidates.append(wp)
+
+	# 60% шанс ехать прямо
+	if randf() < 0.6 and straight_wp != null:
+		return straight_wp
+
+	# 40% шанс повернуть (если есть куда)
+	if not turn_candidates.is_empty():
+		return turn_candidates[randi() % turn_candidates.size()]
+
+	# Fallback - едем прямо
+	return straight_wp
 
 
 # === Night Mode Lights ===
