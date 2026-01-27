@@ -125,6 +125,16 @@ func _update_ai_driver() -> void:
 		steering_input = 0.0
 		return
 
+	# Проверяем приближение к тупику (конец пути без продолжения)
+	var at_dead_end := _is_approaching_dead_end()
+	if at_dead_end:
+		# Тормозим до полной остановки
+		throttle_input = 0.0
+		brake_input = 1.0
+		steering_input = 0.0
+		ai_state = AIState.STOPPED
+		return
+
 	# Pure Pursuit steering с адаптивным lookahead
 	# Чем быстрее едем, тем дальше смотрим
 	var speed_factor: float = clamp(current_speed_kmh / 40.0, 0.0, 1.0)
@@ -396,6 +406,25 @@ func randomize_color() -> void:
 # === Физика теперь в VehicleBase ===
 # Все методы физики (_update_speed, _apply_steering, _apply_forces,
 # _get_torque_curve, _auto_shift) теперь в базовом классе
+
+
+func _is_approaching_dead_end() -> bool:
+	"""Проверяет приближается ли машина к тупику (конец пути без продолжения)"""
+	if waypoint_path.is_empty():
+		return false
+
+	# Проверяем последний waypoint в пути
+	var last_wp = waypoint_path[waypoint_path.size() - 1]
+
+	# Если у последнего waypoint есть продолжение - не тупик
+	if not last_wp.next_waypoints.is_empty():
+		return false
+
+	# Это тупик - проверяем расстояние до него
+	var distance_to_end := global_position.distance_to(last_wp.position)
+
+	# Начинаем тормозить за 15м до тупика
+	return distance_to_end < 15.0
 
 
 func _extend_path() -> void:

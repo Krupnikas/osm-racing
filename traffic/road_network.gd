@@ -199,37 +199,70 @@ func _get_nearby_waypoints(pos: Vector3) -> Array:
 ## Быстрый поиск пересечений с использованием пространственного индекса
 func _connect_intersections_fast(new_waypoints: Array) -> void:
 	"""Находит пересечения используя пространственный индекс O(1) вместо O(n)
-	Связывает только waypoints с близким направлением (не встречные)"""
-	# Проверяем только концы сегмента
-	var endpoints := []
-	if new_waypoints.size() > 0:
-		endpoints.append(new_waypoints[0])
-	if new_waypoints.size() > 1:
-		endpoints.append(new_waypoints[new_waypoints.size() - 1])
+	Связывает только waypoints с близким направлением (не встречные)
 
-	for new_wp in endpoints:
-		# Ищем только в соседних ячейках
+	На T-образных перекрёстках:
+	- Конец дороги A должен связаться с waypoint дороги B (которая проходит мимо)
+	- Проверяем endpoints новой дороги против ВСЕХ существующих waypoints
+	- Проверяем ВСЕ waypoints новой дороги против endpoints существующих (тупиков)"""
+
+	if new_waypoints.is_empty():
+		return
+
+	var new_endpoints := [new_waypoints[0]]
+	if new_waypoints.size() > 1:
+		new_endpoints.append(new_waypoints[new_waypoints.size() - 1])
+
+	# 1. Проверяем endpoints новой дороги против всех существующих waypoints
+	for new_wp in new_endpoints:
 		var nearby := _get_nearby_waypoints(new_wp.position)
 
 		for existing_wp in nearby:
-			if existing_wp == new_wp:
-				continue
-			if existing_wp in new_waypoints:
+			if existing_wp == new_wp or existing_wp in new_waypoints:
 				continue
 
 			var distance: float = new_wp.position.distance_to(existing_wp.position)
+			if distance >= INTERSECTION_THRESHOLD:
+				continue
 
-			if distance < INTERSECTION_THRESHOLD:
-				# Проверяем что направления не противоположные (dot > 0 = схожее направление)
-				# Это предотвращает связывание встречных полос
-				var dir_dot: float = new_wp.direction.dot(existing_wp.direction)
-				if dir_dot < -0.3:  # Почти противоположные направления - не связываем
-					continue
+			# Проверяем что направления не противоположные
+			var dir_dot: float = new_wp.direction.dot(existing_wp.direction)
+			if dir_dot < -0.3:
+				continue
 
-				if not new_wp.next_waypoints.has(existing_wp):
-					new_wp.next_waypoints.append(existing_wp)
-				if not existing_wp.next_waypoints.has(new_wp):
-					existing_wp.next_waypoints.append(new_wp)
+			if not new_wp.next_waypoints.has(existing_wp):
+				new_wp.next_waypoints.append(existing_wp)
+			if not existing_wp.next_waypoints.has(new_wp):
+				existing_wp.next_waypoints.append(new_wp)
+
+	# 2. Проверяем ВСЕ waypoints новой дороги против "тупиков" (waypoints без next)
+	#    Это нужно для T-образных перекрёстков где старая дорога заканчивается
+	#    рядом с серединой новой дороги
+	for new_wp in new_waypoints:
+		var nearby := _get_nearby_waypoints(new_wp.position)
+
+		for existing_wp in nearby:
+			if existing_wp == new_wp or existing_wp in new_waypoints:
+				continue
+
+			# Проверяем только если existing_wp - тупик (нет следующих waypoints)
+			if not existing_wp.next_waypoints.is_empty():
+				continue
+
+			var distance: float = new_wp.position.distance_to(existing_wp.position)
+			if distance >= INTERSECTION_THRESHOLD:
+				continue
+
+			# Проверяем что направления не противоположные
+			var dir_dot: float = new_wp.direction.dot(existing_wp.direction)
+			if dir_dot < -0.3:
+				continue
+
+			# Связываем тупик с новой дорогой
+			if not existing_wp.next_waypoints.has(new_wp):
+				existing_wp.next_waypoints.append(new_wp)
+			if not new_wp.next_waypoints.has(existing_wp):
+				new_wp.next_waypoints.append(existing_wp)
 
 
 func get_nearest_waypoint(position: Vector3) -> Waypoint:
