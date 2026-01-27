@@ -1,48 +1,25 @@
 extends AudioStreamPlayer3D
 
 ## Звук визга резины при скольжении колес
-## Работает аналогично engine_sound.gd
+## Работает аналогично engine_sound.gd - звук всегда играет, громкость регулируется
 
 @export var vehicle: Vehicle
-@export var slip_threshold := 0.05  # Минимальное скольжение для начала звука (снижено с 0.15)
-@export var max_pitch := 1.5  # Максимальный pitch при сильном скольжении
+@export var min_slip_for_sound := 0.02  # Начинаем тихо при малом скольжении
+@export var max_pitch := 1.8  # Максимальный pitch при сильном скольжении
 
-var _debug_timer := 0.0
-
-func _init() -> void:
-	print("TireSquealSound: _init() called")
-
-func _ready() -> void:
-	print("TireSquealSound: _ready() called")
-	print("TireSquealSound: vehicle = ", vehicle)
-	print("TireSquealSound: parent = ", get_parent())
-	print("TireSquealSound: stream = ", stream)
-	if stream:
-		print("TireSquealSound: Stream loaded OK, path = ", stream.resource_path if "resource_path" in stream else "no path")
-	else:
-		push_error("TireSquealSound: FATAL - No stream assigned!")
-
-	# Пробуем сыграть тестовый звук
-	print("TireSquealSound: Attempting test play...")
-	play()
-	await get_tree().create_timer(0.5).timeout
-	stop()
-	print("TireSquealSound: Test play completed")
-
-func _physics_process(delta):
+func _physics_process(_delta):
 	if not vehicle:
 		return
 
-	# Debug каждые 2 секунды
-	_debug_timer += delta
-	if _debug_timer > 2.0:
-		_debug_timer = 0.0
-
-	# Не играть звук если машина заморожена или скрыта
+	# Не играть звук если машина заморожена или скрыта (как у двигателя)
 	if vehicle.freeze or not vehicle.visible:
 		if playing:
 			stop()
 		return
+
+	# Включить звук если не играет (как у двигателя - всегда включен)
+	if not playing:
+		play()
 
 	# Вычисляем максимальное скольжение среди всех колес
 	var max_slip := 0.0
@@ -59,24 +36,17 @@ func _physics_process(delta):
 			var slip_magnitude := wheel.slip_vector.length()
 			max_slip = max(max_slip, slip_magnitude)
 
-	# Debug вывод
-	if _debug_timer == 0.0:
-		print("TireSquealSound: max_slip=%.3f, threshold=%.3f, playing=%s" % [max_slip, slip_threshold, playing])
+	# Pitch зависит от величины скольжения (аналогично RPM у двигателя)
+	# При скольжении 0.0 -> pitch 1.0, при 0.5+ -> pitch max_pitch
+	pitch_scale = 1.0 + (clampf(max_slip / 0.5, 0.0, 1.0) * (max_pitch - 1.0))
 
-	# Если скольжение выше порога - включаем звук
-	if max_slip > slip_threshold:
-		if not playing:
-			play()
-
-		# Нормализуем скольжение от threshold до 1.0
-		var slip_normalized := clampf((max_slip - slip_threshold) / (1.0 - slip_threshold), 0.0, 1.0)
-
-		# Pitch зависит от величины скольжения (чем больше - тем выше)
-		pitch_scale = 1.0 + (slip_normalized * (max_pitch - 1.0))
-
-		# Громкость тоже зависит от скольжения
-		volume_db = linear_to_db(slip_normalized * 0.8 + 0.2)  # Диапазон 0.2-1.0
+	# Громкость зависит от скольжения
+	# Если нет скольжения - полная тишина (-80 dB)
+	if max_slip < min_slip_for_sound:
+		volume_db = -80.0  # Практически беззвучно
 	else:
-		# Скольжение слишком маленькое - выключаем звук
-		if playing:
-			stop()
+		# Нормализуем скольжение от min_slip_for_sound до 0.3 (сильное скольжение)
+		var slip_normalized := clampf((max_slip - min_slip_for_sound) / (0.3 - min_slip_for_sound), 0.0, 1.0)
+		# Диапазон громкости: от 0.2 до 0.9 (чуть тише двигателя)
+		var volume_factor := (slip_normalized * 0.7) + 0.2
+		volume_db = linear_to_db(volume_factor)
