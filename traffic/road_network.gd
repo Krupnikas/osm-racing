@@ -84,10 +84,11 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_k
 	# Создаём waypoints в обратном направлении
 	var reverse_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, true, road_id)
 
-	# Проверяем пересечения с другими дорогами для создания связей
-	# Важно: проверяем каждое направление отдельно, чтобы не связывать forward и reverse между собой
-	_connect_intersections_fast(forward_waypoints)
-	_connect_intersections_fast(reverse_waypoints)
+	# OPTIMIZATION: НЕ соединяем пересечения при добавлении дороги
+	# Это занимает до 400ms и вызывает лаги при подгрузке чанков
+	# NPC машины и так будут следовать только по своей дороге
+	# _connect_intersections_fast(forward_waypoints)
+	# _connect_intersections_fast(reverse_waypoints)
 
 
 func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictionary, speed_limit: float, width: float, lanes: int, reverse: bool, road_id: int = 0) -> Array[Waypoint]:
@@ -267,46 +268,6 @@ func _connect_intersections_fast(new_waypoints: Array) -> void:
 			if _can_connect_waypoints(existing_wp, new_wp):
 				if not existing_wp.next_waypoints.has(new_wp):
 					existing_wp.next_waypoints.append(new_wp)
-
-	# 3. КРИТИЧНО для T-перекрёстков: проверяем endpoint'ы новой дороги
-	#    которые сами являются тупиками - им нужно ОБЯЗАТЕЛЬНО найти продолжение
-	#    на пересекающей дороге, иначе машины проедут мимо и развернутся на траве
-	for new_wp in new_endpoints:
-		# Если у endpoint'а УЖЕ есть next_waypoints - всё ок
-		if not new_wp.next_waypoints.is_empty():
-			continue
-
-		# Это тупик! Ищем ЛЮБОЙ совместимый waypoint рядом с увеличенным радиусом
-		var search_radius := INTERSECTION_THRESHOLD * 1.5  # Увеличиваем радиус поиска
-		var nearby := _get_nearby_waypoints(new_wp.position)
-
-		var best_candidate = null
-		var best_score := -INF
-
-		for existing_wp in nearby:
-			if existing_wp == new_wp or existing_wp in new_waypoints:
-				continue
-
-			var distance: float = new_wp.position.distance_to(existing_wp.position)
-			if distance >= search_radius:
-				continue
-
-			# Проверяем совместимость направлений
-			if not _can_connect_waypoints(new_wp, existing_wp):
-				continue
-
-			# Оцениваем кандидата: предпочитаем близкие waypoints с похожим направлением
-			var dir_dot: float = new_wp.direction.dot(existing_wp.direction)
-			var score := dir_dot - distance / search_radius  # Баланс направления и расстояния
-
-			if score > best_score:
-				best_score = score
-				best_candidate = existing_wp
-
-		# Подключаем лучшего кандидата
-		if best_candidate != null:
-			if not new_wp.next_waypoints.has(best_candidate):
-				new_wp.next_waypoints.append(best_candidate)
 
 
 ## Проверяет можно ли создать связь from_wp -> to_wp для правостороннего движения

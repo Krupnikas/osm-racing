@@ -325,38 +325,59 @@ void fragment() {
 func _process(delta: float) -> void:
 	var _frame_start := Time.get_ticks_usec()
 
+	# ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ: Логируем только кадры с frame time > 10ms
+	var _log_this_frame := false
+
 	# Обрабатываем готовые здания из worker threads (даже на паузе)
 	var t0 := Time.get_ticks_usec()
 	_process_building_results()
-	_record_perf("building_results", Time.get_ticks_usec() - t0)
+	var t_building := Time.get_ticks_usec() - t0
+	_record_perf("building_results", t_building)
 
 	# Обрабатываем очередь дорог (3 дороги за кадр)
 	t0 = Time.get_ticks_usec()
 	_process_road_queue()
-	_record_perf("road_queue", Time.get_ticks_usec() - t0)
+	var t_road := Time.get_ticks_usec() - t0
+	_record_perf("road_queue", t_road)
 
 	# Обрабатываем очередь terrain объектов (2 за кадр)
 	t0 = Time.get_ticks_usec()
 	_process_terrain_objects_queue()
-	_record_perf("terrain_queue", Time.get_ticks_usec() - t0)
+	var t_terrain := Time.get_ticks_usec() - t0
+	_record_perf("terrain_queue", t_terrain)
 
 	# Обрабатываем очередь инфраструктуры (1 объект за кадр)
 	t0 = Time.get_ticks_usec()
 	_process_infrastructure_queue()
-	_record_perf("infra_queue", Time.get_ticks_usec() - t0)
+	var t_infra := Time.get_ticks_usec() - t0
+	_record_perf("infra_queue", t_infra)
 
 	# Обрабатываем очередь растительности (1 за кадр, низкий приоритет)
 	t0 = Time.get_ticks_usec()
 	_process_vegetation_queue()
-	_record_perf("vegetation_queue", Time.get_ticks_usec() - t0)
+	var t_veg := Time.get_ticks_usec() - t0
+	_record_perf("vegetation_queue", t_veg)
 
 	# Применяем коллизии бордюров из worker threads
 	t0 = Time.get_ticks_usec()
 	_apply_curb_collisions()
-	_record_perf("curb_collisions", Time.get_ticks_usec() - t0)
+	var t_curb := Time.get_ticks_usec() - t0
+	_record_perf("curb_collisions", t_curb)
 
 	var _frame_time := (Time.get_ticks_usec() - _frame_start) / 1000.0
 	_record_perf("total_frame", int(_frame_time * 1000))
+
+	# ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ: Выводим breakdown если кадр > 10ms
+	if _frame_time > 10.0:
+		print("⚠️ SLOW FRAME %.1fms: building=%.1f road=%.1f terrain=%.1f infra=%.1f veg=%.1f curb=%.1fms" % [
+			_frame_time,
+			t_building / 1000.0,
+			t_road / 1000.0,
+			t_terrain / 1000.0,
+			t_infra / 1000.0,
+			t_veg / 1000.0,
+			t_curb / 1000.0
+		])
 
 	_perf_frame_count += 1
 	if _perf_enabled and _perf_frame_count % 600 == 0:  # Каждые 10 сек при 60fps
@@ -4026,20 +4047,27 @@ Chunks: %d loaded""" % [fps, avg_fps, fps_1pct, min_fps, road_q, terrain_q, infr
 ## Обрабатывает очередь дорог (3 дороги за кадр)
 func _process_road_queue() -> void:
 	if _road_queue.is_empty():
-		# OPTIMIZATION: Финализируем все pending road batches
-		var t_batch := Time.get_ticks_usec()
-		for chunk_key in _pending_batch_chunks:
+		# OPTIMIZATION: Финализируем road batches ПО ОДНОМУ ЧАНКУ ЗА КАДР
+		if not _pending_batch_chunks.is_empty():
+			var t_batch := Time.get_ticks_usec()
+			var chunk_key: String = _pending_batch_chunks.pop_front()
 			_finalize_road_batches_for_chunk(chunk_key)
-		_pending_batch_chunks.clear()
-		if Time.get_ticks_usec() - t_batch > 100:  # Только если >0.1ms
-			_record_perf("road_batch_finalize", Time.get_ticks_usec() - t_batch)
+			if Time.get_ticks_usec() - t_batch > 100:
+				_record_perf("road_batch_finalize", Time.get_ticks_usec() - t_batch)
+			return  # Один чанк за кадр
 
-		# OPTIMIZATION: Финализируем все pending window batches
-		var t_window := Time.get_ticks_usec()
-		for chunk_key in _window_batch_data.keys():
-			_finalize_window_batches_for_chunk(chunk_key)
-		if Time.get_ticks_usec() - t_window > 100:  # Только если >0.1ms
-			_record_perf("window_batch_finalize", Time.get_ticks_usec() - t_window)
+		# OPTIMIZATION: Финализируем window batches ТОЛЬКО когда ВСЕ здания обработаны
+		# Проверяем что нет pending зданий в worker threads И в очереди результатов
+		# Финализируем ПО ОДНОМУ ЧАНКУ ЗА КАДР чтобы не фризить
+		if _pending_building_tasks == 0 and _building_results.is_empty():
+			var window_chunks := _window_batch_data.keys()
+			if not window_chunks.is_empty():
+				var t_window := Time.get_ticks_usec()
+				var chunk_key: String = window_chunks[0]  # Берём первый чанк
+				_finalize_window_batches_for_chunk(chunk_key)
+				if Time.get_ticks_usec() - t_window > 100:
+					_record_perf("window_batch_finalize", Time.get_ticks_usec() - t_window)
+				return  # Один чанк за кадр — не блокируем
 
 		# Когда все дороги созданы, обрабатываем бордюры
 		_process_curb_queue()
@@ -4051,11 +4079,17 @@ func _process_road_queue() -> void:
 		_sort_queue_by_distance(_road_queue, _car.global_position)
 		_record_perf("road_sort", Time.get_ticks_usec() - t0)
 
-	# Обрабатываем 3 дороги за кадр (фиксированное количество для предсказуемости)
-	var max_per_frame := 3
+	# OPTIMIZATION: Time budget вместо фиксированного количества
+	# Бюджет 5ms на обработку дорог, но минимум 1 дорога за кадр
+	const ROAD_TIME_BUDGET_USEC := 5000  # 5ms
+	var start_time := Time.get_ticks_usec()
 	var processed := 0
 
-	while not _road_queue.is_empty() and processed < max_per_frame:
+	while not _road_queue.is_empty():
+		# Проверяем бюджет ПОСЛЕ первой дороги (минимум 1)
+		if processed > 0 and (Time.get_ticks_usec() - start_time) > ROAD_TIME_BUDGET_USEC:
+			break
+
 		var item: Dictionary = _road_queue.pop_front()
 		if not is_instance_valid(item.get("parent")):
 			continue
