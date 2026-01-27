@@ -1675,32 +1675,32 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 	match highway_type:
 		"motorway", "trunk":
 			texture_key = "highway"
-			height_offset = 0.12  # Самые высокие
-			curb_height = 0.12
+			height_offset = 0.020  # Самые высокие
+			curb_height = 0.020
 		"primary":
 			texture_key = "primary"
-			height_offset = 0.11
-			curb_height = 0.10
+			height_offset = 0.018
+			curb_height = 0.018
 		"secondary", "tertiary":
 			texture_key = "primary"
-			height_offset = 0.10
-			curb_height = 0.08
+			height_offset = 0.016
+			curb_height = 0.014
 		"residential", "unclassified":
 			texture_key = "residential"
-			height_offset = 0.09
-			curb_height = 0.06
+			height_offset = 0.014
+			curb_height = 0.010
 		"service":
 			texture_key = "residential"
-			height_offset = 0.08  # Самые низкие дороги
-			curb_height = 0.04
+			height_offset = 0.012  # Самые низкие дороги
+			curb_height = 0.006
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
-			height_offset = 0.07  # Пешеходные ещё ниже
+			height_offset = 0.005  # Пешеходные значительно ниже
 			curb_height = 0.0
 		_:
 			texture_key = "residential"
-			height_offset = 0.09
-			curb_height = 0.05
+			height_offset = 0.014
+			curb_height = 0.008
 
 	# OPTIMIZATION: Road batching - добавляем данные в batch вместо создания MeshInstance3D
 	_add_road_to_batch(nodes, width, texture_key, height_offset, parent, elev_data)
