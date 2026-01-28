@@ -306,12 +306,9 @@ func _start_game() -> void:
 	if _hud:
 		_hud.show_hud()
 
-	# Переключаем на следующий трек после загрузки
-	# MusicManager - это autoload (синглтон), доступен напрямую
+	# Переключаем на случайный трек после загрузки (при входе в игру)
 	if MusicManager:
-		print("MainMenu: calling play_next_track(), current index = ", MusicManager.current_track_index)
-		MusicManager.play_next_track()
-		print("MainMenu: after play_next_track(), new index = ", MusicManager.current_track_index)
+		MusicManager.play_random_track()
 
 	# Скрываем меню
 	visible = false

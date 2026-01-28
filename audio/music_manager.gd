@@ -88,6 +88,16 @@ func play_next_track() -> void:
 	current_track_index = (current_track_index + 1) % playlist.size()
 	play_track(current_track_index)
 
+func play_random_track() -> void:
+	"""Переключается на случайный трек (отличный от текущего)"""
+	if playlist.size() <= 1:
+		play_track(0)
+		return
+	var new_index := current_track_index
+	while new_index == current_track_index:
+		new_index = randi() % playlist.size()
+	play_track(new_index)
+
 func play_previous_track() -> void:
 	"""Переключается на предыдущий трек"""
 	current_track_index = (current_track_index - 1 + playlist.size()) % playlist.size()
