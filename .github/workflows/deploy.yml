@@ -1,0 +1,146 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    name: Export and Deploy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Setup Godot
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.5.0
+          use-dotnet: false
+          include-templates: true
+
+      - name: Verify Godot installation
+        run: godot --version
+
+      - name: Import project
+        run: |
+          mkdir -p build
+          godot --headless --import --quit || true
+
+      - name: Export for Web
+        run: |
+          mkdir -p build/web
+          godot --headless --export-release "Web" build/web/index.html
+
+      - name: Add .nojekyll file
+        run: touch build/web/.nojekyll
+
+      - name: Add COOP/COEP headers workaround
+        run: |
+          cat > build/web/coi-serviceworker.js << 'EOF'
+          /*! coi-serviceworker v0.1.7 - Guido Zuidhof and contributors, licensed under MIT */
+          let coepCredentialless = false;
+          if (typeof window === 'undefined') {
+              self.addEventListener("install", () => self.skipWaiting());
+              self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+              self.addEventListener("message", (ev) => {
+                  if (!ev.data) {
+                      return;
+                  } else if (ev.data.type === "deregister") {
+                      self.registration
+                          .unregister()
+                          .then(() => {
+                              return self.clients.matchAll();
+                          })
+                          .then(clients => {
+                              clients.forEach((client) => client.navigate(client.url));
+                          });
+                  } else if (ev.data.type === "coepCredentialless") {
+                      coepCredentialless = ev.data.value;
+                  }
+              });
+              self.addEventListener("fetch", function (event) {
+                  const r = event.request;
+                  if (r.cache === "only-if-cached" && r.mode !== "same-origin") {
+                      return;
+                  }
+                  const request = (coepCredentialless && r.mode === "no-cors")
+                      ? new Request(r, {
+                          credentials: "omit",
+                      })
+                      : r;
+                  event.respondWith(
+                      fetch(request)
+                          .then((response) => {
+                              if (response.status === 0) {
+                                  return response;
+                              }
+                              const newHeaders = new Headers(response.headers);
+                              newHeaders.set("Cross-Origin-Embedder-Policy",
+                                  coepCredentialless ? "credentialless" : "require-corp"
+                              );
+                              if (!coepCredentialless) {
+                                  newHeaders.set("Cross-Origin-Resource-Policy", "cross-origin");
+                              }
+                              newHeaders.set("Cross-Origin-Opener-Policy", "same-origin");
+                              return new Response(response.body, {
+                                  status: response.status,
+                                  statusText: response.statusText,
+                                  headers: newHeaders,
+                              });
+                          })
+                          .catch((e) => console.error(e))
+                  );
+              });
+          } else {
+              (() => {
+                  const reloadedBySelf = window.sessionStorage.getItem("coiReloadedBySelf");
+                  window.sessionStorage.removeItem("coiReloadedBySelf");
+                  const coepDegrading = (reloadedBySelf == "coepdegrade");
+                  const coepCredentialless = typeof window?.crossOriginIsolated !== "undefined" && window.crossOriginIsolated;
+                  if (!coepDegrading && !(document.domain || "").match(/^(127\.0\.0\.1|localhost)$/)) {
+                      navigator.serviceWorker
+                          .register(window.location.pathname + "coi-serviceworker.js")
+                          .then(
+                              (registration) => {
+                                  if (registration.active && !window.crossOriginIsolated) {
+                                      window.sessionStorage.setItem("coiReloadedBySelf", "coepdegrade");
+                                      window.location.reload();
+                                  }
+                                  registration.active?.postMessage({
+                                      type: "coepCredentialless",
+                                      value: coepCredentialless,
+                                  });
+                              },
+                              (err) => {
+                                  console.log("Service worker registration error:", err);
+                              }
+                          );
+                  }
+              })();
+          }
+          EOF
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'build/web'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
