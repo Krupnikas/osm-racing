@@ -5667,7 +5667,7 @@ func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3,
 	var lamp_forward := road_dir.normalized()
 	var lamp_basis := Basis()
 	lamp_basis.y = Vector3.UP
-	lamp_basis.z = -lamp_forward  # Look at road
+	lamp_basis.z = lamp_forward  # Look at road (FIX: removed minus sign for correct orientation)
 	lamp_basis.x = lamp_basis.y.cross(lamp_basis.z).normalized()
 	lamp_basis.y = lamp_basis.z.cross(lamp_basis.x).normalized()
 
