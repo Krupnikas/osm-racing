@@ -34,8 +34,8 @@ var _textures_initialized := false
 
 @export var start_lat := 59.150066
 @export var start_lon := 37.949370
-@export var chunk_size := 300.0  # Размер чанка в метрах
-@export var load_distance := 500.0  # Дистанция подгрузки чанков
+@export var chunk_size := 150.0  # Размер чанка в метрах (уменьшено для лучшего culling)
+@export var load_distance := 400.0  # Дистанция подгрузки чанков (уменьшено под меньший chunk_size)
 @export var unload_distance := 800.0  # Дистанция выгрузки чанков
 @export var render_distance := 600.0  # Дальность прорисовки (и начало тумана)
 @export var fog_enabled := true  # Включить туман для скрытия края мира
@@ -169,7 +169,7 @@ var _smoothed_velocity := Vector3.ZERO
 var _velocity_smoothing := 0.7  # Фактор сглаживания скорости
 var _chunk_load_queue: Array[Dictionary] = []  # Очередь загрузки {key, priority, distance}
 var _current_load_count := 0
-const MAX_CONCURRENT_LOADS := 3  # Макс параллельных запросов к OSM API
+const MAX_CONCURRENT_LOADS := 5  # Макс параллельных запросов к OSM API (увеличено для маленьких чанков)
 const PREDICTION_INTERVALS := 3  # Точки предсказания (5с, 10с, 15с)
 
 # Сцены для припаркованных машин
@@ -7999,6 +7999,9 @@ func _update_chunk_culling() -> void:
 	car_forward.y = 0  # Проецируем на XZ плоскость
 	car_forward = car_forward.normalized()
 
+	var culled_count := 0
+	var visible_count := 0
+
 	# Обходим все загруженные чанки
 	for chunk_key in _loaded_chunks.keys():
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
@@ -8021,14 +8024,40 @@ func _update_chunk_culling() -> void:
 		var dist_from_car := to_chunk_from_car.length()
 
 		# Dot product: чанк впереди или позади машины
+		# dot > 0 = впереди, dot < 0 = позади
 		var dot := car_forward.dot(to_chunk_from_car.normalized())
 
-		# Скрываем чанки ПОЗАДИ машины (dot < 0) И ДАЛЕКО (> 400m)
-		# Близкие чанки (< 300m) всегда видны
+		# АГРЕССИВНАЯ СТРАТЕГИЯ CULLING:
 		var should_hide := false
-		if dist_from_car > 400.0:
-			should_hide = dot < -0.3  # Позади на > 107° (cos(107°) = -0.3)
-		elif dist_from_car > 300.0:
-			should_hide = dot < -0.5  # Позади на > 120° (cos(120°) = -0.5)
+
+		# 1. ВПЕРЕДИ машины (dot > 0.2) - всегда видим в пределах load_distance
+		if dot > 0.2:
+			should_hide = false  # Всегда видим впереди
+
+		# 2. СБОКУ машины (-0.2 <= dot <= 0.2) - видим только близкие
+		elif dot >= -0.2:
+			should_hide = dist_from_car > 200.0  # Скрываем если далеко сбоку
+
+		# 3. ПОЗАДИ машины (dot < -0.2) - АГРЕССИВНОЕ СКРЫТИЕ
+		else:
+			# Позади - скрываем всё дальше 150m
+			if dist_from_car > 200.0:
+				should_hide = true  # Далеко позади - точно скрываем
+			elif dist_from_car > 150.0:
+				should_hide = dot < -0.4  # Средне далеко - скрываем если достаточно позади
+			elif dist_from_car > 100.0:
+				should_hide = dot < -0.6  # Близко - скрываем только строго позади
+			# else: < 100m - всегда видим (машина может развернуться)
+
+		if should_hide:
+			culled_count += 1
+		else:
+			visible_count += 1
 
 		chunk_node.visible = not should_hide
+
+	# DEBUG: Выводим статистику culling раз в 5 секунд
+	if Engine.get_frames_drawn() % 300 == 0:
+		print("🎯 Frustum Culling: %d visible, %d culled (%.1f%% hidden)" % [
+			visible_count, culled_count, 100.0 * culled_count / float(visible_count + culled_count)
+		])
