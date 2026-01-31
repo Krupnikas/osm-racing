@@ -5691,12 +5691,13 @@ func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3,
 	# ARM transform (angled upward from top of pole)
 	var arm_basis := lamp_basis.rotated(lamp_basis.x, PI/6)  # 30° upward
 	var arm_start := lamp_pos + Vector3(0, 5.5, 0)  # Top of pole
-	var arm_center := arm_start + arm_basis.z * 1.0  # Midpoint of 2m arm
+	# Arm cylinder is oriented along Y axis, so center should be at +Y direction
+	var arm_center := arm_start + arm_basis.y * 1.0  # Midpoint of 2m arm (along rotated Y)
 	var arm_transform := Transform3D(arm_basis, arm_center)
 	_lamp_batch_data[chunk_key]["arm_transforms"].append(arm_transform)
 
-	# GLOBE transform (at end of arm)
-	var arm_end := arm_start + arm_basis.z * 2.0  # End of 2m arm
+	# GLOBE transform (at end of arm - at top of arm cylinder)
+	var arm_end := arm_start + arm_basis.y * 2.0  # End of 2m arm (along rotated Y)
 	var globe_transform := Transform3D(Basis(), arm_end)
 	_lamp_batch_data[chunk_key]["globe_transforms"].append(globe_transform)
 
