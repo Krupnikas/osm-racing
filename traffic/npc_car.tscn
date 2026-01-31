@@ -38,7 +38,7 @@ roughness = 0.9
 [node name="NPCCar" type="VehicleBody3D"]
 mass = 1400.0
 collision_layer = 4
-collision_mask = 7
+collision_mask = 1
 center_of_mass_mode = 1
 center_of_mass = Vector3(0, -0.3, 0)
 script = ExtResource("1_npc_car")

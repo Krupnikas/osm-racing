@@ -10,7 +10,7 @@ size = Vector3(2.5, 2.8, 7.0)
 [node name="NPCCar" type="VehicleBody3D"]
 mass = 5500.0
 collision_layer = 4
-collision_mask = 7
+collision_mask = 1
 center_of_mass_mode = 1
 center_of_mass = Vector3(0, 0.0, 0)
 script = ExtResource("1_npc_car")
