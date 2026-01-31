@@ -170,6 +170,9 @@ var _lamp_materials: Dictionary = {}  # {pole, arm, globe}
 # Keep for night mode updates and chunk association
 var _lamp_lights_by_chunk: Dictionary = {}  # chunk_key -> Array[OmniLight3D]
 
+# Building shadow LOD - only cast shadows for close buildings
+var _building_shadow_lod_distance: float = 150.0  # Buildings > 150m don't cast shadows
+
 var _curb_collision_results: Array = []  # Результаты расчёта коллизий из worker threads
 var _curb_collision_mutex: Mutex  # Для синхронизации доступа к результатам коллизий
 
@@ -3261,7 +3264,14 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 					color = Color(0.65, 0.55, 0.45)  # Стандартный коричневатый
 
 	# Получаем высоту террейна для здания (берём центр)
-	var base_elev := _get_elevation_at_point(_get_polygon_center(points), elev_data)
+	var center := _get_polygon_center(points)
+	var base_elev := _get_elevation_at_point(center, elev_data)
+
+	# Вычисляем расстояние до игрока для LOD (shadows)
+	var distance_to_player: float = INF
+	if car:
+		var building_pos_3d := Vector3(center.x, base_elev, center.y)
+		distance_to_player = car.global_position.distance_to(building_pos_3d)
 
 	# Определяем тип текстуры здания
 	var building_type: String = str(tags.get("building", "yes"))
@@ -3276,7 +3286,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		texture_type = "brick"  # Остальное - кирпич
 
 	# Используем многопоточную генерацию зданий
-	_queue_building_for_thread(points, building_height, texture_type, parent, base_elev)
+	_queue_building_for_thread(points, building_height, texture_type, parent, base_elev, distance_to_player)
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
@@ -4151,13 +4161,14 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 # === МНОГОПОТОЧНАЯ ГЕНЕРАЦИЯ ЗДАНИЙ ===
 
 ## Добавляет здание в очередь для генерации в worker thread
-func _queue_building_for_thread(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float) -> void:
+func _queue_building_for_thread(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float, distance_to_player: float = INF) -> void:
 	var task_data := {
 		"points": points,
 		"building_height": building_height,
 		"texture_type": texture_type,
 		"parent": parent,
-		"base_elev": base_elev
+		"base_elev": base_elev,
+		"distance_to_player": distance_to_player  # For shadow LOD
 	}
 
 	# Добавляем задачу в пул потоков
@@ -4311,6 +4322,7 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		"texture_type": task_data.texture_type,
 		"parent": task_data.parent,
 		"base_elev": base_elev,
+		"distance_to_player": task_data.distance_to_player,  # For shadow LOD
 		"wall_vertices": wall_vertices,
 		"wall_uvs": wall_uvs,
 		"wall_normals": wall_normals,
@@ -4355,7 +4367,14 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 
 	var wall_mesh_instance := MeshInstance3D.new()
 	wall_mesh_instance.mesh = wall_mesh
-	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+	# Shadow LOD: только близкие здания отбрасывают тени (< 150m)
+	var distance: float = result.get("distance_to_player", INF)
+	if distance < _building_shadow_lod_distance:
+		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	else:
+		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # LOD optimization
+
 	# Visibility range для автоматического скрытия далёких зданий
 	wall_mesh_instance.visibility_range_end = 400.0
 	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
@@ -4389,7 +4408,12 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 
 		var roof_mesh_instance := MeshInstance3D.new()
 		roof_mesh_instance.mesh = roof_mesh
-		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+		# Shadow LOD: только близкие здания отбрасывают тени (< 150m)
+		if distance < _building_shadow_lod_distance:
+			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		else:
+			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # LOD optimization
 
 		var roof_material := StandardMaterial3D.new()
 		roof_material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация: включить backface culling
@@ -5204,7 +5228,14 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 
 	var wall_mesh_instance := MeshInstance3D.new()
 	wall_mesh_instance.mesh = wall_mesh
-	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+	# Shadow LOD: только близкие здания отбрасывают тени (< 150m)
+	var distance: float = result.get("distance_to_player", INF)
+	if distance < _building_shadow_lod_distance:
+		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	else:
+		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # LOD optimization
+
 	# Visibility range для автоматического скрытия далёких зданий
 	wall_mesh_instance.visibility_range_end = 400.0
 	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
