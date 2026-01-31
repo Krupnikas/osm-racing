@@ -34,8 +34,8 @@ var _textures_initialized := false
 
 @export var start_lat := 59.150066
 @export var start_lon := 37.949370
-@export var chunk_size := 150.0  # Размер чанка в метрах (уменьшено для лучшего culling)
-@export var load_distance := 400.0  # Дистанция подгрузки чанков (уменьшено под меньший chunk_size)
+@export var chunk_size := 300.0  # Размер чанка в метрах
+@export var load_distance := 500.0  # Дистанция подгрузки чанков
 @export var unload_distance := 800.0  # Дистанция выгрузки чанков
 @export var render_distance := 600.0  # Дальность прорисовки (и начало тумана)
 @export var fog_enabled := true  # Включить туман для скрытия края мира
