@@ -1188,8 +1188,11 @@ func _unload_chunk(chunk_key: String) -> void:
 			_lamp_batch_data.erase(chunk_key)
 			print("OSM: Cleaned up unfinalized lamp batch data for chunk %s" % chunk_key)
 
-		# NEW: Clean up lamp lights references
+		# NEW: Explicitly free lamp lights to prevent memory leak
 		if _lamp_lights_by_chunk.has(chunk_key):
+			for light in _lamp_lights_by_chunk[chunk_key]:
+				if is_instance_valid(light):
+					light.queue_free()
 			_lamp_lights_by_chunk.erase(chunk_key)
 
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
@@ -4444,31 +4447,41 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 
 ## Обрабатывает готовые результаты из worker threads (вызывается из _process)
 func _process_building_results() -> void:
-	if _building_results.is_empty():
-		return
-
 	var t0 := Time.get_ticks_usec()
 	_building_mutex.lock()
+	if _building_results.is_empty():
+		_building_mutex.unlock()
+		return
+
 	var results_to_process := _building_results.duplicate()
 	_building_results.clear()
 	_building_mutex.unlock()
 
+	# Filter out invalid results to prevent processing empty/invalid buildings
+	var valid_results: Array = []
+	for result in results_to_process:
+		if result.get("valid", false):
+			valid_results.append(result)
+
+	if valid_results.is_empty():
+		return  # Nothing valid to process
+
 	# Сортируем здания по близости к игроку (если много в очереди)
-	if results_to_process.size() > 10 and _car:
+	if valid_results.size() > 10 and _car:
 		var t_sort := Time.get_ticks_usec()
-		_sort_building_results_by_distance(results_to_process, _car.global_position)
+		_sort_building_results_by_distance(valid_results, _car.global_position)
 		_record_perf("building_sort", Time.get_ticks_usec() - t_sort)
 
 	# Применяем 1 здание за кадр для максимальной плавности
 	var t_apply := Time.get_ticks_usec()
-	_apply_building_mesh_result(results_to_process[0])
+	_apply_building_mesh_result(valid_results[0])
 	_record_perf("building_apply", Time.get_ticks_usec() - t_apply)
 
-	# Возвращаем оставшиеся обратно в очередь
-	if results_to_process.size() > 1:
+	# Возвращаем оставшиеся обратно в очередь (only valid results)
+	if valid_results.size() > 1:
 		_building_mutex.lock()
-		for i in range(1, results_to_process.size()):
-			_building_results.append(results_to_process[i])
+		for i in range(1, valid_results.size()):
+			_building_results.append(valid_results[i])
 		_building_mutex.unlock()
 
 
@@ -5713,20 +5726,43 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 		return
 
 	var batch: Dictionary = _lamp_batch_data[chunk_key]
+
+	# Validate batch structure
+	if not batch.has("parent") or not batch.has("pole_transforms"):
+		print("OSM: ERROR - Invalid lamp batch structure for chunk %s" % chunk_key)
+		_lamp_batch_data.erase(chunk_key)
+		return
+
 	var parent: Node3D = batch.parent
 
 	if not is_instance_valid(parent):
 		_lamp_batch_data.erase(chunk_key)
 		return
 
-	var lamp_count: int = batch.pole_transforms.size()
+	var lamp_count: int = batch.get("pole_transforms", []).size()
 	if lamp_count == 0:
+		_lamp_batch_data.erase(chunk_key)
+		return
+
+	# Validate all arrays have consistent sizes
+	if batch.get("arm_transforms", []).size() != lamp_count or \
+	   batch.get("globe_transforms", []).size() != lamp_count or \
+	   batch.get("globe_colors", []).size() != lamp_count or \
+	   batch.get("light_data", []).size() != lamp_count:
+		print("OSM: ERROR - Lamp batch for chunk %s has mismatched array sizes!" % chunk_key)
 		_lamp_batch_data.erase(chunk_key)
 		return
 
 	# Create container for all lamp components in this chunk
 	var lamp_container := Node3D.new()
 	lamp_container.name = "LampBatches"
+
+	# Re-validate parent before adding child (could be freed during batch creation)
+	if not is_instance_valid(parent):
+		_lamp_batch_data.erase(chunk_key)
+		lamp_container.queue_free()
+		return
+
 	parent.add_child(lamp_container)
 
 	# 1. POLE MultiMesh
@@ -5797,9 +5833,13 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 		if _night_mode_manager and is_instance_valid(_night_mode_manager):
 			is_night = _night_mode_manager.is_night
 		else:
-			# Fallback: try to find NightModeManager or use _is_night_mode
+			# Fallback: try to find and re-cache NightModeManager
 			var night_mgr := get_tree().get_first_node_in_group("night_mode_manager")
-			is_night = night_mgr.is_night if night_mgr else _is_night_mode
+			if night_mgr:
+				_night_mode_manager = night_mgr  # Re-cache for next time
+				is_night = night_mgr.is_night
+			else:
+				is_night = _is_night_mode
 
 		light.visible = is_night and not light_data.broken
 
