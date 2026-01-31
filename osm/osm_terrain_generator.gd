@@ -58,7 +58,6 @@ var _textures_initialized := false
 @export var enable_traffic_lights := true  # Включить светофоры
 @export var enable_night_mode_windows := true  # Включить подсветку окон ночью
 @export var enable_frustum_culling := true  # Включить frustum culling чанков
-
 var osm_loader: Node
 var _car: Node3D
 var _camera: Camera3D
@@ -115,6 +114,11 @@ var _infrastructure_queue: Array = []  # Очередь {type, pos, elevation, p
 var _culling_camera: Camera3D = null  # Ссылка на камеру для culling
 var _culling_update_timer: float = 0.0  # Таймер обновления culling
 const CULLING_UPDATE_INTERVAL := 0.2  # Обновлять каждые 200ms (5 раз в секунду)
+
+# Raycast-based occlusion culling (дополняет frustum culling)
+var _raycast_occlusion_cache: Dictionary = {}  # chunk_key -> {visible: bool, time: float}
+const RAYCAST_CACHE_DURATION := 1.0  # Кеш на 1 секунду
+const RAYCAST_BUDGET_PER_UPDATE := 3  # Макс чанков для проверки за одно обновление
 
 # Отложенная генерация дорог и других тяжёлых объектов
 var _road_queue: Array = []  # Очередь {nodes, tags, parent, elev_data}
@@ -1593,7 +1597,7 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	material.albedo_color = COLORS["default"]
 	mesh.material_override = material
 
-	# Добавляем коллизию
+	# Добавляем коллизию напрямую из vertices/indices (быстрее чем create_trimesh_collision)
 	var body := StaticBody3D.new()
 	body.name = "TerrainBody"
 	body.collision_layer = 1  # Слой 1 - земля, по которой едет машина
@@ -1601,16 +1605,15 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	body.add_to_group("Grass")  # GEVP - террейн как трава (большое сопротивление)
 	body.add_child(mesh)
 
-	# Создаём коллизию из меша
-	mesh.create_trimesh_collision()
-	# Перемещаем коллизию в body
-	for child in mesh.get_children():
-		if child is StaticBody3D:
-			var col_shape := child.get_child(0)
-			if col_shape is CollisionShape3D:
-				child.remove_child(col_shape)
-				body.add_child(col_shape)
-			child.queue_free()
+	var faces := PackedVector3Array()
+	faces.resize(indices.size())
+	for fi in range(indices.size()):
+		faces[fi] = vertices[indices[fi]]
+	var shape := ConcavePolygonShape3D.new()
+	shape.set_faces(faces)
+	var col := CollisionShape3D.new()
+	col.shape = shape
+	body.add_child(col)
 
 	parent.add_child(body)
 
@@ -2429,12 +2432,24 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		road_body.add_to_group("Road")  # GEVP - дорога
 		road_body.add_child(mesh_instance)
 
-		# Создаём trimesh коллизию (МОЖЕТ ФРИЗИТЬ!)
+		# Создаём trimesh коллизию вручную из имеющихся vertices/indices
+		# (быстрее чем create_trimesh_collision() который парсит mesh заново)
 		var prof_collision = 0
 		if _profiler:
 			prof_collision = _profiler.start_measure("road_collision_create_" + chunk_key)
 
-		mesh_instance.create_trimesh_collision()
+		var verts: PackedVector3Array = batch["vertices"]
+		var idxs: PackedInt32Array = batch["indices"]
+		var faces := PackedVector3Array()
+		faces.resize(idxs.size())
+		for fi in range(idxs.size()):
+			faces[fi] = verts[idxs[fi]]
+
+		var shape := ConcavePolygonShape3D.new()
+		shape.set_faces(faces)
+		var col_shape := CollisionShape3D.new()
+		col_shape.shape = shape
+		road_body.add_child(col_shape)
 
 		if _profiler:
 			_profiler.end_measure("road_collision_create_" + chunk_key, prof_collision)
@@ -2443,14 +2458,6 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 				print("🔴 FREEZE: road collision shape creation took %.1f ms for chunk %s (type: %s)" % [
 					collision_time_ms, chunk_key, texture_key
 				])
-
-		for child in mesh_instance.get_children():
-			if child is StaticBody3D:
-				var col_shape := child.get_child(0)
-				if col_shape is CollisionShape3D:
-					child.remove_child(col_shape)
-					road_body.add_child(col_shape)
-				child.queue_free()
 
 		# Добавляем в parent (chunk node)
 		var parent: Node3D = batch["parent"]
@@ -5087,7 +5094,7 @@ func _sort_building_results_by_distance(results: Array, player_pos: Vector3) -> 
 	results.sort_custom(func(a, b): return a.get("_dist", 999999.0) < b.get("_dist", 999999.0))
 
 
-## Обрабатывает очередь terrain объектов (фиксированное количество за кадр)
+## Обрабатывает очередь terrain объектов (с time budget)
 func _process_terrain_objects_queue() -> void:
 	if _terrain_objects_queue.is_empty():
 		return
@@ -5098,10 +5105,16 @@ func _process_terrain_objects_queue() -> void:
 		_sort_queue_by_distance(_terrain_objects_queue, _car.global_position)
 		_record_perf("terrain_sort", Time.get_ticks_usec() - t0)
 
-	var max_per_frame := 2  # Terrain objects могут быть тяжёлыми (деревья)
+	# Time budget: максимум 3ms на terrain объекты, минимум 1 за кадр
+	const TERRAIN_TIME_BUDGET_USEC := 3000
+	var start_time := Time.get_ticks_usec()
 	var processed := 0
 
-	while not _terrain_objects_queue.is_empty() and processed < max_per_frame:
+	while not _terrain_objects_queue.is_empty():
+		# Проверяем бюджет ПОСЛЕ первого объекта
+		if processed > 0 and (Time.get_ticks_usec() - start_time) > TERRAIN_TIME_BUDGET_USEC:
+			break
+
 		var item: Dictionary = _terrain_objects_queue.pop_front()
 
 		# Проверяем что parent ещё существует
@@ -5571,35 +5584,24 @@ func _create_park_collision(points: PackedVector2Array, elev_data: Dictionary, p
 		var h := _get_elevation_at_point(p, elev_data) + 0.01  # Чуть выше террейна
 		vertices.append(Vector3(p.x, h, p.y))
 
-	# Создаём меш для коллизии
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = vertices
-	arrays[Mesh.ARRAY_INDEX] = PackedInt32Array(indices)
+	# Создаём ConcavePolygonShape3D напрямую из vertices/indices (быстрее чем create_trimesh_collision)
+	var faces := PackedVector3Array()
+	faces.resize(indices.size())
+	for fi in range(indices.size()):
+		faces[fi] = vertices[indices[fi]]
 
-	var arr_mesh := ArrayMesh.new()
-	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-
-	var mesh := MeshInstance3D.new()
-	mesh.mesh = arr_mesh
-	mesh.visible = false  # Невидимый меш только для коллизии
+	var shape := ConcavePolygonShape3D.new()
+	shape.set_faces(faces)
 
 	var body := StaticBody3D.new()
 	body.name = "ParkCollision"
 	body.collision_layer = 1
 	body.collision_mask = 0  # Статика не проверяет коллизии
 	body.add_to_group("Park")  # GEVP - парк (очень высокое сопротивление)
-	body.add_child(mesh)
 
-	# Создаём коллизию
-	mesh.create_trimesh_collision()
-	for child in mesh.get_children():
-		if child is StaticBody3D:
-			var col_shape := child.get_child(0)
-			if col_shape is CollisionShape3D:
-				child.remove_child(col_shape)
-				body.add_child(col_shape)
-			child.queue_free()
+	var col_shape := CollisionShape3D.new()
+	col_shape.shape = shape
+	body.add_child(col_shape)
 
 	parent.add_child(body)
 
@@ -7586,10 +7588,9 @@ func _connect_to_night_mode() -> void:
 func _setup_render_distance() -> void:
 	"""Настраивает дальность прорисовки камеры, туман и дистанции чанков"""
 	# Настраиваем дистанции загрузки чанков
-	# Зазор между load и unload должен быть >= chunk_size + overlap (300+100=400m)
-	# чтобы объекты, выходящие за границу чанка, не исчезали раньше времени
+	# Зазор между load и unload нужен чтобы не флаттерить загрузку/выгрузку
 	load_distance = render_distance + 100.0  # Загружаем чуть дальше видимости
-	unload_distance = render_distance + chunk_size + 200.0  # Выгружаем с запасом на overlap
+	unload_distance = render_distance + chunk_size  # Выгружаем с запасом на chunk_size
 	print("OSM: Chunk distances - load: %.0f, unload: %.0f" % [load_distance, unload_distance])
 
 	# Настраиваем камеру
@@ -8303,12 +8304,12 @@ func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) 
 ## Smooths road geometry using Catmull-Rom spline interpolation
 ## This creates smooth curves through all points
 func _smooth_road_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
-	return _smooth_points(raw_points, 6.0, 6, 0.5)  # Упрощенное сглаживание: меньше точек для оптимизации
+	return _smooth_points(raw_points, 10.0, 3, 1.0)  # Оптимизация: реже точки, меньше subdivisions
 
 
 ## Упрощённое сглаживание для бордюров (меньше точек)
 func _smooth_curb_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
-	return _smooth_points(raw_points, 8.0, 4, 1.5)  # Меньше точек для бордюров
+	return _smooth_points(raw_points, 12.0, 2, 2.0)  # Оптимизация: минимум subdivisions для бордюров
 
 
 ## Общая функция сглаживания с настраиваемыми параметрами
@@ -8920,15 +8921,14 @@ func _print_draw_call_stats() -> void:
 
 
 ## Camera-based frustum culling для чанков
+## Использует реальные frustum planes камеры + dot product для чанков позади
 func _update_chunk_culling() -> void:
 	if not enable_frustum_culling:
-		# Если culling выключен, все чанки видимы
 		for chunk_node in _loaded_chunks.values():
 			if is_instance_valid(chunk_node):
 				chunk_node.visible = true
 		return
 
-	# Найти камеру
 	if not _culling_camera:
 		_culling_camera = get_viewport().get_camera_3d()
 		if not _culling_camera:
@@ -8937,73 +8937,110 @@ func _update_chunk_culling() -> void:
 	if not _car:
 		return
 
-	var camera_pos := _culling_camera.global_position
 	var car_pos := _car.global_position
 
-	# Направление движения машины (куда она смотрит)
-	var car_forward := -_car.global_transform.basis.z
-	car_forward.y = 0  # Проецируем на XZ плоскость
-	car_forward = car_forward.normalized()
+	# Получаем frustum planes камеры (left, right, top, bottom, near, far)
+	var frustum: Array[Plane] = _culling_camera.get_frustum()
+
+	# Направление камеры для дополнительного culling позади машины
+	var cam_forward := -_culling_camera.global_transform.basis.z
+	cam_forward.y = 0
+	if cam_forward.length_squared() > 0.001:
+		cam_forward = cam_forward.normalized()
+	else:
+		cam_forward = -_car.global_transform.basis.z
+		cam_forward.y = 0
+		cam_forward = cam_forward.normalized()
 
 	var culled_count := 0
 	var visible_count := 0
+	var raycast_culled := 0
 
-	# Обходим все загруженные чанки
+	# Высота зданий для AABB (макс ~50м)
+	var chunk_height := 60.0
+
+	var cam_pos := _culling_camera.global_position
+	var current_time := Time.get_ticks_msec() / 1000.0
+	var raycast_checks_this_frame := 0
+	var space_state: PhysicsDirectSpaceState3D = null
+
 	for chunk_key in _loaded_chunks.keys():
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
 		if not is_instance_valid(chunk_node):
 			continue
 
-		# Вычисляем центр чанка
 		var coords: PackedStringArray = chunk_key.split(",")
 		var chunk_x := int(coords[0])
 		var chunk_z := int(coords[1])
-		var chunk_center := Vector3(
-			chunk_x * chunk_size + chunk_size / 2.0,
-			0,
-			chunk_z * chunk_size + chunk_size / 2.0
-		)
 
-		# Расстояние от машины до чанка
-		var to_chunk_from_car := chunk_center - car_pos
-		to_chunk_from_car.y = 0
-		var dist_from_car := to_chunk_from_car.length()
+		# AABB чанка с учётом высоты
+		var aabb_min := Vector3(chunk_x * chunk_size, -5.0, chunk_z * chunk_size)
+		var aabb_max := Vector3(aabb_min.x + chunk_size, chunk_height, aabb_min.z + chunk_size)
+		var aabb_center := (aabb_min + aabb_max) * 0.5
+		var aabb_half := (aabb_max - aabb_min) * 0.5
 
-		# Dot product: чанк впереди или позади машины
-		# dot > 0 = впереди, dot < 0 = позади
-		var dot := car_forward.dot(to_chunk_from_car.normalized())
+		# Расстояние до ближнего ребра чанка
+		var nearest_x := clampf(car_pos.x, aabb_min.x, aabb_max.x)
+		var nearest_z := clampf(car_pos.z, aabb_min.z, aabb_max.z)
+		var dist_to_edge := car_pos.distance_to(Vector3(nearest_x, car_pos.y, nearest_z))
 
-		# SMART CULLING: используем расстояние до ближайшей точки чанка (AABB),
-		# а не до центра. Объекты могут выходить за край чанка на 100м (OSM overlap).
-		var chunk_min := Vector3(chunk_x * chunk_size, 0, chunk_z * chunk_size)
-		var chunk_max := Vector3(chunk_min.x + chunk_size, 0, chunk_min.z + chunk_size)
-		# Ближайшая точка AABB к машине
-		var nearest := Vector3(
-			clampf(car_pos.x, chunk_min.x, chunk_max.x),
-			0,
-			clampf(car_pos.z, chunk_min.z, chunk_max.z)
-		)
-		var dist_to_nearest_edge := car_pos.distance_to(Vector3(nearest.x, car_pos.y, nearest.z))
+		# Ближние чанки (< 200м до ребра) — всегда видимы
+		if dist_to_edge < 200.0:
+			chunk_node.visible = true
+			visible_count += 1
+			continue
 
-		var should_hide := false
+		# Тест AABB vs frustum planes
+		var inside_frustum := true
+		for plane in frustum:
+			var d := aabb_center.dot(plane.normal) + plane.d
+			var r := absf(aabb_half.x * plane.normal.x) + absf(aabb_half.y * plane.normal.y) + absf(aabb_half.z * plane.normal.z)
+			if d + r < 0.0:
+				inside_frustum = false
+				break
 
-		# 1. Чанк близко (edge < 100м + overlap) - всегда видим
-		if dist_to_nearest_edge < 200.0:
-			should_hide = false
+		var should_hide := not inside_frustum
 
-		# 2. ВПЕРЕДИ или СБОКУ машины - всегда видим
-		elif dot > -0.2:
-			should_hide = false
+		# Дополнительно: скрываем далёкие чанки строго позади камеры
+		if not should_hide:
+			var to_chunk := aabb_center - car_pos
+			to_chunk.y = 0
+			var dist := to_chunk.length()
+			if dist > chunk_size * 0.5:  # Не текущий чанк
+				var dot := cam_forward.dot(to_chunk.normalized())
+				# Чанк далеко позади - скрываем
+				if dot < -0.4 and dist > chunk_size * 1.5:
+					should_hide = true
 
-		# 3. ПОЗАДИ машины - скрываем агрессивнее по расстоянию до края
-		else:
-			# edge > 200м и позади - проверяем как далеко позади
-			if dist_to_nearest_edge > 400.0:
-				should_hide = true  # Далеко позади - точно не видим
-			elif dist_to_nearest_edge > 300.0:
-				should_hide = dot < -0.5  # Средне далеко позади
-			else:
-				should_hide = dot < -0.7  # Близко позади - только строго за спиной
+			# Raycast occlusion: только для далёких чанков, прошедших frustum
+			if not should_hide and dist > chunk_size:
+				# Проверяем кеш
+				if _raycast_occlusion_cache.has(chunk_key):
+					var cached: Dictionary = _raycast_occlusion_cache[chunk_key]
+					if current_time - cached["time"] < RAYCAST_CACHE_DURATION:
+						if not cached["visible"]:
+							should_hide = true
+							raycast_culled += 1
+					elif raycast_checks_this_frame < RAYCAST_BUDGET_PER_UPDATE:
+						# Кеш устарел — перепроверяем
+						if not space_state:
+							space_state = get_world_3d().direct_space_state
+						var is_visible := _check_chunk_visibility_raycast(space_state, cam_pos, aabb_center, aabb_half)
+						_raycast_occlusion_cache[chunk_key] = {"visible": is_visible, "time": current_time}
+						raycast_checks_this_frame += 1
+						if not is_visible:
+							should_hide = true
+							raycast_culled += 1
+				elif raycast_checks_this_frame < RAYCAST_BUDGET_PER_UPDATE:
+					# Нет в кеше — проверяем
+					if not space_state:
+						space_state = get_world_3d().direct_space_state
+					var is_visible := _check_chunk_visibility_raycast(space_state, cam_pos, aabb_center, aabb_half)
+					_raycast_occlusion_cache[chunk_key] = {"visible": is_visible, "time": current_time}
+					raycast_checks_this_frame += 1
+					if not is_visible:
+						should_hide = true
+						raycast_culled += 1
 
 		if should_hide:
 			culled_count += 1
@@ -9012,8 +9049,36 @@ func _update_chunk_culling() -> void:
 
 		chunk_node.visible = not should_hide
 
-	# DEBUG: Выводим статистику culling раз в 5 секунд
+	# Чистим кеш для выгруженных чанков
+	for key in _raycast_occlusion_cache.keys():
+		if not _loaded_chunks.has(key):
+			_raycast_occlusion_cache.erase(key)
+
+	# DEBUG: раз в 5 секунд
 	if Engine.get_frames_drawn() % 300 == 0:
-		print("🎯 Frustum Culling: %d visible, %d culled (%.1f%% hidden)" % [
-			visible_count, culled_count, 100.0 * culled_count / float(visible_count + culled_count)
+		print("Culling: %d visible, %d culled (%d frustum, %d raycast)" % [
+			visible_count, culled_count, culled_count - raycast_culled, raycast_culled
 		])
+
+
+## Проверяет видимость чанка из камеры через raycast к зданиям
+## Бросает 5 лучей (центр + 4 угла на уровне земли). Если хотя бы один проходит — чанк видим.
+func _check_chunk_visibility_raycast(space_state: PhysicsDirectSpaceState3D, cam_pos: Vector3, aabb_center: Vector3, aabb_half: Vector3) -> bool:
+	# 5 контрольных точек на уровне земли чанка
+	var ground_y := 1.5  # Чуть выше земли
+	var test_points := [
+		Vector3(aabb_center.x, ground_y, aabb_center.z),  # Центр
+		Vector3(aabb_center.x - aabb_half.x * 0.8, ground_y, aabb_center.z - aabb_half.z * 0.8),  # Ближний-левый
+		Vector3(aabb_center.x + aabb_half.x * 0.8, ground_y, aabb_center.z - aabb_half.z * 0.8),  # Ближний-правый
+		Vector3(aabb_center.x - aabb_half.x * 0.8, ground_y, aabb_center.z + aabb_half.z * 0.8),  # Дальний-левый
+		Vector3(aabb_center.x + aabb_half.x * 0.8, ground_y, aabb_center.z + aabb_half.z * 0.8),  # Дальний-правый
+	]
+
+	for target in test_points:
+		var query := PhysicsRayQueryParameters3D.create(cam_pos, target)
+		query.collision_mask = 2  # Только слой зданий
+		var result := space_state.intersect_ray(query)
+		if result.is_empty():
+			return true  # Луч прошёл — чанк виден
+
+	return false  # Все лучи заблокированы — чанк скрыт
