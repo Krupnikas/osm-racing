@@ -813,10 +813,10 @@ func _check_initial_load_complete() -> void:
 		if _finalization_state == 0:
 			print("OSM: Starting finalization...")
 			_finalization_state = 1
-			initial_load_progress.emit(0.95, "Финализация: создание фонарей (%d)..." % _pending_lamps.size())
-			# Создаём все фонари сразу
-			_create_pending_lamps()
-			print("OSM: Lamps done, starting parking signs...")
+			initial_load_progress.emit(0.95, "Финализация: батчинг фонарей...")
+			# OLD: Создаём все фонари сразу (DEPRECATED - now using batching)
+			# _create_pending_lamps()
+			print("OSM: Lamp batching queued, starting parking signs...")
 			_finalization_state = 2
 			initial_load_progress.emit(0.98, "Финализация: создание знаков парковки (%d)..." % _pending_parking_signs.size())
 			# Создаём все знаки парковки сразу
@@ -1419,10 +1419,11 @@ func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: 
 	# Генерируем растительность на пустых участках чанка (временно отключено)
 	# _queue_chunk_vegetation(chunk_key, chunk_node)
 
-	# Создаём фонари для этого чанка (если не начальная загрузка)
+	# OLD: Создаём фонари для этого чанка (DEPRECATED - now using batching)
 	if not _initial_loading:
-		print("OSM: Post-initial chunk loaded, pending_lamps=%d" % _pending_lamps.size())
-		_create_pending_lamps()
+		# Batching happens automatically in _process() via _lamp_batches_to_finalize
+		pass
+		# _create_pending_lamps()  # DISABLED
 
 	# Если ночь уже включена - активируем свет в новом чанке
 	_apply_night_mode_to_chunk(chunk_node)
@@ -5755,8 +5756,19 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 		light.light_bake_mode = Light3D.BAKE_DISABLED
 
 		# Visibility based on night mode and broken state
-		var is_night: bool = _night_mode_manager.is_night if _night_mode_manager else false
+		# Check night mode from manager if available, otherwise check _is_night_mode flag
+		var is_night: bool = false
+		if _night_mode_manager and is_instance_valid(_night_mode_manager):
+			is_night = _night_mode_manager.is_night
+		else:
+			# Fallback: try to find NightModeManager or use _is_night_mode
+			var night_mgr := get_tree().get_first_node_in_group("night_mode_manager")
+			is_night = night_mgr.is_night if night_mgr else _is_night_mode
+
 		light.visible = is_night and not light_data.broken
+
+		# Store broken state as metadata for night mode updates
+		light.set_meta("broken", light_data.broken)
 
 		lights_container.add_child(light)
 		_lamp_lights_by_chunk[chunk_key].append(light)
@@ -5779,9 +5791,10 @@ func _update_lamp_night_mode(is_night: bool) -> void:
 		var lights: Array = _lamp_lights_by_chunk[chunk_key]
 		for light in lights:
 			if is_instance_valid(light):
-				# Light visibility depends on night mode
-				# Broken state is already encoded (light doesn't exist or has flag)
-				light.visible = is_night
+				# Light visibility depends on night mode AND if lamp is not broken
+				# Broken lamps have a special metadata flag set during creation
+				var is_broken: bool = light.get_meta("broken", false)
+				light.visible = is_night and not is_broken
 
 	# Note: Globe colors are baked into MultiMesh instance colors
 	# If we need dynamic color changes, would need to:
