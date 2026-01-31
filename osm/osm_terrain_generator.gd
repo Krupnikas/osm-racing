@@ -99,7 +99,7 @@ const QUEUE_STUCK_TIMEOUT := 5.0  # Таймаут зависшей очеред
 var _infrastructure_queue: Array = []  # Очередь {type, pos, elevation, parent, ...}
 
 # Camera-based frustum culling для чанков
-var _camera: Camera3D = null  # Ссылка на камеру игрока
+var _culling_camera: Camera3D = null  # Ссылка на камеру для culling
 var _culling_update_timer: float = 0.0  # Таймер обновления culling
 const CULLING_UPDATE_INTERVAL := 0.2  # Обновлять каждые 200ms (5 раз в секунду)
 
@@ -7983,15 +7983,15 @@ func _print_draw_call_stats() -> void:
 ## Camera-based frustum culling для чанков
 func _update_chunk_culling() -> void:
 	# Найти камеру
-	if not _camera:
-		_camera = get_viewport().get_camera_3d()
-		if not _camera:
+	if not _culling_camera:
+		_culling_camera = get_viewport().get_camera_3d()
+		if not _culling_camera:
 			return
 
 	if not _car:
 		return
 
-	var camera_pos := _camera.global_position
+	var camera_pos := _culling_camera.global_position
 	var car_pos := _car.global_position
 
 	# Направление взгляда камеры = от камеры К машине (target для Orbit)
