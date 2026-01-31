@@ -23,6 +23,12 @@ const UPDATE_INTERVAL := 0.1  # Интервал обновления AI (100ms)
 const CAR_WIDTH := 2.0  # Ширина машины в метрах
 const LANE_WIDTH := 3.5  # Стандартная ширина полосы в метрах
 
+# Physics LOD (для оптимизации)
+const PHYSICS_LOD_DISTANCE := 100.0  # Дистанция переключения на kinematic
+var _is_kinematic := false  # Флаг kinematic режима (0 physics bodies)
+var _player_car: Node3D = null  # Кеш ссылки на игрока
+var _original_linear_velocity := Vector3.ZERO  # Сохраненная скорость для kinematic
+
 # Internal state (AI-specific)
 var ai_state := AIState.DRIVING
 var update_timer := 0.0
@@ -57,7 +63,10 @@ func _ready() -> void:
 	# Вызываем базовый _ready (собирает колёса)
 	super._ready()
 
-	# Настраиваем привод (AWD)
+	# ОПТИМИЗАЦИЯ: Отключаем физику колес у ВСЕХ NPC (1 body вместо 5)
+	_disable_wheel_physics()
+
+	# Настраиваем привод (AWD) - не используется, но оставляем для совместимости
 	for wheel in wheels_front:
 		wheel.use_as_traction = true
 	for wheel in wheels_rear:
@@ -77,11 +86,24 @@ func _ready() -> void:
 	await get_tree().process_frame
 	_connect_to_night_mode()
 
+	# Найти player car для LOD
+	_player_car = get_tree().get_first_node_in_group("car")
+
 
 func _physics_process(delta: float) -> void:
 	# Обновляем grace timer
 	if spawn_grace_timer > 0.0:
 		spawn_grace_timer -= delta
+
+	# PHYSICS LOD: проверяем дистанцию до игрока
+	if _player_car:
+		var dist = global_position.distance_to(_player_car.global_position)
+		_update_physics_lod(dist)
+
+	# Если kinematic - используем упрощенное движение
+	if _is_kinematic:
+		_update_kinematic_movement(delta)
+		return
 
 	# Обновляем AI с интервалом
 	update_timer += delta
@@ -597,3 +619,91 @@ func _debug_wheel_contact() -> void:
 	#if in_contact == 0:
 	#	print("⚠️ NPC %s: NO WHEELS IN CONTACT!" % name)
 	pass
+
+
+func _disable_wheel_physics() -> void:
+	"""
+	ОПТИМИЗАЦИЯ: Отключает физику колес у ВСЕХ NPC.
+	VehicleBody3D остается, но колеса не симулируются = 1 physics body вместо 5
+	"""
+	for wheel in wheels_front + wheels_rear:
+		if wheel:
+			wheel.set_physics_process(false)
+			# Скрываем визуальные модели колёс (колеса не нужны для дальних NPC)
+			for child in wheel.get_children():
+				if child is MeshInstance3D:
+					child.visible = false
+
+
+func _update_physics_lod(distance: float) -> void:
+	"""
+	Physics LOD для дальних NPC.
+	Близко (<100m): VehicleBody3D без колес (1 physics body)
+	Далеко (>100m): Kinematic mode (0 physics bodies!)
+	"""
+	var should_be_kinematic = distance > PHYSICS_LOD_DISTANCE
+
+	if should_be_kinematic and not _is_kinematic:
+		# Переключаемся на kinematic (0 physics bodies)
+		_enable_kinematic_mode()
+		_is_kinematic = true
+	elif not should_be_kinematic and _is_kinematic:
+		# Возвращаем VehicleBody3D режим (1 body)
+		_disable_kinematic_mode()
+		_is_kinematic = false
+
+
+func _enable_kinematic_mode() -> void:
+	"""Переключает на kinematic (0 physics bodies)"""
+	# Сохраняем текущую скорость
+	_original_linear_velocity = linear_velocity
+
+	# Отключаем физическую симуляцию
+	freeze = true
+	collision_layer = 0  # Не коллайдим ни с чем
+	collision_mask = 0
+
+
+func _disable_kinematic_mode() -> void:
+	"""Возвращает VehicleBody3D режим (1 physics body)"""
+	# Включаем физическую симуляцию
+	freeze = false
+	collision_layer = 4  # NPC layer
+	collision_mask = 7   # Terrain + Buildings + NPCs
+
+	# Восстанавливаем скорость
+	linear_velocity = _original_linear_velocity
+
+
+func _update_kinematic_movement(delta: float) -> void:
+	"""
+	Упрощенное движение для kinematic NPC (без физики).
+	Просто двигаем по пути с постоянной скоростью.
+	"""
+	# Обновляем AI с интервалом
+	update_timer += delta
+	if update_timer >= UPDATE_INTERVAL:
+		update_timer = 0.0
+		_update_ai_driver()
+
+	# Простое движение вперед вдоль направления
+	if waypoint_path.is_empty():
+		return
+
+	# Получаем target waypoint
+	var target_wp = _get_target_waypoint()
+	if target_wp == null:
+		return
+
+	# Направление к цели
+	var target_pos = Vector3(target_wp.position.x, global_position.y, target_wp.position.z)
+	var direction = (target_pos - global_position).normalized()
+
+	# Двигаем NPC с постоянной скоростью (без физики)
+	var speed_mps = target_speed / 3.6  # km/h -> m/s
+	global_position += direction * speed_mps * delta
+
+	# Поворачиваем к цели
+	if direction.length() > 0.01:
+		var target_basis = Basis.looking_at(direction, Vector3.UP)
+		basis = basis.slerp(target_basis, 5.0 * delta)

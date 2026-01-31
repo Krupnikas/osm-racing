@@ -36,6 +36,11 @@ var waypoint_spheres: Array = []  # Визуальные маркеры waypoint
 var npc_path_visuals: Dictionary = {}  # npc -> Array[MeshInstance3D] для визуализации путей
 var npc_target_cubes: Dictionary = {}  # npc -> MeshInstance3D для визуализации целевой точки
 
+# Диагностика и профилирование
+var _profiler: Node = null
+var _log_timer: float = 0.0
+const LOG_INTERVAL := 2.0  # Логировать каждые 2 секунды
+
 
 func _ready() -> void:
 	# Загружаем сцены NPC машин
@@ -62,6 +67,14 @@ func _ready() -> void:
 	if not player_car:
 		push_warning("TrafficManager: Player car not found in group 'car'")
 
+	# Загрузить профайлер для диагностики
+	var profiler_script = load("res://debug/performance_profiler.gd")
+	if profiler_script:
+		_profiler = profiler_script.new()
+		_profiler.print_interval = 5.0
+		add_child(_profiler)
+		print("[TrafficManager] Profiler created for diagnostics")
+
 	print("TrafficManager: Initialized (max %d NPCs)" % MAX_NPCS)
 
 
@@ -77,6 +90,12 @@ func _process(delta: float) -> void:
 	# Обновляем визуализацию путей NPC
 	if debug_visualize:
 		_update_npc_path_visualization()
+
+	# Логировать статистику NPC каждые 2 секунды
+	_log_timer += delta
+	if _log_timer >= LOG_INTERVAL:
+		_log_timer = 0.0
+		_log_npc_statistics()
 
 
 func _input(event: InputEvent) -> void:
@@ -698,3 +717,38 @@ func _clear_npc_target_cube(npc) -> void:
 	if npc_target_cubes.has(npc):
 		npc_target_cubes[npc].queue_free()
 		npc_target_cubes.erase(npc)
+
+
+func _log_npc_statistics() -> void:
+	"""Логировать детальную статистику NPC для диагностики"""
+	if not player_car:
+		return
+
+	# Детальная статистика по дистанциям
+	var near_count = 0  # < 100m
+	var mid_count = 0   # 100-200m
+	var far_count = 0   # > 200m
+
+	for npc in active_npcs:
+		var dist = npc.global_position.distance_to(player_car.global_position)
+		if dist < 100.0:
+			near_count += 1
+		elif dist < 200.0:
+			mid_count += 1
+		else:
+			far_count += 1
+
+	print("🚗 Traffic: %d active NPCs (Near: %d, Mid: %d, Far: %d), %d pooled" % [
+		active_npcs.size(), near_count, mid_count, far_count, inactive_npcs.size()
+	])
+
+	# Physics bodies с учетом агрессивного LOD:
+	# Near (<100m): 1 body each (VehicleBody без колес)
+	# Far (>100m): 0 bodies (kinematic, freeze=true)
+	var physics_bodies = near_count * 1  # Только близкие NPC
+	var kinematic_bodies = (mid_count + far_count) * 0  # Kinematic = 0 bodies
+
+	print("  → Physics bodies: %d (Near: %d×1=%d, Kinematic: %d×0=%d)" % [
+		physics_bodies, near_count, physics_bodies,
+		mid_count + far_count, kinematic_bodies
+	])

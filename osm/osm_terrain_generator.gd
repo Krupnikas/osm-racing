@@ -223,6 +223,14 @@ func _ready() -> void:
 	_profiler = get_node_or_null("/root/Main/PerformanceProfiler")
 	if not _profiler:
 		_profiler = get_tree().get_first_node_in_group("profiler")
+	if not _profiler:
+		# Создать профайлер для диагностики
+		var profiler_script = load("res://debug/performance_profiler.gd")
+		if profiler_script:
+			_profiler = profiler_script.new()
+			_profiler.print_interval = 5.0
+			add_child(_profiler)
+			print("[OSMTerrain] Profiler created for diagnostics")
 	if _profiler:
 		print("OSMTerrainGenerator: Profiler connected - road performance will be measured")
 	else:
@@ -2050,7 +2058,13 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 
 # Финализирует road batches для чанка - создаёт merged meshes
 func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
+	var prof_start_total = 0
+	if _profiler:
+		prof_start_total = _profiler.start_measure("road_batch_finalize_total_" + chunk_key)
+
 	if not _road_batch_data.has(chunk_key):
+		if _profiler:
+			_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
 		return  # Нет дорог в этом чанке
 
 	var chunk_batches: Dictionary = _road_batch_data[chunk_key]
@@ -2106,8 +2120,21 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		road_body.add_to_group("Road")  # GEVP - дорога
 		road_body.add_child(mesh_instance)
 
-		# Создаём trimesh коллизию
+		# Создаём trimesh коллизию (МОЖЕТ ФРИЗИТЬ!)
+		var prof_collision = 0
+		if _profiler:
+			prof_collision = _profiler.start_measure("road_collision_create_" + chunk_key)
+
 		mesh_instance.create_trimesh_collision()
+
+		if _profiler:
+			_profiler.end_measure("road_collision_create_" + chunk_key, prof_collision)
+			var collision_time_ms = (Time.get_ticks_usec() - prof_collision) / 1000.0
+			if collision_time_ms > 5.0:
+				print("🔴 FREEZE: road collision shape creation took %.1f ms for chunk %s (type: %s)" % [
+					collision_time_ms, chunk_key, texture_key
+				])
+
 		for child in mesh_instance.get_children():
 			if child is StaticBody3D:
 				var col_shape := child.get_child(0)
@@ -2134,6 +2161,13 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 
 	# Очищаем batch data для этого чанка
 	_road_batch_data.erase(chunk_key)
+
+	# Измерить общее время финализации
+	if _profiler:
+		_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
+		var total_time_ms = (Time.get_ticks_usec() - prof_start_total) / 1000.0
+		if total_time_ms > 8.0:
+			print("⚠️ SLOW: road batch finalization took %.1f ms for chunk %s" % [total_time_ms, chunk_key])
 
 # Финализирует window batches для чанка (создаёт ONE MultiMesh для всех окон в чанке)
 func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
