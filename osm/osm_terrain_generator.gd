@@ -4155,16 +4155,6 @@ func _process_road_queue() -> void:
 					_record_perf("window_batch_finalize", Time.get_ticks_usec() - t_window)
 				return  # Один чанк за кадр — не блокируем
 
-		# PHASE 2: Финализируем lamp batches (после windows)
-		var lamp_chunks := _lamp_batch_data.keys()
-		if not lamp_chunks.is_empty():
-			var t_lamp := Time.get_ticks_usec()
-			var chunk_key: String = lamp_chunks[0]
-			_finalize_lamp_batches_for_chunk(chunk_key)
-			if Time.get_ticks_usec() - t_lamp > 100:
-				_record_perf("lamp_batch_finalize", Time.get_ticks_usec() - t_lamp)
-			return  # Один чанк за кадр
-
 		# Когда все дороги созданы, обрабатываем бордюры
 		_process_curb_queue()
 		return
@@ -6273,6 +6263,11 @@ func _create_pending_lamps() -> void:
 		print("OSM: Created %d lamps, skipped %d (on parking or chunk not loaded)" % [created, skipped])
 	_pending_lamps.clear()
 	_lamps_created = true  # Флаг только для начальной загрузки
+
+	# PHASE 2: Финализируем ВСЕ lamp batches после создания всех pending lamps
+	var lamp_chunks := _lamp_batch_data.keys()
+	for chunk_key in lamp_chunks:
+		_finalize_lamp_batches_for_chunk(chunk_key)
 
 
 func _create_pending_parking_signs() -> void:
