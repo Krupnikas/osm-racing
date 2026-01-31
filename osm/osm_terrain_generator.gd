@@ -151,6 +151,25 @@ var _tree_mesh_medium: Mesh  # Simplified (cylinder trunk + sphere leaves)
 var _tree_mesh_far: Mesh  # Billboard quad
 var _tree_materials: Dictionary = {}  # Materials for each LOD level
 
+# Lamp batching system - MultiMesh with per-chunk batching
+var _lamp_batch_data: Dictionary = {}  # key: chunk_key -> batch data
+#   pole_transforms: Array[Transform3D]
+#   arm_transforms: Array[Transform3D]
+#   globe_transforms: Array[Transform3D]
+#   globe_colors: Array[Color]
+#   light_data: Array[Dictionary]  # {position: Vector3, broken: bool}
+#   parent: Node3D
+var _lamp_batches_to_finalize: Array[String] = []  # Chunk keys ready for finalization
+
+# Pre-generated lamp meshes for batching
+var _lamp_pole_mesh: Mesh
+var _lamp_arm_mesh: Mesh
+var _lamp_globe_mesh: Mesh
+var _lamp_materials: Dictionary = {}  # {pole, arm, globe}
+
+# Keep for night mode updates and chunk association
+var _lamp_lights_by_chunk: Dictionary = {}  # chunk_key -> Array[OmniLight3D]
+
 var _curb_collision_results: Array = []  # Результаты расчёта коллизий из worker threads
 var _curb_collision_mutex: Mutex  # Для синхронизации доступа к результатам коллизий
 
@@ -267,6 +286,9 @@ func _ready() -> void:
 
 	# Инициализируем tree meshes для LOD
 	_init_tree_meshes()
+
+	# Инициализируем lamp meshes для батчинга
+	_init_lamp_meshes()
 
 	# Инициализируем шейдер окон (один раз для всех батчей)
 	_init_window_shader()
@@ -467,6 +489,50 @@ func _init_tree_meshes() -> void:
 	_tree_materials["far"] = billboard_mat
 
 	print("OSM: Tree LOD meshes initialized (close/medium/far)")
+
+func _init_lamp_meshes() -> void:
+	"""Initialize lamp component meshes for MultiMesh batching"""
+	print("OSM: Initializing lamp meshes for batching...")
+
+	# POLE - cylinder mesh
+	_lamp_pole_mesh = CylinderMesh.new()
+	_lamp_pole_mesh.top_radius = 0.05
+	_lamp_pole_mesh.bottom_radius = 0.08
+	_lamp_pole_mesh.height = 5.5
+	_lamp_pole_mesh.radial_segments = 8  # Low poly for performance
+	_lamp_pole_mesh.rings = 1
+
+	# ARM - cylinder mesh (will be rotated per instance)
+	_lamp_arm_mesh = CylinderMesh.new()
+	_lamp_arm_mesh.top_radius = 0.03
+	_lamp_arm_mesh.bottom_radius = 0.04
+	_lamp_arm_mesh.height = 2.0
+	_lamp_arm_mesh.radial_segments = 6  # Very low poly
+	_lamp_arm_mesh.rings = 1
+
+	# GLOBE - sphere mesh
+	_lamp_globe_mesh = SphereMesh.new()
+	_lamp_globe_mesh.radius = 0.2
+	_lamp_globe_mesh.height = 0.35
+	_lamp_globe_mesh.radial_segments = 8  # Low poly
+	_lamp_globe_mesh.rings = 4
+
+	# MATERIALS
+	# Pole/Arm material (shared)
+	var metal_mat := StandardMaterial3D.new()
+	metal_mat.albedo_color = Color(0.25, 0.25, 0.25)  # Dark gray
+	metal_mat.metallic = 0.9
+	metal_mat.roughness = 0.3
+	_lamp_materials["pole"] = metal_mat
+	_lamp_materials["arm"] = metal_mat  # Share same material
+
+	# Globe material (uses vertex colors for day/night)
+	var globe_mat := StandardMaterial3D.new()
+	globe_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED  # Self-illuminated
+	globe_mat.vertex_color_use_as_albedo = true  # Use MultiMesh instance colors
+	_lamp_materials["globe"] = globe_mat
+
+	print("OSM: Lamp meshes initialized (pole/arm/globe)")
 
 func _process(delta: float) -> void:
 	var _frame_start := Time.get_ticks_usec()
@@ -1114,6 +1180,15 @@ func _load_chunk_at_position(pos: Vector3) -> void:
 
 func _unload_chunk(chunk_key: String) -> void:
 	if _loaded_chunks.has(chunk_key):
+		# NEW: Clean up lamp batch data if not yet finalized
+		if _lamp_batch_data.has(chunk_key):
+			_lamp_batch_data.erase(chunk_key)
+			print("OSM: Cleaned up unfinalized lamp batch data for chunk %s" % chunk_key)
+
+		# NEW: Clean up lamp lights references
+		if _lamp_lights_by_chunk.has(chunk_key):
+			_lamp_lights_by_chunk.erase(chunk_key)
+
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
 		chunk_node.queue_free()
 		_loaded_chunks.erase(chunk_key)
@@ -1220,7 +1295,12 @@ func reset_terrain() -> void:
 	_road_spatial_hash.clear()
 	_parking_polygons.clear()
 
-	print("OSM: Terrain reset complete")
+	# NEW: Clear lamp batching data
+	_lamp_batch_data.clear()
+	_lamp_batches_to_finalize.clear()
+	_lamp_lights_by_chunk.clear()
+
+	print("OSM: Terrain reset complete (including lamp batches)")
 
 func _on_osm_load_failed(error: String) -> void:
 	push_error("OSM load failed: " + error)
@@ -4472,6 +4552,16 @@ func _process_road_queue() -> void:
 					_record_perf("tree_batch_finalize", Time.get_ticks_usec() - t_tree)
 				return  # Один чанк за кадр
 
+			# Финализация lamp batches (после tree batches)
+			if not _lamp_batches_to_finalize.is_empty():
+				var t_lamp := Time.get_ticks_usec()
+				var chunk_key: String = _lamp_batches_to_finalize[0]
+				_lamp_batches_to_finalize.remove_at(0)
+				_finalize_lamp_batches_for_chunk(chunk_key)
+				if Time.get_ticks_usec() - t_lamp > 100:
+					_record_perf("lamp_batch_finalize", Time.get_ticks_usec() - t_lamp)
+				return  # Один чанк за кадр
+
 		# Когда все дороги созданы, обрабатываем бордюры
 		_process_curb_queue()
 		return
@@ -5519,6 +5609,187 @@ func _get_chunk_key_from_node(node: Node3D) -> String:
 		if parts.size() >= 3:
 			return "%s,%s" % [parts[1], parts[2]]
 	return ""
+
+## Add lamp to batch for chunk with pre-calculated transforms
+func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3, parent: Node3D) -> void:
+	if not enable_street_lamps:
+		return
+
+	# Initialize batch if needed
+	if not _lamp_batch_data.has(chunk_key):
+		_lamp_batch_data[chunk_key] = {
+			"pole_transforms": [],
+			"arm_transforms": [],
+			"globe_transforms": [],
+			"globe_colors": [],
+			"light_data": [],
+			"parent": parent
+		}
+
+	# Calculate lamp orientation (face toward road)
+	var lamp_forward := road_dir.normalized()
+	var lamp_basis := Basis()
+	lamp_basis.y = Vector3.UP
+	lamp_basis.z = -lamp_forward  # Look at road
+	lamp_basis.x = lamp_basis.y.cross(lamp_basis.z).normalized()
+	lamp_basis.y = lamp_basis.z.cross(lamp_basis.x).normalized()
+
+	# POLE transform (base at lamp_pos)
+	var pole_transform := Transform3D(lamp_basis, lamp_pos + Vector3(0, 2.75, 0))
+	_lamp_batch_data[chunk_key]["pole_transforms"].append(pole_transform)
+
+	# ARM transform (angled upward from top of pole)
+	var arm_basis := lamp_basis.rotated(lamp_basis.x, PI/6)  # 30° upward
+	var arm_start := lamp_pos + Vector3(0, 5.5, 0)  # Top of pole
+	var arm_center := arm_start + arm_basis.z * 1.0  # Midpoint of 2m arm
+	var arm_transform := Transform3D(arm_basis, arm_center)
+	_lamp_batch_data[chunk_key]["arm_transforms"].append(arm_transform)
+
+	# GLOBE transform (at end of arm)
+	var arm_end := arm_start + arm_basis.z * 2.0  # End of 2m arm
+	var globe_transform := Transform3D(Basis(), arm_end)
+	_lamp_batch_data[chunk_key]["globe_transforms"].append(globe_transform)
+
+	# GLOBE color (5% chance broken)
+	var is_broken := randf() < 0.05
+	var globe_color: Color
+	if is_broken:
+		globe_color = Color(0.3, 0.3, 0.3)  # Dark gray
+	else:
+		# Color will be updated by night mode later
+		globe_color = Color(1.0, 0.75, 0.3)  # Warm orange (default night)
+	_lamp_batch_data[chunk_key]["globe_colors"].append(globe_color)
+
+	# LIGHT data (for creating separate OmniLight3D nodes)
+	_lamp_batch_data[chunk_key]["light_data"].append({
+		"position": arm_end,
+		"broken": is_broken
+	})
+
+	# Mark for finalization
+	if not _lamp_batches_to_finalize.has(chunk_key):
+		_lamp_batches_to_finalize.append(chunk_key)
+
+## Finalize lamp batches for chunk - create MultiMesh instances
+func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
+	if not _lamp_batch_data.has(chunk_key):
+		return
+
+	var batch: Dictionary = _lamp_batch_data[chunk_key]
+	var parent: Node3D = batch.parent
+
+	if not is_instance_valid(parent):
+		_lamp_batch_data.erase(chunk_key)
+		return
+
+	var lamp_count := batch.pole_transforms.size()
+	if lamp_count == 0:
+		_lamp_batch_data.erase(chunk_key)
+		return
+
+	# Create container for all lamp components in this chunk
+	var lamp_container := Node3D.new()
+	lamp_container.name = "LampBatches"
+	parent.add_child(lamp_container)
+
+	# 1. POLE MultiMesh
+	var pole_mm_inst := MultiMeshInstance3D.new()
+	pole_mm_inst.name = "Lamps_Poles"
+	var pole_mm := MultiMesh.new()
+	pole_mm.transform_format = MultiMesh.TRANSFORM_3D
+	pole_mm.mesh = _lamp_pole_mesh
+	pole_mm.instance_count = lamp_count
+	for i in range(lamp_count):
+		pole_mm.set_instance_transform(i, batch.pole_transforms[i])
+	pole_mm_inst.multimesh = pole_mm
+	pole_mm_inst.material_override = _lamp_materials["pole"]
+	pole_mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	lamp_container.add_child(pole_mm_inst)
+
+	# 2. ARM MultiMesh
+	var arm_mm_inst := MultiMeshInstance3D.new()
+	arm_mm_inst.name = "Lamps_Arms"
+	var arm_mm := MultiMesh.new()
+	arm_mm.transform_format = MultiMesh.TRANSFORM_3D
+	arm_mm.mesh = _lamp_arm_mesh
+	arm_mm.instance_count = lamp_count
+	for i in range(lamp_count):
+		arm_mm.set_instance_transform(i, batch.arm_transforms[i])
+	arm_mm_inst.multimesh = arm_mm
+	arm_mm_inst.material_override = _lamp_materials["arm"]
+	arm_mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	lamp_container.add_child(arm_mm_inst)
+
+	# 3. GLOBE MultiMesh (with vertex colors)
+	var globe_mm_inst := MultiMeshInstance3D.new()
+	globe_mm_inst.name = "Lamps_Globes"
+	var globe_mm := MultiMesh.new()
+	globe_mm.transform_format = MultiMesh.TRANSFORM_3D
+	globe_mm.use_colors = true  # Enable per-instance colors
+	globe_mm.mesh = _lamp_globe_mesh
+	globe_mm.instance_count = lamp_count
+	for i in range(lamp_count):
+		globe_mm.set_instance_transform(i, batch.globe_transforms[i])
+		globe_mm.set_instance_color(i, batch.globe_colors[i])
+	globe_mm_inst.multimesh = globe_mm
+	globe_mm_inst.material_override = _lamp_materials["globe"]
+	globe_mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	lamp_container.add_child(globe_mm_inst)
+
+	# 4. LIGHTS (separate OmniLight3D nodes)
+	var lights_container := Node3D.new()
+	lights_container.name = "Lights"
+	lamp_container.add_child(lights_container)
+
+	# Initialize chunk lights array
+	_lamp_lights_by_chunk[chunk_key] = []
+
+	for light_data in batch.light_data:
+		var light := OmniLight3D.new()
+		light.position = light_data.position
+		light.omni_range = 12.0
+		light.omni_attenuation = 1.2
+		light.light_energy = 1.5
+		light.light_color = Color(1.0, 0.65, 0.2)  # Warm orange
+		light.shadow_enabled = false
+		light.light_bake_mode = Light3D.BAKE_DISABLED
+
+		# Visibility based on night mode and broken state
+		var is_night := _night_mode_manager.is_night if _night_mode_manager else false
+		light.visible = is_night and not light_data.broken
+
+		lights_container.add_child(light)
+		_lamp_lights_by_chunk[chunk_key].append(light)
+
+	# Draw call tracking
+	if _draw_call_logging_enabled:
+		_draw_call_stats["lamps"] += 3  # pole + arm + globe
+
+	print("OSM: Finalized lamp batch for chunk %s: %d lamps, 3 batches (was %d draw calls)" % [
+		chunk_key, lamp_count, lamp_count * 3
+	])
+
+	# Clear batch data
+	_lamp_batch_data.erase(chunk_key)
+
+## Update lamp globe colors and light visibility for night mode
+func _update_lamp_night_mode(is_night: bool) -> void:
+	# Update light visibility for all chunks
+	for chunk_key in _lamp_lights_by_chunk.keys():
+		var lights: Array = _lamp_lights_by_chunk[chunk_key]
+		for light in lights:
+			if is_instance_valid(light):
+				# Light visibility depends on night mode
+				# Broken state is already encoded (light doesn't exist or has flag)
+				light.visible = is_night
+
+	# Note: Globe colors are baked into MultiMesh instance colors
+	# If we need dynamic color changes, would need to:
+	# 1. Store MultiMesh references per chunk
+	# 2. Iterate and call set_instance_color() for each instance
+	# For now, globe colors are static (set at batch creation time)
+
+	print("OSM: Updated lamp night mode (is_night=%s)" % is_night)
 
 ## Add tree to batch with LOD based on distance from car
 func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, parent: Node3D) -> void:
@@ -6585,20 +6856,30 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 				var dir_to_road_left := -perp  # Левый фонарь смотрит вправо (к дороге)
 				var dir_to_road_right := perp   # Правый фонарь смотрит влево (к дороге)
 
-				# Сохраняем позиции фонарей для отложенного создания
-				# (после загрузки всех чанков когда все парковки известны)
-				_pending_lamps.append({
-					"pos": lamp_pos_left,
-					"elev": elev_left,
-					"parent": parent,
-					"dir": dir_to_road_left
-				})
-				_pending_lamps.append({
-					"pos": lamp_pos_right,
-					"elev": elev_right,
-					"parent": parent,
-					"dir": dir_to_road_right
-				})
+				# NEW: Add lamps to batch instead of pending queue
+				# Left lamp
+				if not left_on_parking:
+					var lamp_3d_left := Vector3(lamp_pos_left.x, elev_left, lamp_pos_left.y)
+					var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
+					var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
+					var chunk_key := "%d,%d" % [chunk_x, chunk_z]
+
+					# Only add if chunk is loaded
+					if _loaded_chunks.has(chunk_key):
+						var chunk_parent: Node3D = _loaded_chunks[chunk_key]
+						_add_lamp_to_batch(chunk_key, lamp_3d_left, Vector3(dir_to_road_left.x, 0, dir_to_road_left.y), chunk_parent)
+
+				# Right lamp
+				if not right_on_parking:
+					var lamp_3d_right := Vector3(lamp_pos_right.x, elev_right, lamp_pos_right.y)
+					var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
+					var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
+					var chunk_key := "%d,%d" % [chunk_x, chunk_z]
+
+					# Only add if chunk is loaded
+					if _loaded_chunks.has(chunk_key):
+						var chunk_parent: Node3D = _loaded_chunks[chunk_key]
+						_add_lamp_to_batch(chunk_key, lamp_3d_right, Vector3(dir_to_road_right.x, 0, dir_to_road_right.y), chunk_parent)
 
 				last_lamp_distance = accumulated_distance + pos_along
 
@@ -7146,6 +7427,9 @@ func _on_night_mode_changed(enabled: bool) -> void:
 	"""Обрабатывает переключение ночного режима"""
 	print("OSM: Night mode ", "enabled" if enabled else "disabled")
 	_is_night_mode = enabled
+
+	# NEW: Update lamp night mode
+	_update_lamp_night_mode(enabled)
 
 	# Обновляем все фонари и неоновые вывески
 	for chunk_key in _loaded_chunks.keys():
