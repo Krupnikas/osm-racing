@@ -18,13 +18,13 @@
 
 ---
 
-## Текущие метрики (после Shadow LOD - тест от 2026-01-31)
+## Текущие метрики (после Shadow LOD - FIXED - 2026-01-31)
 
-- **FPS**: 16.8 avg (GUI mode, нужен перетест в headless)
-- **Frame Time**: 66.85 ms avg
-- **Draw Calls**: 178 avg, 183 max ✅ (было 3,380!)
-- **Vertices**: 1.8M avg ✅
-- **Physics Bodies**: 1
+- **FPS**: 68.6 avg, 67.0 min ✅ **ЦЕЛЬ ДОСТИГНУТА!**
+- **Frame Time**: 14.04 ms avg (цель 16.67 ms) ✅
+- **Tracked Draw Calls**: 931 (Buildings 654, Terrain 156, Lamps 27)
+- **Traffic NPCs**: 9 active (1 body каждый)
+- **Status**: ✅ Стабильный 60+ FPS достигнут!
 
 ## Draw Call Breakdown (главная проблема)
 
@@ -278,18 +278,50 @@ func _process(delta):
 
 ---
 
-## Замеры эффективности (TODO)
+## Замеры эффективности
 
-После каждой оптимизации запускать:
+### ⚠️ КРИТИЧЕСКИ ВАЖНО: Проверка перед тестом
+
+**ВСЕГДА** перед запуском теста проверяйте что код компилируется!
+
 ```bash
-/Applications/Godot.app/Contents/MacOS/Godot --path . res://tests/performance_test_detailed.tscn
+# 1. Проверка компиляции скриптов
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path . --check-only 2>&1 | grep -i "error\|failed"
+
+# Если есть ошибки - НЕ запускайте тест! Сначала исправьте ошибки.
 ```
 
-И записывать:
+**Почему это важно:**
+- Parse errors могут привести к тому что весь terrain не отрисовывается
+- Это даёт ложно высокий FPS (ничего не рендерится = высокий FPS)
+- Пример: commit 4b92efc имел parse errors → FPS 95+ но ничего не рисовалось
+
+### Правильная процедура тестирования:
+
+```bash
+# 1. Проверить компиляцию
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path . --check-only 2>&1 | grep -i "error"
+
+# 2. Запустить тест
+/Applications/Godot.app/Contents/MacOS/Godot --path . res://tests/performance_test_detailed.tscn 2>&1 | tee test_results.log
+
+# 3. Во время теста проверить что terrain загрузился
+grep "Terrain loaded" test_results.log
+
+# 4. Проверить что draw calls есть
+grep "DRAW CALL BREAKDOWN" test_results.log
+
+# 5. Если FPS подозрительно высокий (>80) - проверить parse errors!
+grep -i "parse error\|failed to load script" test_results.log
+```
+
+### Метрики для записи:
 - FPS avg/min
 - Draw calls avg/max
 - Frame time avg/max
 - Spike count
+- Vertices count
+- Parse errors (должно быть 0!)
 
 ---
 
@@ -303,18 +335,21 @@ func _process(delta):
   - ✅ Vegetation MultiMesh + LOD (730 → 10)
   - ✅ Building Shadow LOD (shadow calls cut by ~50-70%)
 
-### ⏳ Next Step: FPS Validation
-- GUI test показал 16.8 FPS (не репрезентативно)
-- Draw calls идеальные (178 avg)
-- Vertices нормальные (1.8M avg)
-- **TODO**: Запустить headless test для чистых метрик
+### ✅ FPS Target ACHIEVED!
+- **68.6 FPS avg** (target 60 FPS) ✅
+- Frame time 14.04 ms (target 16.67 ms) ✅
+- Shadow LOD работает корректно
+- Lamp MultiMesh батчинг активен (1152 → 27)
+- Vegetation батчинг активен (730 → 10)
 
-### 🤔 Если FPS всё ещё низкий после headless test:
-Возможные bottlenecks:
-1. **Post-processing**: SSAO, SSR, Glow (дорогие в GUI mode)
-2. **Physics**: 1 body нормально, но может быть collision overhead
-3. **Script overhead**: `_process()` в большом количестве nodes
-4. **Chunk loading**: возможны freezes при загрузке
+### 🐛 Known Issues:
+1. **Lamp orientation bug**: Фонари повернуты на 180° вокруг вертикальной оси
+   - Нужно исправить в `_add_lamp_to_batch()` rotation calculation
+
+### 🎯 Next Steps (опционально):
+- Fix lamp rotation bug
+- Дальнейшая оптимизация buildings (70% draw calls)
+- Traffic Physics LOD (если нужно ещё выше FPS)
 
 ---
 
