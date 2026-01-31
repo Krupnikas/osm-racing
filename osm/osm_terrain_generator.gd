@@ -98,6 +98,11 @@ const QUEUE_STUCK_TIMEOUT := 5.0  # Таймаут зависшей очеред
 # Отложенная генерация инфраструктуры (фонари, знаки, светофоры)
 var _infrastructure_queue: Array = []  # Очередь {type, pos, elevation, parent, ...}
 
+# Camera-based frustum culling для чанков
+var _camera: Camera3D = null  # Ссылка на камеру игрока
+var _culling_update_timer: float = 0.0  # Таймер обновления culling
+const CULLING_UPDATE_INTERVAL := 0.2  # Обновлять каждые 200ms (5 раз в секунду)
+
 # Отложенная генерация дорог и других тяжёлых объектов
 var _road_queue: Array = []  # Очередь {nodes, tags, parent, elev_data}
 var _curb_queue: Array = []  # Очередь бордюров (создаются после детекции перекрёстков)
@@ -389,6 +394,15 @@ func _process(delta: float) -> void:
 	_apply_curb_collisions()
 	var t_curb := Time.get_ticks_usec() - t0
 	_record_perf("curb_collisions", t_curb)
+
+	# Camera-based frustum culling для чанков (каждые 200ms)
+	_culling_update_timer += delta
+	if _culling_update_timer >= CULLING_UPDATE_INTERVAL:
+		_culling_update_timer = 0.0
+		t0 = Time.get_ticks_usec()
+		_update_chunk_culling()
+		var t_culling := Time.get_ticks_usec() - t0
+		_record_perf("chunk_culling", t_culling)
 
 	var _frame_time := (Time.get_ticks_usec() - _frame_start) / 1000.0
 	_record_perf("total_frame", int(_frame_time * 1000))
@@ -7964,3 +7978,47 @@ func _print_draw_call_stats() -> void:
 		print("     → Use MultiMesh for curbs, lamps, signs")
 
 	print("=========================================\n")
+
+
+## Camera-based frustum culling для чанков
+func _update_chunk_culling() -> void:
+	# Найти камеру если еще не нашли
+	if not _camera:
+		_camera = get_viewport().get_camera_3d()
+		if not _camera:
+			return
+
+	var camera_pos := _camera.global_position
+	var camera_forward := -_camera.global_transform.basis.z  # Forward direction
+
+	# Обходим все загруженные чанки
+	for chunk_key in _loaded_chunks.keys():
+		var chunk_node: Node3D = _loaded_chunks[chunk_key]
+		if not is_instance_valid(chunk_node):
+			continue
+
+		# Вычисляем центр чанка
+		var coords := chunk_key.split(",")
+		var chunk_x := int(coords[0])
+		var chunk_z := int(coords[1])
+		var chunk_center := Vector3(
+			chunk_x * chunk_size + chunk_size / 2.0,
+			0,
+			chunk_z * chunk_size + chunk_size / 2.0
+		)
+
+		# Вектор от камеры к центру чанка
+		var to_chunk := chunk_center - camera_pos
+		to_chunk.y = 0  # Игнорируем высоту
+		var distance := to_chunk.length()
+
+		# Dot product для определения направления (> 0 = впереди, < 0 = сзади)
+		var dot := camera_forward.dot(to_chunk.normalized())
+
+		# Скрываем чанк если он:
+		# 1. Сзади камеры (dot < -0.3) И далеко (> 200m)
+		# 2. ИЛИ очень далеко сзади (dot < -0.5)
+		var should_hide := (dot < -0.3 and distance > 200.0) or (dot < -0.5)
+
+		# Применяем видимость
+		chunk_node.visible = not should_hide
