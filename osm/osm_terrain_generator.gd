@@ -7586,8 +7586,10 @@ func _connect_to_night_mode() -> void:
 func _setup_render_distance() -> void:
 	"""Настраивает дальность прорисовки камеры, туман и дистанции чанков"""
 	# Настраиваем дистанции загрузки чанков
+	# Зазор между load и unload должен быть >= chunk_size + overlap (300+100=400m)
+	# чтобы объекты, выходящие за границу чанка, не исчезали раньше времени
 	load_distance = render_distance + 100.0  # Загружаем чуть дальше видимости
-	unload_distance = render_distance + 300.0  # Выгружаем с запасом
+	unload_distance = render_distance + chunk_size + 200.0  # Выгружаем с запасом на overlap
 	print("OSM: Chunk distances - load: %.0f, unload: %.0f" % [load_distance, unload_distance])
 
 	# Настраиваем камеру
