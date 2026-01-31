@@ -137,6 +137,20 @@ var _lamp_batch_lights: Array[OmniLight3D] = []  # Все OmniLight3D (тепе�
 
 var _curb_smoothed_queue: Array = []  # Очередь сглаженных бордюров для генерации меша
 var _curb_mesh_state: Dictionary = {}  # Текущее состояние генерации меша бордюра (для разбивки по кадрам)
+
+# Vegetation batching system - MultiMesh with LOD
+var _tree_batch_data: Dictionary = {}  # key: chunk_key -> {close: [], medium: [], far: [], collisions: []}
+#   close: Array[Transform3D] - full detail trees (<100m)
+#   medium: Array[Transform3D] - simplified trees (100-200m)
+#   far: Array[Transform3D] - billboard quads (>200m)
+#   collisions: Array[Dictionary] - {position: Vector3, radius: float} for StaticBody3D
+var _tree_batches_to_finalize: Array[String] = []  # Chunk keys ready for finalization
+# Pregenerated tree meshes for LOD
+var _tree_mesh_close: Mesh  # Full detail (original scene)
+var _tree_mesh_medium: Mesh  # Simplified (cylinder trunk + sphere leaves)
+var _tree_mesh_far: Mesh  # Billboard quad
+var _tree_materials: Dictionary = {}  # Materials for each LOD level
+
 var _curb_collision_results: Array = []  # Результаты расчёта коллизий из worker threads
 var _curb_collision_mutex: Mutex  # Для синхронизации доступа к результатам коллизий
 
@@ -250,6 +264,9 @@ func _ready() -> void:
 
 	# Инициализируем текстуры
 	_init_textures()
+
+	# Инициализируем tree meshes для LOD
+	_init_tree_meshes()
 
 	# Инициализируем шейдер окон (один раз для всех батчей)
 	_init_window_shader()
@@ -370,6 +387,86 @@ void fragment() {
 }
 """
 	print("OSM: Window shader compiled")
+
+func _init_tree_meshes() -> void:
+	"""Initialize simplified tree meshes for LOD batching"""
+	print("OSM: Initializing tree LOD meshes...")
+
+	# LOD CLOSE: Full detail - use original birch scene's first mesh
+	# Extract mesh from BIRCH_TREE_SCENE instead of instantiating full scene
+	var birch_instance = BIRCH_TREE_SCENE.instantiate()
+	var first_mesh_instance: MeshInstance3D = null
+	# Find first MeshInstance3D in tree
+	for child in birch_instance.get_children():
+		if child is MeshInstance3D:
+			first_mesh_instance = child
+			break
+		# Check nested children
+		for nested in child.get_children():
+			if nested is MeshInstance3D:
+				first_mesh_instance = nested
+				break
+		if first_mesh_instance:
+			break
+
+	if first_mesh_instance:
+		_tree_mesh_close = first_mesh_instance.mesh
+		_tree_materials["close"] = first_mesh_instance.material_override
+	birch_instance.queue_free()
+
+	# LOD MEDIUM: Simplified tree - cylinder trunk + sphere leaves
+	var arrays_trunk := []
+	arrays_trunk.resize(Mesh.ARRAY_MAX)
+	var trunk_mesh := CylinderMesh.new()
+	trunk_mesh.top_radius = 0.3
+	trunk_mesh.bottom_radius = 0.35
+	trunk_mesh.height = 6.0
+	trunk_mesh.radial_segments = 6  # Low poly
+	trunk_mesh.rings = 1
+
+	var arrays_leaves := []
+	arrays_leaves.resize(Mesh.ARRAY_MAX)
+	var leaves_mesh := SphereMesh.new()
+	leaves_mesh.radius = 2.5
+	leaves_mesh.height = 5.0
+	leaves_mesh.radial_segments = 8  # Low poly
+	leaves_mesh.rings = 4
+
+	# Combine trunk + leaves into one mesh
+	_tree_mesh_medium = ArrayMesh.new()
+	# Add trunk
+	arrays_trunk = trunk_mesh.get_mesh_arrays()
+	_tree_mesh_medium.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays_trunk)
+	# Add leaves offset upward
+	arrays_leaves = leaves_mesh.get_mesh_arrays()
+	var vertices: PackedVector3Array = arrays_leaves[Mesh.ARRAY_VERTEX]
+	for i in range(vertices.size()):
+		vertices[i].y += 4.0  # Offset leaves up
+	arrays_leaves[Mesh.ARRAY_VERTEX] = vertices
+	_tree_mesh_medium.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays_leaves)
+
+	# Materials for medium LOD
+	var trunk_mat := StandardMaterial3D.new()
+	trunk_mat.albedo_color = Color(0.3, 0.2, 0.1)  # Brown
+	_tree_mesh_medium.surface_set_material(0, trunk_mat)
+
+	var leaves_mat := StandardMaterial3D.new()
+	leaves_mat.albedo_color = Color(0.2, 0.5, 0.2)  # Green
+	_tree_mesh_medium.surface_set_material(1, leaves_mat)
+
+	# LOD FAR: Billboard quad with tree texture
+	var quad_mesh := QuadMesh.new()
+	quad_mesh.size = Vector2(8.0, 10.0)  # Tree size
+	_tree_mesh_far = quad_mesh
+
+	var billboard_mat := StandardMaterial3D.new()
+	billboard_mat.albedo_color = Color(0.25, 0.4, 0.2)  # Dark green
+	billboard_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	billboard_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	billboard_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_tree_materials["far"] = billboard_mat
+
+	print("OSM: Tree LOD meshes initialized (close/medium/far)")
 
 func _process(delta: float) -> void:
 	var _frame_start := Time.get_ticks_usec()
@@ -4365,6 +4462,16 @@ func _process_road_queue() -> void:
 					_record_perf("building_batch_finalize", Time.get_ticks_usec() - t_building)
 				return  # Один чанк за кадр
 
+			# Финализация tree batches (после building batches)
+			if not _tree_batches_to_finalize.is_empty():
+				var t_tree := Time.get_ticks_usec()
+				var chunk_key: String = _tree_batches_to_finalize[0]
+				_tree_batches_to_finalize.remove_at(0)
+				_finalize_tree_batches_for_chunk(chunk_key)
+				if Time.get_ticks_usec() - t_tree > 100:
+					_record_perf("tree_batch_finalize", Time.get_ticks_usec() - t_tree)
+				return  # Один чанк за кадр
+
 		# Когда все дороги созданы, обрабатываем бордюры
 		_process_curb_queue()
 		return
@@ -5401,6 +5508,153 @@ func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
 
 
 # Создание дерева из 3D модели берёзы
+## Get chunk key from parent node name (e.g. "Chunk_1_2" -> "1,2")
+func _get_chunk_key_from_node(node: Node3D) -> String:
+	if not node:
+		return ""
+	var node_name := node.name
+	# Format: "Chunk_x_z"
+	if "_" in node_name:
+		var parts := node_name.split("_")
+		if parts.size() >= 3:
+			return "%s,%s" % [parts[1], parts[2]]
+	return ""
+
+## Add tree to batch with LOD based on distance from car
+func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, parent: Node3D) -> void:
+	if not enable_vegetation:
+		return
+
+	# Initialize batch if needed
+	if not _tree_batch_data.has(chunk_key):
+		_tree_batch_data[chunk_key] = {
+			"close": [],
+			"medium": [],
+			"far": [],
+			"collisions": [],
+			"parent": parent
+		}
+
+	var tree_pos := Vector3(pos.x, elevation, pos.y)
+
+	# Determine LOD based on distance from car
+	var car_pos := _car.global_position if _car else Vector3.ZERO
+	var distance := tree_pos.distance_to(car_pos)
+
+	var scale_factor := randf_range(0.015, 0.022)
+	var transform := Transform3D(Basis().scaled(Vector3(scale_factor, scale_factor, scale_factor)), tree_pos)
+
+	if distance < 100.0:
+		# Close: full detail
+		_tree_batch_data[chunk_key]["close"].append(transform)
+	elif distance < 200.0:
+		# Medium: simplified
+		_tree_batch_data[chunk_key]["medium"].append(transform)
+	else:
+		# Far: billboard
+		_tree_batch_data[chunk_key]["far"].append(transform)
+
+	# Add collision data
+	_tree_batch_data[chunk_key]["collisions"].append({
+		"position": tree_pos,
+		"radius": 0.4
+	})
+
+	# Mark for finalization
+	if not _tree_batches_to_finalize.has(chunk_key):
+		_tree_batches_to_finalize.append(chunk_key)
+
+## Finalize tree batches for chunk - create MultiMesh instances
+func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
+	if not _tree_batch_data.has(chunk_key):
+		return
+
+	var batch: Dictionary = _tree_batch_data[chunk_key]
+	var parent: Node3D = batch.parent
+
+	if not is_instance_valid(parent):
+		_tree_batch_data.erase(chunk_key)
+		return
+
+	# Create container for all tree batches in this chunk
+	var tree_container := Node3D.new()
+	tree_container.name = "TreeBatches"
+	parent.add_child(tree_container)
+
+	# Close LOD
+	if batch.close.size() > 0:
+		var mm_inst := MultiMeshInstance3D.new()
+		mm_inst.name = "Trees_Close"
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = _tree_mesh_close if _tree_mesh_close else _tree_mesh_medium  # Fallback
+		mm.instance_count = batch.close.size()
+		for i in range(batch.close.size()):
+			mm.set_instance_transform(i, batch.close[i])
+		mm_inst.multimesh = mm
+		tree_container.add_child(mm_inst)
+
+		if _draw_call_logging_enabled:
+			_draw_call_stats["vegetation"] += 1  # One draw call for all close trees
+
+	# Medium LOD
+	if batch.medium.size() > 0:
+		var mm_inst := MultiMeshInstance3D.new()
+		mm_inst.name = "Trees_Medium"
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = _tree_mesh_medium
+		mm.instance_count = batch.medium.size()
+		for i in range(batch.medium.size()):
+			mm.set_instance_transform(i, batch.medium[i])
+		mm_inst.multimesh = mm
+		tree_container.add_child(mm_inst)
+
+		if _draw_call_logging_enabled:
+			_draw_call_stats["vegetation"] += 1
+
+	# Far LOD (billboard)
+	if batch.far.size() > 0:
+		var mm_inst := MultiMeshInstance3D.new()
+		mm_inst.name = "Trees_Far"
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = _tree_mesh_far
+		mm.instance_count = batch.far.size()
+		for i in range(batch.far.size()):
+			mm.set_instance_transform(i, batch.far[i])
+		mm_inst.multimesh = mm
+		if _tree_materials.has("far"):
+			mm_inst.material_override = _tree_materials["far"]
+		tree_container.add_child(mm_inst)
+
+		if _draw_call_logging_enabled:
+			_draw_call_stats["vegetation"] += 1
+
+	# Create collision bodies (separate from visuals for performance)
+	for collision_data in batch.collisions:
+		var body := StaticBody3D.new()
+		body.collision_layer = 2
+		body.collision_mask = 0
+		body.position = collision_data.position
+
+		var collision := CollisionShape3D.new()
+		var shape := CylinderShape3D.new()
+		shape.radius = collision_data.radius
+		shape.height = 8.0
+		collision.position = Vector3(0, 4.0, 0)
+		collision.shape = shape
+		body.add_child(collision)
+		tree_container.add_child(body)
+
+	print("OSM: Finalized tree batch for chunk %s: %d close, %d medium, %d far" % [
+		chunk_key, batch.close.size(), batch.medium.size(), batch.far.size()
+	])
+
+	# Clear batch data
+	_tree_batch_data.erase(chunk_key)
+
+## OLD: Individual tree creation (deprecated, kept for fallback)
 func _create_tree(pos: Vector2, elevation: float, parent: Node3D) -> void:
 	if not enable_vegetation:
 		return
@@ -5757,7 +6011,12 @@ func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, 
 				continue
 
 			var elevation := _get_elevation_at_point(test_point, elev_data)
-			_create_tree(test_point, elevation, parent)
+
+			# NEW: Add to batch instead of creating individual tree
+			var chunk_key := _get_chunk_key_from_node(parent)
+			if chunk_key != "":
+				_add_tree_to_batch(chunk_key, test_point, elevation, parent)
+
 			tree_count += 1
 
 			if tree_count >= max_trees:
