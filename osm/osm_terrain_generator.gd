@@ -5682,7 +5682,7 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 		_lamp_batch_data.erase(chunk_key)
 		return
 
-	var lamp_count := batch.pole_transforms.size()
+	var lamp_count: int = batch.pole_transforms.size()
 	if lamp_count == 0:
 		_lamp_batch_data.erase(chunk_key)
 		return
@@ -5755,7 +5755,7 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 		light.light_bake_mode = Light3D.BAKE_DISABLED
 
 		# Visibility based on night mode and broken state
-		var is_night := _night_mode_manager.is_night if _night_mode_manager else false
+		var is_night: bool = _night_mode_manager.is_night if _night_mode_manager else false
 		light.visible = is_night and not light_data.broken
 
 		lights_container.add_child(light)
