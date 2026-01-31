@@ -1204,6 +1204,29 @@ func _unload_chunk(chunk_key: String) -> void:
 		if finalize_idx >= 0:
 			_tree_batches_to_finalize.remove_at(finalize_idx)
 
+		# Clean up building batch data if not yet finalized
+		if _building_batch_data.has(chunk_key):
+			_building_batch_data.erase(chunk_key)
+		var building_finalize_idx := _building_batches_to_finalize.find(chunk_key)
+		if building_finalize_idx >= 0:
+			_building_batches_to_finalize.remove_at(building_finalize_idx)
+
+		# Clean up window batch data if not yet finalized
+		if _window_batch_data.has(chunk_key):
+			_window_batch_data.erase(chunk_key)
+
+		# Clean up pending batch chunks
+		var pending_idx := _pending_batch_chunks.find(chunk_key)
+		if pending_idx >= 0:
+			_pending_batch_chunks.remove_at(pending_idx)
+
+		# Prune invalid window batch materials (freed with chunk node)
+		var valid_mats: Array[ShaderMaterial] = []
+		for mat in _window_batch_materials:
+			if is_instance_valid(mat):
+				valid_mats.append(mat)
+		_window_batch_materials = valid_mats
+
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
 		chunk_node.queue_free()
 		_loaded_chunks.erase(chunk_key)
@@ -1310,16 +1333,19 @@ func reset_terrain() -> void:
 	_road_spatial_hash.clear()
 	_parking_polygons.clear()
 
-	# NEW: Clear lamp batching data
+	# Clear ALL batching data on reset
 	_lamp_batch_data.clear()
 	_lamp_batches_to_finalize.clear()
 	_lamp_lights_by_chunk.clear()
-
-	# Clear tree batching data
 	_tree_batch_data.clear()
 	_tree_batches_to_finalize.clear()
+	_building_batch_data.clear()
+	_building_batches_to_finalize.clear()
+	_window_batch_data.clear()
+	_window_batch_materials.clear()
+	_pending_batch_chunks.clear()
 
-	print("OSM: Terrain reset complete (including lamp batches)")
+	print("OSM: Terrain reset complete (all batch data cleared)")
 
 func _on_osm_load_failed(error: String) -> void:
 	push_error("OSM load failed: " + error)
@@ -2524,9 +2550,17 @@ func update_window_night_mode(is_night: bool) -> void:
 			mat.set_shader_parameter("is_night", is_night)
 			updated_count += 1
 
+	# Prune invalid materials to prevent unbounded growth
+	var before_size := _window_batch_materials.size()
+	var valid_mats: Array[ShaderMaterial] = []
+	for m in _window_batch_materials:
+		if is_instance_valid(m):
+			valid_mats.append(m)
+	_window_batch_materials = valid_mats
+
 	var icon := "🌙" if is_night else "☀️"
-	print("OSM: %s Updated %d/%d window batch materials: is_night=%s" % [
-		icon, updated_count, _window_batch_materials.size(), is_night
+	print("OSM: %s Updated %d window batch materials: is_night=%s (pruned %d stale)" % [
+		icon, updated_count, is_night, before_size - _window_batch_materials.size()
 	])
 
 
