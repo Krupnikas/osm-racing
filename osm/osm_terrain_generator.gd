@@ -2428,7 +2428,7 @@ func _finalize_building_batches_for_chunk(chunk_key: String) -> void:
 
 
 ## Создаёт упрощенное здание (простой box) и добавляет в batch для чанка
-func _create_3d_building_simple_batched(points: PackedVector2Array, color: Color, building_height: float, chunk_key: String, parent: Node3D, base_elev: float = 0.0) -> void:
+func _create_3d_building_simple_batched(points: PackedVector2Array, color: Color, building_height: float, parent: Node3D, base_elev: float = 0.0) -> void:
 	# Минимум 3 точки
 	if points.size() < 3:
 		return
@@ -3081,8 +3081,8 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	else:
 		texture_type = "brick"  # Остальное - кирпич
 
-	# Используем многопоточную генерацию зданий
-	_queue_building_for_thread(points, building_height, texture_type, parent, base_elev)
+	# Используем BATCHED генерацию зданий для performance
+	_create_3d_building_simple_batched(points, color, building_height, parent, base_elev)
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
