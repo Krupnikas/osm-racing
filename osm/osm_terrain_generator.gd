@@ -3081,8 +3081,8 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	else:
 		texture_type = "brick"  # Остальное - кирпич
 
-	# Используем BATCHED генерацию зданий для performance
-	_create_3d_building_simple_batched(points, color, building_height, parent, base_elev)
+	# Используем многопоточную генерацию зданий
+	_queue_building_for_thread(points, building_height, texture_type, parent, base_elev)
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
@@ -3705,8 +3705,7 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 	# Получаем высоту террейна для здания (берём центр)
 	var base_elev := _get_elevation_at_point(_get_polygon_center(points), elev_data)
 
-	# ИСПОЛЬЗУЕМ BATCHED VERSION для performance
-	_create_3d_building_simple_batched(points, color, building_height, parent, base_elev)
+	_create_3d_building(points, color, building_height, parent, base_elev)
 
 func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictionary = {}) -> void:
 	# Создаём забор по контуру территории
