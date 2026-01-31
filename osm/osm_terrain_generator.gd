@@ -1195,6 +1195,13 @@ func _unload_chunk(chunk_key: String) -> void:
 					light.queue_free()
 			_lamp_lights_by_chunk.erase(chunk_key)
 
+		# Clean up tree batch data if not yet finalized
+		if _tree_batch_data.has(chunk_key):
+			_tree_batch_data.erase(chunk_key)
+		var finalize_idx := _tree_batches_to_finalize.find(chunk_key)
+		if finalize_idx >= 0:
+			_tree_batches_to_finalize.remove_at(finalize_idx)
+
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
 		chunk_node.queue_free()
 		_loaded_chunks.erase(chunk_key)
@@ -1305,6 +1312,10 @@ func reset_terrain() -> void:
 	_lamp_batch_data.clear()
 	_lamp_batches_to_finalize.clear()
 	_lamp_lights_by_chunk.clear()
+
+	# Clear tree batching data
+	_tree_batch_data.clear()
+	_tree_batches_to_finalize.clear()
 
 	print("OSM: Terrain reset complete (including lamp batches)")
 
@@ -1932,7 +1943,10 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		if tags.get("natural") == "tree":
 			# Пропускаем деревья слишком близко к дорогам
 			if not _is_point_near_road(local, 3.0):
-				_create_tree(local, elevation, target)
+				if chunk_key != "":
+					_add_tree_to_batch(chunk_key, local, elevation, target)
+				else:
+					_create_tree(local, elevation, target)  # Fallback for non-chunk mode
 				tree_count += 1
 		elif tags.has("traffic_sign"):
 			_create_traffic_sign(local, elevation, tags, target)
