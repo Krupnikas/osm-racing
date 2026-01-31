@@ -5676,31 +5676,45 @@ func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3,
 			"parent": parent
 		}
 
-	# Calculate lamp orientation (face toward road)
+	# Calculate lamp orientation (face toward road) - matches original _create_street_lamp_immediate
+	# Original uses: lamp.rotation.y = atan2(dir.x, dir.y) - PI/2
 	var lamp_forward := road_dir.normalized()
-	var lamp_basis := Basis()
-	lamp_basis.y = Vector3.UP
-	lamp_basis.z = lamp_forward  # Look at road (FIX: removed minus sign for correct orientation)
-	lamp_basis.x = lamp_basis.y.cross(lamp_basis.z).normalized()
-	lamp_basis.y = lamp_basis.z.cross(lamp_basis.x).normalized()
+	var yaw := atan2(lamp_forward.x, lamp_forward.z) - PI / 2.0
+	var lamp_basis := Basis(Vector3.UP, yaw)
 
-	# POLE transform (base at lamp_pos)
+	# POLE transform: cylinder centered at y=2.75 (half of 5.5m height)
 	var pole_transform := Transform3D(lamp_basis, lamp_pos + Vector3(0, 2.75, 0))
 	_lamp_batch_data[chunk_key]["pole_transforms"].append(pole_transform)
 
-	# ARM transform: cylinder oriented along Y, rotate to horizontal (toward road) + slight upward tilt
-	# Rotate -PI/2 around local X to lay horizontal, then +PI/12 (~15°) for slight upward tilt
-	var arm_basis := lamp_basis.rotated(lamp_basis.x, -PI/2.0 + PI/12.0)
-	var arm_start := lamp_pos + Vector3(0, 5.5, 0)  # Top of pole
-	# After rotation, cylinder Y axis now points roughly along lamp_basis.z (toward road) + slightly up
-	var arm_dir := arm_basis.y.normalized()  # Direction arm extends in
-	var arm_center := arm_start + arm_dir * 1.0  # Midpoint of 2m arm
-	var arm_transform := Transform3D(arm_basis, arm_center)
+	# ARM transform - reproduce original geometry exactly:
+	# Original: arm_angle = PI/6, arm_length = 2.0
+	# arm_start_y = 5.0 (attachment point on pole)
+	# arm_end_x = arm_length * cos(arm_angle) = 1.732
+	# arm_end_y = arm_start_y + arm_length * sin(arm_angle) = 6.0
+	# arm.position = center of arm = (arm_end_x/2, (start_y+end_y)/2, 0)
+	# arm.rotation.z = PI/2 + arm_angle
+	var arm_angle := PI / 6.0  # 30° upward from horizontal
+	var arm_length := 2.0
+	var arm_start_y := 5.0
+	var arm_end_local_x := arm_length * cos(arm_angle)  # ~1.732
+	var arm_end_local_y := arm_start_y + arm_length * sin(arm_angle)  # ~6.0
+
+	# Arm center in local lamp space (before yaw rotation)
+	var arm_center_local := Vector3(arm_end_local_x / 2.0, (arm_start_y + arm_end_local_y) / 2.0, 0.0)
+
+	# Arm rotation: local Z rotation = PI/2 + arm_angle, then apply lamp yaw
+	var arm_local_basis := Basis(Vector3.FORWARD, PI / 2.0 + arm_angle)  # Z rotation in local space
+	var arm_world_basis := lamp_basis * arm_local_basis  # Apply lamp yaw
+
+	# Transform arm center from local to world
+	var arm_world_pos := lamp_pos + lamp_basis * arm_center_local
+	var arm_transform := Transform3D(arm_world_basis, arm_world_pos)
 	_lamp_batch_data[chunk_key]["arm_transforms"].append(arm_transform)
 
-	# GLOBE transform (at end of arm)
-	var arm_end := arm_start + arm_dir * 2.0  # End of 2m arm
-	var globe_transform := Transform3D(Basis(), arm_end)
+	# GLOBE transform: at end of arm in local space (arm_end_x, arm_end_y, 0)
+	var globe_local := Vector3(arm_end_local_x, arm_end_local_y, 0.0)
+	var globe_world_pos := lamp_pos + lamp_basis * globe_local
+	var globe_transform := Transform3D(Basis(), globe_world_pos)
 	_lamp_batch_data[chunk_key]["globe_transforms"].append(globe_transform)
 
 	# GLOBE color (5% chance broken)
@@ -5715,7 +5729,7 @@ func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3,
 
 	# LIGHT data (for creating separate OmniLight3D nodes)
 	_lamp_batch_data[chunk_key]["light_data"].append({
-		"position": arm_end,
+		"position": globe_world_pos,
 		"broken": is_broken
 	})
 
