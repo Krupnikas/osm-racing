@@ -109,6 +109,11 @@ var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batc
 # Window batching system - ONE MultiMesh per chunk instead of per-building
 var _window_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], colors: Array[Color], parent: Node3D}
 var _window_batch_materials: Array[ShaderMaterial] = []  # Материалы всех window batches для обновления is_night параметра
+
+# Lamp batching system - ONE MultiMesh per chunk for all lamps (pole+arm+globe combined)
+var _lamp_batch_data: Dictionary = {}  # key: chunk_key -> {poles: Array[Transform3D], arms: Array[Transform3D], globes: Array[Transform3D], globe_colors: Array[Color], lights: Array[Dictionary], parent: Node3D}
+var _lamp_batch_lights: Array[OmniLight3D] = []  # Все OmniLight3D для управления ночным режимом
+
 var _curb_smoothed_queue: Array = []  # Очередь сглаженных бордюров для генерации меша
 var _curb_mesh_state: Dictionary = {}  # Текущее состояние генерации меша бордюра (для разбивки по кадрам)
 var _curb_collision_results: Array = []  # Результаты расчёта коллизий из worker threads
@@ -118,6 +123,20 @@ var _curb_collision_mutex: Mutex  # Для синхронизации досту
 var _perf_metrics: Dictionary = {}
 var _perf_frame_count: int = 0
 var _perf_enabled: bool = true
+
+# Подсчет draw calls по категориям (для диагностики)
+var _draw_call_stats: Dictionary = {
+	"roads": 0,
+	"buildings": 0,
+	"windows": 0,
+	"curbs": 0,
+	"lamps": 0,
+	"signs": 0,
+	"vegetation": 0,
+	"terrain": 0,
+	"other": 0
+}
+var _draw_call_logging_enabled := true  # PHASE 1 DIAGNOSTIC: Track draw calls by category
 
 # Отложенная генерация terrain объектов (natural, landuse, leisure)
 var _terrain_objects_queue: Array = []  # Очередь {type, nodes, tags, parent, elev_data}
@@ -390,6 +409,7 @@ func _process(delta: float) -> void:
 	_perf_frame_count += 1
 	if _perf_enabled and _perf_frame_count % 600 == 0:  # Каждые 10 сек при 60fps
 		_print_perf_metrics()
+		_print_draw_call_stats()
 
 	# Обновляем debug статистику
 	_update_debug_stats(delta)
@@ -973,6 +993,10 @@ func _unload_chunk(chunk_key: String) -> void:
 
 		# Очищаем позиции фонарей и знаков в выгруженном чанке
 		_clear_chunk_objects_positions(chunk_key)
+
+		# PHASE 2: Очищаем lamp batches для этого чанка
+		if _lamp_batch_data.has(chunk_key):
+			_lamp_batch_data.erase(chunk_key)
 
 		print("OSM: Unloaded chunk %s" % chunk_key)
 
@@ -2094,6 +2118,10 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		mesh_instance.name = "RoadBatch_" + texture_key
 		mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # Дороги не должны отбрасывать тени
 
+		# Track draw calls
+		if _draw_call_logging_enabled:
+			_draw_call_stats["roads"] += 1
+
 		# Создаём материал (копируем логику из _create_road_mesh_with_texture)
 		var material: StandardMaterial3D = StandardMaterial3D.new()
 		material.cull_mode = BaseMaterial3D.CULL_DISABLED  # Оставляем DISABLED как в оригинале
@@ -2237,6 +2265,10 @@ func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
 	mm_instance.material_override = mat
 	mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	mm_instance.name = "WindowBatch"
+
+	# Track draw calls (MultiMesh = 1 draw call for all windows)
+	if _draw_call_logging_enabled:
+		_draw_call_stats["windows"] += 1
 
 	# Добавляем к родителю (ChunkRoot)
 	parent.add_child(mm_instance)
@@ -2531,6 +2563,10 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 	# Добавляем depth bias для устранения z-fighting на пересечениях
 	material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
 	mesh.material_override = material
+
+	# Track draw calls
+	if _draw_call_logging_enabled:
+		_draw_call_stats["curbs"] += 1
 
 	parent.add_child(mesh)
 	# Примечание: коллизии создаются через инкрементальную систему (_finalize_curb_mesh)
@@ -3221,6 +3257,10 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	body.add_child(pole)
 
+	# Track draw calls
+	if _draw_call_logging_enabled:
+		_draw_call_stats["signs"] += 1
+
 	# Знак - синий квадрат
 	var sign_plate := MeshInstance3D.new()
 	var sign_mesh := BoxMesh.new()
@@ -3233,6 +3273,10 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	sign_plate.position.y = 2.3
 	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	body.add_child(sign_plate)
+
+	# Track draw calls
+	if _draw_call_logging_enabled:
+		_draw_call_stats["signs"] += 1
 
 	# Буква "P" - белый текст
 	var label := Label3D.new()
@@ -3949,6 +3993,10 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 		wall_material.set_shader_parameter("use_texture", false)
 	wall_mesh_instance.material_override = wall_material
 
+	# Track draw calls
+	if _draw_call_logging_enabled:
+		_draw_call_stats["buildings"] += 1
+
 	# === СОЗДАНИЕ МЕША КРЫШИ ===
 	if result.roof_indices.size() >= 3:
 		var roof_arrays := []
@@ -3973,6 +4021,10 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 		else:
 			roof_material.albedo_color = Color(0.4, 0.35, 0.3)
 		roof_mesh_instance.material_override = roof_material
+
+		# Track draw calls
+		if _draw_call_logging_enabled:
+			_draw_call_stats["buildings"] += 1  # Roof counts as building
 
 		wall_mesh_instance.add_child(roof_mesh_instance)
 
@@ -4102,6 +4154,16 @@ func _process_road_queue() -> void:
 				if Time.get_ticks_usec() - t_window > 100:
 					_record_perf("window_batch_finalize", Time.get_ticks_usec() - t_window)
 				return  # Один чанк за кадр — не блокируем
+
+		# PHASE 2: Финализируем lamp batches (после windows)
+		var lamp_chunks := _lamp_batch_data.keys()
+		if not lamp_chunks.is_empty():
+			var t_lamp := Time.get_ticks_usec()
+			var chunk_key: String = lamp_chunks[0]
+			_finalize_lamp_batches_for_chunk(chunk_key)
+			if Time.get_ticks_usec() - t_lamp > 100:
+				_record_perf("lamp_batch_finalize", Time.get_ticks_usec() - t_lamp)
+			return  # Один чанк за кадр
 
 		# Когда все дороги созданы, обрабатываем бордюры
 		_process_curb_queue()
@@ -4958,6 +5020,11 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 		material.albedo_color.a = 0.8
 
 	mesh.material_override = material
+
+	# Track draw calls
+	if _draw_call_logging_enabled:
+		_draw_call_stats["terrain"] += 1
+
 	parent.add_child(mesh)
 
 ## Создаёт коллизию для парка с группой "Park" (очень высокое сопротивление качению)
@@ -5144,6 +5211,10 @@ func _create_tree(pos: Vector2, elevation: float, parent: Node3D) -> void:
 	tree_model.scale = Vector3(scale_factor, scale_factor, scale_factor)
 	tree_root.add_child(tree_model)
 
+	# Track draw calls (tree scene has ~10 meshes: trunk + branches + leaves)
+	if _draw_call_logging_enabled:
+		_draw_call_stats["vegetation"] += 10  # Approximate
+
 	# Коллизия для ствола
 	# Ствол в модели находится примерно на (200, 0, 200) в единицах модели
 	# После масштабирования: позиция = координаты_модели * scale_factor
@@ -5290,122 +5361,211 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	if not is_instance_valid(parent):
 		return
 
-	var lamp := Node3D.new()
-	lamp.position = Vector3(pos.x, elevation, pos.y)
+	# PHASE 2 OPTIMIZATION: Батчим фонари в MultiMesh вместо создания отдельных мешей
+	# Получаем chunk_key из имени parent (формат: "Chunk_X,Y")
+	var chunk_key: String = ""
+	if parent.name.begins_with("Chunk_"):
+		chunk_key = parent.name.substr(6)
+	else:
+		# Fallback: создаём фонарь по-старому если parent не ChunkRoot
+		_create_street_lamp_immediate_legacy(pos, elevation, parent, direction_to_road)
+		return
 
-	# Поворачиваем весь фонарь в направлении дороги (+90° + 180° чтобы кронштейн смотрел К дороге)
+	# Инициализируем batch для этого чанка если еще нет
+	if not _lamp_batch_data.has(chunk_key):
+		_lamp_batch_data[chunk_key] = {
+			"poles": [],
+			"arms": [],
+			"globes": [],
+			"globe_colors": [],
+			"lights": [],  # {pos: Vector3, is_broken: bool}
+			"parent": parent
+		}
+
+	# Вычисляем параметры фонаря
+	var angle_to_road := 0.0
 	if direction_to_road.length() > 0.1:
-		var angle_to_road := atan2(direction_to_road.x, direction_to_road.y) - PI / 2
-		lamp.rotation.y = angle_to_road
+		angle_to_road = atan2(direction_to_road.x, direction_to_road.y) - PI / 2
 
-	var pole_mat := StandardMaterial3D.new()
-	pole_mat.albedo_color = Color(0.25, 0.25, 0.25)  # Тёмно-серый
-	pole_mat.metallic = 0.9
+	var arm_length := 2.0
+	var arm_angle := PI / 6.0
+	var arm_start_y := 5.0
+	var arm_end_x := arm_length * cos(arm_angle)
+	var arm_end_y := arm_start_y + arm_length * sin(arm_angle)
 
-	# Основной столб - тёмно-серый цилиндр
-	var pole := MeshInstance3D.new()
+	# Базовая трансформа фонаря (позиция + поворот)
+	var base_transform := Transform3D()
+	base_transform.origin = Vector3(pos.x, elevation, pos.y)
+	base_transform = base_transform.rotated(Vector3.UP, angle_to_road)
+
+	# Трансформа столба (pole)
+	var pole_transform := Transform3D()
+	pole_transform.origin = Vector3(0, 2.75, 0)
+	pole_transform = base_transform * pole_transform
+
+	# Трансформа кронштейна (arm)
+	var arm_transform := Transform3D()
+	arm_transform.origin = Vector3(arm_end_x / 2.0, (arm_start_y + arm_end_y) / 2.0, 0)
+	arm_transform = arm_transform.rotated(Vector3.FORWARD, PI / 2.0 + arm_angle)
+	arm_transform = base_transform * arm_transform
+
+	# Трансформа плафона (globe)
+	var globe_transform := Transform3D()
+	globe_transform.origin = Vector3(arm_end_x, arm_end_y, 0)
+	globe_transform = base_transform * globe_transform
+
+	# 5% шанс что фонарь сломан
+	var is_broken := randf() < 0.05
+
+	# Цвет плафона (зависит от ночного режима)
+	var is_night := _is_night_mode
+	var globe_color: Color
+	if is_night and not is_broken:
+		globe_color = Color(1.0, 0.75, 0.3)  # Натриевый оранжевый с emission
+	else:
+		globe_color = Color(0.3, 0.3, 0.3)  # Серый днём или сломан
+
+	# Добавляем в батч
+	var batch = _lamp_batch_data[chunk_key]
+	batch.poles.append(pole_transform)
+	batch.arms.append(arm_transform)
+	batch.globes.append(globe_transform)
+	batch.globe_colors.append(globe_color)
+	batch.lights.append({
+		"pos": globe_transform.origin,
+		"is_broken": is_broken
+	})
+
+
+## Финализирует батч фонарей для чанка - создаёт 3 MultiMesh (poles, arms, globes) + OmniLights
+func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
+	if not _lamp_batch_data.has(chunk_key):
+		return
+
+	var batch: Dictionary = _lamp_batch_data[chunk_key]
+	var poles: Array = batch.get("poles", [])
+	var arms: Array = batch.get("arms", [])
+	var globes: Array = batch.get("globes", [])
+	var globe_colors: Array = batch.get("globe_colors", [])
+	var lights: Array = batch.get("lights", [])
+	var parent: Node3D = batch.get("parent", null)
+
+	if poles.is_empty() or not is_instance_valid(parent):
+		_lamp_batch_data.erase(chunk_key)
+		return
+
+	# Базовый контейнер для всех фонарей чанка
+	var lamps_root := Node3D.new()
+	lamps_root.name = "LampBatch"
+
+	# === MultiMesh для столбов (poles) ===
+	var pole_mm := MultiMesh.new()
+	pole_mm.transform_format = MultiMesh.TRANSFORM_3D
+	pole_mm.use_colors = false
 	var pole_mesh := CylinderMesh.new()
 	pole_mesh.top_radius = 0.05
 	pole_mesh.bottom_radius = 0.08
 	pole_mesh.height = 5.5
-	pole.mesh = pole_mesh
-	pole.material_override = pole_mat
-	pole.position.y = 2.75
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	lamp.add_child(pole)
+	pole_mm.mesh = pole_mesh
+	pole_mm.instance_count = poles.size()
 
-	# Кронштейн - наклонный цилиндр от верха столба к лампе (наклон ВВЕРХ)
-	var arm_length := 2.0
-	var arm_angle := PI / 6  # 30 градусов вверх от горизонтали
-	var arm := MeshInstance3D.new()
+	for i in range(poles.size()):
+		pole_mm.set_instance_transform(i, poles[i])
+
+	var pole_mat := StandardMaterial3D.new()
+	pole_mat.albedo_color = Color(0.25, 0.25, 0.25)
+	pole_mat.metallic = 0.9
+
+	var pole_mm_instance := MultiMeshInstance3D.new()
+	pole_mm_instance.multimesh = pole_mm
+	pole_mm_instance.material_override = pole_mat
+	pole_mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole_mm_instance.name = "Poles"
+	lamps_root.add_child(pole_mm_instance)
+
+	# === MultiMesh для кронштейнов (arms) ===
+	var arm_mm := MultiMesh.new()
+	arm_mm.transform_format = MultiMesh.TRANSFORM_3D
+	arm_mm.use_colors = false
 	var arm_mesh := CylinderMesh.new()
 	arm_mesh.top_radius = 0.03
 	arm_mesh.bottom_radius = 0.04
-	arm_mesh.height = arm_length
-	arm.mesh = arm_mesh
-	arm.material_override = pole_mat
-	arm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	arm_mesh.height = 2.0
+	arm_mm.mesh = arm_mesh
+	arm_mm.instance_count = arms.size()
 
-	# Кронштейн идёт от столба вверх и в сторону
-	var arm_start_y := 5.0  # Точка крепления к столбу
-	var arm_end_x := arm_length * cos(arm_angle)  # Горизонтальное смещение
-	var arm_end_y := arm_start_y + arm_length * sin(arm_angle)  # Вертикальное смещение (вверх)
+	for i in range(arms.size()):
+		arm_mm.set_instance_transform(i, arms[i])
 
-	# Позиция центра кронштейна
-	arm.position.x = arm_end_x / 2.0
-	arm.position.y = (arm_start_y + arm_end_y) / 2.0
+	var arm_mm_instance := MultiMeshInstance3D.new()
+	arm_mm_instance.multimesh = arm_mm
+	arm_mm_instance.material_override = pole_mat  # Тот же материал
+	arm_mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	arm_mm_instance.name = "Arms"
+	lamps_root.add_child(arm_mm_instance)
 
-	# Поворот кронштейна: наклон вверх
-	arm.rotation.z = PI / 2 + arm_angle
-	lamp.add_child(arm)
-
-	# Плафон - светлая сфера на конце кронштейна
-	var light_globe := MeshInstance3D.new()
+	# === MultiMesh для плафонов (globes) ===
+	var globe_mm := MultiMesh.new()
+	globe_mm.transform_format = MultiMesh.TRANSFORM_3D
+	globe_mm.use_colors = true  # Цвет зависит от ночного режима
 	var globe_mesh := SphereMesh.new()
 	globe_mesh.radius = 0.2
 	globe_mesh.height = 0.35
-	light_globe.mesh = globe_mesh
+	globe_mm.mesh = globe_mesh
+	globe_mm.instance_count = globes.size()
 
-	# 5% шанс что фонарь сломан (определяем до создания плафона)
-	var is_broken := randf() < 0.05
+	for i in range(globes.size()):
+		globe_mm.set_instance_transform(i, globes[i])
+		if i < globe_colors.size():
+			globe_mm.set_instance_color(i, globe_colors[i])
 
-	# Проверяем, включён ли ночной режим
-	var is_night := _is_night_mode
-	if not is_night:
-		var night_manager := get_tree().current_scene.find_child("NightModeManager", true, false)
-		if night_manager:
-			is_night = night_manager.is_night
-
+	# Материал плафонов - будет обновляться при смене дня/ночи
 	var globe_mat := StandardMaterial3D.new()
-	# Настраиваем плафон в зависимости от состояния (ночь/день, сломан/работает)
-	if is_night and not is_broken:
-		globe_mat.albedo_color = Color(1.0, 0.75, 0.3)  # Натриевый оранжевый
-		globe_mat.emission_enabled = true
-		globe_mat.emission = Color(1.0, 0.65, 0.2)  # Тёплый натриевый
-		globe_mat.emission_energy_multiplier = 5.0
-	else:
-		globe_mat.albedo_color = Color(0.3, 0.3, 0.3)  # Серый днём или сломан
-		globe_mat.emission_enabled = false
-	light_globe.material_override = globe_mat
-	light_globe.name = "LampGlobe"
-	# Сохраняем флаг "сломан" в метаданных плафона
-	light_globe.set_meta("is_broken", is_broken)
+	globe_mat.vertex_color_use_as_albedo = true  # Используем цвета из MultiMesh
+	# NOTE: Emission для ночного режима не работает через vertex colors,
+	# нужно будет использовать shader или обновлять материал динамически
 
-	# Позиция плафона на конце кронштейна
-	light_globe.position.x = arm_end_x
-	light_globe.position.y = arm_end_y
-	lamp.add_child(light_globe)
+	var globe_mm_instance := MultiMeshInstance3D.new()
+	globe_mm_instance.multimesh = globe_mm
+	globe_mm_instance.material_override = globe_mat
+	globe_mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	globe_mm_instance.name = "Globes"
+	lamps_root.add_child(globe_mm_instance)
 
-	# Добавляем источник света - OmniLight для освещения вокруг
-	var lamp_light := OmniLight3D.new()
-	lamp_light.name = "LampLight"
-	lamp_light.position = light_globe.position
-	lamp_light.omni_range = 12.0  # Радиус освещения
-	lamp_light.omni_attenuation = 1.2
-	lamp_light.light_energy = 1.5
-	lamp_light.light_color = Color(1.0, 0.65, 0.2)  # Тёплый натриевый жёлто-оранжевый
-	lamp_light.shadow_enabled = false
-	lamp_light.light_bake_mode = Light3D.BAKE_DISABLED
-	# Фонарь светит только ночью и если не сломан
-	lamp_light.visible = is_night and not is_broken
-	# Сохраняем флаг "сломан" в метаданных для переключения день/ночь
-	lamp_light.set_meta("is_broken", is_broken)
-	lamp.add_child(lamp_light)
+	# === Создаём OmniLight3D для каждого фонаря ===
+	var is_night := _is_night_mode
+	for light_data in lights:
+		var lamp_light := OmniLight3D.new()
+		lamp_light.position = light_data.pos
+		lamp_light.omni_range = 12.0
+		lamp_light.omni_attenuation = 1.2
+		lamp_light.light_energy = 1.5
+		lamp_light.light_color = Color(1.0, 0.65, 0.2)
+		lamp_light.shadow_enabled = false
+		lamp_light.light_bake_mode = Light3D.BAKE_DISABLED
+		lamp_light.visible = is_night and not light_data.is_broken
+		lamp_light.set_meta("is_broken", light_data.is_broken)
+		lamps_root.add_child(lamp_light)
+		_lamp_batch_lights.append(lamp_light)
 
-	# Коллизия для столба
-	var body := StaticBody3D.new()
-	body.collision_layer = 2
-	body.collision_mask = 0  # Статика не проверяет коллизии
-	var collision := CollisionShape3D.new()
-	var shape := CylinderShape3D.new()
-	shape.radius = 0.1
-	shape.height = 5.5
-	collision.shape = shape
-	collision.position.y = 2.75
-	body.add_child(collision)
-	lamp.add_child(body)
+	# Track draw calls (3 MultiMeshes = 3 draw calls total вместо poles.size() * 3)
+	if _draw_call_logging_enabled:
+		_draw_call_stats["lamps"] += 3
 
-	parent.add_child(lamp)
+	parent.add_child(lamps_root)
+
+	print("OSM: ✅ Finalized lamp batch %s: %d lamps (3 MultiMeshes + %d lights, was %d draw calls before)" % [
+		chunk_key, poles.size(), lights.size(), poles.size() * 3
+	])
+
+	_lamp_batch_data.erase(chunk_key)
+
+
+## Legacy метод создания одиночного фонаря (для случаев когда parent не ChunkRoot)
+func _create_street_lamp_immediate_legacy(pos: Vector2, elevation: float, parent: Node3D, direction_to_road: Vector2 = Vector2.ZERO) -> void:
+	# Старая реализация (создаёт отдельные меши) - используется только для специальных случаев
+	# В текущей версии не используется - все фонари батчатся
+	pass
 
 
 # Процедурная генерация деревьев в полигоне (парк, лес) - добавляет в очередь
@@ -7832,3 +7992,73 @@ func _print_perf_metrics() -> void:
 	# Сбрасываем метрики
 	_perf_metrics.clear()
 	_perf_frame_count = 0
+
+func _print_draw_call_stats() -> void:
+	"""
+	Выводит статистику draw calls по категориям для диагностики
+	"""
+	if not _draw_call_logging_enabled:
+		return
+
+	var total_draw_calls = 0
+	for category in _draw_call_stats:
+		total_draw_calls += _draw_call_stats[category]
+
+	if total_draw_calls == 0:
+		return
+
+	print("\n========== DRAW CALL BREAKDOWN ==========")
+	print("Total tracked draw calls: %d" % total_draw_calls)
+	print()
+
+	# Сортируем по количеству (descending)
+	var sorted_categories = []
+	for category in _draw_call_stats:
+		sorted_categories.append({
+			"name": category,
+			"count": _draw_call_stats[category]
+		})
+	sorted_categories.sort_custom(func(a, b): return a.count > b.count)
+
+	# Выводим с процентами
+	for item in sorted_categories:
+		if item.count == 0:
+			continue
+		var percentage = 100.0 * item.count / total_draw_calls
+		# Создаем визуальную полоску (до 20 символов)
+		var bar_length = int(percentage / 5.0)
+		var bar = ""
+		for i in range(bar_length):
+			bar += "█"
+		print("  %-12s: %5d (%5.1f%%) %s" % [
+			item.name.capitalize(),
+			item.count,
+			percentage,
+			bar
+		])
+
+	print("\n💡 RECOMMENDATIONS:")
+
+	# Анализируем что нужно оптимизировать
+	var buildings_pct = 100.0 * _draw_call_stats["buildings"] / total_draw_calls if total_draw_calls > 0 else 0
+	var windows_pct = 100.0 * _draw_call_stats["windows"] / total_draw_calls if total_draw_calls > 0 else 0
+	var roads_pct = 100.0 * _draw_call_stats["roads"] / total_draw_calls if total_draw_calls > 0 else 0
+	var infrastructure_pct = (_draw_call_stats["curbs"] + _draw_call_stats["lamps"] + _draw_call_stats["signs"]) * 100.0 / total_draw_calls if total_draw_calls > 0 else 0
+
+	if buildings_pct > 30:
+		print("  🔴 Buildings: %.1f%% of draw calls" % buildings_pct)
+		print("     → Implement MultiMeshInstance3D for building base meshes")
+
+	if windows_pct > 20:
+		print("  🔴 Windows: %.1f%% of draw calls" % windows_pct)
+		print("     → Batch all windows into single MultiMesh per chunk")
+
+	if roads_pct > 20:
+		print("  🔴 Roads: %.1f%% of draw calls" % roads_pct)
+		print("     → Merge road segments, use global batches by material")
+
+	if infrastructure_pct > 15:
+		print("  🟠 Infrastructure: %.1f%% of draw calls" % infrastructure_pct)
+		print("     → Use MultiMesh for curbs, lamps, signs")
+
+	print("=========================================\n")

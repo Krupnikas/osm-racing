@@ -1,0 +1,733 @@
+Godot Engine v4.5.1.stable.official.f62fdbde1 - https://godotengine.org
+Vulkan 1.2.283 - Forward+ - Using Device #0: Apple - Apple M1 Pro
+
+SCRIPT ERROR: Parse Error: Expected indented block after function declaration.
+          at: GDScript::reload (res://osm/osm_terrain_generator.gd:5565)
+ERROR: Failed to load script "res://osm/osm_terrain_generator.gd" with error "Parse error".
+   at: load (modules/gdscript/gdscript.cpp:3041)
+WARNING: res://traffic/npc_lada_2109.tscn:4 - ext_resource, invalid UID: uid://bvnqxj3m4y5oa - using text path instead: res://car/models/lada_2109_dps/scene.gltf
+     at: load (scene/resources/resource_format_text.cpp:444)
+WARNING: res://traffic/npc_taxi.tscn:4 - ext_resource, invalid UID: uid://taxi_model - using text path instead: res://car/models/lada_2109_taxi/scene.gltf
+     at: load (scene/resources/resource_format_text.cpp:444)
+SCRIPT ERROR: Parse Error: Could not parse global class "OSMTerrainGenerator" from "res://osm/osm_terrain_generator.gd".
+          at: GDScript::reload (res://traffic/traffic_manager.gd:137)
+ERROR: Failed to load script "res://traffic/traffic_manager.gd" with error "Parse error".
+   at: load (modules/gdscript/gdscript.cpp:3041)
+ERROR: Error opening file 'res://icon.svg'.
+   at: load_image (core/io/image_loader.cpp:89)
+MusicManager: Now playing track 0: Петя Павлов - Я хочу скорости
+
+========== Bottleneck Analyzer Started ==========
+Collecting performance data...
+=================================================
+
+
+========== DETAILED PERFORMANCE TEST ==========
+Random seed: 12345 (fixed for reproducibility)
+Location: Cherepovets (59.1167, 37.9000)
+Duration: 90 seconds
+Spike threshold: 25.0 ms
+Tracking: Every spike > 25.0 ms
+Night mode: ENABLED
+==============================================
+
+2026-01-31 06:52:34.095 Godot[67855:2100238] +[IMKClient subclass]: chose IMKClient_Modern
+2026-01-31 06:52:34.095 Godot[67855:2100238] +[IMKInputSession subclass]: chose IMKInputSession_Modern
+Nexia: Found mesh: body_Car Paint PL_0
+  -> Created override material for surface 0
+  -> Material: Car_Paint_PL (StandardMaterial3D)
+  -> Changed body color to cherry (glossy)
+Nexia: Found mesh: body_Car Paint PL_02
+  -> Created override material for surface 0
+  -> Material: Car_Paint_PL (StandardMaterial3D)
+  -> Changed body color to cherry (glossy)
+Nexia: Found mesh: body_Car Paint PL_03
+  -> Created override material for surface 0
+  -> Material: Car_Paint_PL (StandardMaterial3D)
+  -> Changed body color to cherry (glossy)
+Nexia: Found mesh: body_Black leather_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_Black leather_02
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_Black leather_03
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_Black Opaque  Glass_0
+  -> Created override material for surface 0
+  -> Material: Black_Opaque__Glass (StandardMaterial3D)
+  -> Changed glass to tinted (day mode)
+Nexia: Found mesh: body_mattemetal_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_orangeglass_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_chrome_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_chrome_02
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_chrome_03
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_chrome_04
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_redglass_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_AR3DMat Procedural Realistic Mirror_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_left_TireProcedural_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_left_rim_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_left_black_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_left_brakedisk_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_left_mattemetal_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_right_TireProcedural_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_right_rim_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_right_black_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_right_brakedisk_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_right_mattemetal_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_left_TireProcedural_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_left_black_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_left_brakedisk_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_left_rim_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_left_mattemetal_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_right_TireProcedural_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_right_black_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_right_brakedisk_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_right_rim_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_right_mattemetal_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found taillight mesh: body_redglass_0
+  -> Added taillight material
+  -> Created brake SpotLight at (-0.5, 0.9, 1.95)
+  -> Created brake SpotLight at (0.5, 0.9, 1.95)
+Nexia: Found front marker mesh: body_orangeglass_0
+  -> Added front marker material
+  -> Created headlight SpotLight at (-0.55, 0.75, -1.9)
+  -> Created headlight SpotLight at (0.55, 0.75, -1.9)
+  -> Created underglow with 16 lights
+Nexia model setup complete
+NightModeManager: Ready (day mode, no rain)
+GraphicsSettings: Found WorldEnvironment
+GraphicsSettings: Found Camera3D: Camera3D
+GraphicsSettings: Loading settings from file...
+GraphicsSettings: Settings loaded - FXAA: false, TAA: true, MSAA: 1
+GraphicsSettings: Applying initial settings...
+SSR: OFF
+Fog: ON
+Glow: ON
+SSAO: ON
+TAA: ON
+MSAA: 2X
+FXAA disabled on root viewport
+DOF: ON (far distance: 100m)
+GraphicsSettings: Ready
+[Systems Found]
+  OSMTerrain: NO
+  TrafficManager: NO
+  NightModeManager: NO
+  Player Car: YES
+
+[PerformanceTestDetailed] Found nodes:
+  Car: YES
+  VehicleInput: YES
+  OSMTerrain: YES
+[PerformanceTestDetailed] Night mode ENABLED (windows + lights + moon)
+
+========== Bottleneck Analysis Report ==========
+Time: 4.0s | Frames: 169
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 57.4 avg | 1.0 min
+  Frame Time: 48.13 ms avg | 173.09 ms max
+  Physics Time: 0.91 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🔴 [CRITICAL] Frame Time
+      Value: 48.13 ms (target: 16.67 ms)
+      Impact: Overall performance bottleneck
+      Suggestions:
+        • Reduce draw calls
+        • Optimize scripts in _process()
+        • Check for expensive operations per frame
+
+  🟡 [MEDIUM] Vertex Count
+      Value: 50961625 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 172 avg | 179 max
+  Vertices: 50961625 avg | 51018258 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 6.0s | Frames: 367
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.2 avg | 98.0 min
+  Frame Time: 10.57 ms avg | 10.59 ms max
+  Physics Time: 0.65 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 50983773 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 174 avg | 175 max
+  Vertices: 50983773 avg | 50983802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+[PerformanceTestDetailed] ✓ Terrain loaded! Starting test in 2 seconds...
+
+========== Bottleneck Analysis Report ==========
+Time: 8.0s | Frames: 565
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.2 avg | 98.0 min
+  Frame Time: 10.46 ms avg | 10.50 ms max
+  Physics Time: 0.61 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 50970701 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 172 avg | 179 max
+  Vertices: 50970701 avg | 51018258 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+[PerformanceLogger] Started logging: detailed_test_90s
+🚀 Test started!
+
+
+========== Bottleneck Analysis Report ==========
+Time: 10.0s | Frames: 763
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 99.0 avg | 98.0 min
+  Frame Time: 10.66 ms avg | 10.72 ms max
+  Physics Time: 0.63 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 50985443 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 170 avg | 178 max
+  Vertices: 50985443 avg | 51018134 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 12.0s | Frames: 961
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.8 avg | 98.0 min
+  Frame Time: 10.59 ms avg | 10.60 ms max
+  Physics Time: 0.65 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 50983555 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 172 avg | 176 max
+  Vertices: 50983555 avg | 50983802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 14.0s | Frames: 1158
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.8 avg | 98.0 min
+  Frame Time: 10.55 ms avg | 10.56 ms max
+  Physics Time: 0.71 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 50983560 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 173 avg | 176 max
+  Vertices: 50983560 avg | 50983802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 16.0s | Frames: 1355
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.8 avg | 98.0 min
+  Frame Time: 10.42 ms avg | 10.52 ms max
+  Physics Time: 0.69 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 50983593 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 175 avg | 179 max
+  Vertices: 50983593 avg | 50983802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 18.0s | Frames: 1553
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.8 avg | 98.0 min
+  Frame Time: 10.56 ms avg | 10.60 ms max
+  Physics Time: 0.64 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 42945212 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 42945212 avg | 44839802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 20.1s | Frames: 1751
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 10.70 ms avg | 10.73 ms max
+  Physics Time: 0.68 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831631 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831631 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+⚡ FRAME SPIKE #1: 123.2 ms at 12.3s (Draw: 180, Bodies: 1)
+⚡ FRAME SPIKE #2: 27.3 ms at 12.5s (Draw: 180, Bodies: 1)
+
+========== Bottleneck Analysis Report ==========
+Time: 22.4s | Frames: 1932
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 78.5 avg | 45.0 min
+  Frame Time: 203.65 ms avg | 526.57 ms max
+  Physics Time: 0.87 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🔴 [CRITICAL] Frame Time
+      Value: 203.65 ms (target: 16.67 ms)
+      Impact: Overall performance bottleneck
+      Suggestions:
+        • Reduce draw calls
+        • Optimize scripts in _process()
+        • Check for expensive operations per frame
+
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831622 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831622 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 24.4s | Frames: 2133
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 102.0 avg | 102.0 min
+  Frame Time: 10.15 ms avg | 10.30 ms max
+  Physics Time: 0.71 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831607 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 1831607 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 26.4s | Frames: 2331
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 102.0 avg | 102.0 min
+  Frame Time: 10.22 ms avg | 10.28 ms max
+  Physics Time: 0.67 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831607 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 1831607 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 28.3s | Frames: 2530
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 102.0 avg | 102.0 min
+  Frame Time: 10.20 ms avg | 10.30 ms max
+  Physics Time: 0.76 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831612 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831612 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 30.3s | Frames: 2729
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 102.0 avg | 102.0 min
+  Frame Time: 10.16 ms avg | 10.18 ms max
+  Physics Time: 0.71 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831617 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831617 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 32.2s | Frames: 2928
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 101.2 avg | 101.0 min
+  Frame Time: 10.12 ms avg | 10.12 ms max
+  Physics Time: 2.10 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831641 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831641 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 34.3s | Frames: 3127
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 95.7 avg | 95.0 min
+  Frame Time: 11.93 ms avg | 14.46 ms max
+  Physics Time: 0.77 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831612 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831612 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+⚡ FRAME SPIKE #3: 38.9 ms at 25.2s (Draw: 180, Bodies: 1)
