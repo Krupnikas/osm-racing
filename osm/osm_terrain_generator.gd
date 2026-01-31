@@ -5703,7 +5703,8 @@ func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3,
 	var arm_center_local := Vector3(arm_end_local_x / 2.0, (arm_start_y + arm_end_local_y) / 2.0, 0.0)
 
 	# Arm rotation: local Z rotation = PI/2 + arm_angle, then apply lamp yaw
-	var arm_local_basis := Basis(Vector3.FORWARD, PI / 2.0 + arm_angle)  # Z rotation in local space
+	# Vector3.BACK = (0,0,1) = +Z axis, matching Godot's rotation.z convention
+	var arm_local_basis := Basis(Vector3.BACK, PI / 2.0 + arm_angle)  # Z rotation in local space
 	var arm_world_basis := lamp_basis * arm_local_basis  # Apply lamp yaw
 
 	# Transform arm center from local to world
