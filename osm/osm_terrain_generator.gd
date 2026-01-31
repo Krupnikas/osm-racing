@@ -1186,7 +1186,9 @@ func _unload_chunk(chunk_key: String) -> void:
 		# NEW: Clean up lamp batch data if not yet finalized
 		if _lamp_batch_data.has(chunk_key):
 			_lamp_batch_data.erase(chunk_key)
-			print("OSM: Cleaned up unfinalized lamp batch data for chunk %s" % chunk_key)
+		var lamp_finalize_idx := _lamp_batches_to_finalize.find(chunk_key)
+		if lamp_finalize_idx >= 0:
+			_lamp_batches_to_finalize.remove_at(lamp_finalize_idx)
 
 		# NEW: Explicitly free lamp lights to prevent memory leak
 		if _lamp_lights_by_chunk.has(chunk_key):
@@ -1954,7 +1956,14 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		elif tags.get("highway") == "street_lamp":
 			# Не ставим фонари на парковках
 			if not _is_point_in_any_parking(local):
-				_create_street_lamp(local, elevation, target)
+				if chunk_key != "":
+					# Use batching for OSM point lamps too
+					var lamp_pos := Vector3(local.x, elevation, local.y)
+					# Direction toward nearest road (approximate - use zero if not near road)
+					var road_dir := Vector3.FORWARD
+					_add_lamp_to_batch(chunk_key, lamp_pos, road_dir, target)
+				else:
+					_create_street_lamp(local, elevation, target)
 				lamp_count += 1
 
 	print("OSM: Generated %d roads, %d buildings, %d trees, %d signs, %d lamps, %d intersections" % [road_count, building_count, tree_count, sign_count, lamp_count, intersection_count])
@@ -3285,7 +3294,8 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	var base_elev := _get_elevation_at_point(center, elev_data)
 
 	# Вычисляем расстояние до игрока для LOD (shadows)
-	var distance_to_player: float = INF
+	# Default to 0.0 (shadows ON) when car unknown - safer for visual quality during initial load
+	var distance_to_player: float = 0.0
 	if _car:
 		var building_pos_3d := Vector3(center.x, base_elev, center.y)
 		distance_to_player = _car.global_position.distance_to(building_pos_3d)
@@ -4386,7 +4396,7 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 	wall_mesh_instance.mesh = wall_mesh
 
 	# Shadow LOD: только близкие здания отбрасывают тени (< 150m)
-	var distance: float = result.get("distance_to_player", INF)
+	var distance: float = result.get("distance_to_player", 0.0)  # Default 0 = shadows ON when unknown
 	if distance < _building_shadow_lod_distance:
 		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	else:
@@ -4571,20 +4581,37 @@ func _process_road_queue() -> void:
 				_record_perf("road_batch_finalize", Time.get_ticks_usec() - t_batch)
 			return  # Один чанк за кадр
 
-		# OPTIMIZATION: Финализируем window batches ТОЛЬКО когда ВСЕ здания обработаны
-		# Проверяем что нет pending зданий в worker threads И в очереди результатов
-		# Финализируем ПО ОДНОМУ ЧАНКУ ЗА КАДР чтобы не фризить
+		# Tree and lamp batches finalize INDEPENDENTLY of building processing
+		# (so they don't get starved while buildings are being built)
+		if not _tree_batches_to_finalize.is_empty():
+			var t_tree := Time.get_ticks_usec()
+			var chunk_key: String = _tree_batches_to_finalize[0]
+			_tree_batches_to_finalize.remove_at(0)
+			_finalize_tree_batches_for_chunk(chunk_key)
+			if Time.get_ticks_usec() - t_tree > 100:
+				_record_perf("tree_batch_finalize", Time.get_ticks_usec() - t_tree)
+			return  # Один чанк за кадр
+
+		if not _lamp_batches_to_finalize.is_empty():
+			var t_lamp := Time.get_ticks_usec()
+			var chunk_key: String = _lamp_batches_to_finalize[0]
+			_lamp_batches_to_finalize.remove_at(0)
+			_finalize_lamp_batches_for_chunk(chunk_key)
+			if Time.get_ticks_usec() - t_lamp > 100:
+				_record_perf("lamp_batch_finalize", Time.get_ticks_usec() - t_lamp)
+			return  # Один чанк за кадр
+
+		# Window and building batches wait until ALL buildings processed
 		if _pending_building_tasks == 0 and _building_results.is_empty():
 			var window_chunks := _window_batch_data.keys()
 			if not window_chunks.is_empty():
 				var t_window := Time.get_ticks_usec()
-				var chunk_key: String = window_chunks[0]  # Берём первый чанк
+				var chunk_key: String = window_chunks[0]
 				_finalize_window_batches_for_chunk(chunk_key)
 				if Time.get_ticks_usec() - t_window > 100:
 					_record_perf("window_batch_finalize", Time.get_ticks_usec() - t_window)
-				return  # Один чанк за кадр — не блокируем
+				return
 
-			# Финализация building batches (после window batches)
 			if not _building_batches_to_finalize.is_empty():
 				var t_building := Time.get_ticks_usec()
 				var chunk_key: String = _building_batches_to_finalize[0]
@@ -4592,27 +4619,7 @@ func _process_road_queue() -> void:
 				_finalize_building_batches_for_chunk(chunk_key)
 				if Time.get_ticks_usec() - t_building > 100:
 					_record_perf("building_batch_finalize", Time.get_ticks_usec() - t_building)
-				return  # Один чанк за кадр
-
-			# Финализация tree batches (после building batches)
-			if not _tree_batches_to_finalize.is_empty():
-				var t_tree := Time.get_ticks_usec()
-				var chunk_key: String = _tree_batches_to_finalize[0]
-				_tree_batches_to_finalize.remove_at(0)
-				_finalize_tree_batches_for_chunk(chunk_key)
-				if Time.get_ticks_usec() - t_tree > 100:
-					_record_perf("tree_batch_finalize", Time.get_ticks_usec() - t_tree)
-				return  # Один чанк за кадр
-
-			# Финализация lamp batches (после tree batches)
-			if not _lamp_batches_to_finalize.is_empty():
-				var t_lamp := Time.get_ticks_usec()
-				var chunk_key: String = _lamp_batches_to_finalize[0]
-				_lamp_batches_to_finalize.remove_at(0)
-				_finalize_lamp_batches_for_chunk(chunk_key)
-				if Time.get_ticks_usec() - t_lamp > 100:
-					_record_perf("lamp_batch_finalize", Time.get_ticks_usec() - t_lamp)
-				return  # Один чанк за кадр
+				return
 
 		# Когда все дороги созданы, обрабатываем бордюры
 		_process_curb_queue()
@@ -5257,7 +5264,8 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	wall_mesh_instance.mesh = wall_mesh
 
 	# Shadow LOD: только близкие здания отбрасывают тени (< 150m)
-	var distance: float = INF
+	# Default to 0.0 (shadows ON) when car unknown - safer for visual quality
+	var distance: float = 0.0
 	if _car:
 		var center := _get_polygon_center(points)
 		var building_pos_3d := Vector3(center.x, base_elev, center.y)
@@ -5315,7 +5323,12 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 
 		var roof_mesh_instance := MeshInstance3D.new()
 		roof_mesh_instance.mesh = roof_mesh
-		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+		# Shadow LOD for roof (same distance check as walls)
+		if distance < _building_shadow_lod_distance:
+			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		else:
+			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 		# Материал крыши с текстурой
 		var roof_material := StandardMaterial3D.new()
