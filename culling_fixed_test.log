@@ -1,0 +1,2553 @@
+WorkerThreadPool: 10 threads, 3 max low-priority.
+Godot Engine v4.5.1.stable.official.f62fdbde1 - https://godotengine.org
+TextServer: Added interface "Dummy"
+TextServer: Added interface "ICU / HarfBuzz / Graphite (Built-in)"
+Unrecognized output string "misc2" in mapping:
+030000007e0500006920000001010000,Nintendo Switch 2 Pro Controller,a:b0,b:b1,back:b14,dpdown:b8,dpleft:b10,dpright:b9,dpup:b11,guide:b16,leftshoulder:b12,leftstick:b15,lefttrigger:b13,leftx:a0,lefty:a1~,misc1:b17,misc2:b20,paddle1:b18,paddle2:b19,rightshoulder:b4,rightstick:b7,righttrigger:b5,rightx:a2,righty:a3~,start:b6,x:b2,y:b3,platform:Mac OS X,
+SDL: Init OK!
+[mvk-info] MoltenVK version 1.2.9, supporting Vulkan version 1.2.283.
+	The following 110 Vulkan extensions are supported:
+		VK_KHR_16bit_storage v1
+		VK_KHR_8bit_storage v1
+		VK_KHR_bind_memory2 v1
+		VK_KHR_buffer_device_address v1
+		VK_KHR_calibrated_timestamps v1
+		VK_KHR_copy_commands2 v1
+		VK_KHR_create_renderpass2 v1
+		VK_KHR_dedicated_allocation v3
+		VK_KHR_deferred_host_operations v4
+		VK_KHR_depth_stencil_resolve v1
+		VK_KHR_descriptor_update_template v1
+		VK_KHR_device_group v4
+		VK_KHR_device_group_creation v1
+		VK_KHR_driver_properties v1
+		VK_KHR_dynamic_rendering v1
+		VK_KHR_external_fence v1
+		VK_KHR_external_fence_capabilities v1
+		VK_KHR_external_memory v1
+		VK_KHR_external_memory_capabilities v1
+		VK_KHR_external_semaphore v1
+		VK_KHR_external_semaphore_capabilities v1
+		VK_KHR_fragment_shader_barycentric v1
+		VK_KHR_format_feature_flags2 v2
+		VK_KHR_get_memory_requirements2 v1
+		VK_KHR_get_physical_device_properties2 v2
+		VK_KHR_get_surface_capabilities2 v1
+		VK_KHR_imageless_framebuffer v1
+		VK_KHR_image_format_list v1
+		VK_KHR_incremental_present v2
+		VK_KHR_maintenance1 v2
+		VK_KHR_maintenance2 v1
+		VK_KHR_maintenance3 v1
+		VK_KHR_map_memory2 v1
+		VK_KHR_multiview v1
+		VK_KHR_portability_subset v1
+		VK_KHR_push_descriptor v2
+		VK_KHR_relaxed_block_layout v1
+		VK_KHR_sampler_mirror_clamp_to_edge v3
+		VK_KHR_sampler_ycbcr_conversion v14
+		VK_KHR_separate_depth_stencil_layouts v1
+		VK_KHR_shader_draw_parameters v1
+		VK_KHR_shader_float_controls v4
+		VK_KHR_shader_float16_int8 v1
+		VK_KHR_shader_integer_dot_product v1
+		VK_KHR_shader_non_semantic_info v1
+		VK_KHR_shader_subgroup_extended_types v1
+		VK_KHR_spirv_1_4 v1
+		VK_KHR_storage_buffer_storage_class v1
+		VK_KHR_surface v25
+		VK_KHR_swapchain v70
+		VK_KHR_swapchain_mutable_format v1
+		VK_KHR_synchronization2 v1
+		VK_KHR_timeline_semaphore v2
+		VK_KHR_uniform_buffer_standard_layout v1
+		VK_KHR_variable_pointers v1
+		VK_KHR_vertex_attribute_divisor v1
+		VK_EXT_4444_formats v1
+		VK_EXT_buffer_device_address v2
+		VK_EXT_calibrated_timestamps v2
+		VK_EXT_debug_marker v4
+		VK_EXT_debug_report v10
+		VK_EXT_debug_utils v2
+		VK_EXT_descriptor_indexing v2
+		VK_EXT_extended_dynamic_state v1
+		VK_EXT_extended_dynamic_state2 v1
+		VK_EXT_extended_dynamic_state3 v2
+		VK_EXT_external_memory_host v1
+		VK_EXT_fragment_shader_interlock v1
+		VK_EXT_hdr_metadata v2
+		VK_EXT_headless_surface v1
+		VK_EXT_host_image_copy v1
+		VK_EXT_host_query_reset v1
+		VK_EXT_image_robustness v1
+		VK_EXT_inline_uniform_block v1
+		VK_EXT_layer_settings v2
+		VK_EXT_memory_budget v1
+		VK_EXT_metal_objects v2
+		VK_EXT_metal_surface v1
+		VK_EXT_pipeline_creation_cache_control v3
+		VK_EXT_pipeline_creation_feedback v1
+		VK_EXT_post_depth_coverage v1
+		VK_EXT_private_data v1
+		VK_EXT_robustness2 v1
+		VK_EXT_sample_locations v1
+		VK_EXT_scalar_block_layout v1
+		VK_EXT_separate_stencil_usage v1
+		VK_EXT_shader_atomic_float v1
+		VK_EXT_shader_demote_to_helper_invocation v1
+		VK_EXT_shader_stencil_export v1
+		VK_EXT_shader_subgroup_ballot v1
+		VK_EXT_shader_subgroup_vote v1
+		VK_EXT_shader_viewport_index_layer v1
+		VK_EXT_subgroup_size_control v2
+		VK_EXT_surface_maintenance1 v1
+		VK_EXT_swapchain_colorspace v4
+		VK_EXT_swapchain_maintenance1 v1
+		VK_EXT_texel_buffer_alignment v1
+		VK_EXT_texture_compression_astc_hdr v1
+		VK_EXT_vertex_attribute_divisor v3
+		VK_AMD_gpu_shader_half_float v2
+		VK_AMD_negative_viewport_height v1
+		VK_AMD_shader_image_load_store_lod v1
+		VK_AMD_shader_trinary_minmax v1
+		VK_IMG_format_pvrtc v1
+		VK_INTEL_shader_integer_functions2 v1
+		VK_GOOGLE_display_timing v1
+		VK_MVK_macos_surface v3
+		VK_MVK_moltenvk v37
+		VK_NV_fragment_shader_barycentric v1
+		VK_NV_glsl_shader v1
+[mvk-info] GPU device:
+		model: Apple M1 Pro
+		type: Integrated
+		vendorID: 0x106b
+		deviceID: 0xf0103ef
+		pipelineCacheUUID: BF097EDC-0F01-03EF-0000-000000000000
+		GPU memory available: 21845 MB
+		GPU memory used: 0 MB
+	supports the following Metal Versions, GPU's and Feature Sets:
+		Metal Shading Language 3.1
+		GPU Family Apple 7
+		GPU Family Apple 6
+		GPU Family Apple 5
+		GPU Family Apple 4
+		GPU Family Apple 3
+		GPU Family Apple 2
+		GPU Family Apple 1
+		GPU Family Mac 2
+		GPU Family Mac 1
+		GPU Family Common 3
+		GPU Family Common 2
+		GPU Family Common 1
+		macOS GPU Family 2 v1
+		macOS GPU Family 1 v4
+		macOS GPU Family 1 v3
+		macOS GPU Family 1 v2
+		macOS GPU Family 1 v1
+[mvk-info] Created VkInstance for Vulkan version 1.2.0, as requested by app, with the following 4 Vulkan extensions enabled:
+		VK_KHR_get_physical_device_properties2 v2
+		VK_KHR_surface v25
+		VK_EXT_debug_utils v2
+		VK_EXT_metal_surface v1
+Devices:
+  #0: Apple Apple M1 Pro - Supported, Integrated
+Optional extension VK_KHR_fragment_shading_rate not found
+Optional extension VK_EXT_fragment_density_map not found
+Optional extension VK_EXT_astc_decode_mode not found
+Optional extension VK_KHR_vulkan_memory_model not found
+Optional extension VK_KHR_external_memory_fd not found
+Optional extension VK_EXT_device_fault not found
+- Vulkan Variable Rate Shading not supported
+- Vulkan Fragment Density Map not supported
+- Vulkan multiview supported:
+  max view count: 32
+  max instances: 134217727
+- Vulkan subgroup:
+  size: 32
+  min size: 32
+  max size: 32
+  stages: STAGE_TESSELLATION_CONTROL, STAGE_FRAGMENT, STAGE_COMPUTE
+  supported ops: FEATURE_BASIC, FEATURE_VOTE, FEATURE_ARITHMETIC, FEATURE_BALLOT, FEATURE_SHUFFLE, FEATURE_SHUFFLE_RELATIVE, FEATURE_QUAD
+  quad operations in all stages
+[mvk-info] Vulkan semaphores using Metal implicit guarantees within a single queue.
+[mvk-info] Created VkDevice to run on GPU Apple M1 Pro with the following 13 Vulkan extensions enabled:
+		VK_KHR_16bit_storage v1
+		VK_KHR_buffer_device_address v1
+		VK_KHR_create_renderpass2 v1
+		VK_KHR_image_format_list v1
+		VK_KHR_maintenance2 v1
+		VK_KHR_multiview v1
+		VK_KHR_shader_float16_int8 v1
+		VK_KHR_storage_buffer_storage_class v1
+		VK_KHR_swapchain v70
+		VK_EXT_debug_marker v4
+		VK_EXT_pipeline_creation_cache_control v3
+		VK_EXT_subgroup_size_control v2
+		VK_EXT_texture_compression_astc_hdr v1
+Vulkan 1.2.283 - Forward+ - Using Device #0: Apple - Apple M1 Pro
+Startup PSO cache (41.1 MiB)
+Using "default" pen tablet driver...
+Creating VMA small objects pool for memory type index 0
+Shader 'CanvasSdfShaderRD' (group 0) SHA256: e3e36a196484fd7752bf3d5dca5d9ff7512a4e981b5f5f57e6f0a0fc50640721
+Loading cache for shader CanvasSdfShaderRD, variant 0
+Loading cache for shader CanvasSdfShaderRD, variant 1
+Loading cache for shader CanvasSdfShaderRD, variant 2
+Loading cache for shader CanvasSdfShaderRD, variant 3
+Loading cache for shader CanvasSdfShaderRD, variant 4
+Loading cache for shader CanvasSdfShaderRD, variant 5
+Shader 'SkeletonShaderRD' (group 0) SHA256: e0325885d3b45ea42d045525d1c732805f14a5a6cc4b6b67ce336626653e9573
+Loading cache for shader SkeletonShaderRD, variant 0
+Loading cache for shader SkeletonShaderRD, variant 1
+Shader 'SortShaderRD' (group 0) SHA256: ce9b4120b1d1a35c1bea19b12a6206dee2526af5e61fd4520555d6b447f15e34
+Loading cache for shader SortShaderRD, variant 0
+Loading cache for shader SortShaderRD, variant 1
+Loading cache for shader SortShaderRD, variant 2
+Shader 'ParticlesShaderRD' (group 0) SHA256: c77129ff51da9b8bd8037785c1a2afcdca1f25aa602d8d22c4973640d55305a4
+Loading cache for shader ParticlesShaderRD, variant 0
+Shader 'ParticlesCopyShaderRD' (group 0) SHA256: 76ee6b7648ff369a05e8340a639ce08c065370fd23e6d18634d522db1c3ac055
+Loading cache for shader ParticlesCopyShaderRD, variant 0
+Loading cache for shader ParticlesCopyShaderRD, variant 1
+Loading cache for shader ParticlesCopyShaderRD, variant 2
+Loading cache for shader ParticlesCopyShaderRD, variant 3
+Loading cache for shader ParticlesCopyShaderRD, variant 4
+Loading cache for shader ParticlesCopyShaderRD, variant 5
+Loading cache for shader ParticlesCopyShaderRD, variant 6
+Loading cache for shader ParticlesCopyShaderRD, variant 7
+Loading cache for shader ParticlesCopyShaderRD, variant 8
+Loading cache for shader ParticlesCopyShaderRD, variant 9
+Loading cache for shader ParticlesCopyShaderRD, variant 10
+Loading cache for shader ParticlesCopyShaderRD, variant 11
+Loading cache for shader ParticlesCopyShaderRD, variant 12
+Loading cache for shader ParticlesCopyShaderRD, variant 13
+Loading cache for shader ParticlesCopyShaderRD, variant 14
+Loading cache for shader ParticlesCopyShaderRD, variant 15
+Loading cache for shader ParticlesCopyShaderRD, variant 16
+Loading cache for shader ParticlesCopyShaderRD, variant 17
+Loading cache for shader ParticlesCopyShaderRD, variant 18
+Loading cache for shader ParticlesCopyShaderRD, variant 19
+Loading cache for shader ParticlesCopyShaderRD, variant 20
+Shader 'CanvasShaderRD' (group 0) SHA256: 8f73ea59600218c7f4a72f38f0a825d4b9edae392f00688807259ea2faf43974
+Loading cache for shader CanvasShaderRD, variant 0
+Loading cache for shader CanvasShaderRD, variant 1
+Loading cache for shader CanvasShaderRD, variant 2
+Loading cache for shader CanvasShaderRD, variant 3
+Loading cache for shader CanvasShaderRD, variant 4
+Loading cache for shader CanvasShaderRD, variant 5
+Shader 'CanvasOcclusionShaderRD' (group 0) SHA256: 2e1e40e085c85bd3960b7bad3be9bad88a3e02174708138d2eb3215933437ede
+Loading cache for shader CanvasOcclusionShaderRD, variant 0
+Loading cache for shader CanvasOcclusionShaderRD, variant 1
+Loading cache for shader CanvasOcclusionShaderRD, variant 2
+Loading cache for shader CanvasShaderRD, variant 0
+Loading cache for shader CanvasShaderRD, variant 1
+Loading cache for shader CanvasShaderRD, variant 2
+Loading cache for shader CanvasShaderRD, variant 3
+Loading cache for shader CanvasShaderRD, variant 4
+Loading cache for shader CanvasShaderRD, variant 5
+Loading cache for shader CanvasShaderRD, variant 0
+Loading cache for shader CanvasShaderRD, variant 1
+Loading cache for shader CanvasShaderRD, variant 2
+Loading cache for shader CanvasShaderRD, variant 3
+Loading cache for shader CanvasShaderRD, variant 4
+Loading cache for shader CanvasShaderRD, variant 5
+Shader 'ClusterRenderShaderRD' (group 0) SHA256: 5520632edde9dc7efc467666b1888d0f07fe10e4c2e113e68f1757bab97a847b
+Loading cache for shader ClusterRenderShaderRD, variant 2
+Loading cache for shader ClusterRenderShaderRD, variant 3
+Shader 'ClusterStoreShaderRD' (group 0) SHA256: 9ca626ebec243544ae7398e49713da5e69391ab29de1ced02b03e718a013c28f
+Loading cache for shader ClusterStoreShaderRD, variant 0
+Shader 'ClusterDebugShaderRD' (group 0) SHA256: 7253e84e6deaaf9cd1391aff49a754db31e162f9ecaf776485fde4bc31121aa6
+Loading cache for shader ClusterDebugShaderRD, variant 0
+Shader 'SceneForwardClusteredShaderRD' (group 0) SHA256: df8d1dbb6fb950c04bcc78fb1667a6eb52d604ac1f0317023833936c838ed75f
+Shader 'SceneForwardClusteredShaderRD' (group 1) SHA256: 6a184745fdc168cf1854f82e467b075c7754389099dd4260c7cfd820f974abb7
+Shader 'SceneForwardClusteredShaderRD' (group 2) SHA256: e54e15eb9546bd2ff28fdb8fc19e33bec138fb364a5418eb6d90e784252ee190
+Shader 'SceneForwardClusteredShaderRD' (group 3) SHA256: 210d14d006d21a3471e63300f334a93a8076f61ad1c3147dbd14466d95970249
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Shader 'BestFitNormalShaderRD' (group 0) SHA256: 8c748b5176971d04b037d61fe8ee9c0da50efc42fb21ff2f4fc11dbf138ac284
+Loading cache for shader BestFitNormalShaderRD, variant 0
+Shader 'IntegrateDfgShaderRD' (group 0) SHA256: 287328d7c084c243ad82ac05423c4a58662ea18582b5b369f3288be49e4a66d8
+Loading cache for shader IntegrateDfgShaderRD, variant 0
+Shader 'ResolveShaderRD' (group 0) SHA256: 5e0937d6a862fc03f2a42b11dd8fcc8ca9fa948bc51bc5504f3e3a92e954cc33
+Loading cache for shader ResolveShaderRD, variant 0
+Loading cache for shader ResolveShaderRD, variant 1
+Loading cache for shader ResolveShaderRD, variant 2
+Shader 'TaaResolveShaderRD' (group 0) SHA256: 8e863ed5b6e6cf5b67a722559308f90a5653d397bdedd8d8c2abe45a89893049
+Loading cache for shader TaaResolveShaderRD, variant 0
+Shader 'Fsr2DepthClipPassShaderRD' (group 0) SHA256: 4130c931008b9d81bce5757c91876fb1c64a992525002d1a9d24c756cdaeb55f
+Shader 'Fsr2ReconstructPreviousDepthPassShaderRD' (group 0) SHA256: 7ef7cdf239edd510c42b9e6ef2ca760f08ac92b57c6b2e5562cf430770b69d49
+Shader 'Fsr2LockPassShaderRD' (group 0) SHA256: 50c95f98dbda1ad902b8fac4668d32cbfc11a3e86b890460da50600750d6d636
+Shader 'Fsr2AccumulatePassShaderRD' (group 0) SHA256: acf7ce56f0f217fbe6fc54b42313d025af58be39a197ea6e6a9c10b1c03de903
+Shader 'Fsr2RcasPassShaderRD' (group 0) SHA256: 3f4d394a0080ce37da6dc5f05c36e082efc8f3a0a333428f23697d21a1e665cd
+Shader 'Fsr2ComputeLuminancePyramidPassShaderRD' (group 0) SHA256: 246789de2d6807e12325bb146b5b960cbec70a2119fe15f67d12c0a1d55213dd
+Shader 'Fsr2AutogenReactivePassShaderRD' (group 0) SHA256: ea81f3d2612452e92eebad3230c8885356cf352779194322ac0b390d949e0a9f
+Shader 'Fsr2TcrAutogenPassShaderRD' (group 0) SHA256: c6b965d8d141ea41ff88aa0df571ed29f4b8b5c974713f24b7fa44f23e3db020
+Shader 'SsEffectsDownsampleShaderRD' (group 0) SHA256: 47ce5b07a7399a4ea52ee0ba0ba0016f7c1b3429f72c2ef29b4382bf8f1d92e7
+Loading cache for shader SsEffectsDownsampleShaderRD, variant 0
+Loading cache for shader SsEffectsDownsampleShaderRD, variant 1
+Loading cache for shader SsEffectsDownsampleShaderRD, variant 2
+Loading cache for shader SsEffectsDownsampleShaderRD, variant 3
+Loading cache for shader SsEffectsDownsampleShaderRD, variant 4
+Loading cache for shader SsEffectsDownsampleShaderRD, variant 5
+Loading cache for shader SsEffectsDownsampleShaderRD, variant 6
+Shader 'SsilShaderRD' (group 0) SHA256: 335e8f9954286db1ee28430b2c9ef17fb01fb4bb8b74d688be9cec967dee41e6
+Loading cache for shader SsilShaderRD, variant 0
+Loading cache for shader SsilShaderRD, variant 1
+Loading cache for shader SsilShaderRD, variant 2
+Shader 'SsilImportanceMapShaderRD' (group 0) SHA256: 3d668b995f5f00c0cdb73fd8c13cd3bed37bf5f45c10621fcc2475eefd50a7bd
+Loading cache for shader SsilImportanceMapShaderRD, variant 0
+Loading cache for shader SsilImportanceMapShaderRD, variant 1
+Loading cache for shader SsilImportanceMapShaderRD, variant 2
+Shader 'SsilBlurShaderRD' (group 0) SHA256: 9d2d3e521c5d1601e636d8fc3e533a52362ad011112fde07a344fe3511cea943
+Loading cache for shader SsilBlurShaderRD, variant 0
+Loading cache for shader SsilBlurShaderRD, variant 1
+Loading cache for shader SsilBlurShaderRD, variant 2
+Shader 'SsilInterleaveShaderRD' (group 0) SHA256: 36d769d4532c446edf161d4b3d932557d4fad2904fda9c5f6861ae7fd162c9ee
+Loading cache for shader SsilInterleaveShaderRD, variant 0
+Loading cache for shader SsilInterleaveShaderRD, variant 1
+Loading cache for shader SsilInterleaveShaderRD, variant 2
+Shader 'SsaoShaderRD' (group 0) SHA256: 6831fded981ced729634af4cf4f5515538ff84cbb773c0d583873e29462e1080
+Loading cache for shader SsaoShaderRD, variant 0
+Loading cache for shader SsaoShaderRD, variant 1
+Loading cache for shader SsaoShaderRD, variant 2
+Shader 'SsaoImportanceMapShaderRD' (group 0) SHA256: fe84d24f104b577d6ae2183f611ddfa9ef6ba4834d972f00460c66aa67c6e788
+Loading cache for shader SsaoImportanceMapShaderRD, variant 0
+Loading cache for shader SsaoImportanceMapShaderRD, variant 1
+Loading cache for shader SsaoImportanceMapShaderRD, variant 2
+Shader 'SsaoBlurShaderRD' (group 0) SHA256: 4d3910b2d37af6bb5a68153677dd3f49c424b932871284ee1bb2e31936b31ca0
+Loading cache for shader SsaoBlurShaderRD, variant 0
+Loading cache for shader SsaoBlurShaderRD, variant 1
+Loading cache for shader SsaoBlurShaderRD, variant 2
+Shader 'SsaoInterleaveShaderRD' (group 0) SHA256: b804d0579b589636ca331298d9f8885e277e5fd8be1d20d4560044000a029a49
+Loading cache for shader SsaoInterleaveShaderRD, variant 0
+Loading cache for shader SsaoInterleaveShaderRD, variant 1
+Loading cache for shader SsaoInterleaveShaderRD, variant 2
+Shader 'ScreenSpaceReflectionScaleShaderRD' (group 0) SHA256: f028513910f44db288a6d0d7315df152a910214dd680426d7817a0db185bb512
+Loading cache for shader ScreenSpaceReflectionScaleShaderRD, variant 0
+Shader 'ScreenSpaceReflectionShaderRD' (group 0) SHA256: aa7798f702ec7502be62da736ef869c792a69bb4310d9a535e0b6596ad1c4c8f
+Loading cache for shader ScreenSpaceReflectionShaderRD, variant 0
+Loading cache for shader ScreenSpaceReflectionShaderRD, variant 1
+Shader 'ScreenSpaceReflectionFilterShaderRD' (group 0) SHA256: b8974626c582dd282d9ca1bd58b6ffeda45b41e5b160baa199088657ad7eca95
+Loading cache for shader ScreenSpaceReflectionFilterShaderRD, variant 0
+Loading cache for shader ScreenSpaceReflectionFilterShaderRD, variant 1
+Shader 'SubsurfaceScatteringShaderRD' (group 0) SHA256: cfc79a4166aa45746b6bfa4b2a3345978e68ace79a0a82ab13fdda9f32a7a0b0
+Loading cache for shader SubsurfaceScatteringShaderRD, variant 0
+Loading cache for shader SubsurfaceScatteringShaderRD, variant 1
+Loading cache for shader SubsurfaceScatteringShaderRD, variant 2
+Shader 'SkyShaderRD' (group 0) SHA256: 9c26bd5dc001c975a8ec36520d74f1e5aa9d8125c8172a160acf52f8ebf362f3
+Loading cache for shader SkyShaderRD, variant 0
+Loading cache for shader SkyShaderRD, variant 1
+Loading cache for shader SkyShaderRD, variant 2
+Loading cache for shader SkyShaderRD, variant 3
+Loading cache for shader SkyShaderRD, variant 4
+Loading cache for shader SkyShaderRD, variant 5
+Loading cache for shader SkyShaderRD, variant 0
+Loading cache for shader SkyShaderRD, variant 1
+Loading cache for shader SkyShaderRD, variant 2
+Loading cache for shader SkyShaderRD, variant 3
+Loading cache for shader SkyShaderRD, variant 4
+Loading cache for shader SkyShaderRD, variant 5
+Shader 'VoxelGiShaderRD' (group 0) SHA256: 3d7b0b0258a2977a47dc0a84db7cb49a5e1bfaa74053e42ffae7d3e87d48965f
+Loading cache for shader VoxelGiShaderRD, variant 0
+Loading cache for shader VoxelGiShaderRD, variant 1
+Loading cache for shader VoxelGiShaderRD, variant 2
+Loading cache for shader VoxelGiShaderRD, variant 3
+Loading cache for shader VoxelGiShaderRD, variant 4
+Loading cache for shader VoxelGiShaderRD, variant 5
+Loading cache for shader VoxelGiShaderRD, variant 6
+Loading cache for shader VoxelGiShaderRD, variant 7
+Shader 'VoxelGiDebugShaderRD' (group 0) SHA256: 49ee1e463ded1be1341dc6ee222f492cd9f8484aabe4cf39ca46f519abecbb6c
+Loading cache for shader VoxelGiDebugShaderRD, variant 0
+Loading cache for shader VoxelGiDebugShaderRD, variant 1
+Loading cache for shader VoxelGiDebugShaderRD, variant 2
+Loading cache for shader VoxelGiDebugShaderRD, variant 3
+Shader 'SdfgiPreprocessShaderRD' (group 0) SHA256: 60c77a38319fd7cc123270bcc0dfbdddd8f74e985d1907c08c726e3d4dbf7b06
+Loading cache for shader SdfgiPreprocessShaderRD, variant 0
+Loading cache for shader SdfgiPreprocessShaderRD, variant 1
+Loading cache for shader SdfgiPreprocessShaderRD, variant 2
+Loading cache for shader SdfgiPreprocessShaderRD, variant 3
+Loading cache for shader SdfgiPreprocessShaderRD, variant 4
+Loading cache for shader SdfgiPreprocessShaderRD, variant 5
+Loading cache for shader SdfgiPreprocessShaderRD, variant 6
+Loading cache for shader SdfgiPreprocessShaderRD, variant 7
+Loading cache for shader SdfgiPreprocessShaderRD, variant 8
+Shader 'SdfgiDirectLightShaderRD' (group 0) SHA256: a3474a0b60ebab5bb7010596e49cfb91bbfc3689c4df741b809ddc92e1fa90e9
+Loading cache for shader SdfgiDirectLightShaderRD, variant 0
+Loading cache for shader SdfgiDirectLightShaderRD, variant 1
+Shader 'SdfgiIntegrateShaderRD' (group 0) SHA256: 62e2ae895bf90996b40c48aeab6a59c24d27c6c843ef9ee94adf3f6de80b26ac
+Loading cache for shader SdfgiIntegrateShaderRD, variant 0
+Loading cache for shader SdfgiIntegrateShaderRD, variant 1
+Loading cache for shader SdfgiIntegrateShaderRD, variant 2
+Loading cache for shader SdfgiIntegrateShaderRD, variant 3
+Shader 'GiShaderRD' (group 0) SHA256: e4e3882307beba471cbf1d2ebf8ca49fedccbba528ef384e7d1e2461d14a71f0
+Shader 'GiShaderRD' (group 1) SHA256: 69ca96412569cbef4a05e515b55b5744ab10048a32a6d2fef2a7c2ad984c9155
+Loading cache for shader GiShaderRD, variant 0
+Loading cache for shader GiShaderRD, variant 1
+Loading cache for shader GiShaderRD, variant 2
+Loading cache for shader GiShaderRD, variant 3
+Loading cache for shader GiShaderRD, variant 4
+Shader 'SdfgiDebugShaderRD' (group 0) SHA256: 6de37bb5aa871af3d348d47b0cbfc09f6873bf5a2500f0cf9280e404ff4ce97b
+Loading cache for shader SdfgiDebugShaderRD, variant 0
+Shader 'SdfgiDebugProbesShaderRD' (group 0) SHA256: c25d7a81827da688487a69637d3e61ae9f31c125940f4fbf05b6de4a2c1e78a9
+Loading cache for shader SdfgiDebugProbesShaderRD, variant 0
+Loading cache for shader SdfgiDebugProbesShaderRD, variant 1
+Loading cache for shader SdfgiDebugProbesShaderRD, variant 2
+Loading cache for shader SdfgiDebugProbesShaderRD, variant 3
+Shader 'VolumetricFogShaderRD' (group 0) SHA256: 6120947dc0a3cd4bff5b217e63490686b128f0319aabd6f96d597268f68d60e3
+Shader 'VolumetricFogShaderRD' (group 1) SHA256: f44655a2103d6cb3b1d0a206e66c4427aca3de3b5de59f72bf7e08db5144f83c
+Shader 'VolumetricFogShaderRD' (group 2) SHA256: 963b90021bd602c144aa8f80b75ecdf64c2abe48940f55cf2f25f2deda808186
+Shader 'VolumetricFogShaderRD' (group 3) SHA256: 5929600387c20b3c1eead45ba7f6c87fde922e0e4f78f80366f58cdfb10e63f7
+Loading cache for shader VolumetricFogShaderRD, variant 0
+Shader 'VolumetricFogProcessShaderRD' (group 0) SHA256: 2749f17fe5049db6df987d401e0fb5a52692635224ca129e06c3d6e15dd2dc29
+Shader 'VolumetricFogProcessShaderRD' (group 1) SHA256: 8333ba62fcdf5c0ffe915641fe9faa88286844b2bb245d94b41eb48eca8e881d
+Shader 'VolumetricFogProcessShaderRD' (group 2) SHA256: 6b05211651f14a1593c8b3be3b5932c64a3beba37ce1e1649b4ea67ac36d3c47
+Shader 'VolumetricFogProcessShaderRD' (group 3) SHA256: 14fbd4a37cc30a2991dbfa525da8e6182def041c1eeaa20638fb2597e98f3c52
+Loading cache for shader VolumetricFogProcessShaderRD, variant 0
+Loading cache for shader VolumetricFogProcessShaderRD, variant 1
+Loading cache for shader VolumetricFogProcessShaderRD, variant 2
+Loading cache for shader VolumetricFogProcessShaderRD, variant 3
+Loading cache for shader VolumetricFogProcessShaderRD, variant 4
+Shader 'BokehDofShaderRD' (group 0) SHA256: 5a14c722b7cad6a5d1853b764825b687b8e8c26d08a7edef6f50a28c2a237b9c
+Loading cache for shader BokehDofShaderRD, variant 0
+Loading cache for shader BokehDofShaderRD, variant 1
+Loading cache for shader BokehDofShaderRD, variant 3
+Loading cache for shader BokehDofShaderRD, variant 5
+Loading cache for shader BokehDofShaderRD, variant 6
+Shader 'CopyShaderRD' (group 0) SHA256: 363226e4e754f4dd97b1000777a12a1e717a0202ef34a8bb5cbbee343880d1a3
+Loading cache for shader CopyShaderRD, variant 0
+Loading cache for shader CopyShaderRD, variant 1
+Loading cache for shader CopyShaderRD, variant 2
+Loading cache for shader CopyShaderRD, variant 3
+Loading cache for shader CopyShaderRD, variant 4
+Loading cache for shader CopyShaderRD, variant 5
+Loading cache for shader CopyShaderRD, variant 6
+Loading cache for shader CopyShaderRD, variant 7
+Loading cache for shader CopyShaderRD, variant 8
+Loading cache for shader CopyShaderRD, variant 9
+Loading cache for shader CopyShaderRD, variant 10
+Loading cache for shader CopyShaderRD, variant 11
+Loading cache for shader CopyShaderRD, variant 12
+Shader 'CopyToFbShaderRD' (group 0) SHA256: 0adebb67e6205ddab89bef68d0541718044b8408d301ef90fcc572ab1f1dc3c1
+Loading cache for shader CopyToFbShaderRD, variant 0
+Loading cache for shader CopyToFbShaderRD, variant 1
+Loading cache for shader CopyToFbShaderRD, variant 2
+Loading cache for shader CopyToFbShaderRD, variant 3
+Shader 'CubeToDpShaderRD' (group 0) SHA256: f3ba78a7ce282686c1bace415c6d4852f8b5df07fd90aff0139030354b9c53e6
+Loading cache for shader CubeToDpShaderRD, variant 0
+Shader 'CubemapDownsamplerShaderRD' (group 0) SHA256: 831be8c39044041b2e1da3b55ee6c2d5d5242c0c11326369eda23b7ae42ee04c
+Loading cache for shader CubemapDownsamplerShaderRD, variant 0
+Shader 'CubemapFilterShaderRD' (group 0) SHA256: 73d1b21cf27dc843bbcc28dc35d902623419ae7f0c17dba1d9c725d82959f576
+Loading cache for shader CubemapFilterShaderRD, variant 0
+Loading cache for shader CubemapFilterShaderRD, variant 1
+Loading cache for shader CubemapFilterShaderRD, variant 2
+Loading cache for shader CubemapFilterShaderRD, variant 3
+Shader 'CubemapRoughnessShaderRD' (group 0) SHA256: bb92ea060a11d89f9121ad84bf077cdf954f39a59c3cc78038611f19f3d94533
+Loading cache for shader CubemapRoughnessShaderRD, variant 0
+Shader 'SpecularMergeShaderRD' (group 0) SHA256: 99444119f03d2c92d5ab325e0fa261255c819d4cb4b019c0eaa369b2d0383a8f
+Loading cache for shader SpecularMergeShaderRD, variant 0
+Loading cache for shader SpecularMergeShaderRD, variant 1
+Loading cache for shader SpecularMergeShaderRD, variant 2
+Loading cache for shader SpecularMergeShaderRD, variant 3
+Shader 'ShadowFrustumShaderRD' (group 0) SHA256: 851c9007fbee11476e65c3cbb595c7113c7e98676c38d49b88056bdb1eb5904b
+Loading cache for shader ShadowFrustumShaderRD, variant 0
+Shader 'MotionVectorsShaderRD' (group 0) SHA256: e9ac9ae0667a399f458196d55204937c545356cd64ba755844d9c9943cffdc55
+Loading cache for shader MotionVectorsShaderRD, variant 0
+Shader 'LuminanceReduceShaderRD' (group 0) SHA256: 62fd065f2a03f76e82ff0efdd729b029811828e67b3dc62b0dd4c1b2a8eb2c23
+Loading cache for shader LuminanceReduceShaderRD, variant 0
+Loading cache for shader LuminanceReduceShaderRD, variant 1
+Loading cache for shader LuminanceReduceShaderRD, variant 2
+Shader 'SmaaEdgeDetectionShaderRD' (group 0) SHA256: e4c623cbbd80f252ca1afe76f478a818c89eb124cff6ca285865b0ba733f1f07
+Loading cache for shader SmaaEdgeDetectionShaderRD, variant 0
+Shader 'SmaaWeightCalculationShaderRD' (group 0) SHA256: 604beebafad6f83aaaead58113c3a3e5b0ed7a7c5605fd197dd952e3821b5878
+Loading cache for shader SmaaWeightCalculationShaderRD, variant 0
+Shader 'SmaaBlendingShaderRD' (group 0) SHA256: 9f3b4dcf01e8d340348bba93235fb3c9c13964b1e1bd23e7d59891cc9748a71c
+Loading cache for shader SmaaBlendingShaderRD, variant 0
+Shader 'TonemapShaderRD' (group 0) SHA256: 06d49e3e1e33f4e3f9069e4df65b734ffc54e7ad36b2b03be9c40766a30f7576
+Loading cache for shader TonemapShaderRD, variant 0
+Loading cache for shader TonemapShaderRD, variant 1
+Loading cache for shader TonemapShaderRD, variant 2
+Loading cache for shader TonemapShaderRD, variant 3
+Loading cache for shader TonemapShaderRD, variant 4
+Loading cache for shader TonemapShaderRD, variant 5
+Shader 'FsrUpscaleShaderRD' (group 0) SHA256: 0715ca028e84f0a9b6f91a4ac308d37a5c185438f466e254fac8b7377dc10759
+Loading cache for shader FsrUpscaleShaderRD, variant 0
+Loading cache for shader FsrUpscaleShaderRD, variant 1
+Shader 'BlitShaderRD' (group 0) SHA256: 25c59c709fcd7c8e69780f3edeaebc055b68c06b660c69bb43d8246614325591
+Loading cache for shader BlitShaderRD, variant 0
+Loading cache for shader BlitShaderRD, variant 1
+Loading cache for shader BlitShaderRD, variant 2
+Loading cache for shader BlitShaderRD, variant 3
+CoreAudio: detected 2 channels
+CoreAudio: output sampling rate: 48000 Hz
+CoreAudio: output audio buffer frames: 512 calculated latency: 10ms
+
+[mvk-info] Created 3 swapchain images with size (3024, 1890) and contents scale 2.0 in layer CAMetalLayer: GodotContentView (0x7fa2ac72d4e0) on screen Built-in Retina Display.
+TextServer: Primary interface set to: "ICU / HarfBuzz / Graphite (Built-in)".
+Loading resource: res://audio/default_bus_layout.tres
+CORE API HASH: 937899573
+EDITOR API HASH: 1777164193
+SceneTreeFTI: traversal method DEFAULT
+Loading resource: res://audio/music_manager.gd
+Loading resource: res://race/race_state.gd
+Loaded system CA certificates
+Loading resource: res://tests/performance_test_detailed.tscn
+Loading resource: res://addons/gevp/scenes/nexia_car.tscn
+Loading resource: res://addons/gevp/scripts/vehicle.gd
+Loading resource: res://car/models/nexia/scene.gltf
+Loading resource: res://.godot/imported/scene.gltf-da3723215ad592219a17a8e3f5ec4079.scn
+Loading resource: res://car/models/nexia/textures/Black_leather_baseColor.jpeg
+Loading resource: res://.godot/imported/Black_leather_baseColor.jpeg-27dd6f30fef7f3a67c1452b21a139442.s3tc.ctex
+Loading resource: res://car/models/nexia/textures/Black_leather_normal.png
+Loading resource: res://.godot/imported/Black_leather_normal.png-645df4b6ce11f1f4aba9288d250b742d.s3tc.ctex
+Loading resource: res://car/models/nexia/textures/Black_Opaque__Glass_baseColor.png
+Loading resource: res://.godot/imported/Black_Opaque__Glass_baseColor.png-8658f51f68c57f44cb0f6d55f3c25917.s3tc.ctex
+Loading resource: res://car/models/nexia/textures/Black_Opaque__Glass_emissive.jpeg
+Loading resource: res://.godot/imported/Black_Opaque__Glass_emissive.jpeg-c45eddde3afb26a113f3ebe2e1d65d70.s3tc.ctex
+Loading resource: res://car/models/nexia/textures/Black_Opaque__Glass_normal.png
+Loading resource: res://.godot/imported/Black_Opaque__Glass_normal.png-483320fc9a3689ffc546bb08f7e8d3e6.s3tc.ctex
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading resource: res://car/nexia_setup.gd
+Loading resource: res://addons/gevp/scripts/wheel_visibility.gd
+Loading resource: res://addons/gevp/scripts/vehicle_input.gd
+Loading resource: res://addons/gevp/scripts/engine_sound.gd
+Loading resource: res://addons/gevp/scripts/tire_squeal_sound.gd
+Loading resource: res://addons/gevp/sounds/4000.wav
+Loading resource: res://.godot/imported/4000.wav-5b7af0defc40e9d8fb80f07cca8d9fcd.sample
+Loading resource: res://addons/gevp/sounds/tire_squeal.wav
+Loading resource: res://.godot/imported/tire_squeal.wav-c8a8ffb33767ae9357a23caee4b04892.sample
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading resource: res://tests/performance_test_detailed.gd
+Loading resource: res://camera/follow_camera.gd
+Loading resource: res://osm/osm_terrain_generator.gd
+SCRIPT ERROR: Parse Error: Variable "_camera" has the same name as a previously declared variable.
+          at: GDScript::reload (res://osm/osm_terrain_generator.gd:102)
+ERROR: Failed to load script "res://osm/osm_terrain_generator.gd" with error "Parse error".
+   at: load (modules/gdscript/gdscript.cpp:3041)
+Loading resource: res://traffic/traffic_manager.gd
+Loading resource: res://traffic/npc_car.tscn
+Loading resource: res://traffic/npc_car.gd
+Loading resource: res://traffic/npc_paz.tscn
+Loading resource: res://car/models/paz_32053/scene.gltf
+Loading resource: res://.godot/imported/scene.gltf-e2ef1de0e6e96c2fdc37a92edd0871d3.scn
+Loading resource: res://car/models/paz_32053/textures/Material.006_baseColor.png
+Loading resource: res://.godot/imported/Material.006_baseColor.png-cfb6d2383ff6937aac0fe6a6e3e13a87.s3tc.ctex
+Loading resource: res://car/models/paz_32053/textures/Material.006_metallicRoughness.png
+Loading resource: res://.godot/imported/Material.006_metallicRoughness.png-b65e4d33e5f2d1bdd59486b591a744e1.s3tc.ctex
+Loading resource: res://car/models/paz_32053/textures/Material.006_normal.png
+Loading resource: res://.godot/imported/Material.006_normal.png-d1ec12af03a9dc62e01eb28b35da9f97.s3tc.ctex
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading resource: res://car/paz_setup.gd
+Loading resource: res://traffic/npc_lada_2109.tscn
+WARNING: res://traffic/npc_lada_2109.tscn:4 - ext_resource, invalid UID: uid://bvnqxj3m4y5oa - using text path instead: res://car/models/lada_2109_dps/scene.gltf
+     at: load (scene/resources/resource_format_text.cpp:444)
+Loading resource: res://car/models/lada_2109_dps/scene.gltf
+Loading resource: res://.godot/imported/scene.gltf-f24f699731375136b32f89ade3a8eddc.scn
+Loading resource: res://car/models/lada_2109_dps/textures/Flashlight_lambert_baseColor.png
+Loading resource: res://.godot/imported/Flashlight_lambert_baseColor.png-b355e794557fe548f6fa216b11a43455.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/Flashlight_lambert_metallicRoughness.png
+Loading resource: res://.godot/imported/Flashlight_lambert_metallicRoughness.png-b6f98fc79bf4819e1df6cfc74708587a.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/Flashlight_lambert_normal.png
+Loading resource: res://.godot/imported/Flashlight_lambert_normal.png-769f16b6d1cab547b5b4600e43f7af03.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/Cleaner_lambert_baseColor.png
+Loading resource: res://.godot/imported/Cleaner_lambert_baseColor.png-bb2ae7fcd466234fc794558247c635b5.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/Mirror_lambert_baseColor.png
+Loading resource: res://.godot/imported/Mirror_lambert_baseColor.png-5112edd329aff07d78e1ab96052b3e78.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/Mirror_lambert_metallicRoughness.png
+Loading resource: res://.godot/imported/Mirror_lambert_metallicRoughness.png-bbcd66006f159de42aba40ee24912bbc.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/Mirror_lambert_normal.png
+Loading resource: res://.godot/imported/Mirror_lambert_normal.png-58a0ac522a99e7fae172c676b4a29831.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/taxycap_lambert_baseColor.png
+Loading resource: res://.godot/imported/taxycap_lambert_baseColor.png-80673c8306ea25f20d6161d594f81adc.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/taxycap_lambert_metallicRoughness.png
+Loading resource: res://.godot/imported/taxycap_lambert_metallicRoughness.png-e537f5ae30215425bae2808fc2b3b833.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/taxycap_lambert_normal.png
+Loading resource: res://.godot/imported/taxycap_lambert_normal.png-a8eec270eb4e388f2bd7ac1cc98f65b7.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/Whells3_lambert_baseColor.png
+Loading resource: res://.godot/imported/Whells3_lambert_baseColor.png-534e942fd1713c61b1afb676d297402d.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/Whells3_lambert_metallicRoughness.png
+Loading resource: res://.godot/imported/Whells3_lambert_metallicRoughness.png-53a41be61f57b913febcf41fdd10c606.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/Whells1_lambert_metallicRoughness.png
+Loading resource: res://.godot/imported/Whells1_lambert_metallicRoughness.png-6b7c4747eed5d5f4d04e1d581b984c48.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/CarBody_lambert_baseColor.png
+Loading resource: res://.godot/imported/CarBody_lambert_baseColor.png-f4491e448971bed28d689a53e30c796d.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/CarBody_lambert_metallicRoughness.png
+Loading resource: res://.godot/imported/CarBody_lambert_metallicRoughness.png-e54ab5111cd11d73f9bb0c07746ae0d0.s3tc.ctex
+Loading resource: res://car/models/lada_2109_dps/textures/CarBody_lambert_normal.png
+Loading resource: res://.godot/imported/CarBody_lambert_normal.png-b5c3687dea7001e21bf71938599ff44a.s3tc.ctex
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading resource: res://car/lada_2109_setup.gd
+Loading resource: res://traffic/npc_taxi.tscn
+WARNING: res://traffic/npc_taxi.tscn:4 - ext_resource, invalid UID: uid://taxi_model - using text path instead: res://car/models/lada_2109_taxi/scene.gltf
+     at: load (scene/resources/resource_format_text.cpp:444)
+Loading resource: res://car/models/lada_2109_taxi/scene.gltf
+Loading resource: res://.godot/imported/scene.gltf-b52ab687efc1f0120251ce55fdab14dd.scn
+Loading resource: res://car/models/lada_2109_taxi/textures/Cleaner_lambert_baseColor.png
+Loading resource: res://.godot/imported/Cleaner_lambert_baseColor.png-bcf9981b53946007b4a8647d2cfcc91a.s3tc.ctex
+Loading resource: res://car/models/lada_2109_taxi/textures/Mirror_lambert_baseColor.png
+Loading resource: res://.godot/imported/Mirror_lambert_baseColor.png-427a768a217cd62a68b2ecded39220b3.s3tc.ctex
+Loading resource: res://car/models/lada_2109_taxi/textures/Mirror_lambert_metallicRoughness.png
+Loading resource: res://.godot/imported/Mirror_lambert_metallicRoughness.png-91c03a15ed7a5008d133f552f2119f55.s3tc.ctex
+Loading resource: res://car/models/lada_2109_taxi/textures/taxycap_lambert_baseColor.png
+Loading resource: res://.godot/imported/taxycap_lambert_baseColor.png-0bc8f32a9cd7551fd571d5415cd35c78.s3tc.ctex
+Loading resource: res://car/models/lada_2109_taxi/textures/taxycap_lambert_metallicRoughness.png
+Loading resource: res://.godot/imported/taxycap_lambert_metallicRoughness.png-a68effdd3bfc7b4fcef90951717e7a3d.s3tc.ctex
+Loading resource: res://car/models/lada_2109_taxi/textures/Whells3_lambert_baseColor.png
+Loading resource: res://.godot/imported/Whells3_lambert_baseColor.png-5d8885656e4f1d67fb2e2281623b52b2.s3tc.ctex
+Loading resource: res://car/models/lada_2109_taxi/textures/Whells2_lambert_metallicRoughness.png
+Loading resource: res://.godot/imported/Whells2_lambert_metallicRoughness.png-aaa6575caface87bf44297abb8c9b821.s3tc.ctex
+Loading resource: res://car/models/lada_2109_taxi/textures/Whells3_lambert_metallicRoughness.png
+Loading resource: res://.godot/imported/Whells3_lambert_metallicRoughness.png-a3ef1c1cc236839d0f7707a7d8869f9f.s3tc.ctex
+Loading resource: res://car/models/lada_2109_taxi/textures/VAZ2109_BASE_lambert_baseColor.png
+Loading resource: res://.godot/imported/VAZ2109_BASE_lambert_baseColor.png-bf15a1e211e98d1b58e2bab566b66185.s3tc.ctex
+Loading resource: res://car/models/lada_2109_taxi/textures/VAZ2109_BASE_lambert_metallicRoughness.png
+Loading resource: res://.godot/imported/VAZ2109_BASE_lambert_metallicRoughness.png-977fe43c5d7cc17bdc9b17cf06c70ef1.s3tc.ctex
+Loading resource: res://car/models/lada_2109_taxi/textures/VAZ2109_BASE_lambert_normal.png
+Loading resource: res://.godot/imported/VAZ2109_BASE_lambert_normal.png-cfeb2c0af6329849102c29c2e9bd8a65.s3tc.ctex
+Loading resource: res://traffic/npc_vaz_2107.tscn
+Loading resource: res://car/models/vaz_2107/scene.gltf
+Loading resource: res://.godot/imported/scene.gltf-d7b131791e86e600027f4f17262117df.scn
+Loading resource: res://car/models/vaz_2107/scene_0.png
+Loading resource: res://.godot/imported/scene_0.png-e25bcb14a0f0651912c08347d50bbdc8.s3tc.ctex
+Loading resource: res://car/models/vaz_2107/scene_1.png
+Loading resource: res://.godot/imported/scene_1.png-4c7a5d36203d9d437746c6449e41c734.s3tc.ctex
+Loading resource: res://car/models/vaz_2107/scene_2.png
+Loading resource: res://.godot/imported/scene_2.png-1981eda6296e0043ff00aad2572e0abb.s3tc.ctex
+Loading resource: res://car/models/vaz_2107/scene_3.png
+Loading resource: res://.godot/imported/scene_3.png-d38c00ebf4e93dae6de409b7897aca58.s3tc.ctex
+Loading resource: res://car/models/vaz_2107/scene_4.png
+Loading resource: res://.godot/imported/scene_4.png-b3bddbd8efa4d8603c141a84c096ee55.s3tc.ctex
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading resource: res://car/vaz_2107_setup.gd
+SCRIPT ERROR: Parse Error: Could not parse global class "OSMTerrainGenerator" from "res://osm/osm_terrain_generator.gd".
+          at: GDScript::reload (res://traffic/traffic_manager.gd:137)
+ERROR: Failed to load script "res://traffic/traffic_manager.gd" with error "Parse error".
+   at: load (modules/gdscript/gdscript.cpp:3041)
+Loading resource: res://night_mode/night_mode_manager.gd
+Loading resource: res://settings/graphics_settings.gd
+Loading resource: res://textures/ground_setup.gd
+Loading resource: res://tests/bottleneck_analyzer.gd
+Loading cache for shader SkyShaderRD, variant 0
+Loading cache for shader SkyShaderRD, variant 1
+Loading cache for shader SkyShaderRD, variant 2
+Loading cache for shader SkyShaderRD, variant 3
+Loading cache for shader SkyShaderRD, variant 4
+Loading cache for shader SkyShaderRD, variant 5
+ERROR: Error opening file 'res://icon.svg'.
+   at: load_image (core/io/image_loader.cpp:89)
+Loading resource: res://audio/music/petya_pavlov_ya_hochu_skorosti.ogg
+Loading resource: res://.godot/imported/petya_pavlov_ya_hochu_skorosti.ogg-1975faad5a524bfffff2345ac5d67add.oggvorbisstr
+MusicManager: Now playing track 0: Петя Павлов - Я хочу скорости
+
+========== Bottleneck Analyzer Started ==========
+Collecting performance data...
+=================================================
+
+Loading resource: res://tests/performance_logger.gd
+
+========== DETAILED PERFORMANCE TEST ==========
+Random seed: 12345 (fixed for reproducibility)
+Location: Cherepovets (59.1167, 37.9000)
+Duration: 90 seconds
+Spike threshold: 25.0 ms
+Tracking: Every spike > 25.0 ms
+Night mode: ENABLED
+==============================================
+
+2026-01-31 07:37:53.773 Godot[70188:2142516] +[IMKClient subclass]: chose IMKClient_Modern
+Nexia: Found mesh: body_Car Paint PL_0
+  -> Created override material for surface 0
+  -> Material: Car_Paint_PL (StandardMaterial3D)
+  -> Changed body color to cherry (glossy)
+Nexia: Found mesh: body_Car Paint PL_02
+  -> Created override material for surface 0
+  -> Material: Car_Paint_PL (StandardMaterial3D)
+  -> Changed body color to cherry (glossy)
+Nexia: Found mesh: body_Car Paint PL_03
+  -> Created override material for surface 0
+  -> Material: Car_Paint_PL (StandardMaterial3D)
+  -> Changed body color to cherry (glossy)
+Nexia: Found mesh: body_Black leather_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_Black leather_02
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_Black leather_03
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_Black Opaque  Glass_0
+  -> Created override material for surface 0
+  -> Material: Black_Opaque__Glass (StandardMaterial3D)
+  -> Changed glass to tinted (day mode)
+Nexia: Found mesh: body_mattemetal_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_orangeglass_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_chrome_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_chrome_02
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_chrome_03
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_chrome_04
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_redglass_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: body_AR3DMat Procedural Realistic Mirror_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_left_TireProcedural_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_left_rim_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_left_black_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_left_brakedisk_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_left_mattemetal_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_right_TireProcedural_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_right_rim_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_right_black_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_right_brakedisk_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_front_right_mattemetal_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_left_TireProcedural_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_left_black_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_left_brakedisk_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_left_rim_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_left_mattemetal_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_right_TireProcedural_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_right_black_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_right_brakedisk_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_right_rim_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found mesh: wheel_rear_right_mattemetal_0
+  -> Skipping (light/wheel/chrome/interior)
+Nexia: Found taillight mesh: body_redglass_0
+  -> Added taillight material
+  -> Created brake SpotLight at (-0.5, 0.9, 1.95)
+  -> Created brake SpotLight at (0.5, 0.9, 1.95)
+Nexia: Found front marker mesh: body_orangeglass_0
+  -> Added front marker material
+  -> Created headlight SpotLight at (-0.55, 0.75, -1.9)
+  -> Created headlight SpotLight at (0.55, 0.75, -1.9)
+  -> Created underglow with 16 lights
+Nexia model setup complete
+Loading cache for shader SkyShaderRD, variant 0
+Loading cache for shader SkyShaderRD, variant 1
+Loading cache for shader SkyShaderRD, variant 2
+Loading cache for shader SkyShaderRD, variant 3
+Loading cache for shader SkyShaderRD, variant 4
+Loading cache for shader SkyShaderRD, variant 5
+Loading cache for shader SkyShaderRD, variant 0
+Loading cache for shader SkyShaderRD, variant 1
+Loading cache for shader SkyShaderRD, variant 2
+Loading cache for shader SkyShaderRD, variant 3
+Loading cache for shader SkyShaderRD, variant 4
+Loading cache for shader SkyShaderRD, variant 5
+Loading cache for shader ParticlesShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+NightModeManager: Ready (day mode, no rain)
+GraphicsSettings: Found WorldEnvironment
+GraphicsSettings: Found Camera3D: Camera3D
+GraphicsSettings: Loading settings from file...
+GraphicsSettings: Settings loaded - FXAA: false, TAA: true, MSAA: 1
+GraphicsSettings: Applying initial settings...
+SSR: OFF
+Fog: ON
+Glow: ON
+SSAO: ON
+TAA: ON
+MSAA: 2X
+FXAA disabled on root viewport
+DOF: ON (far distance: 100m)
+GraphicsSettings: Ready
+[Systems Found]
+  OSMTerrain: NO
+  TrafficManager: NO
+  NightModeManager: NO
+  Player Car: YES
+
+[PerformanceTestDetailed] Found nodes:
+  Car: YES
+  VehicleInput: YES
+  OSMTerrain: YES
+[PerformanceTestDetailed] Night mode ENABLED (windows + lights + moon)
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 8
+Loading cache for shader SceneForwardClusteredShaderRD, variant 9
+Loading cache for shader SceneForwardClusteredShaderRD, variant 10
+Loading cache for shader SceneForwardClusteredShaderRD, variant 11
+Loading cache for shader SceneForwardClusteredShaderRD, variant 12
+Loading cache for shader SceneForwardClusteredShaderRD, variant 13
+Loading cache for shader SceneForwardClusteredShaderRD, variant 14
+Loading cache for shader SceneForwardClusteredShaderRD, variant 15
+Loading cache for shader SceneForwardClusteredShaderRD, variant 16
+Loading cache for shader SceneForwardClusteredShaderRD, variant 17
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 8
+Loading cache for shader SceneForwardClusteredShaderRD, variant 9
+Loading cache for shader SceneForwardClusteredShaderRD, variant 10
+Loading cache for shader SceneForwardClusteredShaderRD, variant 11
+Loading cache for shader SceneForwardClusteredShaderRD, variant 12
+Loading cache for shader SceneForwardClusteredShaderRD, variant 13
+Loading cache for shader SceneForwardClusteredShaderRD, variant 14
+Loading cache for shader SceneForwardClusteredShaderRD, variant 15
+Loading cache for shader SceneForwardClusteredShaderRD, variant 16
+Loading cache for shader SceneForwardClusteredShaderRD, variant 17
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 8
+Loading cache for shader SceneForwardClusteredShaderRD, variant 9
+Loading cache for shader SceneForwardClusteredShaderRD, variant 10
+Loading cache for shader SceneForwardClusteredShaderRD, variant 11
+Loading cache for shader SceneForwardClusteredShaderRD, variant 12
+Loading cache for shader SceneForwardClusteredShaderRD, variant 13
+Loading cache for shader SceneForwardClusteredShaderRD, variant 14
+Loading cache for shader SceneForwardClusteredShaderRD, variant 15
+Loading cache for shader SceneForwardClusteredShaderRD, variant 16
+Loading cache for shader SceneForwardClusteredShaderRD, variant 17
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 8
+Loading cache for shader SceneForwardClusteredShaderRD, variant 9
+Loading cache for shader SceneForwardClusteredShaderRD, variant 10
+Loading cache for shader SceneForwardClusteredShaderRD, variant 11
+Loading cache for shader SceneForwardClusteredShaderRD, variant 12
+Loading cache for shader SceneForwardClusteredShaderRD, variant 13
+Loading cache for shader SceneForwardClusteredShaderRD, variant 14
+Loading cache for shader SceneForwardClusteredShaderRD, variant 15
+Loading cache for shader SceneForwardClusteredShaderRD, variant 16
+Loading cache for shader SceneForwardClusteredShaderRD, variant 17
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 8
+Loading cache for shader SceneForwardClusteredShaderRD, variant 9
+Loading cache for shader SceneForwardClusteredShaderRD, variant 10
+Loading cache for shader SceneForwardClusteredShaderRD, variant 11
+Loading cache for shader SceneForwardClusteredShaderRD, variant 12
+Loading cache for shader SceneForwardClusteredShaderRD, variant 13
+Loading cache for shader SceneForwardClusteredShaderRD, variant 14
+Loading cache for shader SceneForwardClusteredShaderRD, variant 15
+Loading cache for shader SceneForwardClusteredShaderRD, variant 16
+Loading cache for shader SceneForwardClusteredShaderRD, variant 17
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 8
+Loading cache for shader SceneForwardClusteredShaderRD, variant 9
+Loading cache for shader SceneForwardClusteredShaderRD, variant 10
+Loading cache for shader SceneForwardClusteredShaderRD, variant 11
+Loading cache for shader SceneForwardClusteredShaderRD, variant 12
+Loading cache for shader SceneForwardClusteredShaderRD, variant 13
+Loading cache for shader SceneForwardClusteredShaderRD, variant 14
+Loading cache for shader SceneForwardClusteredShaderRD, variant 15
+Loading cache for shader SceneForwardClusteredShaderRD, variant 16
+Loading cache for shader SceneForwardClusteredShaderRD, variant 17
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 8
+Loading cache for shader SceneForwardClusteredShaderRD, variant 9
+Loading cache for shader SceneForwardClusteredShaderRD, variant 10
+Loading cache for shader SceneForwardClusteredShaderRD, variant 11
+Loading cache for shader SceneForwardClusteredShaderRD, variant 12
+Loading cache for shader SceneForwardClusteredShaderRD, variant 13
+Loading cache for shader SceneForwardClusteredShaderRD, variant 14
+Loading cache for shader SceneForwardClusteredShaderRD, variant 15
+Loading cache for shader SceneForwardClusteredShaderRD, variant 16
+Loading cache for shader SceneForwardClusteredShaderRD, variant 17
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 8
+Loading cache for shader SceneForwardClusteredShaderRD, variant 9
+Loading cache for shader SceneForwardClusteredShaderRD, variant 10
+Loading cache for shader SceneForwardClusteredShaderRD, variant 11
+Loading cache for shader SceneForwardClusteredShaderRD, variant 12
+Loading cache for shader SceneForwardClusteredShaderRD, variant 13
+Loading cache for shader SceneForwardClusteredShaderRD, variant 14
+Loading cache for shader SceneForwardClusteredShaderRD, variant 15
+Loading cache for shader SceneForwardClusteredShaderRD, variant 16
+Loading cache for shader SceneForwardClusteredShaderRD, variant 17
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 8
+Loading cache for shader SceneForwardClusteredShaderRD, variant 9
+Loading cache for shader SceneForwardClusteredShaderRD, variant 10
+Loading cache for shader SceneForwardClusteredShaderRD, variant 11
+Loading cache for shader SceneForwardClusteredShaderRD, variant 12
+Loading cache for shader SceneForwardClusteredShaderRD, variant 13
+Loading cache for shader SceneForwardClusteredShaderRD, variant 14
+Loading cache for shader SceneForwardClusteredShaderRD, variant 15
+Loading cache for shader SceneForwardClusteredShaderRD, variant 16
+Loading cache for shader SceneForwardClusteredShaderRD, variant 17
+Loading cache for shader SceneForwardClusteredShaderRD, variant 0
+Loading cache for shader SceneForwardClusteredShaderRD, variant 1
+Loading cache for shader SceneForwardClusteredShaderRD, variant 2
+Loading cache for shader SceneForwardClusteredShaderRD, variant 3
+Loading cache for shader SceneForwardClusteredShaderRD, variant 4
+Loading cache for shader SceneForwardClusteredShaderRD, variant 5
+Loading cache for shader SceneForwardClusteredShaderRD, variant 6
+Loading cache for shader SceneForwardClusteredShaderRD, variant 7
+Loading cache for shader SceneForwardClusteredShaderRD, variant 8
+Loading cache for shader SceneForwardClusteredShaderRD, variant 9
+Loading cache for shader SceneForwardClusteredShaderRD, variant 10
+Loading cache for shader SceneForwardClusteredShaderRD, variant 11
+Loading cache for shader SceneForwardClusteredShaderRD, variant 12
+Loading cache for shader SceneForwardClusteredShaderRD, variant 13
+Loading cache for shader SceneForwardClusteredShaderRD, variant 14
+Loading cache for shader SceneForwardClusteredShaderRD, variant 15
+Loading cache for shader SceneForwardClusteredShaderRD, variant 16
+Loading cache for shader SceneForwardClusteredShaderRD, variant 17
+[mvk-info] Created 3 swapchain images with size (3024, 1890) and contents scale 2.0 in layer CAMetalLayer: GodotContentView (0x7fa2ac72d4e0) on screen Built-in Retina Display.
+2026-01-31 07:37:54.161 Godot[70188:2142516] +[IMKInputSession subclass]: chose IMKInputSession_Modern
+[mvk-info] Created 3 swapchain images with size (3024, 1890) and contents scale 2.0 in layer CAMetalLayer: GodotContentView (0x7fa2ac72d4e0) on screen Built-in Retina Display.
+[mvk-info] Created 3 swapchain images with size (3024, 1890) and contents scale 2.0 in layer CAMetalLayer: GodotContentView (0x7fa2ac72d4e0) on screen Built-in Retina Display.
+
+========== Bottleneck Analysis Report ==========
+Time: 4.0s | Frames: 169
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 57.3 avg | 1.0 min
+  Frame Time: 40.15 ms avg | 180.11 ms max
+  Physics Time: 0.68 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🔴 [CRITICAL] Frame Time
+      Value: 40.15 ms (target: 16.67 ms)
+      Impact: Overall performance bottleneck
+      Suggestions:
+        • Reduce draw calls
+        • Optimize scripts in _process()
+        • Check for expensive operations per frame
+
+  🟡 [MEDIUM] Vertex Count
+      Value: 50961416 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 172 avg | 179 max
+  Vertices: 50961416 avg | 51018258 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 6.0s | Frames: 363
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.2 avg | 97.0 min
+  Frame Time: 11.16 ms avg | 13.12 ms max
+  Physics Time: 0.63 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 50983697 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 173 avg | 175 max
+  Vertices: 50983697 avg | 50983802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+[PerformanceTestDetailed] ✓ Terrain loaded! Starting test in 2 seconds...
+
+========== Bottleneck Analysis Report ==========
+Time: 8.1s | Frames: 560
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.9 avg | 97.0 min
+  Frame Time: 12.38 ms avg | 12.47 ms max
+  Physics Time: 0.60 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 50971870 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 172 avg | 179 max
+  Vertices: 50971870 avg | 51018258 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+[PerformanceLogger] Started logging: detailed_test_90s
+🚀 Test started!
+
+
+========== Bottleneck Analysis Report ==========
+Time: 10.1s | Frames: 757
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.8 avg | 97.0 min
+  Frame Time: 12.15 ms avg | 12.37 ms max
+  Physics Time: 0.65 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 50985748 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 170 avg | 178 max
+  Vertices: 50985748 avg | 51018134 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 12.1s | Frames: 954
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.1 avg | 97.0 min
+  Frame Time: 11.69 ms avg | 13.60 ms max
+  Physics Time: 0.66 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 50983612 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 173 avg | 176 max
+  Vertices: 50983612 avg | 50983802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 14.1s | Frames: 1151
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 11.86 ms avg | 13.60 ms max
+  Physics Time: 0.65 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 50983607 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 173 avg | 176 max
+  Vertices: 50983607 avg | 50983802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 16.1s | Frames: 1345
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.9 avg | 97.0 min
+  Frame Time: 11.20 ms avg | 16.32 ms max
+  Physics Time: 0.64 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 50983598 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 175 avg | 179 max
+  Vertices: 50983598 avg | 50983802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 18.1s | Frames: 1542
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.9 avg | 97.0 min
+  Frame Time: 12.71 ms avg | 16.32 ms max
+  Physics Time: 0.61 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 42894017 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 42894017 avg | 44839802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 20.1s | Frames: 1739
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.9 avg | 97.0 min
+  Frame Time: 11.62 ms avg | 11.87 ms max
+  Physics Time: 0.65 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831607 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 1831607 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 22.1s | Frames: 1936
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 97.0 min
+  Frame Time: 10.62 ms avg | 10.63 ms max
+  Physics Time: 0.63 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831612 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831612 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 24.1s | Frames: 2133
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.2 avg | 98.0 min
+  Frame Time: 10.54 ms avg | 10.61 ms max
+  Physics Time: 0.67 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831607 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 1831607 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 26.1s | Frames: 2330
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 97.0 min
+  Frame Time: 12.19 ms avg | 14.88 ms max
+  Physics Time: 0.61 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831622 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831622 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 28.1s | Frames: 2527
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.6 avg | 97.0 min
+  Frame Time: 12.32 ms avg | 14.88 ms max
+  Physics Time: 0.62 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831631 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831631 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 30.2s | Frames: 2724
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.9 avg | 97.0 min
+  Frame Time: 11.07 ms avg | 11.97 ms max
+  Physics Time: 2.88 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831612 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831612 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 32.2s | Frames: 2921
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.2 avg | 97.0 min
+  Frame Time: 12.67 ms avg | 13.13 ms max
+  Physics Time: 0.65 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831641 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831641 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 34.2s | Frames: 3117
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.8 avg | 97.0 min
+  Frame Time: 11.10 ms avg | 12.59 ms max
+  Physics Time: 0.62 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831617 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831617 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 36.2s | Frames: 3313
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.8 avg | 97.0 min
+  Frame Time: 13.07 ms avg | 13.50 ms max
+  Physics Time: 0.61 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831617 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831617 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 38.2s | Frames: 3510
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.1 avg | 97.0 min
+  Frame Time: 10.98 ms avg | 11.05 ms max
+  Physics Time: 0.61 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831598 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 1831598 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 40.2s | Frames: 3707
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 10.59 ms avg | 10.63 ms max
+  Physics Time: 0.60 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831612 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831612 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 42.2s | Frames: 3904
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.2 avg | 97.0 min
+  Frame Time: 10.58 ms avg | 10.66 ms max
+  Physics Time: 0.60 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831617 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831617 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 44.2s | Frames: 4099
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.0 avg | 97.0 min
+  Frame Time: 12.48 ms avg | 12.76 ms max
+  Physics Time: 0.68 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831622 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831622 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 46.2s | Frames: 4292
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 96.8 avg | 96.0 min
+  Frame Time: 12.12 ms avg | 12.21 ms max
+  Physics Time: 0.62 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831603 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 1831603 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 48.2s | Frames: 4489
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 11.80 ms avg | 13.43 ms max
+  Physics Time: 0.62 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831617 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831617 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 50.3s | Frames: 4686
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 11.09 ms avg | 11.20 ms max
+  Physics Time: 0.60 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831617 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831617 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 52.3s | Frames: 4882
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.2 avg | 97.0 min
+  Frame Time: 13.55 ms avg | 14.25 ms max
+  Physics Time: 0.62 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831617 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831617 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 54.3s | Frames: 5079
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 12.31 ms avg | 12.79 ms max
+  Physics Time: 0.63 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831617 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831617 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 56.3s | Frames: 5275
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.8 avg | 97.0 min
+  Frame Time: 11.75 ms avg | 15.70 ms max
+  Physics Time: 0.70 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831617 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831617 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 58.3s | Frames: 5471
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.8 avg | 97.0 min
+  Frame Time: 11.09 ms avg | 11.34 ms max
+  Physics Time: 0.60 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831626 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831626 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 60.3s | Frames: 5668
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 11.07 ms avg | 11.16 ms max
+  Physics Time: 0.61 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831607 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 1831607 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 62.3s | Frames: 5864
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 12.28 ms avg | 12.61 ms max
+  Physics Time: 0.61 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831612 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831612 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 64.3s | Frames: 6061
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 11.60 ms avg | 11.87 ms max
+  Physics Time: 0.67 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831622 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831622 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 66.3s | Frames: 6258
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.5 avg | 97.0 min
+  Frame Time: 10.95 ms avg | 12.10 ms max
+  Physics Time: 0.63 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831617 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831617 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 68.3s | Frames: 6455
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 13.41 ms avg | 13.43 ms max
+  Physics Time: 0.66 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831603 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 1831603 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 70.4s | Frames: 6652
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.3 avg | 97.0 min
+  Frame Time: 15.20 ms avg | 16.59 ms max
+  Physics Time: 0.63 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831612 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831612 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 72.4s | Frames: 6849
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 12.19 ms avg | 12.71 ms max
+  Physics Time: 0.63 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831626 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831626 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 74.4s | Frames: 7045
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.7 avg | 97.0 min
+  Frame Time: 11.04 ms avg | 11.06 ms max
+  Physics Time: 2.46 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831612 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831612 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 76.4s | Frames: 7241
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 11.25 ms avg | 13.16 ms max
+  Physics Time: 0.61 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831622 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831622 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 78.4s | Frames: 7437
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 11.74 ms avg | 12.06 ms max
+  Physics Time: 0.60 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831607 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 1831607 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 80.4s | Frames: 7634
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 12.39 ms avg | 15.88 ms max
+  Physics Time: 0.87 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831607 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 1831607 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 82.4s | Frames: 7829
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 96.3 avg | 96.0 min
+  Frame Time: 12.11 ms avg | 12.21 ms max
+  Physics Time: 0.87 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831612 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831612 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 84.4s | Frames: 8025
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 98.0 avg | 98.0 min
+  Frame Time: 12.17 ms avg | 14.93 ms max
+  Physics Time: 0.68 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831607 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 177 avg | 180 max
+  Vertices: 1831607 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+
+
+========== Bottleneck Analysis Report ==========
+Time: 86.4s | Frames: 8222
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 97.3 avg | 97.0 min
+  Frame Time: 10.78 ms avg | 10.79 ms max
+  Physics Time: 0.69 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🟡 [MEDIUM] Vertex Count
+      Value: 1831617 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 178 avg | 180 max
+  Vertices: 1831617 avg | 1831802 max
+  Physics Bodies: 1
+  Nodes: 102
+  VRAM: 437.7 MB
+
+=================================================
+

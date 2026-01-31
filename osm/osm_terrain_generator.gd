@@ -7994,9 +7994,10 @@ func _update_chunk_culling() -> void:
 	var camera_pos := _culling_camera.global_position
 	var car_pos := _car.global_position
 
-	# Направление взгляда камеры = от камеры К машине (target для Orbit)
-	var camera_look_dir := (car_pos - camera_pos).normalized()
-	camera_look_dir.y = 0  # Проецируем на XZ плоскость
+	# Направление движения машины (куда она смотрит)
+	var car_forward := -_car.global_transform.basis.z
+	car_forward.y = 0  # Проецируем на XZ плоскость
+	car_forward = car_forward.normalized()
 
 	# Обходим все загруженные чанки
 	for chunk_key in _loaded_chunks.keys():
@@ -8005,7 +8006,7 @@ func _update_chunk_culling() -> void:
 			continue
 
 		# Вычисляем центр чанка
-		var coords := chunk_key.split(",")
+		var coords: PackedStringArray = chunk_key.split(",")
 		var chunk_x := int(coords[0])
 		var chunk_z := int(coords[1])
 		var chunk_center := Vector3(
@@ -8014,18 +8015,20 @@ func _update_chunk_culling() -> void:
 			chunk_z * chunk_size + chunk_size / 2.0
 		)
 
-		# Вектор от камеры к чанку
-		var to_chunk := chunk_center - camera_pos
-		to_chunk.y = 0
-		var dist_from_camera := to_chunk.length()
-
-		# Dot product относительно направления взгляда камеры
-		var dot := camera_look_dir.dot(to_chunk.normalized())
-
 		# Расстояние от машины до чанка
-		var dist_from_car := (chunk_center - car_pos).length()
+		var to_chunk_from_car := chunk_center - car_pos
+		to_chunk_from_car.y = 0
+		var dist_from_car := to_chunk_from_car.length()
 
-		# Скрываем если сзади камеры И далеко от машины
-		var should_hide := (dot < -0.2 and dist_from_car > 300.0) or (dot < -0.5 and dist_from_car > 200.0)
+		# Dot product: чанк впереди или позади машины
+		var dot := car_forward.dot(to_chunk_from_car.normalized())
+
+		# Скрываем чанки ПОЗАДИ машины (dot < 0) И ДАЛЕКО (> 400m)
+		# Близкие чанки (< 300m) всегда видны
+		var should_hide := false
+		if dist_from_car > 400.0:
+			should_hide = dot < -0.3  # Позади на > 107° (cos(107°) = -0.3)
+		elif dist_from_car > 300.0:
+			should_hide = dot < -0.5  # Позади на > 120° (cos(120°) = -0.5)
 
 		chunk_node.visible = not should_hide
