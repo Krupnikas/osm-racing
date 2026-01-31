@@ -4609,6 +4609,11 @@ func _process_terrain_objects_queue() -> void:
 ## Обрабатывает очередь инфраструктуры (1 объект за кадр)
 func _process_infrastructure_queue() -> void:
 	if _infrastructure_queue.is_empty():
+		# PHASE 2: Когда infrastructure queue пустая, финализируем lamp batches
+		if not _lamp_batch_data.is_empty():
+			var lamp_chunks := _lamp_batch_data.keys()
+			var chunk_key: String = lamp_chunks[0]
+			_finalize_lamp_batches_for_chunk(chunk_key)
 		return
 
 	# Сортируем по расстоянию до игрока
@@ -5425,6 +5430,10 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 		"pos": globe_transform.origin,
 		"is_broken": is_broken
 	})
+
+	# DEBUG
+	if batch.poles.size() == 1:
+		print("OSM: DEBUG - First lamp added to chunk %s batch" % chunk_key)
 
 
 ## Финализирует батч фонарей для чанка - создаёт 3 MultiMesh (poles, arms, globes) + OmniLights
@@ -6266,6 +6275,7 @@ func _create_pending_lamps() -> void:
 
 	# PHASE 2: Финализируем ВСЕ lamp batches после создания всех pending lamps
 	var lamp_chunks := _lamp_batch_data.keys()
+	print("OSM: DEBUG - Finalizing %d lamp batches" % lamp_chunks.size())
 	for chunk_key in lamp_chunks:
 		_finalize_lamp_batches_for_chunk(chunk_key)
 
