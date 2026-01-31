@@ -46,6 +46,19 @@ var _textures_initialized := false
 @export var elevation_scale := 1.0  # Масштаб высоты (1.0 = реальный)
 @export var elevation_grid_resolution := 8  # Разрешение сетки высот на чанк (8x8 = 128 triangles)
 
+## Feature Flags для A/B тестирования производительности
+@export_group("Features", "enable_")
+@export var enable_buildings := true  # Включить здания
+@export var enable_windows := true  # Включить окна в зданиях
+@export var enable_roads := true  # Включить дороги
+@export var enable_curbs := true  # Включить бордюры
+@export var enable_vegetation := true  # Включить деревья/растительность
+@export var enable_street_lamps := true  # Включить уличные фонари
+@export var enable_traffic_signs := true  # Включить дорожные знаки
+@export var enable_traffic_lights := true  # Включить светофоры
+@export var enable_night_mode_windows := true  # Включить подсветку окон ночью
+@export var enable_frustum_culling := true  # Включить frustum culling чанков
+
 var osm_loader: Node
 var _car: Node3D
 var _camera: Camera3D
@@ -1755,6 +1768,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		print("OSM: Marked chunk '%s' for road batch finalization" % batch_chunk_key)
 
 func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
+	if not enable_roads:
+		return
 	# Добавляем в очередь для отложенного создания
 	_road_queue.append({
 		"nodes": nodes,
@@ -2213,7 +2228,7 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 
 # Финализирует window batches для чанка (создаёт ONE MultiMesh для всех окон в чанке)
 func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
-	if not _window_batch_data.has(chunk_key):
+	if not enable_windows or not _window_batch_data.has(chunk_key):
 		return
 
 	var batch: Dictionary = _window_batch_data[chunk_key]
@@ -2480,7 +2495,7 @@ func _create_3d_building_simple_batched(points: PackedVector2Array, color: Color
 
 # Создаёт бордюры вдоль дороги (старая версия для обратной совместимости)
 func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_height: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
-	if nodes.size() < 2:
+	if not enable_curbs or nodes.size() < 2:
 		return
 
 	var raw_points: PackedVector2Array = []
@@ -2916,7 +2931,7 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: 
 	parent.add_child(mesh)
 
 func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
-	if nodes.size() < 3:
+	if not enable_buildings or nodes.size() < 3:
 		return
 
 	var points: PackedVector2Array = []
@@ -5387,6 +5402,8 @@ func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
 
 # Создание дерева из 3D модели берёзы
 func _create_tree(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	if not enable_vegetation:
+		return
 	# Контейнер без масштабирования (для коллизии)
 	var tree_root := Node3D.new()
 	tree_root.name = "Tree"
@@ -5446,6 +5463,8 @@ func _create_tree(pos: Vector2, elevation: float, parent: Node3D) -> void:
 
 # Создание дорожного знака - разрушаемый при столкновении
 func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, parent: Node3D) -> void:
+	if not enable_traffic_signs:
+		return
 	# Смещаем знак с дороги если нужно
 	var safe_pos := _move_object_off_road(pos, 0.5, 5)
 	if safe_pos == Vector2.ZERO:
@@ -6265,7 +6284,7 @@ func _generate_industrial_buildings(points: PackedVector2Array, elev_data: Dicti
 
 # Процедурная генерация фонарей вдоль дороги
 func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_data: Dictionary, parent: Node3D) -> void:
-	if nodes.size() < 2:
+	if not enable_street_lamps or nodes.size() < 2:
 		return
 
 	var lamp_spacing := 25.0  # Расстояние между фонарями (метры)
@@ -6513,6 +6532,8 @@ func _is_point_near_any_parking(point: Vector2, max_distance: float) -> bool:
 
 # Создание светофора на перекрёстке
 func _create_traffic_light(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	if not enable_traffic_lights:
+		return
 	# Смещаем светофор с дороги если нужно
 	var safe_pos := _move_object_off_road(pos, 0.5, 5)
 	if safe_pos == Vector2.ZERO:
@@ -8168,6 +8189,13 @@ func _print_draw_call_stats() -> void:
 
 ## Camera-based frustum culling для чанков
 func _update_chunk_culling() -> void:
+	if not enable_frustum_culling:
+		# Если culling выключен, все чанки видимы
+		for chunk_node in _loaded_chunks.values():
+			if is_instance_valid(chunk_node):
+				chunk_node.visible = true
+		return
+
 	# Найти камеру
 	if not _culling_camera:
 		_culling_camera = get_viewport().get_camera_3d()
