@@ -1747,41 +1747,51 @@ OSM: DEBUG - First lamp added to chunk 1,-1 batch
 ⚡ FRAME SPIKE #6: 25.8 ms at 1.1s (Draw: 5657, Bodies: 195)
 ⚡ FRAME SPIKE #7: 25.7 ms at 1.1s (Draw: 5658, Bodies: 195)
 ⚡ FRAME SPIKE #8: 25.2 ms at 1.2s (Draw: 5659, Bodies: 195)
-fects
-      Value: SSAO, Glow/Bloom, Volumetric Fog
-      Impact: GPU shader overhead
-      Suggestions:
-        • Reduce SSR quality
-        • Disable SSAO on low-end hardware
-        • Use simpler fog
-
-📈 DETAILED STATS:
-  Draw Calls: 3327 avg | 3633 max
-  Vertices: 52838602 avg | 52860989 max
-  Physics Bodies: 193
-  Nodes: 11691
-  VRAM: 716.8 MB
-
-=================================================
-
+⚡ FRAME SPIKE #9: 25.6 ms at 1.2s (Draw: 5667, Bodies: 196)
+⚡ FRAME SPIKE #10: 25.1 ms at 1.3s (Draw: 5662, Bodies: 196)
 === PAZ Model Meshes Debug ===
 Total meshes found: 1
   - Mesh: bus_low_Material_006_0 (MeshInstance3D)
 PAZ-32053 model setup complete
-🚗 Traffic: 18 active NPCs (Near: 4, Mid: 14, Far: 0), 1 pooled
-  → Physics bodies from NPCs: 18 (All: 18×1, было бы 18×5=90)
+⚡ FRAME SPIKE #11: 30.8 ms at 1.5s (Draw: 6579, Bodies: 200)
+⚡ FRAME SPIKE #12: 76.9 ms at 1.5s (Draw: 6621, Bodies: 200)
+⚡ FRAME SPIKE #13: 37.4 ms at 1.6s (Draw: 6625, Bodies: 200)
+⚡ FRAME SPIKE #14: 39.1 ms at 1.6s (Draw: 6625, Bodies: 200)
+⚡ FRAME SPIKE #15: 28.5 ms at 1.7s (Draw: 6620, Bodies: 200)
+⚡ FRAME SPIKE #16: 28.3 ms at 1.7s (Draw: 6619, Bodies: 200)
+⚡ FRAME SPIKE #17: 26.7 ms at 1.7s (Draw: 6622, Bodies: 200)
+⚡ FRAME SPIKE #18: 27.8 ms at 1.8s (Draw: 6621, Bodies: 200)
+⚡ FRAME SPIKE #19: 27.8 ms at 1.8s (Draw: 6620, Bodies: 200)
+⚡ FRAME SPIKE #20: 27.1 ms at 1.8s (Draw: 6619, Bodies: 200)
+⚡ FRAME SPIKE #21: 27.8 ms at 1.8s (Draw: 6619, Bodies: 201)
+⚡ FRAME SPIKE #22: 27.8 ms at 1.9s (Draw: 6613, Bodies: 201)
+⚡ FRAME SPIKE #23: 27.3 ms at 1.9s (Draw: 6615, Bodies: 201)
+⚡ FRAME SPIKE #24: 27.6 ms at 1.9s (Draw: 6616, Bodies: 201)
+⚡ FRAME SPIKE #25: 27.8 ms at 2.0s (Draw: 6618, Bodies: 202)
+⚡ FRAME SPIKE #26: 27.3 ms at 2.0s (Draw: 6618, Bodies: 202)
+⚡ FRAME SPIKE #27: 27.3 ms at 2.0s (Draw: 6611, Bodies: 202)
+⚡ FRAME SPIKE #28: 27.3 ms at 2.0s (Draw: 6602, Bodies: 202)
+⚡ FRAME SPIKE #29: 26.9 ms at 2.1s (Draw: 6610, Bodies: 202)
+⚡ FRAME SPIKE #30: 27.3 ms at 2.1s (Draw: 6603, Bodies: 203)
+⚡ FRAME SPIKE #31: 27.3 ms at 2.1s (Draw: 6603, Bodies: 203)
+⚡ FRAME SPIKE #32: 27.3 ms at 2.1s (Draw: 6603, Bodies: 203)
+⚡ FRAME SPIKE #33: 27.3 ms at 2.2s (Draw: 6599, Bodies: 203)
+⚡ FRAME SPIKE #34: 27.3 ms at 2.2s (Draw: 6597, Bodies: 203)
+⚡ FRAME SPIKE #35: 27.3 ms at 2.2s (Draw: 6602, Bodies: 203)
+🚗 Traffic: 17 active NPCs (Near: 3, Mid: 13, Far: 1), 0 pooled
+  → Physics bodies from NPCs: 17 (All: 17×1, было бы 17×5=85)
 
 ========== Bottleneck Analysis Report ==========
-Time: 13.3s | Frames: 409
+Time: 106.7s | Frames: 352
 
 📊 PERFORMANCE OVERVIEW:
-  FPS: 53.3 avg | 52.0 min
-  Frame Time: 35.33 ms avg | 57.45 ms max
-  Physics Time: 4.53 ms avg
+  FPS: 42.7 avg | 19.0 min
+  Frame Time: 37.28 ms avg | 61.14 ms max
+  Physics Time: 3.92 ms avg
 
 🔍 BOTTLENECK IDENTIFICATION:
   🔴 [CRITICAL] Frame Time
-      Value: 35.33 ms (target: 16.67 ms)
+      Value: 37.28 ms (target: 16.67 ms)
       Impact: Overall performance bottleneck
       Suggestions:
         • Reduce draw calls
@@ -1789,7 +1799,7 @@ Time: 13.3s | Frames: 409
         • Check for expensive operations per frame
 
   🟠 [HIGH] Draw Calls
-      Value: 3631 calls/frame
+      Value: 5495 calls/frame
       Impact: GPU rendering overhead
       Suggestions:
         • Batch meshes by material
@@ -1797,24 +1807,24 @@ Time: 13.3s | Frames: 409
         • Implement LOD system
         • Enable frustum culling
 
-  🟠 [HIGH] Physics Bodies
-      Value: 202 active bodies
-      Impact: Physics engine load
-      Suggestions:
-        • Reduce NPC count
-        • Convert distant NPCs to kinematic
-        • Disable physics for far objects
-
   🟡 [MEDIUM] Vertex Count
-      Value: 52845430 vertices/frame
+      Value: 52922106 vertices/frame
       Impact: GPU vertex processing
       Suggestions:
         • Implement LOD for distant objects
         • Simplify building meshes
         • Use lower poly models
 
+  🟡 [MEDIUM] Physics Bodies
+      Value: 194 active bodies
+      Impact: Physics engine load
+      Suggestions:
+        • Reduce NPC count
+        • Convert distant NPCs to kinematic
+        • Disable physics for far objects
+
   🟡 [MEDIUM] Node Count
-      Value: 11823 nodes
+      Value: 11874 nodes
       Impact: Scene tree traversal overhead
       Suggestions:
         • Unload distant chunks
@@ -1830,86 +1840,138 @@ Time: 13.3s | Frames: 409
         • Use simpler fog
 
 📈 DETAILED STATS:
-  Draw Calls: 3631 avg | 3679 max
-  Vertices: 52845430 avg | 52862929 max
-  Physics Bodies: 202
-  Nodes: 11823
-  VRAM: 717.0 MB
+  Draw Calls: 5495 avg | 6625 max
+  Vertices: 52922106 avg | 52966589 max
+  Physics Bodies: 194
+  Nodes: 11874
+  VRAM: 717.7 MB
 
 =================================================
 
+⚡ FRAME SPIKE #36: 27.3 ms at 2.3s (Draw: 6610, Bodies: 204)
+⚡ FRAME SPIKE #37: 27.3 ms at 2.3s (Draw: 6603, Bodies: 204)
+⚡ FRAME SPIKE #38: 27.3 ms at 2.3s (Draw: 6601, Bodies: 204)
+⚡ FRAME SPIKE #39: 27.3 ms at 2.3s (Draw: 6596, Bodies: 204)
+⚡ FRAME SPIKE #40: 27.3 ms at 2.4s (Draw: 6596, Bodies: 204)
+⚡ FRAME SPIKE #41: 27.3 ms at 2.4s (Draw: 6598, Bodies: 205)
+⚡ FRAME SPIKE #42: 27.3 ms at 2.4s (Draw: 6598, Bodies: 205)
+⚡ FRAME SPIKE #43: 27.3 ms at 2.4s (Draw: 6593, Bodies: 205)
+⚡ FRAME SPIKE #44: 27.8 ms at 2.5s (Draw: 7527, Bodies: 207)
+⚡ FRAME SPIKE #45: 44.6 ms at 2.5s (Draw: 7564, Bodies: 207)
+⚡ FRAME SPIKE #46: 32.3 ms at 2.5s (Draw: 7566, Bodies: 207)
+⚡ FRAME SPIKE #47: 30.7 ms at 2.6s (Draw: 7559, Bodies: 207)
+⚡ FRAME SPIKE #48: 31.0 ms at 2.6s (Draw: 7565, Bodies: 207)
+⚡ FRAME SPIKE #49: 31.8 ms at 2.6s (Draw: 7565, Bodies: 207)
+⚡ FRAME SPIKE #50: 32.7 ms at 2.7s (Draw: 7554, Bodies: 207)
+⚡ FRAME SPIKE #51: 32.8 ms at 2.7s (Draw: 7557, Bodies: 207)
+⚡ FRAME SPIKE #52: 32.3 ms at 2.7s (Draw: 7554, Bodies: 207)
+⚡ FRAME SPIKE #53: 31.9 ms at 2.8s (Draw: 7561, Bodies: 207)
+⚡ FRAME SPIKE #54: 33.3 ms at 2.8s (Draw: 7563, Bodies: 207)
+⚡ FRAME SPIKE #55: 33.3 ms at 2.8s (Draw: 7556, Bodies: 207)
+⚡ FRAME SPIKE #56: 33.3 ms at 2.9s (Draw: 7555, Bodies: 207)
+⚡ FRAME SPIKE #57: 33.3 ms at 2.9s (Draw: 7560, Bodies: 207)
+⚡ FRAME SPIKE #58: 32.0 ms at 2.9s (Draw: 7553, Bodies: 207)
+⚡ FRAME SPIKE #59: 31.5 ms at 3.0s (Draw: 7552, Bodies: 207)
+⚡ FRAME SPIKE #60: 31.9 ms at 3.0s (Draw: 7549, Bodies: 207)
+⚡ FRAME SPIKE #61: 31.9 ms at 3.0s (Draw: 7555, Bodies: 207)
+⚡ FRAME SPIKE #62: 31.9 ms at 3.1s (Draw: 7560, Bodies: 207)
+⚡ FRAME SPIKE #63: 31.9 ms at 3.1s (Draw: 7544, Bodies: 207)
+⚡ FRAME SPIKE #64: 31.9 ms at 3.1s (Draw: 7551, Bodies: 207)
+⚡ FRAME SPIKE #65: 31.9 ms at 3.2s (Draw: 7551, Bodies: 207)
+⚡ FRAME SPIKE #66: 31.9 ms at 3.2s (Draw: 7533, Bodies: 207)
+⚡ FRAME SPIKE #67: 31.9 ms at 3.2s (Draw: 7543, Bodies: 207)
+⚡ FRAME SPIKE #68: 31.9 ms at 3.3s (Draw: 7542, Bodies: 207)
+⚡ FRAME SPIKE #69: 31.9 ms at 3.3s (Draw: 7542, Bodies: 207)
+⚡ FRAME SPIKE #70: 31.9 ms at 3.3s (Draw: 7547, Bodies: 207)
+⚡ FRAME SPIKE #71: 31.9 ms at 3.4s (Draw: 7535, Bodies: 207)
+⚡ FRAME SPIKE #72: 27.9 ms at 3.4s (Draw: 7543, Bodies: 207)
+⚡ FRAME SPIKE #73: 30.9 ms at 3.4s (Draw: 7536, Bodies: 207)
+⚡ FRAME SPIKE #74: 31.9 ms at 3.4s (Draw: 7537, Bodies: 207)
+⚡ FRAME SPIKE #75: 31.9 ms at 3.5s (Draw: 7534, Bodies: 207)
+⚡ FRAME SPIKE #76: 31.9 ms at 3.5s (Draw: 7539, Bodies: 208)
+⚡ FRAME SPIKE #77: 31.9 ms at 3.5s (Draw: 7544, Bodies: 208)
+⚡ FRAME SPIKE #78: 31.3 ms at 3.6s (Draw: 7536, Bodies: 208)
+⚡ FRAME SPIKE #79: 31.0 ms at 3.6s (Draw: 7541, Bodies: 208)
+⚡ FRAME SPIKE #80: 27.3 ms at 3.6s (Draw: 7538, Bodies: 208)
+⚡ FRAME SPIKE #81: 30.6 ms at 3.7s (Draw: 7534, Bodies: 208)
+⚡ FRAME SPIKE #82: 30.9 ms at 3.7s (Draw: 7535, Bodies: 208)
+⚡ FRAME SPIKE #83: 31.2 ms at 3.7s (Draw: 7544, Bodies: 209)
+⚡ FRAME SPIKE #84: 31.2 ms at 3.8s (Draw: 7542, Bodies: 209)
+⚡ FRAME SPIKE #85: 33.2 ms at 3.8s (Draw: 7549, Bodies: 210)
+⚡ FRAME SPIKE #86: 31.0 ms at 3.8s (Draw: 7545, Bodies: 210)
+⚡ FRAME SPIKE #87: 27.9 ms at 3.8s (Draw: 7540, Bodies: 210)
+⚡ FRAME SPIKE #88: 31.0 ms at 3.9s (Draw: 7542, Bodies: 210)
+⚡ FRAME SPIKE #89: 31.0 ms at 3.9s (Draw: 7550, Bodies: 211)
+⚡ FRAME SPIKE #90: 31.0 ms at 3.9s (Draw: 7551, Bodies: 211)
+⚡ FRAME SPIKE #91: 31.6 ms at 4.0s (Draw: 7545, Bodies: 211)
+⚡ FRAME SPIKE #92: 30.6 ms at 4.0s (Draw: 7555, Bodies: 211)
+⚡ FRAME SPIKE #93: 29.7 ms at 4.0s (Draw: 7555, Bodies: 211)
+⚡ FRAME SPIKE #94: 30.6 ms at 4.1s (Draw: 7546, Bodies: 211)
 OSM: DEBUG - First lamp added to chunk -2,-2 batch
+⚡ FRAME SPIKE #95: 30.6 ms at 4.1s (Draw: 7555, Bodies: 211)
+⚡ FRAME SPIKE #96: 30.6 ms at 4.1s (Draw: 7559, Bodies: 211)
+⚡ FRAME SPIKE #97: 31.4 ms at 4.2s (Draw: 7560, Bodies: 212)
 OSM: ✅ Finalized lamp batch 0,-1: 62 lamps (3 MultiMeshes + 62 lights, was 186 draw calls before)
-⚠️ SLOW FRAME 14.3ms: building=0.0 road=0.0 terrain=0.0 infra=14.2 veg=0.0 curb=0.0ms
-⚡ FRAME SPIKE #1: 26.7 ms at 2.5s (Draw: 3499, Bodies: 210)
+⚠️ SLOW FRAME 14.5ms: building=0.0 road=0.0 terrain=0.0 infra=14.4 veg=0.0 curb=0.0ms
+⚡ FRAME SPIKE #98: 150.0 ms at 4.2s (Draw: 7570, Bodies: 212)
 OSM: ✅ Finalized lamp batch -1,-1: 34 lamps (3 MultiMeshes + 34 lights, was 102 draw calls before)
-OSM: ✅ Finalized lamp batch 0,0: 6 lamps (3 MultiMeshes + 6 lights, was 18 draw calls before)
-OSM: ✅ Finalized lamp batch -2,-1: 50 lamps (3 MultiMeshes + 50 lights, was 150 draw calls before)
-OSM: ✅ Finalized lamp batch 0,-2: 45 lamps (3 MultiMeshes + 45 lights, was 135 draw calls before)
-OSM: ✅ Finalized lamp batch 0,1: 11 lamps (3 MultiMeshes + 11 lights, was 33 draw calls before)
-OSM: ✅ Finalized lamp batch 1,-1: 14 lamps (3 MultiMeshes + 14 lights, was 42 draw calls before)
-OSM: ✅ Finalized lamp batch -2,-2: 1 lamps (3 MultiMeshes + 1 lights, was 3 draw calls before)
-⚡ FRAME SPIKE #2: 29.0 ms at 2.7s (Draw: 3591, Bodies: 211)
-⚡ FRAME SPIKE #3: 62.4 ms at 3.7s (Draw: 3712, Bodies: 212)
-⚡ FRAME SPIKE #4: 33.3 ms at 3.7s (Draw: 3706, Bodies: 212)
-⚡ FRAME SPIKE #5: 29.5 ms at 3.8s (Draw: 3712, Bodies: 211)
 
 === PERFORMANCE METRICS ===
-FPS: 46 | Frame: 19.6 ms (max 62.4) | Physics: 16.7 ms (max 61.6)
-Godot Process: 54.48 ms | Physics: 5.06 ms
-Objects: 29779 | Nodes: 12424 | Resources: 535
-Draw calls: 3717 | Vertices: 56336631 | VRAM: 718.1 MB
-Physics bodies: 211 | Collision pairs: 1991
+FPS: 32 | Frame: 25.1 ms (max 150.0) | Physics: 17.3 ms (max 287.9)
+Godot Process: 24.39 ms | Physics: 4.75 ms
+Objects: 29535 | Nodes: 12236 | Resources: 535
+Draw calls: 7570 | Vertices: 53833486 | VRAM: 718.0 MB
+Physics bodies: 212 | Collision pairs: 2023
 --- System Times ---
-  road_batch_finalize_total_-1,-1: 10.47 ms (max 10.47)
-  road_batch_finalize_total_-1,-2: 15.38 ms (max 15.38)
-  road_batch_finalize_total_-1,0: 3.82 ms (max 3.82)
-  road_batch_finalize_total_-2,-1: 16.32 ms (max 16.32)
-  road_batch_finalize_total_-2,-2: 15.24 ms (max 15.24)
-  road_batch_finalize_total_-2,0: 14.05 ms (max 14.05)
-  road_batch_finalize_total_0,-1: 19.44 ms (max 19.44)
-  road_batch_finalize_total_0,-2: 19.68 ms (max 19.68)
-  road_batch_finalize_total_0,0: 16.18 ms (max 16.18)
-  road_batch_finalize_total_0,1: 10.93 ms (max 10.93)
-  road_batch_finalize_total_1,-1: 16.70 ms (max 16.70)
-  road_batch_finalize_total_1,-2: 18.21 ms (max 18.21)
-  road_batch_finalize_total_1,0: 12.08 ms (max 12.08)
-  road_collision_create_-1,-1: 3.28 ms (max 3.86)
-  road_collision_create_-1,-2: 7.46 ms (max 11.95)
-  road_collision_create_-1,0: 1.74 ms (max 2.01)
-  road_collision_create_-2,-1: 5.22 ms (max 10.23)
-  road_collision_create_-2,-2: 7.37 ms (max 13.00)
-  road_collision_create_-2,0: 6.79 ms (max 10.68)
-  road_collision_create_0,-1: 6.19 ms (max 12.66)
-  road_collision_create_0,-2: 6.30 ms (max 11.99)
-  road_collision_create_0,0: 5.16 ms (max 12.41)
-  road_collision_create_0,1: 10.65 ms (max 10.65)
-  road_collision_create_1,-1: 5.31 ms (max 12.56)
-  road_collision_create_1,-2: 8.81 ms (max 15.10)
-  road_collision_create_1,0: 11.81 ms (max 11.81)
+  road_batch_finalize_total_-1,-1: 20.41 ms (max 20.41)
+  road_batch_finalize_total_-1,-2: 13.00 ms (max 13.00)
+  road_batch_finalize_total_-1,0: 12.66 ms (max 12.66)
+  road_batch_finalize_total_-2,-1: 16.80 ms (max 16.80)
+  road_batch_finalize_total_-2,-2: 6.12 ms (max 6.12)
+  road_batch_finalize_total_-2,0: 12.47 ms (max 12.47)
+  road_batch_finalize_total_0,-1: 21.91 ms (max 21.91)
+  road_batch_finalize_total_0,-2: 21.66 ms (max 21.66)
+  road_batch_finalize_total_0,0: 16.10 ms (max 16.10)
+  road_batch_finalize_total_0,1: 9.37 ms (max 9.37)
+  road_batch_finalize_total_1,-1: 15.77 ms (max 15.77)
+  road_batch_finalize_total_1,-2: 17.96 ms (max 17.96)
+  road_batch_finalize_total_1,0: 7.48 ms (max 7.48)
+  road_collision_create_-1,-1: 6.46 ms (max 12.87)
+  road_collision_create_-1,-2: 6.18 ms (max 9.41)
+  road_collision_create_-1,0: 6.09 ms (max 10.14)
+  road_collision_create_-2,-1: 5.33 ms (max 10.44)
+  road_collision_create_-2,-2: 2.84 ms (max 4.17)
+  road_collision_create_-2,0: 5.93 ms (max 8.66)
+  road_collision_create_0,-1: 7.04 ms (max 15.38)
+  road_collision_create_0,-2: 6.93 ms (max 13.93)
+  road_collision_create_0,0: 5.18 ms (max 12.36)
+  road_collision_create_0,1: 9.17 ms (max 9.17)
+  road_collision_create_1,-1: 5.05 ms (max 11.74)
+  road_collision_create_1,-2: 8.61 ms (max 14.58)
+  road_collision_create_1,0: 7.22 ms (max 7.22)
 ===========================
+🚗 Traffic: 20 active NPCs (Near: 5, Mid: 14, Far: 1), 0 pooled
+  → Physics bodies from NPCs: 20 (All: 20×1, было бы 20×5=100)
 
 === PERFORMANCE METRICS ===
-FPS: 46 | Frame: 19.6 ms (max 62.4) | Physics: 16.7 ms (max 61.6)
-Godot Process: 54.48 ms | Physics: 5.06 ms
-Objects: 29779 | Nodes: 12424 | Resources: 535
-Draw calls: 3717 | Vertices: 56336631 | VRAM: 718.1 MB
-Physics bodies: 211 | Collision pairs: 1991
+FPS: 32 | Frame: 25.1 ms (max 150.0) | Physics: 17.3 ms (max 288.0)
+Godot Process: 24.39 ms | Physics: 4.75 ms
+Objects: 29535 | Nodes: 12236 | Resources: 535
+Draw calls: 7570 | Vertices: 53833486 | VRAM: 718.0 MB
+Physics bodies: 212 | Collision pairs: 2023
 ===========================
-🚗 Traffic: 19 active NPCs (Near: 3, Mid: 14, Far: 2), 2 pooled
-  → Physics bodies from NPCs: 19 (All: 19×1, было бы 19×5=95)
 
 ========== Bottleneck Analysis Report ==========
-Time: 15.3s | Frames: 504
+Time: 109.0s | Frames: 415
 
 📊 PERFORMANCE OVERVIEW:
-  FPS: 50.2 avg | 46.0 min
-  Frame Time: 28.32 ms avg | 54.48 ms max
-  Physics Time: 5.06 ms avg
+  FPS: 38.9 avg | 32.0 min
+  Frame Time: 39.79 ms avg | 61.14 ms max
+  Physics Time: 4.37 ms avg
 
 🔍 BOTTLENECK IDENTIFICATION:
-  🟠 [HIGH] Frame Time
-      Value: 28.32 ms (target: 16.67 ms)
+  🔴 [CRITICAL] Frame Time
+      Value: 39.79 ms (target: 16.67 ms)
       Impact: Overall performance bottleneck
       Suggestions:
         • Reduce draw calls
@@ -1917,7 +1979,139 @@ Time: 15.3s | Frames: 504
         • Check for expensive operations per frame
 
   🟠 [HIGH] Draw Calls
-      Value: 3608 calls/frame
+      Value: 6793 calls/frame
+      Impact: GPU rendering overhead
+      Suggestions:
+        • Batch meshes by material
+        • Use MultiMeshInstance3D
+        • Implement LOD system
+        • Enable frustum culling
+
+  🟠 [HIGH] Physics Bodies
+      Value: 203 active bodies
+      Impact: Physics engine load
+      Suggestions:
+        • Reduce NPC count
+        • Convert distant NPCs to kinematic
+        • Disable physics for far objects
+
+  🟡 [MEDIUM] Vertex Count
+      Value: 52909991 vertices/frame
+      Impact: GPU vertex processing
+      Suggestions:
+        • Implement LOD for distant objects
+        • Simplify building meshes
+        • Use lower poly models
+
+  🟡 [MEDIUM] Node Count
+      Value: 12236 nodes
+      Impact: Scene tree traversal overhead
+      Suggestions:
+        • Unload distant chunks
+        • Pool and reuse nodes
+        • Flatten hierarchy where possible
+
+  🟡 [MEDIUM] Post-Processing Effects
+      Value: SSAO, Glow/Bloom, Volumetric Fog
+      Impact: GPU shader overhead
+      Suggestions:
+        • Reduce SSR quality
+        • Disable SSAO on low-end hardware
+        • Use simpler fog
+
+📈 DETAILED STATS:
+  Draw Calls: 6793 avg | 7570 max
+  Vertices: 52909991 avg | 53833486 max
+  Physics Bodies: 203
+  Nodes: 12236
+  VRAM: 718.0 MB
+
+=================================================
+
+⚡ FRAME SPIKE #99: 68.7 ms at 4.3s (Draw: 7612, Bodies: 212)
+OSM: ✅ Finalized lamp batch 0,0: 6 lamps (3 MultiMeshes + 6 lights, was 18 draw calls before)
+⚡ FRAME SPIKE #100: 52.6 ms at 4.4s (Draw: 7662, Bodies: 212)
+OSM: ✅ Finalized lamp batch -2,-1: 50 lamps (3 MultiMeshes + 50 lights, was 150 draw calls before)
+⚡ FRAME SPIKE #101: 45.4 ms at 4.5s (Draw: 7692, Bodies: 212)
+OSM: ✅ Finalized lamp batch 0,-2: 45 lamps (3 MultiMeshes + 45 lights, was 135 draw calls before)
+⚡ FRAME SPIKE #102: 35.0 ms at 4.5s (Draw: 7724, Bodies: 212)
+OSM: ✅ Finalized lamp batch 0,1: 11 lamps (3 MultiMeshes + 11 lights, was 33 draw calls before)
+⚡ FRAME SPIKE #103: 41.7 ms at 4.5s (Draw: 7797, Bodies: 214)
+OSM: ✅ Finalized lamp batch 1,-1: 14 lamps (3 MultiMeshes + 14 lights, was 42 draw calls before)
+⚡ FRAME SPIKE #104: 41.7 ms at 4.6s (Draw: 7877, Bodies: 214)
+OSM: ✅ Finalized lamp batch -2,-2: 1 lamps (3 MultiMeshes + 1 lights, was 3 draw calls before)
+⚡ FRAME SPIKE #105: 41.7 ms at 4.6s (Draw: 7888, Bodies: 214)
+⚡ FRAME SPIKE #106: 37.0 ms at 4.7s (Draw: 7890, Bodies: 214)
+⚡ FRAME SPIKE #107: 34.3 ms at 4.7s (Draw: 7903, Bodies: 214)
+⚡ FRAME SPIKE #108: 34.0 ms at 4.7s (Draw: 7886, Bodies: 214)
+⚡ FRAME SPIKE #109: 34.5 ms at 4.8s (Draw: 7878, Bodies: 214)
+⚡ FRAME SPIKE #110: 34.6 ms at 4.8s (Draw: 7877, Bodies: 214)
+⚡ FRAME SPIKE #111: 36.1 ms at 4.8s (Draw: 7912, Bodies: 214)
+⚡ FRAME SPIKE #112: 36.1 ms at 4.9s (Draw: 7927, Bodies: 214)
+⚡ FRAME SPIKE #113: 35.0 ms at 4.9s (Draw: 7955, Bodies: 214)
+⚡ FRAME SPIKE #114: 34.5 ms at 4.9s (Draw: 7978, Bodies: 214)
+⚡ FRAME SPIKE #115: 34.3 ms at 5.0s (Draw: 7990, Bodies: 214)
+⚡ FRAME SPIKE #116: 33.3 ms at 5.0s (Draw: 7992, Bodies: 214)
+⚡ FRAME SPIKE #117: 35.2 ms at 5.0s (Draw: 7982, Bodies: 214)
+⚡ FRAME SPIKE #118: 33.4 ms at 5.1s (Draw: 7978, Bodies: 214)
+⚡ FRAME SPIKE #119: 33.7 ms at 5.1s (Draw: 7971, Bodies: 214)
+⚡ FRAME SPIKE #120: 34.7 ms at 5.1s (Draw: 7958, Bodies: 214)
+⚡ FRAME SPIKE #121: 33.8 ms at 5.2s (Draw: 7945, Bodies: 214)
+⚡ FRAME SPIKE #122: 33.0 ms at 5.2s (Draw: 7912, Bodies: 214)
+⚡ FRAME SPIKE #123: 33.3 ms at 5.2s (Draw: 7907, Bodies: 214)
+⚡ FRAME SPIKE #124: 33.3 ms at 5.3s (Draw: 7884, Bodies: 214)
+⚡ FRAME SPIKE #125: 33.3 ms at 5.3s (Draw: 7874, Bodies: 214)
+⚡ FRAME SPIKE #126: 33.3 ms at 5.3s (Draw: 7835, Bodies: 214)
+⚡ FRAME SPIKE #127: 36.0 ms at 5.4s (Draw: 7786, Bodies: 214)
+⚡ FRAME SPIKE #128: 36.5 ms at 5.4s (Draw: 7728, Bodies: 214)
+⚡ FRAME SPIKE #129: 36.1 ms at 5.5s (Draw: 7686, Bodies: 214)
+⚡ FRAME SPIKE #130: 35.4 ms at 5.5s (Draw: 7622, Bodies: 214)
+⚡ FRAME SPIKE #131: 34.7 ms at 5.5s (Draw: 7553, Bodies: 214)
+⚡ FRAME SPIKE #132: 35.7 ms at 5.6s (Draw: 7483, Bodies: 215)
+⚡ FRAME SPIKE #133: 64.7 ms at 5.6s (Draw: 7422, Bodies: 214)
+⚡ FRAME SPIKE #134: 42.7 ms at 5.7s (Draw: 7342, Bodies: 214)
+⚡ FRAME SPIKE #135: 44.4 ms at 5.7s (Draw: 7373, Bodies: 214)
+⚡ FRAME SPIKE #136: 35.0 ms at 5.7s (Draw: 7406, Bodies: 214)
+⚡ FRAME SPIKE #137: 33.4 ms at 5.8s (Draw: 7430, Bodies: 214)
+⚡ FRAME SPIKE #138: 32.5 ms at 5.8s (Draw: 7465, Bodies: 214)
+⚡ FRAME SPIKE #139: 32.7 ms at 5.8s (Draw: 7495, Bodies: 214)
+⚡ FRAME SPIKE #140: 32.5 ms at 5.9s (Draw: 7522, Bodies: 214)
+⚡ FRAME SPIKE #141: 32.6 ms at 5.9s (Draw: 7552, Bodies: 214)
+⚡ FRAME SPIKE #142: 31.7 ms at 5.9s (Draw: 7574, Bodies: 214)
+⚡ FRAME SPIKE #143: 32.7 ms at 6.0s (Draw: 7576, Bodies: 214)
+⚡ FRAME SPIKE #144: 32.3 ms at 6.0s (Draw: 7522, Bodies: 214)
+⚡ FRAME SPIKE #145: 31.1 ms at 6.0s (Draw: 7447, Bodies: 214)
+⚡ FRAME SPIKE #146: 31.9 ms at 6.1s (Draw: 7398, Bodies: 214)
+⚡ FRAME SPIKE #147: 32.0 ms at 6.1s (Draw: 7366, Bodies: 214)
+⚡ FRAME SPIKE #148: 31.8 ms at 6.1s (Draw: 7307, Bodies: 214)
+⚡ FRAME SPIKE #149: 30.6 ms at 6.2s (Draw: 7247, Bodies: 214)
+⚡ FRAME SPIKE #150: 27.3 ms at 6.2s (Draw: 7211, Bodies: 214)
+⚡ FRAME SPIKE #151: 31.7 ms at 6.2s (Draw: 7187, Bodies: 214)
+⚡ FRAME SPIKE #152: 30.7 ms at 6.3s (Draw: 7183, Bodies: 214)
+⚡ FRAME SPIKE #153: 30.0 ms at 6.3s (Draw: 7165, Bodies: 214)
+⚡ FRAME SPIKE #154: 30.1 ms at 6.3s (Draw: 7154, Bodies: 214)
+🚗 Traffic: 22 active NPCs (Near: 4, Mid: 17, Far: 1), 2 pooled
+  → Physics bodies from NPCs: 22 (All: 22×1, было бы 22×5=110)
+
+========== Bottleneck Analysis Report ==========
+Time: 110.9s | Frames: 471
+
+📊 PERFORMANCE OVERVIEW:
+  FPS: 30.1 avg | 23.0 min
+  Frame Time: 92.62 ms avg | 283.68 ms max
+  Physics Time: 5.13 ms avg
+
+🔍 BOTTLENECK IDENTIFICATION:
+  🔴 [CRITICAL] Frame Time
+      Value: 92.62 ms (target: 16.67 ms)
+      Impact: Overall performance bottleneck
+      Suggestions:
+        • Reduce draw calls
+        • Optimize scripts in _process()
+        • Check for expensive operations per frame
+
+  🟠 [HIGH] Draw Calls
+      Value: 7528 calls/frame
       Impact: GPU rendering overhead
       Suggestions:
         • Batch meshes by material
@@ -1934,7 +2128,7 @@ Time: 15.3s | Frames: 504
         • Disable physics for far objects
 
   🟡 [MEDIUM] Physics Time
-      Value: 5.06 ms
+      Value: 5.13 ms
       Impact: Physics simulation overhead
       Suggestions:
         • Reduce number of active physics bodies
@@ -1942,7 +2136,7 @@ Time: 15.3s | Frames: 504
         • Disable physics for distant objects
 
   🟡 [MEDIUM] Vertex Count
-      Value: 55493470 vertices/frame
+      Value: 54499631 vertices/frame
       Impact: GPU vertex processing
       Suggestions:
         • Implement LOD for distant objects
@@ -1950,7 +2144,7 @@ Time: 15.3s | Frames: 504
         • Use lower poly models
 
   🟡 [MEDIUM] Node Count
-      Value: 12424 nodes
+      Value: 12636 nodes
       Impact: Scene tree traversal overhead
       Suggestions:
         • Unload distant chunks
@@ -1966,28 +2160,97 @@ Time: 15.3s | Frames: 504
         • Use simpler fog
 
 📈 DETAILED STATS:
-  Draw Calls: 3608 avg | 3717 max
-  Vertices: 55493470 avg | 56612948 max
+  Draw Calls: 7528 avg | 7992 max
+  Vertices: 54499631 avg | 56501491 max
   Physics Bodies: 210
-  Nodes: 12424
-  VRAM: 718.1 MB
+  Nodes: 12636
+  VRAM: 718.9 MB
 
 =================================================
 
-🚗 Traffic: 21 active NPCs (Near: 3, Mid: 17, Far: 1), 1 pooled
+⚡ FRAME SPIKE #155: 28.4 ms at 6.3s (Draw: 7158, Bodies: 214)
+⚡ FRAME SPIKE #156: 30.6 ms at 6.4s (Draw: 7151, Bodies: 214)
+⚡ FRAME SPIKE #157: 30.6 ms at 6.4s (Draw: 7154, Bodies: 214)
+⚡ FRAME SPIKE #158: 30.6 ms at 6.4s (Draw: 7156, Bodies: 214)
+⚡ FRAME SPIKE #159: 30.6 ms at 6.5s (Draw: 7164, Bodies: 213)
+⚡ FRAME SPIKE #160: 30.3 ms at 6.5s (Draw: 6484, Bodies: 213)
+⚡ FRAME SPIKE #161: 30.3 ms at 6.5s (Draw: 6487, Bodies: 213)
+⚡ FRAME SPIKE #162: 30.3 ms at 6.6s (Draw: 6490, Bodies: 214)
+⚡ FRAME SPIKE #163: 30.3 ms at 6.6s (Draw: 6494, Bodies: 214)
+⚡ FRAME SPIKE #164: 30.3 ms at 6.6s (Draw: 6493, Bodies: 214)
+⚡ FRAME SPIKE #165: 30.3 ms at 6.7s (Draw: 6495, Bodies: 214)
+⚡ FRAME SPIKE #166: 28.4 ms at 6.7s (Draw: 6499, Bodies: 214)
+⚡ FRAME SPIKE #167: 30.2 ms at 6.7s (Draw: 6496, Bodies: 214)
+⚡ FRAME SPIKE #168: 29.8 ms at 6.7s (Draw: 6498, Bodies: 214)
+⚡ FRAME SPIKE #169: 30.3 ms at 6.8s (Draw: 6499, Bodies: 214)
+⚡ FRAME SPIKE #170: 29.9 ms at 6.8s (Draw: 6509, Bodies: 214)
+⚡ FRAME SPIKE #171: 25.3 ms at 6.8s (Draw: 6524, Bodies: 214)
+⚡ FRAME SPIKE #172: 30.0 ms at 6.9s (Draw: 6535, Bodies: 214)
+⚡ FRAME SPIKE #173: 29.2 ms at 6.9s (Draw: 6551, Bodies: 214)
+⚡ FRAME SPIKE #174: 27.3 ms at 6.9s (Draw: 6563, Bodies: 214)
+⚡ FRAME SPIKE #175: 29.2 ms at 6.9s (Draw: 6582, Bodies: 214)
+⚡ FRAME SPIKE #176: 29.2 ms at 7.0s (Draw: 6588, Bodies: 214)
+⚡ FRAME SPIKE #177: 29.2 ms at 7.0s (Draw: 6611, Bodies: 214)
+⚡ FRAME SPIKE #178: 29.2 ms at 7.0s (Draw: 6619, Bodies: 214)
+⚡ FRAME SPIKE #179: 29.2 ms at 7.1s (Draw: 6634, Bodies: 214)
+⚡ FRAME SPIKE #180: 29.2 ms at 7.1s (Draw: 6645, Bodies: 214)
+⚡ FRAME SPIKE #181: 28.8 ms at 7.1s (Draw: 6646, Bodies: 214)
+⚡ FRAME SPIKE #182: 28.8 ms at 7.1s (Draw: 6640, Bodies: 214)
+⚡ FRAME SPIKE #183: 28.8 ms at 7.2s (Draw: 6639, Bodies: 214)
+⚡ FRAME SPIKE #184: 28.8 ms at 7.2s (Draw: 6645, Bodies: 214)
+⚡ FRAME SPIKE #185: 28.8 ms at 7.2s (Draw: 6643, Bodies: 214)
+⚡ FRAME SPIKE #186: 28.8 ms at 7.3s (Draw: 6643, Bodies: 214)
+⚡ FRAME SPIKE #187: 28.8 ms at 7.3s (Draw: 6640, Bodies: 214)
+⚡ FRAME SPIKE #188: 28.8 ms at 7.3s (Draw: 6640, Bodies: 214)
+⚡ FRAME SPIKE #189: 28.8 ms at 7.3s (Draw: 6643, Bodies: 214)
+⚡ FRAME SPIKE #190: 28.8 ms at 7.4s (Draw: 6642, Bodies: 214)
+⚡ FRAME SPIKE #191: 28.8 ms at 7.4s (Draw: 6653, Bodies: 214)
+⚡ FRAME SPIKE #192: 28.8 ms at 7.4s (Draw: 6650, Bodies: 214)
+⚡ FRAME SPIKE #193: 28.8 ms at 7.5s (Draw: 6651, Bodies: 214)
+⚡ FRAME SPIKE #194: 28.8 ms at 7.5s (Draw: 6657, Bodies: 213)
+⚡ FRAME SPIKE #195: 28.8 ms at 7.5s (Draw: 6660, Bodies: 213)
+⚡ FRAME SPIKE #196: 28.8 ms at 7.5s (Draw: 6657, Bodies: 213)
+⚡ FRAME SPIKE #197: 28.8 ms at 7.6s (Draw: 6649, Bodies: 213)
+⚡ FRAME SPIKE #198: 28.8 ms at 7.6s (Draw: 6646, Bodies: 213)
+⚡ FRAME SPIKE #199: 28.8 ms at 7.6s (Draw: 6650, Bodies: 213)
+⚡ FRAME SPIKE #200: 28.8 ms at 7.7s (Draw: 6651, Bodies: 213)
+⚡ FRAME SPIKE #201: 28.8 ms at 7.7s (Draw: 6656, Bodies: 213)
+⚡ FRAME SPIKE #202: 28.8 ms at 7.7s (Draw: 6654, Bodies: 213)
+⚡ FRAME SPIKE #203: 29.1 ms at 7.8s (Draw: 6653, Bodies: 213)
+⚡ FRAME SPIKE #204: 28.8 ms at 7.8s (Draw: 6653, Bodies: 213)
+⚡ FRAME SPIKE #205: 28.8 ms at 7.8s (Draw: 6649, Bodies: 213)
+⚡ FRAME SPIKE #206: 28.8 ms at 7.8s (Draw: 6652, Bodies: 213)
+⚡ FRAME SPIKE #207: 28.8 ms at 7.9s (Draw: 6651, Bodies: 213)
+⚡ FRAME SPIKE #208: 28.8 ms at 7.9s (Draw: 6654, Bodies: 213)
+⚡ FRAME SPIKE #209: 28.8 ms at 7.9s (Draw: 6658, Bodies: 213)
+⚡ FRAME SPIKE #210: 28.8 ms at 8.0s (Draw: 6651, Bodies: 213)
+⚡ FRAME SPIKE #211: 28.8 ms at 8.0s (Draw: 6647, Bodies: 213)
+⚡ FRAME SPIKE #212: 28.8 ms at 8.0s (Draw: 6640, Bodies: 213)
+⚡ FRAME SPIKE #213: 28.8 ms at 8.0s (Draw: 6636, Bodies: 213)
+⚡ FRAME SPIKE #214: 28.8 ms at 8.1s (Draw: 6618, Bodies: 213)
+⚡ FRAME SPIKE #215: 28.8 ms at 8.1s (Draw: 6601, Bodies: 213)
+⚡ FRAME SPIKE #216: 28.8 ms at 8.1s (Draw: 6589, Bodies: 213)
+⚡ FRAME SPIKE #217: 28.8 ms at 8.2s (Draw: 6572, Bodies: 213)
+⚡ FRAME SPIKE #218: 28.8 ms at 8.2s (Draw: 6568, Bodies: 213)
+⚡ FRAME SPIKE #219: 28.8 ms at 8.2s (Draw: 6569, Bodies: 213)
+⚡ FRAME SPIKE #220: 28.8 ms at 8.2s (Draw: 6539, Bodies: 213)
+⚡ FRAME SPIKE #221: 28.8 ms at 8.3s (Draw: 6525, Bodies: 213)
+⚡ FRAME SPIKE #222: 28.8 ms at 8.3s (Draw: 6519, Bodies: 213)
+⚡ FRAME SPIKE #223: 28.8 ms at 8.3s (Draw: 6514, Bodies: 213)
+🚗 Traffic: 21 active NPCs (Near: 4, Mid: 16, Far: 1), 3 pooled
   → Physics bodies from NPCs: 21 (All: 21×1, было бы 21×5=105)
 
 ========== Bottleneck Analysis Report ==========
-Time: 17.3s | Frames: 597
+Time: 112.9s | Frames: 540
 
 📊 PERFORMANCE OVERVIEW:
-  FPS: 47.1 avg | 46.0 min
-  Frame Time: 33.98 ms avg | 54.48 ms max
-  Physics Time: 5.12 ms avg
+  FPS: 28.9 avg | 23.0 min
+  Frame Time: 83.77 ms avg | 283.68 ms max
+  Physics Time: 5.53 ms avg
 
 🔍 BOTTLENECK IDENTIFICATION:
   🔴 [CRITICAL] Frame Time
-      Value: 33.98 ms (target: 16.67 ms)
+      Value: 83.77 ms (target: 16.67 ms)
       Impact: Overall performance bottleneck
       Suggestions:
         • Reduce draw calls
@@ -1995,7 +2258,7 @@ Time: 17.3s | Frames: 597
         • Check for expensive operations per frame
 
   🟠 [HIGH] Draw Calls
-      Value: 3886 calls/frame
+      Value: 7070 calls/frame
       Impact: GPU rendering overhead
       Suggestions:
         • Batch meshes by material
@@ -2004,7 +2267,7 @@ Time: 17.3s | Frames: 597
         • Enable frustum culling
 
   🟠 [HIGH] Physics Bodies
-      Value: 212 active bodies
+      Value: 213 active bodies
       Impact: Physics engine load
       Suggestions:
         • Reduce NPC count
@@ -2012,7 +2275,7 @@ Time: 17.3s | Frames: 597
         • Disable physics for far objects
 
   🟡 [MEDIUM] Physics Time
-      Value: 5.12 ms
+      Value: 5.53 ms
       Impact: Physics simulation overhead
       Suggestions:
         • Reduce number of active physics bodies
@@ -2020,7 +2283,7 @@ Time: 17.3s | Frames: 597
         • Disable physics for distant objects
 
   🟡 [MEDIUM] Vertex Count
-      Value: 56290538 vertices/frame
+      Value: 56300276 vertices/frame
       Impact: GPU vertex processing
       Suggestions:
         • Implement LOD for distant objects
@@ -2028,7 +2291,7 @@ Time: 17.3s | Frames: 597
         • Use lower poly models
 
   🟡 [MEDIUM] Node Count
-      Value: 12445 nodes
+      Value: 12636 nodes
       Impact: Scene tree traversal overhead
       Suggestions:
         • Unload distant chunks
@@ -2044,44 +2307,151 @@ Time: 17.3s | Frames: 597
         • Use simpler fog
 
 📈 DETAILED STATS:
-  Draw Calls: 3886 avg | 4119 max
-  Vertices: 56290538 avg | 56359363 max
-  Physics Bodies: 212
-  Nodes: 12445
-  VRAM: 718.1 MB
+  Draw Calls: 7070 avg | 7992 max
+  Vertices: 56300276 avg | 56501491 max
+  Physics Bodies: 213
+  Nodes: 12636
+  VRAM: 718.9 MB
 
 =================================================
 
+⚡ FRAME SPIKE #224: 28.8 ms at 8.4s (Draw: 6495, Bodies: 213)
+⚡ FRAME SPIKE #225: 28.8 ms at 8.4s (Draw: 6485, Bodies: 213)
+⚡ FRAME SPIKE #226: 28.0 ms at 8.4s (Draw: 6486, Bodies: 213)
+⚡ FRAME SPIKE #227: 28.8 ms at 8.4s (Draw: 6496, Bodies: 213)
+⚡ FRAME SPIKE #228: 28.8 ms at 8.5s (Draw: 6510, Bodies: 213)
+⚡ FRAME SPIKE #229: 28.3 ms at 8.5s (Draw: 6511, Bodies: 213)
+⚡ FRAME SPIKE #230: 28.8 ms at 8.5s (Draw: 6522, Bodies: 213)
+⚡ FRAME SPIKE #231: 28.8 ms at 8.6s (Draw: 6520, Bodies: 213)
+⚡ FRAME SPIKE #232: 28.8 ms at 8.6s (Draw: 6786, Bodies: 215)
+⚡ FRAME SPIKE #233: 28.8 ms at 8.6s (Draw: 6786, Bodies: 215)
+⚡ FRAME SPIKE #234: 28.8 ms at 8.6s (Draw: 6779, Bodies: 215)
+⚡ FRAME SPIKE #235: 29.2 ms at 8.7s (Draw: 6780, Bodies: 215)
+⚡ FRAME SPIKE #236: 29.2 ms at 8.7s (Draw: 6783, Bodies: 215)
+⚡ FRAME SPIKE #237: 28.8 ms at 8.7s (Draw: 6783, Bodies: 214)
+⚡ FRAME SPIKE #238: 29.2 ms at 8.8s (Draw: 6782, Bodies: 214)
+⚡ FRAME SPIKE #239: 29.5 ms at 8.8s (Draw: 6785, Bodies: 214)
+⚡ FRAME SPIKE #240: 29.2 ms at 8.8s (Draw: 6777, Bodies: 214)
+⚡ FRAME SPIKE #241: 29.2 ms at 8.8s (Draw: 6772, Bodies: 214)
+⚡ FRAME SPIKE #242: 29.2 ms at 8.9s (Draw: 6768, Bodies: 214)
+⚡ FRAME SPIKE #243: 30.9 ms at 8.9s (Draw: 6757, Bodies: 214)
+⚡ FRAME SPIKE #244: 31.8 ms at 8.9s (Draw: 6751, Bodies: 214)
+⚡ FRAME SPIKE #245: 31.3 ms at 9.0s (Draw: 6750, Bodies: 214)
+⚡ FRAME SPIKE #246: 29.6 ms at 9.0s (Draw: 6746, Bodies: 214)
+⚡ FRAME SPIKE #247: 29.6 ms at 9.0s (Draw: 6742, Bodies: 214)
+⚡ FRAME SPIKE #248: 29.6 ms at 9.1s (Draw: 6739, Bodies: 214)
+⚡ FRAME SPIKE #249: 29.6 ms at 9.1s (Draw: 6741, Bodies: 214)
+⚡ FRAME SPIKE #250: 29.6 ms at 9.1s (Draw: 6737, Bodies: 214)
+⚡ FRAME SPIKE #251: 29.6 ms at 9.1s (Draw: 6746, Bodies: 214)
+⚡ FRAME SPIKE #252: 29.6 ms at 9.2s (Draw: 6739, Bodies: 214)
+⚡ FRAME SPIKE #253: 29.6 ms at 9.2s (Draw: 6732, Bodies: 214)
+⚡ FRAME SPIKE #254: 29.6 ms at 9.2s (Draw: 6733, Bodies: 214)
+⚡ FRAME SPIKE #255: 29.6 ms at 9.3s (Draw: 6736, Bodies: 214)
+⚡ FRAME SPIKE #256: 29.6 ms at 9.3s (Draw: 6739, Bodies: 214)
+⚡ FRAME SPIKE #257: 29.6 ms at 9.3s (Draw: 6719, Bodies: 214)
+
+=== PERFORMANCE METRICS ===
+FPS: 35 | Frame: 30.4 ms (max 150.0) | Physics: 16.5 ms (max 51.8)
+Godot Process: 22.22 ms | Physics: 5.09 ms
+Objects: 30157 | Nodes: 12636 | Resources: 535
+Draw calls: 6719 | Vertices: 56058592 | VRAM: 718.9 MB
+Physics bodies: 214 | Collision pairs: 2054
+--- System Times ---
+  road_batch_finalize_total_-1,-1: 20.41 ms (max 20.41)
+  road_batch_finalize_total_-1,-2: 13.00 ms (max 13.00)
+  road_batch_finalize_total_-1,0: 12.66 ms (max 12.66)
+  road_batch_finalize_total_-2,-1: 16.80 ms (max 16.80)
+  road_batch_finalize_total_-2,-2: 6.12 ms (max 6.12)
+  road_batch_finalize_total_-2,0: 12.47 ms (max 12.47)
+  road_batch_finalize_total_0,-1: 21.91 ms (max 21.91)
+  road_batch_finalize_total_0,-2: 21.66 ms (max 21.66)
+  road_batch_finalize_total_0,0: 16.10 ms (max 16.10)
+  road_batch_finalize_total_0,1: 9.37 ms (max 9.37)
+  road_batch_finalize_total_1,-1: 15.77 ms (max 15.77)
+  road_batch_finalize_total_1,-2: 17.96 ms (max 17.96)
+  road_batch_finalize_total_1,0: 7.48 ms (max 7.48)
+  road_collision_create_-1,-1: 6.46 ms (max 12.87)
+  road_collision_create_-1,-2: 6.18 ms (max 9.41)
+  road_collision_create_-1,0: 6.09 ms (max 10.14)
+  road_collision_create_-2,-1: 5.33 ms (max 10.44)
+  road_collision_create_-2,-2: 2.84 ms (max 4.17)
+  road_collision_create_-2,0: 5.93 ms (max 8.66)
+  road_collision_create_0,-1: 7.04 ms (max 15.38)
+  road_collision_create_0,-2: 6.93 ms (max 13.93)
+  road_collision_create_0,0: 5.18 ms (max 12.36)
+  road_collision_create_0,1: 9.17 ms (max 9.17)
+  road_collision_create_1,-1: 5.05 ms (max 11.74)
+  road_collision_create_1,-2: 8.61 ms (max 14.58)
+  road_collision_create_1,0: 7.22 ms (max 7.22)
+===========================
+
+=== PERFORMANCE METRICS ===
+FPS: 35 | Frame: 30.4 ms (max 150.0) | Physics: 16.5 ms (max 51.9)
+Godot Process: 22.22 ms | Physics: 5.09 ms
+Objects: 30157 | Nodes: 12636 | Resources: 535
+Draw calls: 6719 | Vertices: 56058592 | VRAM: 718.9 MB
+Physics bodies: 214 | Collision pairs: 2054
+===========================
+⚡ FRAME SPIKE #258: 29.6 ms at 9.4s (Draw: 6625, Bodies: 214)
+⚡ FRAME SPIKE #259: 29.6 ms at 9.4s (Draw: 6550, Bodies: 214)
+⚡ FRAME SPIKE #260: 29.6 ms at 9.4s (Draw: 6397, Bodies: 214)
+⚡ FRAME SPIKE #261: 29.6 ms at 9.4s (Draw: 6252, Bodies: 214)
+⚡ FRAME SPIKE #262: 29.6 ms at 9.5s (Draw: 6247, Bodies: 214)
+⚡ FRAME SPIKE #263: 29.6 ms at 9.5s (Draw: 6208, Bodies: 214)
+⚡ FRAME SPIKE #264: 29.6 ms at 9.5s (Draw: 6212, Bodies: 214)
+⚡ FRAME SPIKE #265: 29.6 ms at 9.6s (Draw: 6207, Bodies: 214)
+=== PAZ Model Meshes Debug ===
+Total meshes found: 1
+  - Mesh: bus_low_Material_006_0 (MeshInstance3D)
+PAZ-32053 model setup complete
+⚡ FRAME SPIKE #266: 29.6 ms at 9.6s (Draw: 6637, Bodies: 217)
+⚡ FRAME SPIKE #267: 31.7 ms at 9.6s (Draw: 6792, Bodies: 217)
+⚡ FRAME SPIKE #268: 32.0 ms at 9.7s (Draw: 6870, Bodies: 217)
+⚡ FRAME SPIKE #269: 32.7 ms at 9.7s (Draw: 6987, Bodies: 217)
+⚡ FRAME SPIKE #270: 33.1 ms at 9.7s (Draw: 6996, Bodies: 217)
+⚡ FRAME SPIKE #271: 30.6 ms at 9.7s (Draw: 7010, Bodies: 217)
+⚡ FRAME SPIKE #272: 30.6 ms at 9.8s (Draw: 7011, Bodies: 217)
+⚡ FRAME SPIKE #273: 32.5 ms at 9.8s (Draw: 7012, Bodies: 217)
+⚡ FRAME SPIKE #274: 33.6 ms at 9.8s (Draw: 7031, Bodies: 217)
+⚡ FRAME SPIKE #275: 33.6 ms at 9.9s (Draw: 7016, Bodies: 217)
+⚡ FRAME SPIKE #276: 34.6 ms at 9.9s (Draw: 6934, Bodies: 217)
+⚡ FRAME SPIKE #277: 34.9 ms at 9.9s (Draw: 6852, Bodies: 217)
+⚡ FRAME SPIKE #278: 32.9 ms at 10.0s (Draw: 6719, Bodies: 216)
+⚡ FRAME SPIKE #279: 31.7 ms at 10.0s (Draw: 6372, Bodies: 216)
+⚡ FRAME SPIKE #280: 31.8 ms at 10.0s (Draw: 6293, Bodies: 216)
+⚡ FRAME SPIKE #281: 31.9 ms at 10.1s (Draw: 6287, Bodies: 216)
+⚡ FRAME SPIKE #282: 33.3 ms at 10.1s (Draw: 6286, Bodies: 216)
+⚡ FRAME SPIKE #283: 32.8 ms at 10.1s (Draw: 6299, Bodies: 216)
 
 ========== PERFORMANCE METRICS ==========
 Frames: 600
-  total_frame: avg=1.86 ms, median=0.04 ms, max=97.78 ms, calls=600, total=1113.9 ms
-  road_queue: avg=0.92 ms, median=0.01 ms, max=19.73 ms, calls=600, total=554.9 ms
-  infra_queue: avg=0.34 ms, median=0.00 ms, max=14.22 ms, calls=600, total=202.8 ms
-  road_batch_finalize: avg=14.53 ms, median=15.41 ms, max=19.72 ms, calls=13, total=188.9 ms
-  curb_mesh: avg=0.28 ms, median=0.00 ms, max=11.84 ms, calls=552, total=153.6 ms
-  road_create: avg=0.30 ms, median=0.18 ms, max=10.30 ms, calls=458, total=135.8 ms
-  terrain_queue: avg=0.21 ms, median=0.00 ms, max=71.17 ms, calls=600, total=128.8 ms
-  building_results: avg=0.19 ms, median=0.00 ms, max=1.21 ms, calls=600, total=111.3 ms
-  infra_sort: avg=0.29 ms, median=0.17 ms, max=1.02 ms, calls=373, total=108.6 ms
-  terrain_leisure: avg=6.03 ms, median=0.17 ms, max=70.14 ms, calls=18, total=108.5 ms
-  curb_collisions: avg=0.10 ms, median=0.00 ms, max=1.95 ms, calls=600, total=61.1 ms
-  building_sort: avg=0.33 ms, median=0.19 ms, max=0.93 ms, calls=166, total=55.2 ms
-  infra_yield_sign: avg=0.30 ms, median=0.32 ms, max=0.50 ms, calls=169, total=50.7 ms
-  building_apply: avg=0.27 ms, median=0.27 ms, max=0.36 ms, calls=176, total=46.9 ms
-  vegetation_queue: avg=0.07 ms, median=0.00 ms, max=20.51 ms, calls=600, total=41.1 ms
-  veg_trees: avg=10.07 ms, median=15.50 ms, max=20.50 ms, calls=4, total=40.3 ms
-  window_batch_finalize: avg=2.77 ms, median=2.29 ms, max=13.76 ms, calls=11, total=30.5 ms
-  road_sort: avg=1.21 ms, median=1.30 ms, max=2.86 ms, calls=18, total=21.7 ms
-  terrain_landuse: avg=0.12 ms, median=0.10 ms, max=0.53 ms, calls=78, total=9.3 ms
-  terrain_sort: avg=0.21 ms, median=0.20 ms, max=0.46 ms, calls=39, total=8.3 ms
-  curb_smooth: avg=0.03 ms, median=0.03 ms, max=0.20 ms, calls=252, total=8.1 ms
-  infra_parking_sign: avg=0.54 ms, median=0.52 ms, max=0.68 ms, calls=13, total=7.0 ms
-  infra_lamp: avg=0.03 ms, median=0.02 ms, max=0.14 ms, calls=223, total=6.4 ms
-  infra_traffic_light: avg=0.52 ms, median=0.51 ms, max=0.68 ms, calls=8, total=4.2 ms
-  curb_latlon: avg=0.01 ms, median=0.01 ms, max=0.05 ms, calls=252, total=3.1 ms
-  terrain_natural: avg=0.07 ms, median=0.07 ms, max=0.07 ms, calls=1, total=0.1 ms
-  veg_bushes_grass: avg=0.02 ms, median=0.02 ms, max=0.02 ms, calls=4, total=0.1 ms
+  total_frame: avg=1.96 ms, median=0.04 ms, max=176.45 ms, calls=600, total=1177.8 ms
+  road_queue: avg=0.92 ms, median=0.01 ms, max=21.96 ms, calls=600, total=552.6 ms
+  infra_queue: avg=0.34 ms, median=0.00 ms, max=14.44 ms, calls=600, total=202.0 ms
+  terrain_queue: avg=0.33 ms, median=0.00 ms, max=149.41 ms, calls=600, total=197.4 ms
+  road_batch_finalize: avg=14.78 ms, median=15.80 ms, max=21.95 ms, calls=13, total=192.2 ms
+  terrain_leisure: avg=9.81 ms, median=0.12 ms, max=148.41 ms, calls=18, total=176.7 ms
+  curb_mesh: avg=0.27 ms, median=0.00 ms, max=12.10 ms, calls=551, total=149.5 ms
+  road_create: avg=0.29 ms, median=0.18 ms, max=9.91 ms, calls=458, total=133.7 ms
+  building_results: avg=0.18 ms, median=0.00 ms, max=1.36 ms, calls=600, total=110.0 ms
+  infra_sort: avg=0.29 ms, median=0.17 ms, max=1.01 ms, calls=373, total=109.6 ms
+  curb_collisions: avg=0.10 ms, median=0.00 ms, max=1.68 ms, calls=600, total=59.5 ms
+  building_sort: avg=0.34 ms, median=0.19 ms, max=1.03 ms, calls=166, total=55.7 ms
+  infra_yield_sign: avg=0.29 ms, median=0.29 ms, max=0.48 ms, calls=169, total=48.7 ms
+  building_apply: avg=0.26 ms, median=0.26 ms, max=0.39 ms, calls=176, total=45.4 ms
+  vegetation_queue: avg=0.07 ms, median=0.00 ms, max=21.52 ms, calls=600, total=42.2 ms
+  veg_trees: avg=10.36 ms, median=15.97 ms, max=21.50 ms, calls=4, total=41.5 ms
+  window_batch_finalize: avg=2.67 ms, median=2.13 ms, max=13.24 ms, calls=11, total=29.4 ms
+  road_sort: avg=1.28 ms, median=1.35 ms, max=3.14 ms, calls=19, total=24.3 ms
+  terrain_landuse: avg=0.12 ms, median=0.11 ms, max=0.45 ms, calls=78, total=9.6 ms
+  terrain_sort: avg=0.22 ms, median=0.20 ms, max=0.49 ms, calls=39, total=8.5 ms
+  curb_smooth: avg=0.03 ms, median=0.03 ms, max=0.19 ms, calls=252, total=7.9 ms
+  infra_parking_sign: avg=0.55 ms, median=0.56 ms, max=0.63 ms, calls=13, total=7.2 ms
+  infra_lamp: avg=0.03 ms, median=0.03 ms, max=0.11 ms, calls=223, total=6.4 ms
+  infra_traffic_light: avg=0.52 ms, median=0.53 ms, max=0.57 ms, calls=8, total=4.1 ms
+  curb_latlon: avg=0.01 ms, median=0.01 ms, max=0.04 ms, calls=252, total=3.0 ms
+  veg_bushes_grass: avg=0.02 ms, median=0.02 ms, max=0.04 ms, calls=4, total=0.1 ms
+  terrain_natural: avg=0.08 ms, median=0.08 ms, max=0.08 ms, calls=1, total=0.1 ms
 ==========================================
 
 
@@ -2101,28 +2471,26 @@ Total tracked draw calls: 908
      → Implement MultiMeshInstance3D for building base meshes
 =========================================
 
-=== PAZ Model Meshes Debug ===
-Total meshes found: 1
-  - Mesh: bus_low_Material_006_0 (MeshInstance3D)
-PAZ-32053 model setup complete
-=== PAZ Model Meshes Debug ===
-Total meshes found: 1
-  - Mesh: bus_low_Material_006_0 (MeshInstance3D)
-PAZ-32053 model setup complete
-🚗 Traffic: 24 active NPCs (Near: 5, Mid: 16, Far: 3), 1 pooled
+⚡ FRAME SPIKE #284: 31.9 ms at 10.2s (Draw: 6418, Bodies: 216)
+⚡ FRAME SPIKE #285: 31.9 ms at 10.2s (Draw: 6443, Bodies: 216)
+⚡ FRAME SPIKE #286: 33.3 ms at 10.2s (Draw: 6467, Bodies: 216)
+⚡ FRAME SPIKE #287: 33.0 ms at 10.3s (Draw: 6432, Bodies: 216)
+⚡ FRAME SPIKE #288: 31.9 ms at 10.3s (Draw: 6364, Bodies: 216)
+⚡ FRAME SPIKE #289: 29.9 ms at 10.3s (Draw: 6285, Bodies: 216)
+🚗 Traffic: 24 active NPCs (Near: 7, Mid: 14, Far: 3), 1 pooled
   → Physics bodies from NPCs: 24 (All: 24×1, было бы 24×5=120)
 
 ========== Bottleneck Analysis Report ==========
-Time: 19.3s | Frames: 687
+Time: 115.0s | Frames: 606
 
 📊 PERFORMANCE OVERVIEW:
-  FPS: 46.0 avg | 44.0 min
-  Frame Time: 18.28 ms avg | 19.46 ms max
-  Physics Time: 5.26 ms avg
+  FPS: 33.3 avg | 30.0 min
+  Frame Time: 27.27 ms avg | 46.81 ms max
+  Physics Time: 5.27 ms avg
 
 🔍 BOTTLENECK IDENTIFICATION:
   🟠 [HIGH] Frame Time
-      Value: 18.28 ms (target: 16.67 ms)
+      Value: 27.27 ms (target: 16.67 ms)
       Impact: Overall performance bottleneck
       Suggestions:
         • Reduce draw calls
@@ -2130,7 +2498,7 @@ Time: 19.3s | Frames: 687
         • Check for expensive operations per frame
 
   🟠 [HIGH] Draw Calls
-      Value: 3914 calls/frame
+      Value: 6629 calls/frame
       Impact: GPU rendering overhead
       Suggestions:
         • Batch meshes by material
@@ -2147,7 +2515,7 @@ Time: 19.3s | Frames: 687
         • Disable physics for far objects
 
   🟡 [MEDIUM] Physics Time
-      Value: 5.26 ms
+      Value: 5.27 ms
       Impact: Physics simulation overhead
       Suggestions:
         • Reduce number of active physics bodies
@@ -2155,7 +2523,7 @@ Time: 19.3s | Frames: 687
         • Disable physics for distant objects
 
   🟡 [MEDIUM] Vertex Count
-      Value: 56113616 vertices/frame
+      Value: 54974645 vertices/frame
       Impact: GPU vertex processing
       Suggestions:
         • Implement LOD for distant objects
@@ -2163,7 +2531,7 @@ Time: 19.3s | Frames: 687
         • Use lower poly models
 
   🟡 [MEDIUM] Node Count
-      Value: 12530 nodes
+      Value: 12660 nodes
       Impact: Scene tree traversal overhead
       Suggestions:
         • Unload distant chunks
@@ -2179,135 +2547,37 @@ Time: 19.3s | Frames: 687
         • Use simpler fog
 
 📈 DETAILED STATS:
-  Draw Calls: 3914 avg | 3995 max
-  Vertices: 56113616 avg | 56258763 max
+  Draw Calls: 6629 avg | 7031 max
+  Vertices: 54974645 avg | 56260016 max
   Physics Bodies: 214
-  Nodes: 12530
-  VRAM: 718.1 MB
+  Nodes: 12660
+  VRAM: 718.9 MB
 
 =================================================
 
-
-=== PERFORMANCE METRICS ===
-FPS: 44 | Frame: 21.8 ms (max 62.4) | Physics: 16.7 ms (max 24.5)
-Godot Process: 18.40 ms | Physics: 5.88 ms
-Objects: 30030 | Nodes: 12608 | Resources: 535
-Draw calls: 3584 | Vertices: 49611648 | VRAM: 718.1 MB
-Physics bodies: 217 | Collision pairs: 2084
---- System Times ---
-  road_batch_finalize_total_-1,-1: 10.47 ms (max 10.47)
-  road_batch_finalize_total_-1,-2: 15.38 ms (max 15.38)
-  road_batch_finalize_total_-1,0: 3.82 ms (max 3.82)
-  road_batch_finalize_total_-2,-1: 16.32 ms (max 16.32)
-  road_batch_finalize_total_-2,-2: 15.24 ms (max 15.24)
-  road_batch_finalize_total_-2,0: 14.05 ms (max 14.05)
-  road_batch_finalize_total_0,-1: 19.44 ms (max 19.44)
-  road_batch_finalize_total_0,-2: 19.68 ms (max 19.68)
-  road_batch_finalize_total_0,0: 16.18 ms (max 16.18)
-  road_batch_finalize_total_0,1: 10.93 ms (max 10.93)
-  road_batch_finalize_total_1,-1: 16.70 ms (max 16.70)
-  road_batch_finalize_total_1,-2: 18.21 ms (max 18.21)
-  road_batch_finalize_total_1,0: 12.08 ms (max 12.08)
-  road_collision_create_-1,-1: 3.28 ms (max 3.86)
-  road_collision_create_-1,-2: 7.46 ms (max 11.95)
-  road_collision_create_-1,0: 1.74 ms (max 2.01)
-  road_collision_create_-2,-1: 5.22 ms (max 10.23)
-  road_collision_create_-2,-2: 7.37 ms (max 13.00)
-  road_collision_create_-2,0: 6.79 ms (max 10.68)
-  road_collision_create_0,-1: 6.19 ms (max 12.66)
-  road_collision_create_0,-2: 6.30 ms (max 11.99)
-  road_collision_create_0,0: 5.16 ms (max 12.41)
-  road_collision_create_0,1: 10.65 ms (max 10.65)
-  road_collision_create_1,-1: 5.31 ms (max 12.56)
-  road_collision_create_1,-2: 8.81 ms (max 15.10)
-  road_collision_create_1,0: 11.81 ms (max 11.81)
-===========================
-
-=== PERFORMANCE METRICS ===
-FPS: 44 | Frame: 21.8 ms (max 62.4) | Physics: 16.7 ms (max 24.5)
-Godot Process: 18.40 ms | Physics: 5.88 ms
-Objects: 30030 | Nodes: 12608 | Resources: 535
-Draw calls: 3584 | Vertices: 49611648 | VRAM: 718.1 MB
-Physics bodies: 217 | Collision pairs: 2084
-===========================
-🚗 Traffic: 27 active NPCs (Near: 6, Mid: 17, Far: 4), 0 pooled
-  → Physics bodies from NPCs: 27 (All: 27×1, было бы 27×5=135)
-
-========== Bottleneck Analysis Report ==========
-Time: 21.3s | Frames: 776
-
-📊 PERFORMANCE OVERVIEW:
-  FPS: 44.4 avg | 44.0 min
-  Frame Time: 18.22 ms avg | 19.46 ms max
-  Physics Time: 5.89 ms avg
-
-🔍 BOTTLENECK IDENTIFICATION:
-  🟠 [HIGH] Frame Time
-      Value: 18.22 ms (target: 16.67 ms)
-      Impact: Overall performance bottleneck
-      Suggestions:
-        • Reduce draw calls
-        • Optimize scripts in _process()
-        • Check for expensive operations per frame
-
-  🟠 [HIGH] Draw Calls
-      Value: 3763 calls/frame
-      Impact: GPU rendering overhead
-      Suggestions:
-        • Batch meshes by material
-        • Use MultiMeshInstance3D
-        • Implement LOD system
-        • Enable frustum culling
-
-  🟠 [HIGH] Physics Bodies
-      Value: 217 active bodies
-      Impact: Physics engine load
-      Suggestions:
-        • Reduce NPC count
-        • Convert distant NPCs to kinematic
-        • Disable physics for far objects
-
-  🟡 [MEDIUM] Physics Time
-      Value: 5.89 ms
-      Impact: Physics simulation overhead
-      Suggestions:
-        • Reduce number of active physics bodies
-        • Simplify collision shapes
-        • Disable physics for distant objects
-
-  🟡 [MEDIUM] Vertex Count
-      Value: 54081745 vertices/frame
-      Impact: GPU vertex processing
-      Suggestions:
-        • Implement LOD for distant objects
-        • Simplify building meshes
-        • Use lower poly models
-
-  🟡 [MEDIUM] Node Count
-      Value: 12608 nodes
-      Impact: Scene tree traversal overhead
-      Suggestions:
-        • Unload distant chunks
-        • Pool and reuse nodes
-        • Flatten hierarchy where possible
-
-  🟡 [MEDIUM] Post-Processing Effects
-      Value: SSAO, Glow/Bloom, Volumetric Fog
-      Impact: GPU shader overhead
-      Suggestions:
-        • Reduce SSR quality
-        • Disable SSAO on low-end hardware
-        • Use simpler fog
-
-📈 DETAILED STATS:
-  Draw Calls: 3763 avg | 3995 max
-  Vertices: 54081745 avg | 56042427 max
-  Physics Bodies: 217
-  Nodes: 12608
-  VRAM: 718.1 MB
-
-=================================================
-
+⚡ FRAME SPIKE #290: 31.9 ms at 10.4s (Draw: 6277, Bodies: 216)
+⚡ FRAME SPIKE #291: 30.4 ms at 10.4s (Draw: 6278, Bodies: 216)
+⚡ FRAME SPIKE #292: 29.7 ms at 10.4s (Draw: 6267, Bodies: 216)
+⚡ FRAME SPIKE #293: 30.0 ms at 10.5s (Draw: 6258, Bodies: 216)
+⚡ FRAME SPIKE #294: 30.5 ms at 10.5s (Draw: 6246, Bodies: 216)
+⚡ FRAME SPIKE #295: 30.6 ms at 10.5s (Draw: 6243, Bodies: 216)
+⚡ FRAME SPIKE #296: 25.8 ms at 10.5s (Draw: 6240, Bodies: 216)
+⚡ FRAME SPIKE #297: 29.6 ms at 10.6s (Draw: 6256, Bodies: 216)
+⚡ FRAME SPIKE #298: 30.6 ms at 10.6s (Draw: 6502, Bodies: 217)
+⚡ FRAME SPIKE #299: 40.9 ms at 10.6s (Draw: 6496, Bodies: 217)
+⚡ FRAME SPIKE #300: 31.0 ms at 10.7s (Draw: 6424, Bodies: 216)
+⚡ FRAME SPIKE #301: 31.0 ms at 10.7s (Draw: 5935, Bodies: 216)
+⚡ FRAME SPIKE #302: 27.9 ms at 10.7s (Draw: 5809, Bodies: 216)
+⚡ FRAME SPIKE #303: 31.0 ms at 10.8s (Draw: 5752, Bodies: 216)
+⚡ FRAME SPIKE #304: 30.6 ms at 10.8s (Draw: 5759, Bodies: 216)
+⚡ FRAME SPIKE #305: 30.6 ms at 10.8s (Draw: 5761, Bodies: 216)
+⚡ FRAME SPIKE #306: 30.6 ms at 10.9s (Draw: 5830, Bodies: 216)
+⚡ FRAME SPIKE #307: 30.6 ms at 10.9s (Draw: 5821, Bodies: 216)
+⚡ FRAME SPIKE #308: 29.2 ms at 10.9s (Draw: 5784, Bodies: 216)
+⚡ FRAME SPIKE #309: 26.9 ms at 11.0s (Draw: 5586, Bodies: 216)
+⚡ FRAME SPIKE #310: 26.2 ms at 11.0s (Draw: 5367, Bodies: 216)
+⚡ FRAME SPIKE #311: 25.9 ms at 11.1s (Draw: 5192, Bodies: 216)
+⚡ FRAME SPIKE #312: 25.8 ms at 11.1s (Draw: 5115, Bodies: 216)
 OSM: Loading chunk -1,-3 at lat=59.1235, lon=37.8974
 OSM: Loaded from cache: osm_v2_59.1235_37.8974_250.json
 OSM: Loading chunk 0,-3 at lat=59.1235, lon=37.9026
@@ -2337,75 +2607,64 @@ OSM: Marked chunk '0,-3' for road batch finalization
 OSM: Post-initial chunk loaded, pending_lamps=0
 OSM: _create_pending_lamps started, count=0
 OSM: No pending lamps
-⚡ FRAME SPIKE #6: 86.4 ms at 10.8s (Draw: 3440, Bodies: 224)
+⚡ FRAME SPIKE #313: 86.9 ms at 11.2s (Draw: 5058, Bodies: 221)
 OSM: DEBUG _add_road_to_batch - first road for chunk '0,-3', parent.name='Chunk_0,-3'
 OSM: DEBUG _add_road_to_batch - first road for chunk '-1,-3', parent.name='Chunk_-1,-3'
-⚡ FRAME SPIKE #7: 80.6 ms at 10.8s (Draw: 3465, Bodies: 225)
-⚠️ SLOW FRAME 11.4ms: building=0.4 road=10.1 terrain=0.3 infra=0.6 veg=0.0 curb=0.0ms
-⚡ FRAME SPIKE #8: 54.5 ms at 10.9s (Draw: 3605, Bodies: 226)
-⚠️ SLOW FRAME 10.1ms: building=0.5 road=8.7 terrain=0.4 infra=0.6 veg=0.0 curb=0.0ms
-⚡ FRAME SPIKE #9: 55.1 ms at 11.0s (Draw: 3607, Bodies: 227)
-⚡ FRAME SPIKE #10: 34.0 ms at 11.0s (Draw: 3603, Bodies: 228)
-⚡ FRAME SPIKE #11: 33.8 ms at 11.1s (Draw: 3564, Bodies: 229)
-⚡ FRAME SPIKE #12: 37.5 ms at 11.1s (Draw: 3472, Bodies: 230)
-⚡ FRAME SPIKE #13: 37.7 ms at 11.1s (Draw: 3467, Bodies: 231)
-⚠️ SLOW FRAME 12.4ms: building=0.4 road=7.7 terrain=0.2 infra=0.5 veg=3.6 curb=0.0ms
-⚡ FRAME SPIKE #14: 38.9 ms at 11.2s (Draw: 3477, Bodies: 232)
-⚡ FRAME SPIKE #15: 35.0 ms at 11.2s (Draw: 3481, Bodies: 233)
-🔴 FREEZE: road collision shape creation took 6.8 ms for chunk -1,-3 (type: residential)
+⚡ FRAME SPIKE #314: 59.6 ms at 11.3s (Draw: 4868, Bodies: 222)
+⚠️ SLOW FRAME 10.4ms: building=0.4 road=9.2 terrain=0.3 infra=0.5 veg=0.0 curb=0.0ms
+⚡ FRAME SPIKE #315: 47.3 ms at 11.3s (Draw: 4792, Bodies: 223)
+⚡ FRAME SPIKE #316: 49.2 ms at 11.4s (Draw: 4597, Bodies: 224)
+⚡ FRAME SPIKE #317: 39.6 ms at 11.4s (Draw: 4561, Bodies: 225)
+⚡ FRAME SPIKE #318: 32.5 ms at 11.5s (Draw: 4534, Bodies: 226)
+⚡ FRAME SPIKE #319: 33.1 ms at 11.5s (Draw: 4381, Bodies: 227)
+⚡ FRAME SPIKE #320: 34.4 ms at 11.5s (Draw: 4205, Bodies: 228)
+⚠️ SLOW FRAME 12.3ms: building=0.4 road=7.6 terrain=0.2 infra=0.5 veg=3.6 curb=0.0ms
+⚡ FRAME SPIKE #321: 37.8 ms at 11.6s (Draw: 4035, Bodies: 229)
+⚡ FRAME SPIKE #322: 33.4 ms at 11.6s (Draw: 4039, Bodies: 231)
+🔴 FREEZE: road collision shape creation took 10.1 ms for chunk -1,-3 (type: residential)
 OSM: ✅ Finalized road batch -1,-3/residential: 2166 vertices, 2110 triangles, material: <ImageTexture#-9223371972681922551>
 OSM: ✅ Finalized road batch -1,-3/path: 792 vertices, 776 triangles, material: <ImageTexture#-9223371972598036470>
 OSM: ✅ Finalized road batch -1,-3/primary: 410 vertices, 406 triangles, material: <ImageTexture#-9223371972765808632>
-⚠️ SLOW: road batch finalization took 11.6 ms for chunk -1,-3
-⚠️ SLOW FRAME 35.3ms: building=0.6 road=11.6 terrain=0.2 infra=0.4 veg=22.4 curb=0.0ms
-⚡ FRAME SPIKE #16: 42.8 ms at 11.3s (Draw: 3481, Bodies: 234)
+⚠️ SLOW: road batch finalization took 14.3 ms for chunk -1,-3
+⚠️ SLOW FRAME 37.1ms: building=0.4 road=14.3 terrain=0.2 infra=0.3 veg=21.8 curb=0.0ms
+⚡ FRAME SPIKE #323: 37.5 ms at 11.6s (Draw: 4039, Bodies: 232)
 OSM: ✅ Finalized road batch 0,-3/path: 2286 vertices, 2210 triangles, material: <ImageTexture#-9223371972598036470>
-OSM: ✅ Finalized road batch 0,-3/primary: 962 vertices, 944 triangles, material: <ImageTexture#-9223371972765808632>
 OSM: ✅ Finalized road batch 0,-3/residential: 1688 vertices, 1624 triangles, material: <ImageTexture#-9223371972681922551>
-⚠️ SLOW: road batch finalization took 11.6 ms for chunk 0,-3
-⚠️ SLOW FRAME 12.7ms: building=0.4 road=11.6 terrain=0.3 infra=0.4 veg=0.0 curb=0.0ms
-⚡ FRAME SPIKE #17: 33.7 ms at 11.3s (Draw: 3481, Bodies: 235)
-⚠️ SLOW FRAME 18.1ms: building=0.4 road=1.1 terrain=0.2 infra=0.8 veg=15.3 curb=0.4ms
-⚡ FRAME SPIKE #18: 29.7 ms at 11.3s (Draw: 3481, Bodies: 235)
+OSM: ✅ Finalized road batch 0,-3/primary: 962 vertices, 944 triangles, material: <ImageTexture#-9223371972765808632>
+⚠️ SLOW: road batch finalization took 11.7 ms for chunk 0,-3
+⚠️ SLOW FRAME 12.7ms: building=0.3 road=11.8 terrain=0.2 infra=0.4 veg=0.0 curb=0.0ms
+⚡ FRAME SPIKE #324: 32.6 ms at 11.7s (Draw: 4039, Bodies: 233)
+⚠️ SLOW FRAME 17.0ms: building=0.3 road=0.9 terrain=0.2 infra=0.7 veg=14.8 curb=0.3ms
+⚡ FRAME SPIKE #325: 26.9 ms at 11.7s (Draw: 4039, Bodies: 233)
 OSM: 🌙 NIGHT Window batch 0,-3 | night_mgr: CACHED | is_night value: true
 OSM: ✅ Finalized window batch 0,-3: 2329 windows (was 2329 draw calls before batching)
 OSM: 🌙 NIGHT Window batch -1,-3 | night_mgr: CACHED | is_night value: true
 OSM: ✅ Finalized window batch -1,-3: 4341 windows (was 4341 draw calls before batching)
-⚡ FRAME SPIKE #19: 27.5 ms at 11.6s (Draw: 3652, Bodies: 268)
-⚡ FRAME SPIKE #20: 37.8 ms at 11.6s (Draw: 3654, Bodies: 269)
-⚡ FRAME SPIKE #21: 28.5 ms at 11.7s (Draw: 3654, Bodies: 270)
-⚡ FRAME SPIKE #22: 27.8 ms at 11.7s (Draw: 3666, Bodies: 271)
-⚡ FRAME SPIKE #23: 28.6 ms at 11.7s (Draw: 3666, Bodies: 272)
-⚡ FRAME SPIKE #24: 29.2 ms at 11.8s (Draw: 3964, Bodies: 274)
-⚡ FRAME SPIKE #25: 52.6 ms at 11.8s (Draw: 3981, Bodies: 275)
-⚡ FRAME SPIKE #26: 36.6 ms at 11.8s (Draw: 3975, Bodies: 276)
-⚡ FRAME SPIKE #27: 33.3 ms at 11.9s (Draw: 3883, Bodies: 277)
-⚡ FRAME SPIKE #28: 33.3 ms at 11.9s (Draw: 3692, Bodies: 278)
-⚡ FRAME SPIKE #29: 33.3 ms at 12.0s (Draw: 3618, Bodies: 279)
-⚡ FRAME SPIKE #30: 33.3 ms at 12.0s (Draw: 3612, Bodies: 280)
-⚡ FRAME SPIKE #31: 33.3 ms at 12.0s (Draw: 3541, Bodies: 281)
-⚡ FRAME SPIKE #32: 31.1 ms at 12.1s (Draw: 3488, Bodies: 282)
-⚡ FRAME SPIKE #33: 30.0 ms at 12.1s (Draw: 3450, Bodies: 283)
-⚡ FRAME SPIKE #34: 27.5 ms at 12.1s (Draw: 3442, Bodies: 283)
-⚡ FRAME SPIKE #35: 27.6 ms at 12.2s (Draw: 3422, Bodies: 283)
-⚡ FRAME SPIKE #36: 26.2 ms at 12.2s (Draw: 3428, Bodies: 283)
-⚡ FRAME SPIKE #37: 25.0 ms at 12.2s (Draw: 3425, Bodies: 283)
-⚡ FRAME SPIKE #38: 25.9 ms at 12.3s (Draw: 3441, Bodies: 283)
-⚡ FRAME SPIKE #39: 25.8 ms at 12.3s (Draw: 3440, Bodies: 283)
-🚗 Traffic: 28 active NPCs (Near: 7, Mid: 15, Far: 6), 2 pooled
-  → Physics bodies from NPCs: 28 (All: 28×1, было бы 28×5=140)
+⚡ FRAME SPIKE #326: 34.8 ms at 12.0s (Draw: 3871, Bodies: 266)
+⚡ FRAME SPIKE #327: 27.4 ms at 12.1s (Draw: 3844, Bodies: 269)
+⚡ FRAME SPIKE #328: 27.6 ms at 12.1s (Draw: 3850, Bodies: 269)
+⚡ FRAME SPIKE #329: 26.2 ms at 12.1s (Draw: 3851, Bodies: 270)
+⚡ FRAME SPIKE #330: 25.7 ms at 12.1s (Draw: 3837, Bodies: 271)
+⚡ FRAME SPIKE #331: 25.9 ms at 12.2s (Draw: 3834, Bodies: 272)
+⚡ FRAME SPIKE #332: 25.8 ms at 12.2s (Draw: 3723, Bodies: 274)
+⚡ FRAME SPIKE #333: 25.8 ms at 12.3s (Draw: 3648, Bodies: 276)
+⚡ FRAME SPIKE #334: 25.2 ms at 12.3s (Draw: 3698, Bodies: 276)
+⚡ FRAME SPIKE #335: 25.8 ms at 12.3s (Draw: 3743, Bodies: 277)
+⚡ FRAME SPIKE #336: 25.8 ms at 12.3s (Draw: 3848, Bodies: 278)
+🚗 Traffic: 24 active NPCs (Near: 6, Mid: 13, Far: 5), 2 pooled
+  → Physics bodies from NPCs: 24 (All: 24×1, было бы 24×5=120)
 
 ========== Bottleneck Analysis Report ==========
-Time: 23.3s | Frames: 867
+Time: 117.0s | Frames: 697
 
 📊 PERFORMANCE OVERVIEW:
-  FPS: 41.4 avg | 35.0 min
-  Frame Time: 55.87 ms avg | 92.84 ms max
-  Physics Time: 6.53 ms avg
+  FPS: 31.8 avg | 31.0 min
+  Frame Time: 55.73 ms avg | 89.48 ms max
+  Physics Time: 5.55 ms avg
 
 🔍 BOTTLENECK IDENTIFICATION:
   🔴 [CRITICAL] Frame Time
-      Value: 55.87 ms (target: 16.67 ms)
+      Value: 55.73 ms (target: 16.67 ms)
       Impact: Overall performance bottleneck
       Suggestions:
         • Reduce draw calls
@@ -2413,7 +2672,7 @@ Time: 23.3s | Frames: 867
         • Check for expensive operations per frame
 
   🟠 [HIGH] Draw Calls
-      Value: 3559 calls/frame
+      Value: 5093 calls/frame
       Impact: GPU rendering overhead
       Suggestions:
         • Batch meshes by material
@@ -2422,7 +2681,7 @@ Time: 23.3s | Frames: 867
         • Enable frustum culling
 
   🟠 [HIGH] Physics Bodies
-      Value: 244 active bodies
+      Value: 233 active bodies
       Impact: Physics engine load
       Suggestions:
         • Reduce NPC count
@@ -2430,7 +2689,7 @@ Time: 23.3s | Frames: 867
         • Disable physics for far objects
 
   🟡 [MEDIUM] Physics Time
-      Value: 6.53 ms
+      Value: 5.55 ms
       Impact: Physics simulation overhead
       Suggestions:
         • Reduce number of active physics bodies
@@ -2438,7 +2697,7 @@ Time: 23.3s | Frames: 867
         • Disable physics for distant objects
 
   🟡 [MEDIUM] Vertex Count
-      Value: 25257169 vertices/frame
+      Value: 25583653 vertices/frame
       Impact: GPU vertex processing
       Suggestions:
         • Implement LOD for distant objects
@@ -2446,7 +2705,7 @@ Time: 23.3s | Frames: 867
         • Use lower poly models
 
   🟡 [MEDIUM] Node Count
-      Value: 16243 nodes
+      Value: 15953 nodes
       Impact: Scene tree traversal overhead
       Suggestions:
         • Unload distant chunks
@@ -2462,85 +2721,85 @@ Time: 23.3s | Frames: 867
         • Use simpler fog
 
 📈 DETAILED STATS:
-  Draw Calls: 3559 avg | 3981 max
-  Vertices: 25257169 avg | 56006054 max
-  Physics Bodies: 244
-  Nodes: 16243
-  VRAM: 727.4 MB
+  Draw Calls: 5093 avg | 7031 max
+  Vertices: 25583653 avg | 56082519 max
+  Physics Bodies: 233
+  Nodes: 15953
+  VRAM: 728.1 MB
 
 =================================================
 
-⚡ FRAME SPIKE #40: 50.3 ms at 13.8s (Draw: 3256, Bodies: 284)
-⚡ FRAME SPIKE #41: 35.0 ms at 13.9s (Draw: 3249, Bodies: 284)
-⚡ FRAME SPIKE #42: 33.8 ms at 13.9s (Draw: 3248, Bodies: 284)
-⚡ FRAME SPIKE #43: 35.1 ms at 13.9s (Draw: 3244, Bodies: 284)
-⚡ FRAME SPIKE #44: 27.8 ms at 14.0s (Draw: 3249, Bodies: 284)
-⚡ FRAME SPIKE #45: 26.7 ms at 14.0s (Draw: 3299, Bodies: 284)
-⚡ FRAME SPIKE #46: 26.2 ms at 14.1s (Draw: 3331, Bodies: 284)
-⚡ FRAME SPIKE #47: 25.9 ms at 14.1s (Draw: 3329, Bodies: 283)
-⚡ FRAME SPIKE #48: 25.8 ms at 14.2s (Draw: 3325, Bodies: 283)
-⚡ FRAME SPIKE #49: 25.2 ms at 14.4s (Draw: 3241, Bodies: 283)
+⚡ FRAME SPIKE #337: 29.1 ms at 12.4s (Draw: 3862, Bodies: 279)
+⚡ FRAME SPIKE #338: 25.8 ms at 12.4s (Draw: 3871, Bodies: 279)
+⚡ FRAME SPIKE #339: 25.8 ms at 12.4s (Draw: 3874, Bodies: 279)
+⚡ FRAME SPIKE #340: 25.8 ms at 12.4s (Draw: 3878, Bodies: 279)
+⚡ FRAME SPIKE #341: 25.4 ms at 12.5s (Draw: 3882, Bodies: 279)
+⚡ FRAME SPIKE #342: 25.4 ms at 12.5s (Draw: 3889, Bodies: 279)
+=== PAZ Model Meshes Debug ===
+Total meshes found: 1
+  - Mesh: bus_low_Material_006_0 (MeshInstance3D)
+PAZ-32053 model setup complete
 
 === PERFORMANCE METRICS ===
-FPS: 39 | Frame: 23.1 ms (max 86.4) | Physics: 16.7 ms (max 98.6)
-Godot Process: 36.71 ms | Physics: 7.26 ms
-Objects: 39049 | Nodes: 16413 | Resources: 536
-Draw calls: 3240 | Vertices: 6637464 | VRAM: 727.4 MB
-Physics bodies: 283 | Collision pairs: 3046
+FPS: 43 | Frame: 25.4 ms (max 86.9) | Physics: 16.7 ms (max 94.7)
+Godot Process: 16.46 ms | Physics: 6.24 ms
+Objects: 38622 | Nodes: 16149 | Resources: 536
+Draw calls: 3258 | Vertices: 6641594 | VRAM: 728.2 MB
+Physics bodies: 281 | Collision pairs: 3041
 --- System Times ---
-  road_batch_finalize_total_-1,-1: 10.47 ms (max 10.47)
-  road_batch_finalize_total_-1,-2: 15.38 ms (max 15.38)
-  road_batch_finalize_total_-1,-3: 11.56 ms (max 11.56)
-  road_batch_finalize_total_-1,0: 3.82 ms (max 3.82)
-  road_batch_finalize_total_-2,-1: 16.32 ms (max 16.32)
-  road_batch_finalize_total_-2,-2: 15.24 ms (max 15.24)
-  road_batch_finalize_total_-2,0: 14.05 ms (max 14.05)
-  road_batch_finalize_total_0,-1: 19.44 ms (max 19.44)
-  road_batch_finalize_total_0,-2: 19.68 ms (max 19.68)
-  road_batch_finalize_total_0,-3: 11.59 ms (max 11.59)
-  road_batch_finalize_total_0,0: 16.18 ms (max 16.18)
-  road_batch_finalize_total_0,1: 10.93 ms (max 10.93)
-  road_batch_finalize_total_1,-1: 16.70 ms (max 16.70)
-  road_batch_finalize_total_1,-2: 18.21 ms (max 18.21)
-  road_batch_finalize_total_1,0: 12.08 ms (max 12.08)
-  road_collision_create_-1,-1: 3.28 ms (max 3.86)
-  road_collision_create_-1,-2: 7.46 ms (max 11.95)
-  road_collision_create_-1,-3: 3.47 ms (max 6.77)
-  road_collision_create_-1,0: 1.74 ms (max 2.01)
-  road_collision_create_-2,-1: 5.22 ms (max 10.23)
-  road_collision_create_-2,-2: 7.37 ms (max 13.00)
-  road_collision_create_-2,0: 6.79 ms (max 10.68)
-  road_collision_create_0,-1: 6.19 ms (max 12.66)
-  road_collision_create_0,-2: 6.30 ms (max 11.99)
-  road_collision_create_0,-3: 3.51 ms (max 4.80)
-  road_collision_create_0,0: 5.16 ms (max 12.41)
-  road_collision_create_0,1: 10.65 ms (max 10.65)
-  road_collision_create_1,-1: 5.31 ms (max 12.56)
-  road_collision_create_1,-2: 8.81 ms (max 15.10)
-  road_collision_create_1,0: 11.81 ms (max 11.81)
+  road_batch_finalize_total_-1,-1: 20.41 ms (max 20.41)
+  road_batch_finalize_total_-1,-2: 13.00 ms (max 13.00)
+  road_batch_finalize_total_-1,-3: 14.26 ms (max 14.26)
+  road_batch_finalize_total_-1,0: 12.66 ms (max 12.66)
+  road_batch_finalize_total_-2,-1: 16.80 ms (max 16.80)
+  road_batch_finalize_total_-2,-2: 6.12 ms (max 6.12)
+  road_batch_finalize_total_-2,0: 12.47 ms (max 12.47)
+  road_batch_finalize_total_0,-1: 21.91 ms (max 21.91)
+  road_batch_finalize_total_0,-2: 21.66 ms (max 21.66)
+  road_batch_finalize_total_0,-3: 11.73 ms (max 11.73)
+  road_batch_finalize_total_0,0: 16.10 ms (max 16.10)
+  road_batch_finalize_total_0,1: 9.37 ms (max 9.37)
+  road_batch_finalize_total_1,-1: 15.77 ms (max 15.77)
+  road_batch_finalize_total_1,-2: 17.96 ms (max 17.96)
+  road_batch_finalize_total_1,0: 7.48 ms (max 7.48)
+  road_collision_create_-1,-1: 6.46 ms (max 12.87)
+  road_collision_create_-1,-2: 6.18 ms (max 9.41)
+  road_collision_create_-1,-3: 4.52 ms (max 10.12)
+  road_collision_create_-1,0: 6.09 ms (max 10.14)
+  road_collision_create_-2,-1: 5.33 ms (max 10.44)
+  road_collision_create_-2,-2: 2.84 ms (max 4.17)
+  road_collision_create_-2,0: 5.93 ms (max 8.66)
+  road_collision_create_0,-1: 7.04 ms (max 15.38)
+  road_collision_create_0,-2: 6.93 ms (max 13.93)
+  road_collision_create_0,-3: 3.61 ms (max 4.79)
+  road_collision_create_0,0: 5.18 ms (max 12.36)
+  road_collision_create_0,1: 9.17 ms (max 9.17)
+  road_collision_create_1,-1: 5.05 ms (max 11.74)
+  road_collision_create_1,-2: 8.61 ms (max 14.58)
+  road_collision_create_1,0: 7.22 ms (max 7.22)
 ===========================
 
 === PERFORMANCE METRICS ===
-FPS: 39 | Frame: 23.1 ms (max 86.4) | Physics: 16.7 ms (max 98.7)
-Godot Process: 36.71 ms | Physics: 7.26 ms
-Objects: 39049 | Nodes: 16413 | Resources: 536
-Draw calls: 3240 | Vertices: 6637464 | VRAM: 727.4 MB
-Physics bodies: 283 | Collision pairs: 3046
+FPS: 43 | Frame: 25.4 ms (max 86.9) | Physics: 16.7 ms (max 94.7)
+Godot Process: 16.46 ms | Physics: 6.24 ms
+Objects: 38622 | Nodes: 16149 | Resources: 536
+Draw calls: 3258 | Vertices: 6641594 | VRAM: 728.2 MB
+Physics bodies: 281 | Collision pairs: 3041
 ===========================
-🚗 Traffic: 29 active NPCs (Near: 5, Mid: 14, Far: 10), 2 pooled
-  → Physics bodies from NPCs: 29 (All: 29×1, было бы 29×5=145)
+🚗 Traffic: 26 active NPCs (Near: 7, Mid: 10, Far: 9), 1 pooled
+  → Physics bodies from NPCs: 26 (All: 26×1, было бы 26×5=130)
 
 ========== Bottleneck Analysis Report ==========
-Time: 25.4s | Frames: 948
+Time: 119.0s | Frames: 785
 
 📊 PERFORMANCE OVERVIEW:
-  FPS: 44.9 avg | 35.0 min
-  Frame Time: 43.77 ms avg | 92.84 ms max
-  Physics Time: 6.79 ms avg
+  FPS: 45.7 avg | 31.0 min
+  Frame Time: 44.80 ms avg | 89.48 ms max
+  Physics Time: 5.93 ms avg
 
 🔍 BOTTLENECK IDENTIFICATION:
   🔴 [CRITICAL] Frame Time
-      Value: 43.77 ms (target: 16.67 ms)
+      Value: 44.80 ms (target: 16.67 ms)
       Impact: Overall performance bottleneck
       Suggestions:
         • Reduce draw calls
@@ -2548,7 +2807,7 @@ Time: 25.4s | Frames: 948
         • Check for expensive operations per frame
 
   🟠 [HIGH] Draw Calls
-      Value: 3375 calls/frame
+      Value: 3574 calls/frame
       Impact: GPU rendering overhead
       Suggestions:
         • Batch meshes by material
@@ -2557,7 +2816,7 @@ Time: 25.4s | Frames: 948
         • Enable frustum culling
 
   🟠 [HIGH] Physics Bodies
-      Value: 280 active bodies
+      Value: 275 active bodies
       Impact: Physics engine load
       Suggestions:
         • Reduce NPC count
@@ -2565,7 +2824,7 @@ Time: 25.4s | Frames: 948
         • Disable physics for far objects
 
   🟡 [MEDIUM] Physics Time
-      Value: 6.79 ms
+      Value: 5.93 ms
       Impact: Physics simulation overhead
       Suggestions:
         • Reduce number of active physics bodies
@@ -2573,7 +2832,7 @@ Time: 25.4s | Frames: 948
         • Disable physics for distant objects
 
   🟡 [MEDIUM] Vertex Count
-      Value: 7106864 vertices/frame
+      Value: 6717209 vertices/frame
       Impact: GPU vertex processing
       Suggestions:
         • Implement LOD for distant objects
@@ -2581,7 +2840,7 @@ Time: 25.4s | Frames: 948
         • Use lower poly models
 
   🟡 [MEDIUM] Node Count
-      Value: 16413 nodes
+      Value: 16149 nodes
       Impact: Scene tree traversal overhead
       Suggestions:
         • Unload distant chunks
@@ -2597,374 +2856,17 @@ Time: 25.4s | Frames: 948
         • Use simpler fog
 
 📈 DETAILED STATS:
-  Draw Calls: 3375 avg | 3981 max
-  Vertices: 7106864 avg | 12842573 max
-  Physics Bodies: 280
-  Nodes: 16413
-  VRAM: 727.4 MB
+  Draw Calls: 3574 avg | 4039 max
+  Vertices: 6717209 avg | 6820628 max
+  Physics Bodies: 275
+  Nodes: 16149
+  VRAM: 728.2 MB
 
 =================================================
 
-🚗 Traffic: 28 active NPCs (Near: 0, Mid: 19, Far: 9), 3 pooled
-  → Physics bodies from NPCs: 28 (All: 28×1, было бы 28×5=140)
-
-========== Bottleneck Analysis Report ==========
-Time: 27.4s | Frames: 1033
-
-📊 PERFORMANCE OVERVIEW:
-  FPS: 40.6 avg | 39.0 min
-  Frame Time: 23.74 ms avg | 36.71 ms max
-  Physics Time: 7.17 ms avg
-
-🔍 BOTTLENECK IDENTIFICATION:
-  🟠 [HIGH] Frame Time
-      Value: 23.74 ms (target: 16.67 ms)
-      Impact: Overall performance bottleneck
-      Suggestions:
-        • Reduce draw calls
-        • Optimize scripts in _process()
-        • Check for expensive operations per frame
-
-  🟠 [HIGH] Draw Calls
-      Value: 3212 calls/frame
-      Impact: GPU rendering overhead
-      Suggestions:
-        • Batch meshes by material
-        • Use MultiMeshInstance3D
-        • Implement LOD system
-        • Enable frustum culling
-
-  🟠 [HIGH] Physics Bodies
-      Value: 283 active bodies
-      Impact: Physics engine load
-      Suggestions:
-        • Reduce NPC count
-        • Convert distant NPCs to kinematic
-        • Disable physics for far objects
-
-  🟡 [MEDIUM] Physics Time
-      Value: 7.17 ms
-      Impact: Physics simulation overhead
-      Suggestions:
-        • Reduce number of active physics bodies
-        • Simplify collision shapes
-        • Disable physics for distant objects
-
-  🟡 [MEDIUM] Vertex Count
-      Value: 6637225 vertices/frame
-      Impact: GPU vertex processing
-      Suggestions:
-        • Implement LOD for distant objects
-        • Simplify building meshes
-        • Use lower poly models
-
-  🟡 [MEDIUM] Node Count
-      Value: 16413 nodes
-      Impact: Scene tree traversal overhead
-      Suggestions:
-        • Unload distant chunks
-        • Pool and reuse nodes
-        • Flatten hierarchy where possible
-
-  🟡 [MEDIUM] Post-Processing Effects
-      Value: SSAO, Glow/Bloom, Volumetric Fog
-      Impact: GPU shader overhead
-      Suggestions:
-        • Reduce SSR quality
-        • Disable SSAO on low-end hardware
-        • Use simpler fog
-
-📈 DETAILED STATS:
-  Draw Calls: 3212 avg | 3334 max
-  Vertices: 6637225 avg | 6724467 max
-  Physics Bodies: 283
-  Nodes: 16413
-  VRAM: 727.4 MB
-
-=================================================
-
-OSM: Loading chunk -2,-3 at lat=59.1235, lon=37.8921
-OSM: Loaded from cache: osm_v2_59.1235_37.8921_250.json
-OSM: Chunk -2,-3 data loaded
-OSM: Found 14 POI nodes in chunk
-POI_DEBUG: Found 'Аптека+' inside building at local (-584.9, -728.9)
-OSM: Generated 36 roads, 41 buildings, 0 trees, 0 signs, 0 lamps, 26 intersections
-OSM: Marked chunk '-2,-3' for road batch finalization
-OSM: Post-initial chunk loaded, pending_lamps=442
-OSM: _create_pending_lamps started, count=442
-OSM: Created 255 lamps, skipped 187 (on parking or chunk not loaded)
-OSM: DEBUG - Finalizing 0 lamp batches
-⚡ FRAME SPIKE #50: 68.2 ms at 18.0s (Draw: 3110, Bodies: 284)
-OSM: DEBUG _add_road_to_batch - first road for chunk '-2,-3', parent.name='Chunk_-2,-3'
-OSM: DEBUG - First lamp added to chunk 0,-3 batch
-⚠️ SLOW FRAME 10.4ms: building=0.5 road=9.0 terrain=0.2 infra=0.7 veg=0.0 curb=0.0ms
-⚡ FRAME SPIKE #51: 53.5 ms at 18.0s (Draw: 3105, Bodies: 284)
-⚡ FRAME SPIKE #52: 41.0 ms at 18.1s (Draw: 3118, Bodies: 284)
-⚡ FRAME SPIKE #53: 50.0 ms at 18.1s (Draw: 3129, Bodies: 284)
-OSM: ✅ Finalized road batch -2,-3/residential: 1996 vertices, 1940 triangles, material: <ImageTexture#-9223371972681922551>
-OSM: ✅ Finalized road batch -2,-3/primary: 410 vertices, 406 triangles, material: <ImageTexture#-9223371972765808632>
-OSM: ✅ Finalized road batch -2,-3/path: 658 vertices, 646 triangles, material: <ImageTexture#-9223371972598036470>
-⚠️ SLOW: road batch finalization took 8.7 ms for chunk -2,-3
-⚡ FRAME SPIKE #54: 30.8 ms at 18.2s (Draw: 3129, Bodies: 284)
-OSM: DEBUG - First lamp added to chunk -1,-3 batch
-OSM: 🌙 NIGHT Window batch -2,-3 | night_mgr: CACHED | is_night value: true
-OSM: ✅ Finalized window batch -2,-3: 5141 windows (was 5141 draw calls before batching)
-OSM: 🌙 NIGHT Window batch -2,-3 | night_mgr: CACHED | is_night value: true
-OSM: ✅ Finalized window batch -2,-3: 200 windows (was 200 draw calls before batching)
-⚡ FRAME SPIKE #55: 27.9 ms at 18.4s (Draw: 3147, Bodies: 283)
-OSM: Loading chunk 1,-3 at lat=59.1235, lon=37.9079
-OSM: Loaded from cache: osm_v2_59.1235_37.9079_250.json
-OSM: Chunk 1,-3 data loaded
-OSM: Found 4 entrance nodes in chunk
-OSM: Found 29 POI nodes in chunk
-POI_DEBUG: Found 'Бон Аппетит' inside building at local (536.3, -777.3)
-POI_DEBUG: Found 'Осетинские пироги' inside building at local (571.7, -769.5)
-POI_DEBUG: Found 'Ткани для Вас' inside building at local (630.6, -755.6)
-POI_DEBUG: Found 'Аста-запчасти' inside building at local (556.2, -773.0)
-POI_DEBUG: Found 'Coffee Like' inside building at local (572.0, -760.4)
-POI_DEBUG: Found 'Шексна' inside building at local (409.3, -852.9)
-POI_DEBUG: Found 'Ozon' inside building at local (392.2, -869.7)
-BusinessSign: Found logo for 'ozon' -> res://textures/brand_logos/ozon.png
-POI_DEBUG: Found 'Академия слуха' inside building at local (369.2, -911.4)
-POI_DEBUG: Found 'DNS' inside building at local (364.5, -739.9)
-POI_DEBUG: Found 'Пятёрочка' inside building at local (336.8, -729.4)
-POI_DEBUG: Found 'Антей' inside building at local (359.3, -721.5)
-BusinessSign: Found logo for 'dns' -> res://textures/brand_logos/dns.png
-BusinessSign: Found logo for 'пятёрочка' -> res://textures/brand_logos/pyaterochka.png
-POI_DEBUG: Found 'Десяточка' inside building at local (434.3, -758.0)
-POI_DEBUG: Found 'Алоэ' inside building at local (425.4, -758.1)
-POI_DEBUG: Found 'МТС' inside building at local (420.4, -759.2)
-BusinessSign: Found logo for 'мтс' -> res://textures/brand_logos/mts.png
-POI_DEBUG: Found 'Россельхозбанк' inside building at local (465.8, -706.4)
-POI_DEBUG: Found 'OTP-банк' inside building at local (592.3, -604.5)
-POI_DEBUG: Found 'ВТБ' inside building at local (594.8, -612.1)
-POI_DEBUG: Found 'Шашлычек' inside building at local (589.3, -592.4)
-POI_DEBUG: Found 'Easy Slip' inside building at local (581.6, -593.1)
-BusinessSign: Found logo for 'втб' -> res://textures/brand_logos/vtb.png
-POI_DEBUG: Found 'СДЭК' inside building at local (536.8, -743.2)
-POI_DEBUG: Found 'Ozon' inside building at local (559.0, -660.9)
-BusinessSign: Found logo for 'ozon' -> res://textures/brand_logos/ozon.png
-BusinessSign: Found logo for 'пятёрочка' -> res://textures/brand_logos/pyaterochka.png
-OSM: Generated 55 roads, 18 buildings, 0 trees, 0 signs, 0 lamps, 28 intersections
-OSM: Marked chunk '1,-3' for road batch finalization
-OSM: Post-initial chunk loaded, pending_lamps=172
-OSM: _create_pending_lamps started, count=172
-OSM: Created 107 lamps, skipped 65 (on parking or chunk not loaded)
-OSM: DEBUG - Finalizing 2 lamp batches
-OSM: ✅ Finalized lamp batch 0,-3: 31 lamps (3 MultiMeshes + 31 lights, was 93 draw calls before)
-OSM: ✅ Finalized lamp batch -1,-3: 7 lamps (3 MultiMeshes + 7 lights, was 21 draw calls before)
-⚡ FRAME SPIKE #56: 100.5 ms at 18.5s (Draw: 3464, Bodies: 283)
-OSM: DEBUG _add_road_to_batch - first road for chunk '1,-3', parent.name='Chunk_1,-3'
-OSM: DEBUG - First lamp added to chunk 0,-3 batch
-🚗 Traffic: 28 active NPCs (Near: 0, Mid: 15, Far: 13), 3 pooled
-  → Physics bodies from NPCs: 28 (All: 28×1, было бы 28×5=140)
-
-========== Bottleneck Analysis Report ==========
-Time: 29.5s | Frames: 1135
-
-📊 PERFORMANCE OVERVIEW:
-  FPS: 41.8 avg | 39.0 min
-  Frame Time: 29.15 ms avg | 60.65 ms max
-  Physics Time: 7.22 ms avg
-
-🔍 BOTTLENECK IDENTIFICATION:
-  🟠 [HIGH] Frame Time
-      Value: 29.15 ms (target: 16.67 ms)
-      Impact: Overall performance bottleneck
-      Suggestions:
-        • Reduce draw calls
-        • Optimize scripts in _process()
-        • Check for expensive operations per frame
-
-  🟠 [HIGH] Draw Calls
-      Value: 3107 calls/frame
-      Impact: GPU rendering overhead
-      Suggestions:
-        • Batch meshes by material
-        • Use MultiMeshInstance3D
-        • Implement LOD system
-        • Enable frustum culling
-
-  🟠 [HIGH] Physics Bodies
-      Value: 282 active bodies
-      Impact: Physics engine load
-      Suggestions:
-        • Reduce NPC count
-        • Convert distant NPCs to kinematic
-        • Disable physics for far objects
-
-  🟡 [MEDIUM] Physics Time
-      Value: 7.22 ms
-      Impact: Physics simulation overhead
-      Suggestions:
-        • Reduce number of active physics bodies
-        • Simplify collision shapes
-        • Disable physics for distant objects
-
-  🟡 [MEDIUM] Vertex Count
-      Value: 6570051 vertices/frame
-      Impact: GPU vertex processing
-      Suggestions:
-        • Implement LOD for distant objects
-        • Simplify building meshes
-        • Use lower poly models
-
-  🟡 [MEDIUM] Node Count
-      Value: 18225 nodes
-      Impact: Scene tree traversal overhead
-      Suggestions:
-        • Unload distant chunks
-        • Pool and reuse nodes
-        • Flatten hierarchy where possible
-
-  🟡 [MEDIUM] Post-Processing Effects
-      Value: SSAO, Glow/Bloom, Volumetric Fog
-      Impact: GPU shader overhead
-      Suggestions:
-        • Reduce SSR quality
-        • Disable SSAO on low-end hardware
-        • Use simpler fog
-
-📈 DETAILED STATS:
-  Draw Calls: 3107 avg | 3464 max
-  Vertices: 6570051 avg | 6829898 max
-  Physics Bodies: 282
-  Nodes: 18225
-  VRAM: 729.5 MB
-
-=================================================
-
-⚡ FRAME SPIKE #57: 67.1 ms at 18.6s (Draw: 3470, Bodies: 283)
-OSM: DEBUG - First lamp added to chunk -1,-3 batch
-⚡ FRAME SPIKE #58: 53.0 ms at 18.6s (Draw: 3466, Bodies: 283)
-⚡ FRAME SPIKE #59: 46.6 ms at 18.7s (Draw: 3471, Bodies: 283)
-OSM: ✅ Finalized road batch 1,-3/residential: 1686 vertices, 1624 triangles, material: <ImageTexture#-9223371972681922551>
-OSM: ✅ Finalized road batch 1,-3/path: 1238 vertices, 1192 triangles, material: <ImageTexture#-9223371972598036470>
-OSM: ✅ Finalized road batch 1,-3/primary: 180 vertices, 178 triangles, material: <ImageTexture#-9223371972765808632>
-⚠️ SLOW: road batch finalization took 9.1 ms for chunk 1,-3
-⚠️ SLOW FRAME 10.3ms: building=0.4 road=9.2 terrain=0.2 infra=0.4 veg=0.0 curb=0.0ms
-⚡ FRAME SPIKE #60: 33.3 ms at 18.7s (Draw: 3471, Bodies: 283)
-OSM: 🌙 NIGHT Window batch 1,-3 | night_mgr: CACHED | is_night value: true
-OSM: ✅ Finalized window batch 1,-3: 4101 windows (was 4101 draw calls before batching)
-OSM: 🌙 NIGHT Window batch 1,-3 | night_mgr: CACHED | is_night value: true
-OSM: ✅ Finalized window batch 1,-3: 405 windows (was 405 draw calls before batching)
-⚡ FRAME SPIKE #61: 30.9 ms at 18.9s (Draw: 3525, Bodies: 284)
-⚡ FRAME SPIKE #62: 31.4 ms at 19.0s (Draw: 3539, Bodies: 284)
-⚡ FRAME SPIKE #63: 29.7 ms at 19.0s (Draw: 3563, Bodies: 284)
-⚡ FRAME SPIKE #64: 27.1 ms at 19.1s (Draw: 3567, Bodies: 284)
-⚡ FRAME SPIKE #65: 29.4 ms at 19.1s (Draw: 3576, Bodies: 285)
-⚡ FRAME SPIKE #66: 26.7 ms at 19.1s (Draw: 3572, Bodies: 285)
-⚡ FRAME SPIKE #67: 26.0 ms at 19.2s (Draw: 3575, Bodies: 285)
-⚡ FRAME SPIKE #68: 26.7 ms at 19.2s (Draw: 3576, Bodies: 285)
-⚡ FRAME SPIKE #69: 27.1 ms at 19.2s (Draw: 3570, Bodies: 285)
-⚡ FRAME SPIKE #70: 28.0 ms at 19.2s (Draw: 3566, Bodies: 285)
-⚡ FRAME SPIKE #71: 27.1 ms at 19.3s (Draw: 3562, Bodies: 285)
-⚡ FRAME SPIKE #72: 27.1 ms at 19.3s (Draw: 3558, Bodies: 285)
-⚡ FRAME SPIKE #73: 28.1 ms at 19.3s (Draw: 3553, Bodies: 285)
-⚡ FRAME SPIKE #74: 27.1 ms at 19.3s (Draw: 3557, Bodies: 285)
-⚡ FRAME SPIKE #75: 27.3 ms at 19.4s (Draw: 3538, Bodies: 285)
-⚡ FRAME SPIKE #76: 29.7 ms at 19.4s (Draw: 3550, Bodies: 286)
-⚡ FRAME SPIKE #77: 27.3 ms at 19.4s (Draw: 3545, Bodies: 286)
-⚡ FRAME SPIKE #78: 27.8 ms at 19.5s (Draw: 3542, Bodies: 286)
-
-=== PERFORMANCE METRICS ===
-FPS: 63 | Frame: 22.7 ms (max 100.5) | Physics: 16.7 ms (max 95.2)
-Godot Process: 88.41 ms | Physics: 7.37 ms
-Objects: 45413 | Nodes: 19210 | Resources: 538
-Draw calls: 3542 | Vertices: 6829012 | VRAM: 730.6 MB
-Physics bodies: 286 | Collision pairs: 3390
---- System Times ---
-  road_batch_finalize_total_-1,-1: 10.47 ms (max 10.47)
-  road_batch_finalize_total_-1,-2: 15.38 ms (max 15.38)
-  road_batch_finalize_total_-1,-3: 11.56 ms (max 11.56)
-  road_batch_finalize_total_-1,0: 3.82 ms (max 3.82)
-  road_batch_finalize_total_-2,-1: 16.32 ms (max 16.32)
-  road_batch_finalize_total_-2,-2: 15.24 ms (max 15.24)
-  road_batch_finalize_total_-2,-3: 8.67 ms (max 8.67)
-  road_batch_finalize_total_-2,0: 14.05 ms (max 14.05)
-  road_batch_finalize_total_0,-1: 19.44 ms (max 19.44)
-  road_batch_finalize_total_0,-2: 19.68 ms (max 19.68)
-  road_batch_finalize_total_0,-3: 11.59 ms (max 11.59)
-  road_batch_finalize_total_0,0: 16.18 ms (max 16.18)
-  road_batch_finalize_total_0,1: 10.93 ms (max 10.93)
-  road_batch_finalize_total_1,-1: 16.70 ms (max 16.70)
-  road_batch_finalize_total_1,-2: 18.21 ms (max 18.21)
-  road_batch_finalize_total_1,-3: 9.12 ms (max 9.12)
-  road_batch_finalize_total_1,0: 12.08 ms (max 12.08)
-  road_collision_create_-1,-1: 3.28 ms (max 3.86)
-  road_collision_create_-1,-2: 7.46 ms (max 11.95)
-  road_collision_create_-1,-3: 3.47 ms (max 6.77)
-  road_collision_create_-1,0: 1.74 ms (max 2.01)
-  road_collision_create_-2,-1: 5.22 ms (max 10.23)
-  road_collision_create_-2,-2: 7.37 ms (max 13.00)
-  road_collision_create_-2,-3: 2.60 ms (max 4.44)
-  road_collision_create_-2,0: 6.79 ms (max 10.68)
-  road_collision_create_0,-1: 6.19 ms (max 12.66)
-  road_collision_create_0,-2: 6.30 ms (max 11.99)
-  road_collision_create_0,-3: 3.51 ms (max 4.80)
-  road_collision_create_0,0: 5.16 ms (max 12.41)
-  road_collision_create_0,1: 10.65 ms (max 10.65)
-  road_collision_create_1,-1: 5.31 ms (max 12.56)
-  road_collision_create_1,-2: 8.81 ms (max 15.10)
-  road_collision_create_1,-3: 2.73 ms (max 3.56)
-  road_collision_create_1,0: 11.81 ms (max 11.81)
-===========================
-
-=== PERFORMANCE METRICS ===
-FPS: 63 | Frame: 22.7 ms (max 100.5) | Physics: 16.7 ms (max 95.4)
-Godot Process: 88.41 ms | Physics: 7.37 ms
-Objects: 45413 | Nodes: 19210 | Resources: 538
-Draw calls: 3542 | Vertices: 6829012 | VRAM: 730.6 MB
-Physics bodies: 286 | Collision pairs: 3390
-===========================
-⚡ FRAME SPIKE #79: 28.9 ms at 19.5s (Draw: 3557, Bodies: 286)
-⚡ FRAME SPIKE #80: 27.8 ms at 19.5s (Draw: 3572, Bodies: 287)
-⚡ FRAME SPIKE #81: 27.8 ms at 19.5s (Draw: 3583, Bodies: 288)
-⚡ FRAME SPIKE #82: 27.8 ms at 19.6s (Draw: 3581, Bodies: 288)
-⚡ FRAME SPIKE #83: 27.8 ms at 19.6s (Draw: 3590, Bodies: 288)
-⚡ FRAME SPIKE #84: 27.8 ms at 19.6s (Draw: 3629, Bodies: 288)
-⚡ FRAME SPIKE #85: 27.8 ms at 19.6s (Draw: 3647, Bodies: 288)
-⚡ FRAME SPIKE #86: 27.4 ms at 19.7s (Draw: 3652, Bodies: 288)
-⚡ FRAME SPIKE #87: 27.8 ms at 19.7s (Draw: 3652, Bodies: 288)
-⚡ FRAME SPIKE #88: 27.8 ms at 19.7s (Draw: 3651, Bodies: 288)
-⚡ FRAME SPIKE #89: 27.3 ms at 19.8s (Draw: 3649, Bodies: 288)
-⚡ FRAME SPIKE #90: 27.8 ms at 19.8s (Draw: 3641, Bodies: 287)
-⚡ FRAME SPIKE #91: 27.8 ms at 19.8s (Draw: 3640, Bodies: 287)
-⚡ FRAME SPIKE #92: 27.8 ms at 19.8s (Draw: 3641, Bodies: 289)
-⚡ FRAME SPIKE #93: 27.8 ms at 19.9s (Draw: 3646, Bodies: 289)
-OSM: DEBUG - First lamp added to chunk -2,-3 batch
-⚡ FRAME SPIKE #94: 27.8 ms at 19.9s (Draw: 3658, Bodies: 289)
-⚡ FRAME SPIKE #95: 27.8 ms at 19.9s (Draw: 3667, Bodies: 290)
-⚡ FRAME SPIKE #96: 27.8 ms at 20.0s (Draw: 3677, Bodies: 290)
-⚡ FRAME SPIKE #97: 27.8 ms at 20.0s (Draw: 3659, Bodies: 290)
-⚡ FRAME SPIKE #98: 27.8 ms at 20.0s (Draw: 3660, Bodies: 290)
-⚡ FRAME SPIKE #99: 27.8 ms at 20.0s (Draw: 3676, Bodies: 290)
-⚡ FRAME SPIKE #100: 27.8 ms at 20.1s (Draw: 3692, Bodies: 291)
-⚡ FRAME SPIKE #101: 27.3 ms at 20.1s (Draw: 3700, Bodies: 291)
-⚡ FRAME SPIKE #102: 27.8 ms at 20.1s (Draw: 3704, Bodies: 292)
-⚡ FRAME SPIKE #103: 27.8 ms at 20.1s (Draw: 3701, Bodies: 292)
-
-========== PERFORMANCE METRICS ==========
-Frames: 600
-  total_frame: avg=0.73 ms, median=0.90 ms, max=35.30 ms, calls=600, total=436.6 ms
-  road_queue: avg=0.40 ms, median=0.32 ms, max=11.64 ms, calls=600, total=237.5 ms
-  road_create: avg=0.44 ms, median=0.11 ms, max=8.48 ms, calls=208, total=92.5 ms
-  curb_mesh: avg=0.14 ms, median=0.00 ms, max=1.66 ms, calls=575, total=78.5 ms
-  infra_queue: avg=0.11 ms, median=0.32 ms, max=0.95 ms, calls=600, total=66.0 ms
-  vegetation_queue: avg=0.08 ms, median=0.00 ms, max=22.41 ms, calls=600, total=50.2 ms
-  veg_trees: avg=8.24 ms, median=5.71 ms, max=22.39 ms, calls=6, total=49.4 ms
-  road_batch_finalize: avg=10.28 ms, median=11.60 ms, max=11.63 ms, calls=4, total=41.1 ms
-  curb_collisions: avg=0.06 ms, median=0.00 ms, max=1.19 ms, calls=600, total=35.8 ms
-  infra_sort: avg=0.23 ms, median=0.28 ms, max=0.62 ms, calls=146, total=34.0 ms
-  building_results: avg=0.05 ms, median=0.01 ms, max=0.68 ms, calls=600, total=28.0 ms
-  infra_yield_sign: avg=0.38 ms, median=0.40 ms, max=0.68 ms, calls=66, total=24.9 ms
-  building_apply: avg=0.20 ms, median=0.20 ms, max=0.46 ms, calls=98, total=19.2 ms
-  window_batch_finalize: avg=1.43 ms, median=1.82 ms, max=2.31 ms, calls=6, total=8.6 ms
-  terrain_queue: avg=0.01 ms, median=0.00 ms, max=0.36 ms, calls=600, total=7.0 ms
-  building_sort: avg=0.08 ms, median=0.06 ms, max=0.21 ms, calls=68, total=5.1 ms
-  curb_smooth: avg=0.03 ms, median=0.03 ms, max=0.14 ms, calls=133, total=4.3 ms
-  terrain_landuse: avg=0.10 ms, median=0.09 ms, max=0.17 ms, calls=42, total=4.2 ms
-  road_sort: avg=0.28 ms, median=0.29 ms, max=0.58 ms, calls=9, total=2.6 ms
+⚡ FRAME SPIKE #343: 25.2 ms at 14.7s (Draw: 3249, Bodies: 282)
+⚡ FRAME SPIKE #344: 26.0 ms at 14.7s (Draw: 3245, Bodies: 282)
+ road_sort: avg=0.28 ms, median=0.29 ms, max=0.58 ms, calls=9, total=2.6 ms
   infra_traffic_light: avg=0.60 ms, median=0.66 ms, max=0.68 ms, calls=4, total=2.4 ms
   infra_lamp: avg=0.02 ms, median=0.02 ms, max=0.10 ms, calls=96, total=2.2 ms
   curb_latlon: avg=0.01 ms, median=0.01 ms, max=0.03 ms, calls=133, total=1.4 ms

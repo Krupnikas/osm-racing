@@ -6273,11 +6273,8 @@ func _create_pending_lamps() -> void:
 	_pending_lamps.clear()
 	_lamps_created = true  # Флаг только для начальной загрузки
 
-	# PHASE 2: Финализируем ВСЕ lamp batches после создания всех pending lamps
-	var lamp_chunks := _lamp_batch_data.keys()
-	print("OSM: DEBUG - Finalizing %d lamp batches" % lamp_chunks.size())
-	for chunk_key in lamp_chunks:
-		_finalize_lamp_batches_for_chunk(chunk_key)
+	# PHASE 2: НЕ финализируем здесь - лампы еще в infrastructure queue!
+	# Финализация произойдет когда infrastructure queue опустеет
 
 
 func _create_pending_parking_signs() -> void:
