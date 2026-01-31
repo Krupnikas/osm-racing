@@ -742,13 +742,11 @@ func _log_npc_statistics() -> void:
 		active_npcs.size(), near_count, mid_count, far_count, inactive_npcs.size()
 	])
 
-	# Physics bodies с учетом агрессивного LOD:
-	# Near (<100m): 1 body each (VehicleBody без колес)
-	# Far (>100m): 0 bodies (kinematic, freeze=true)
-	var physics_bodies = near_count * 1  # Только близкие NPC
-	var kinematic_bodies = (mid_count + far_count) * 0  # Kinematic = 0 bodies
+	# Physics bodies: ВСЕ NPC без колес = 1 body each
+	# (было: 5 bodies per NPC с колесами)
+	var total_npc_bodies = active_npcs.size() * 1
 
-	print("  → Physics bodies: %d (Near: %d×1=%d, Kinematic: %d×0=%d)" % [
-		physics_bodies, near_count, physics_bodies,
-		mid_count + far_count, kinematic_bodies
+	print("  → Physics bodies from NPCs: %d (All: %d×1, было бы %d×5=%d)" % [
+		total_npc_bodies, active_npcs.size(),
+		active_npcs.size(), active_npcs.size() * 5
 	])
