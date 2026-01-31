@@ -672,6 +672,10 @@ func start_loading() -> void:
 	_curb_collision_mutex.lock()
 	_curb_collision_results.clear()  # Очищаем очередь коллизий
 	_curb_collision_mutex.unlock()
+	_road_batch_data.clear()  # Очищаем road batch data
+
+	# Reconnect night mode after reset
+	_connect_to_night_mode()
 
 	# Определяем какие чанки нужны для старта
 	# Используем позицию машины если она есть, иначе Vector3.ZERO
@@ -1325,6 +1329,9 @@ func reset_terrain() -> void:
 	_pending_lamps.clear()
 	_pending_parking_signs.clear()
 	_lamps_created = false
+	_curb_queue.clear()
+	_curb_smoothed_queue.clear()
+	_curb_mesh_state.clear()
 
 	# Очищаем словари позиций объектов и парковок
 	_created_lamp_positions.clear()
@@ -1337,6 +1344,7 @@ func reset_terrain() -> void:
 	_lamp_batch_data.clear()
 	_lamp_batches_to_finalize.clear()
 	_lamp_lights_by_chunk.clear()
+	_lamp_batch_lights.clear()
 	_tree_batch_data.clear()
 	_tree_batches_to_finalize.clear()
 	_building_batch_data.clear()
@@ -1344,6 +1352,17 @@ func reset_terrain() -> void:
 	_window_batch_data.clear()
 	_window_batch_materials.clear()
 	_pending_batch_chunks.clear()
+	_road_batch_data.clear()
+
+	# Reset draw call stats (prevent stale stats across location changes)
+	for key in _draw_call_stats:
+		_draw_call_stats[key] = 0
+
+	# Disconnect night mode signal to prevent stale callbacks
+	if _night_mode_connected and _night_mode_manager and is_instance_valid(_night_mode_manager):
+		if _night_mode_manager.night_mode_changed.is_connected(_on_night_mode_changed):
+			_night_mode_manager.night_mode_changed.disconnect(_on_night_mode_changed)
+		_night_mode_connected = false
 
 	print("OSM: Terrain reset complete (all batch data cleared)")
 
