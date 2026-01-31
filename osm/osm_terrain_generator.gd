@@ -115,6 +115,10 @@ var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batc
 var _window_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], colors: Array[Color], parent: Node3D}
 var _window_batch_materials: Array[ShaderMaterial] = []  # Материалы всех window batches для обновления is_night параметра
 
+# BUILDING BATCHING: собираем все здания чанка в MultiMesh для снижения draw calls и vertices
+var _building_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], sizes: Array[Vector3], colors: Array[Color], parent: Node3D}
+var _building_batches_to_finalize: Array[String] = []  # Очередь chunk_key для финализации building batches
+
 # Lamp lights - для управления ночным режимом
 var _lamp_batch_lights: Array[OmniLight3D] = []  # Все OmniLight3D (теперь без батчинга, по одному фонарю за раз)
 
@@ -2302,6 +2306,177 @@ func update_window_night_mode(is_night: bool) -> void:
 		icon, updated_count, _window_batch_materials.size(), is_night
 	])
 
+
+# ===== BUILDING BATCHING SYSTEM =====
+
+## Добавляет здание в batch для чанка (вместо создания отдельного MeshInstance3D)
+func _add_building_to_batch(chunk_key: String, center: Vector3, size: Vector3, color: Color, parent: Node3D) -> void:
+	if not _building_batch_data.has(chunk_key):
+		_building_batch_data[chunk_key] = {
+			"transforms": [],
+			"sizes": [],
+			"colors": [],
+			"parent": parent
+		}
+
+	# Создаем transform для здания (box mesh будет в center с size)
+	var transform := Transform3D(Basis.IDENTITY, center)
+
+	_building_batch_data[chunk_key]["transforms"].append(transform)
+	_building_batch_data[chunk_key]["sizes"].append(size)
+	_building_batch_data[chunk_key]["colors"].append(color)
+
+## Финализирует все building batches для чанка (создает MultiMesh)
+func _finalize_building_batches_for_chunk(chunk_key: String) -> void:
+	if not _building_batch_data.has(chunk_key):
+		return
+
+	var batch: Dictionary = _building_batch_data[chunk_key]
+	var transforms: Array = batch.get("transforms", [])
+	var sizes: Array = batch.get("sizes", [])
+	var colors: Array = batch.get("colors", [])
+	var parent: Node3D = batch.get("parent", null)
+
+	# SAFETY: Проверяем что parent ещё существует
+	if transforms.is_empty() or not parent or not is_instance_valid(parent):
+		if not is_instance_valid(parent):
+			print("OSM: ⚠️ Skipped building batch %s - chunk was unloaded" % chunk_key)
+		_building_batch_data.erase(chunk_key)
+		return
+
+	# НЕ МОЖЕМ использовать простой MultiMesh с одним mesh - у каждого здания разный размер!
+	# Вместо этого создадим НЕСКОЛЬКО MultiMesh батчей по размерам
+
+	# Группируем здания по размерам (округляем до 5м)
+	var size_groups: Dictionary = {}  # size_key -> {transforms: [], colors: []}
+
+	for i in range(transforms.size()):
+		var size: Vector3 = sizes[i]
+		# Округляем размер до 5м для группировки
+		var size_key := "%d_%d_%d" % [
+			int(size.x / 5.0) * 5,
+			int(size.y / 5.0) * 5,
+			int(size.z / 5.0) * 5
+		]
+
+		if not size_groups.has(size_key):
+			size_groups[size_key] = {
+				"size": Vector3(
+					int(size.x / 5.0) * 5.0,
+					int(size.y / 5.0) * 5.0,
+					int(size.z / 5.0) * 5.0
+				),
+				"transforms": [],
+				"colors": []
+			}
+
+		size_groups[size_key]["transforms"].append(transforms[i])
+		size_groups[size_key]["colors"].append(colors[i])
+
+	# Создаем MultiMesh для каждой группы размеров
+	var total_buildings := 0
+	for size_key in size_groups.keys():
+		var group: Dictionary = size_groups[size_key]
+		var group_size: Vector3 = group["size"]
+		var group_transforms: Array = group["transforms"]
+		var group_colors: Array = group["colors"]
+
+		if group_transforms.is_empty():
+			continue
+
+		# Создаём MultiMesh
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.use_colors = true
+		mm.use_custom_data = false
+
+		# Используем BoxMesh с размером группы
+		var box := BoxMesh.new()
+		box.size = group_size
+		mm.mesh = box
+
+		mm.instance_count = group_transforms.size()
+
+		# Устанавливаем трансформы и цвета
+		for i in range(group_transforms.size()):
+			mm.set_instance_transform(i, group_transforms[i])
+			mm.set_instance_color(i, group_colors[i])
+
+		# Создаём материал (простой unshaded для производительности)
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.vertex_color_use_as_albedo = true
+
+		# Создаём MultiMeshInstance3D
+		var mm_instance := MultiMeshInstance3D.new()
+		mm_instance.multimesh = mm
+		mm_instance.material_override = mat
+		mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		mm_instance.name = "BuildingBatch_" + size_key
+
+		# Добавляем к родителю
+		parent.add_child(mm_instance)
+
+		total_buildings += group_transforms.size()
+
+	print("OSM: ✅ Finalized building batch %s: %d buildings in %d size groups (was %d draw calls before)" % [
+		chunk_key, total_buildings, size_groups.size(), total_buildings
+	])
+
+	# Очищаем batch data
+	_building_batch_data.erase(chunk_key)
+
+
+## Создаёт упрощенное здание (простой box) и добавляет в batch для чанка
+func _create_3d_building_simple_batched(points: PackedVector2Array, color: Color, building_height: float, chunk_key: String, parent: Node3D, base_elev: float = 0.0) -> void:
+	# Минимум 3 точки
+	if points.size() < 3:
+		return
+
+	# Вычисляем bounding box здания
+	var min_x := points[0].x
+	var max_x := points[0].x
+	var min_z := points[0].y
+	var max_z := points[0].y
+
+	for p in points:
+		min_x = min(min_x, p.x)
+		max_x = max(max_x, p.x)
+		min_z = min(min_z, p.y)
+		max_z = max(max_z, p.y)
+
+	var size_x := max_x - min_x
+	var size_z := max_z - min_z
+
+	# Пропускаем слишком маленькие здания
+	if size_x < 3.0 or size_z < 3.0:
+		return
+
+	# Пропускаем слишком большие здания
+	if size_x > 200.0 or size_z > 200.0:
+		return
+
+	# Центр здания
+	var center_x := (min_x + max_x) / 2.0
+	var center_z := (min_z + max_z) / 2.0
+	var center_y := base_elev + building_height / 2.0
+
+	var center := Vector3(center_x, center_y, center_z)
+	var size := Vector3(size_x, building_height, size_z)
+
+	# Вычисляем chunk_key из центра здания
+	var chunk_x := int(floor(center_x / chunk_size))
+	var chunk_z := int(floor(center_z / chunk_size))
+	var chunk_key := "%d,%d" % [chunk_x, chunk_z]
+
+	# Добавляем в batch
+	_add_building_to_batch(chunk_key, center, size, color, parent)
+
+	# Добавляем chunk_key в очередь для финализации (если еще не добавлен)
+	if not _building_batches_to_finalize.has(chunk_key):
+		_building_batches_to_finalize.append(chunk_key)
+
+
 # Создаёт бордюры вдоль дороги (старая версия для обратной совместимости)
 func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_height: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 2:
@@ -3530,7 +3705,8 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 	# Получаем высоту террейна для здания (берём центр)
 	var base_elev := _get_elevation_at_point(_get_polygon_center(points), elev_data)
 
-	_create_3d_building(points, color, building_height, parent, base_elev)
+	# ИСПОЛЬЗУЕМ BATCHED VERSION для performance
+	_create_3d_building_simple_batched(points, color, building_height, parent, base_elev)
 
 func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictionary = {}) -> void:
 	# Создаём забор по контуру территории
@@ -4163,6 +4339,16 @@ func _process_road_queue() -> void:
 				if Time.get_ticks_usec() - t_window > 100:
 					_record_perf("window_batch_finalize", Time.get_ticks_usec() - t_window)
 				return  # Один чанк за кадр — не блокируем
+
+			# Финализация building batches (после window batches)
+			if not _building_batches_to_finalize.is_empty():
+				var t_building := Time.get_ticks_usec()
+				var chunk_key: String = _building_batches_to_finalize[0]
+				_building_batches_to_finalize.remove_at(0)
+				_finalize_building_batches_for_chunk(chunk_key)
+				if Time.get_ticks_usec() - t_building > 100:
+					_record_perf("building_batch_finalize", Time.get_ticks_usec() - t_building)
+				return  # Один чанк за кадр
 
 		# Когда все дороги созданы, обрабатываем бордюры
 		_process_curb_queue()
