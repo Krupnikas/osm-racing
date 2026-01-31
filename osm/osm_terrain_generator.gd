@@ -4355,9 +4355,9 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 
 	var wall_mesh_instance := MeshInstance3D.new()
 	wall_mesh_instance.mesh = wall_mesh
-	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # Оптимизация: shadows отключены для buildings (-50% draw calls)
 	# Visibility range для автоматического скрытия далёких зданий
-	wall_mesh_instance.visibility_range_end = 400.0
+	wall_mesh_instance.visibility_range_end = 300.0  # Reduced from 400m for better performance
 	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
 	# Материал стен
@@ -4389,7 +4389,7 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 
 		var roof_mesh_instance := MeshInstance3D.new()
 		roof_mesh_instance.mesh = roof_mesh
-		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # Оптимизация: shadows отключены для buildings
 
 		var roof_material := StandardMaterial3D.new()
 		roof_material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация: включить backface culling
@@ -5204,9 +5204,9 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 
 	var wall_mesh_instance := MeshInstance3D.new()
 	wall_mesh_instance.mesh = wall_mesh
-	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # Оптимизация: shadows отключены для buildings (-50% draw calls)
 	# Visibility range для автоматического скрытия далёких зданий
-	wall_mesh_instance.visibility_range_end = 400.0
+	wall_mesh_instance.visibility_range_end = 300.0  # Reduced from 400m for better performance
 	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
 	# Материал стен с шейдером для правильного двустороннего освещения
