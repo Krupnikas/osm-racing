@@ -854,7 +854,7 @@ func _update_chunks(player_pos: Vector3) -> void:
 		var coords: Array = chunk_key.split(",")
 		var chunk_x := int(coords[0])
 		var chunk_z := int(coords[1])
-		var chunk_center := Vector3(chunk_x * chunk_size, 0, chunk_z * chunk_size)
+		var chunk_center := Vector3(chunk_x * chunk_size + chunk_size / 2, 0, chunk_z * chunk_size + chunk_size / 2)
 		var dist := player_pos.distance_to(chunk_center)
 		if dist > unload_distance:
 			chunks_to_unload.append(chunk_key)
