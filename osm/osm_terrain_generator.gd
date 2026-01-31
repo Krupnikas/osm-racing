@@ -110,9 +110,8 @@ var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batc
 var _window_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], colors: Array[Color], parent: Node3D}
 var _window_batch_materials: Array[ShaderMaterial] = []  # Материалы всех window batches для обновления is_night параметра
 
-# Lamp batching system - ONE MultiMesh per chunk for all lamps (pole+arm+globe combined)
-var _lamp_batch_data: Dictionary = {}  # key: chunk_key -> {poles: Array[Transform3D], arms: Array[Transform3D], globes: Array[Transform3D], globe_colors: Array[Color], lights: Array[Dictionary], parent: Node3D}
-var _lamp_batch_lights: Array[OmniLight3D] = []  # Все OmniLight3D для управления ночным режимом
+# Lamp lights - для управления ночным режимом
+var _lamp_batch_lights: Array[OmniLight3D] = []  # Все OmniLight3D (теперь без батчинга, по одному фонарю за раз)
 
 var _curb_smoothed_queue: Array = []  # Очередь сглаженных бордюров для генерации меша
 var _curb_mesh_state: Dictionary = {}  # Текущее состояние генерации меша бордюра (для разбивки по кадрам)
@@ -993,10 +992,6 @@ func _unload_chunk(chunk_key: String) -> void:
 
 		# Очищаем позиции фонарей и знаков в выгруженном чанке
 		_clear_chunk_objects_positions(chunk_key)
-
-		# PHASE 2: Очищаем lamp batches для этого чанка
-		if _lamp_batch_data.has(chunk_key):
-			_lamp_batch_data.erase(chunk_key)
 
 		print("OSM: Unloaded chunk %s" % chunk_key)
 
@@ -4609,11 +4604,8 @@ func _process_terrain_objects_queue() -> void:
 ## Обрабатывает очередь инфраструктуры (1 объект за кадр)
 func _process_infrastructure_queue() -> void:
 	if _infrastructure_queue.is_empty():
-		# PHASE 2: Когда infrastructure queue пустая, финализируем lamp batches
-		if not _lamp_batch_data.is_empty():
-			var lamp_chunks := _lamp_batch_data.keys()
-			var chunk_key: String = lamp_chunks[0]
-			_finalize_lamp_batches_for_chunk(chunk_key)
+		# PHASE 2: Батчинг фонарей теперь происходит БЕЗ очереди (сразу в _create_pending_lamps)
+		# Эта очередь используется только для других объектов (traffic lights, etc)
 		return
 
 	# Сортируем по расстоянию до игрока
@@ -5333,7 +5325,7 @@ func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, pare
 	parent.add_child(body)
 
 
-# Создание уличного фонаря - добавляет в очередь
+# Создание уличного фонаря - PHASE 2: сразу добавляет в batch (без очереди!)
 func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, direction_to_road: Vector2 = Vector2.ZERO) -> void:
 	# Проверяем, не создан ли уже фонарь в этой позиции (округляем до метров)
 	var pos_key := "%d_%d" % [int(pos.x), int(pos.y)]
@@ -5341,7 +5333,8 @@ func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, directi
 		return
 	_created_lamp_positions[pos_key] = true
 
-	# Добавляем в очередь для отложенного создания
+	# PHASE 2: Добавляем в очередь для создания по одному фонарю за кадр
+	# Каждый фонарь будет MultiMesh (pole+arm+globe), но БЕЗ батчинга
 	_infrastructure_queue.append({
 		"type": "lamp",
 		"pos": pos,
@@ -5351,31 +5344,10 @@ func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, directi
 	})
 
 
-# Немедленное создание фонаря (вызывается из очереди)
+# Немедленное создание фонаря (вызывается из очереди) - PHASE 2: MultiMesh для ОДНОГО фонаря
 func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3D, direction_to_road: Vector2 = Vector2.ZERO) -> void:
 	if not is_instance_valid(parent):
 		return
-
-	# PHASE 2 OPTIMIZATION: Батчим фонари в MultiMesh вместо создания отдельных мешей
-	# Получаем chunk_key из имени parent (формат: "Chunk_X,Y")
-	var chunk_key: String = ""
-	if parent.name.begins_with("Chunk_"):
-		chunk_key = parent.name.substr(6)
-	else:
-		# Fallback: создаём фонарь по-старому если parent не ChunkRoot
-		_create_street_lamp_immediate_legacy(pos, elevation, parent, direction_to_road)
-		return
-
-	# Инициализируем batch для этого чанка если еще нет
-	if not _lamp_batch_data.has(chunk_key):
-		_lamp_batch_data[chunk_key] = {
-			"poles": [],
-			"arms": [],
-			"globes": [],
-			"globe_colors": [],
-			"lights": [],  # {pos: Vector3, is_broken: bool}
-			"parent": parent
-		}
 
 	# Вычисляем параметры фонаря
 	var angle_to_road := 0.0
@@ -5388,179 +5360,108 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	var arm_end_x := arm_length * cos(arm_angle)
 	var arm_end_y := arm_start_y + arm_length * sin(arm_angle)
 
-	# Базовая трансформа фонаря (позиция + поворот)
-	var base_transform := Transform3D()
-	base_transform.origin = Vector3(pos.x, elevation, pos.y)
-	base_transform = base_transform.rotated(Vector3.UP, angle_to_road)
+	# Позиция фонаря
+	var lamp_pos := Vector3(pos.x, elevation, pos.y)
 
-	# Трансформа столба (pole)
-	var pole_transform := Transform3D()
-	pole_transform.origin = Vector3(0, 2.75, 0)
-	pole_transform = base_transform * pole_transform
+	# PHASE 2: Создаем контейнер для ОДНОГО фонаря с MultiMesh
+	var lamp_root := Node3D.new()
+	lamp_root.name = "StreetLamp"
+	lamp_root.position = lamp_pos
+	lamp_root.rotation.y = angle_to_road
 
-	# Трансформа кронштейна (arm)
-	var arm_transform := Transform3D()
-	arm_transform.origin = Vector3(arm_end_x / 2.0, (arm_start_y + arm_end_y) / 2.0, 0)
-	arm_transform = arm_transform.rotated(Vector3.FORWARD, PI / 2.0 + arm_angle)
-	arm_transform = base_transform * arm_transform
-
-	# Трансформа плафона (globe)
-	var globe_transform := Transform3D()
-	globe_transform.origin = Vector3(arm_end_x, arm_end_y, 0)
-	globe_transform = base_transform * globe_transform
-
-	# 5% шанс что фонарь сломан
-	var is_broken := randf() < 0.05
-
-	# Цвет плафона (зависит от ночного режима)
-	var is_night := _is_night_mode
-	var globe_color: Color
-	if is_night and not is_broken:
-		globe_color = Color(1.0, 0.75, 0.3)  # Натриевый оранжевый с emission
-	else:
-		globe_color = Color(0.3, 0.3, 0.3)  # Серый днём или сломан
-
-	# Добавляем в батч
-	var batch = _lamp_batch_data[chunk_key]
-	batch.poles.append(pole_transform)
-	batch.arms.append(arm_transform)
-	batch.globes.append(globe_transform)
-	batch.globe_colors.append(globe_color)
-	batch.lights.append({
-		"pos": globe_transform.origin,
-		"is_broken": is_broken
-	})
-
-	# DEBUG
-	if batch.poles.size() == 1:
-		print("OSM: DEBUG - First lamp added to chunk %s batch" % chunk_key)
-
-
-## Финализирует батч фонарей для чанка - создаёт 3 MultiMesh (poles, arms, globes) + OmniLights
-func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
-	if not _lamp_batch_data.has(chunk_key):
-		return
-
-	var batch: Dictionary = _lamp_batch_data[chunk_key]
-	var poles: Array = batch.get("poles", [])
-	var arms: Array = batch.get("arms", [])
-	var globes: Array = batch.get("globes", [])
-	var globe_colors: Array = batch.get("globe_colors", [])
-	var lights: Array = batch.get("lights", [])
-	var parent: Node3D = batch.get("parent", null)
-
-	if poles.is_empty() or not is_instance_valid(parent):
-		_lamp_batch_data.erase(chunk_key)
-		return
-
-	# Базовый контейнер для всех фонарей чанка
-	var lamps_root := Node3D.new()
-	lamps_root.name = "LampBatch"
-
-	# === MultiMesh для столбов (poles) ===
+	# === MultiMesh для столба (1 instance) ===
 	var pole_mm := MultiMesh.new()
 	pole_mm.transform_format = MultiMesh.TRANSFORM_3D
-	pole_mm.use_colors = false
-	var pole_mesh := CylinderMesh.new()
-	pole_mesh.top_radius = 0.05
-	pole_mesh.bottom_radius = 0.08
-	pole_mesh.height = 5.5
-	pole_mm.mesh = pole_mesh
-	pole_mm.instance_count = poles.size()
+	pole_mm.mesh = CylinderMesh.new()
+	pole_mm.mesh.top_radius = 0.05
+	pole_mm.mesh.bottom_radius = 0.08
+	pole_mm.mesh.height = 5.5
+	pole_mm.instance_count = 1
+	pole_mm.set_instance_transform(0, Transform3D(Basis.IDENTITY, Vector3(0, 2.75, 0)))
 
-	for i in range(poles.size()):
-		pole_mm.set_instance_transform(i, poles[i])
-
+	var pole_mi := MultiMeshInstance3D.new()
+	pole_mi.multimesh = pole_mm
 	var pole_mat := StandardMaterial3D.new()
 	pole_mat.albedo_color = Color(0.25, 0.25, 0.25)
 	pole_mat.metallic = 0.9
+	pole_mi.material_override = pole_mat
+	pole_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	lamp_root.add_child(pole_mi)
 
-	var pole_mm_instance := MultiMeshInstance3D.new()
-	pole_mm_instance.multimesh = pole_mm
-	pole_mm_instance.material_override = pole_mat
-	pole_mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	pole_mm_instance.name = "Poles"
-	lamps_root.add_child(pole_mm_instance)
-
-	# === MultiMesh для кронштейнов (arms) ===
+	# === MultiMesh для кронштейна (1 instance) ===
 	var arm_mm := MultiMesh.new()
 	arm_mm.transform_format = MultiMesh.TRANSFORM_3D
-	arm_mm.use_colors = false
-	var arm_mesh := CylinderMesh.new()
-	arm_mesh.top_radius = 0.03
-	arm_mesh.bottom_radius = 0.04
-	arm_mesh.height = 2.0
-	arm_mm.mesh = arm_mesh
-	arm_mm.instance_count = arms.size()
+	arm_mm.mesh = CylinderMesh.new()
+	arm_mm.mesh.top_radius = 0.03
+	arm_mm.mesh.bottom_radius = 0.04
+	arm_mm.mesh.height = 2.0
+	arm_mm.instance_count = 1
 
-	for i in range(arms.size()):
-		arm_mm.set_instance_transform(i, arms[i])
+	# Кронштейн: цилиндр повернутый под углом arm_angle ВВЕРХ
+	# Цилиндр по умолчанию вертикальный (Y), поворачиваем вокруг Z на (PI/2 - arm_angle)
+	# чтобы он шел от столба вбок и ВВЕРХ к плафону
+	var arm_basis := Basis()
+	arm_basis = arm_basis.rotated(Vector3.FORWARD, PI / 2.0 - arm_angle)
+	var arm_transform := Transform3D(arm_basis, Vector3(arm_end_x / 2.0, (arm_start_y + arm_end_y) / 2.0, 0))
+	arm_mm.set_instance_transform(0, arm_transform)
 
-	var arm_mm_instance := MultiMeshInstance3D.new()
-	arm_mm_instance.multimesh = arm_mm
-	arm_mm_instance.material_override = pole_mat  # Тот же материал
-	arm_mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	arm_mm_instance.name = "Arms"
-	lamps_root.add_child(arm_mm_instance)
+	var arm_mi := MultiMeshInstance3D.new()
+	arm_mi.multimesh = arm_mm
+	arm_mi.material_override = pole_mat
+	arm_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	lamp_root.add_child(arm_mi)
 
-	# === MultiMesh для плафонов (globes) ===
+	# === MultiMesh для плафона (1 instance) ===
 	var globe_mm := MultiMesh.new()
 	globe_mm.transform_format = MultiMesh.TRANSFORM_3D
-	globe_mm.use_colors = true  # Цвет зависит от ночного режима
-	var globe_mesh := SphereMesh.new()
-	globe_mesh.radius = 0.2
-	globe_mesh.height = 0.35
-	globe_mm.mesh = globe_mesh
-	globe_mm.instance_count = globes.size()
+	globe_mm.use_colors = true
+	globe_mm.mesh = SphereMesh.new()
+	globe_mm.mesh.radius = 0.2
+	globe_mm.mesh.height = 0.35
+	globe_mm.instance_count = 1
+	globe_mm.set_instance_transform(0, Transform3D(Basis.IDENTITY, Vector3(arm_end_x, arm_end_y, 0)))
 
-	for i in range(globes.size()):
-		globe_mm.set_instance_transform(i, globes[i])
-		if i < globe_colors.size():
-			globe_mm.set_instance_color(i, globe_colors[i])
-
-	# Материал плафонов - будет обновляться при смене дня/ночи
-	var globe_mat := StandardMaterial3D.new()
-	globe_mat.vertex_color_use_as_albedo = true  # Используем цвета из MultiMesh
-	# NOTE: Emission для ночного режима не работает через vertex colors,
-	# нужно будет использовать shader или обновлять материал динамически
-
-	var globe_mm_instance := MultiMeshInstance3D.new()
-	globe_mm_instance.multimesh = globe_mm
-	globe_mm_instance.material_override = globe_mat
-	globe_mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	globe_mm_instance.name = "Globes"
-	lamps_root.add_child(globe_mm_instance)
-
-	# === Создаём OmniLight3D для каждого фонаря ===
+	# 5% шанс что фонарь сломан
+	var is_broken := randf() < 0.05
 	var is_night := _is_night_mode
-	for light_data in lights:
-		var lamp_light := OmniLight3D.new()
-		lamp_light.position = light_data.pos
-		lamp_light.omni_range = 12.0
-		lamp_light.omni_attenuation = 1.2
-		lamp_light.light_energy = 1.5
-		lamp_light.light_color = Color(1.0, 0.65, 0.2)
-		lamp_light.shadow_enabled = false
-		lamp_light.light_bake_mode = Light3D.BAKE_DISABLED
-		lamp_light.visible = is_night and not light_data.is_broken
-		lamp_light.set_meta("is_broken", light_data.is_broken)
-		lamps_root.add_child(lamp_light)
-		_lamp_batch_lights.append(lamp_light)
+	var globe_color: Color
+	if is_night and not is_broken:
+		globe_color = Color(1.0, 0.75, 0.3)
+	else:
+		globe_color = Color(0.3, 0.3, 0.3)
+	globe_mm.set_instance_color(0, globe_color)
 
-	# Track draw calls (3 MultiMeshes = 3 draw calls total вместо poles.size() * 3)
+	var globe_mat := StandardMaterial3D.new()
+	globe_mat.vertex_color_use_as_albedo = true
+	var globe_mi := MultiMeshInstance3D.new()
+	globe_mi.multimesh = globe_mm
+	globe_mi.material_override = globe_mat
+	globe_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	lamp_root.add_child(globe_mi)
+
+	# === OmniLight3D ===
+	var lamp_light := OmniLight3D.new()
+	lamp_light.position = Vector3(arm_end_x, arm_end_y, 0)
+	lamp_light.omni_range = 12.0
+	lamp_light.omni_attenuation = 1.2
+	lamp_light.light_energy = 1.5
+	lamp_light.light_color = Color(1.0, 0.65, 0.2)
+	lamp_light.shadow_enabled = false
+	lamp_light.light_bake_mode = Light3D.BAKE_DISABLED
+	lamp_light.visible = is_night and not is_broken
+	lamp_light.set_meta("is_broken", is_broken)
+	lamp_root.add_child(lamp_light)
+	_lamp_batch_lights.append(lamp_light)
+
+	parent.add_child(lamp_root)
+
+	# PHASE 2: 3 MultiMeshes + 1 light = 4 draw calls вместо 3+light (старая версия)
+	# НО создаем по одному фонарю за кадр (без батчинга чанков)
 	if _draw_call_logging_enabled:
-		_draw_call_stats["lamps"] += 3
-
-	parent.add_child(lamps_root)
-
-	print("OSM: ✅ Finalized lamp batch %s: %d lamps (3 MultiMeshes + %d lights, was %d draw calls before)" % [
-		chunk_key, poles.size(), lights.size(), poles.size() * 3
-	])
-
-	_lamp_batch_data.erase(chunk_key)
+		_draw_call_stats["lamps"] += 3  # 3 MultiMeshes
 
 
-## Legacy метод создания одиночного фонаря (для случаев когда parent не ChunkRoot)
+## Legacy метод создания одиночного фонаря (НЕ ИСПОЛЬЗУЕТСЯ - заменен на MultiMesh выше)
 func _create_street_lamp_immediate_legacy(pos: Vector2, elevation: float, parent: Node3D, direction_to_road: Vector2 = Vector2.ZERO) -> void:
 	# Старая реализация (создаёт отдельные меши) - используется только для специальных случаев
 	# В текущей версии не используется - все фонари батчатся
@@ -6269,12 +6170,11 @@ func _create_pending_lamps() -> void:
 		created += 1
 
 	if created > 0:
-		print("OSM: Created %d lamps, skipped %d (on parking or chunk not loaded)" % [created, skipped])
+		print("OSM: Created %d lamps, skipped %d (added to infrastructure queue)" % [created, skipped])
 	_pending_lamps.clear()
 	_lamps_created = true  # Флаг только для начальной загрузки
 
-	# PHASE 2: НЕ финализируем здесь - лампы еще в infrastructure queue!
-	# Финализация произойдет когда infrastructure queue опустеет
+	# PHASE 2: Без батчинга - фонари создаются по одному из infrastructure queue
 
 
 func _create_pending_parking_signs() -> void:
