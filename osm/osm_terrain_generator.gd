@@ -44,7 +44,7 @@ var _textures_initialized := false
 @export var debug_print := false  # Выключить debug output для производительности
 @export var enable_elevation := false  # Включить загрузку высот (экспериментально)
 @export var elevation_scale := 1.0  # Масштаб высоты (1.0 = реальный)
-@export var elevation_grid_resolution := 16  # Разрешение сетки высот на чанк
+@export var elevation_grid_resolution := 8  # Разрешение сетки высот на чанк (8x8 = 128 triangles)
 
 var osm_loader: Node
 var _car: Node3D
@@ -2234,10 +2234,10 @@ func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
 	mm.use_colors = true
 	mm.use_custom_data = false
 
-	# Используем BoxMesh как базовый mesh (как в оригинале)
-	var box := BoxMesh.new()
-	box.size = Vector3(1.2, 1.2, 0.05)
-	mm.mesh = box
+	# Используем плоский QuadMesh вместо BoxMesh для оптимизации
+	var quad := QuadMesh.new()
+	quad.size = Vector2(1.2, 1.2)
+	mm.mesh = quad
 
 	mm.instance_count = transforms.size()
 
@@ -7550,7 +7550,7 @@ func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) 
 ## Smooths road geometry using Catmull-Rom spline interpolation
 ## This creates smooth curves through all points
 func _smooth_road_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
-	return _smooth_points(raw_points, 3.0, 12, 0.3)  # Полное сглаживание для дорог
+	return _smooth_points(raw_points, 6.0, 6, 0.5)  # Упрощенное сглаживание: меньше точек для оптимизации
 
 
 ## Упрощённое сглаживание для бордюров (меньше точек)
