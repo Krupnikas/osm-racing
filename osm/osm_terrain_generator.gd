@@ -5688,16 +5688,18 @@ func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3,
 	var pole_transform := Transform3D(lamp_basis, lamp_pos + Vector3(0, 2.75, 0))
 	_lamp_batch_data[chunk_key]["pole_transforms"].append(pole_transform)
 
-	# ARM transform (angled upward from top of pole)
-	var arm_basis := lamp_basis.rotated(lamp_basis.x, PI/6)  # 30° upward
+	# ARM transform: cylinder oriented along Y, rotate to horizontal (toward road) + slight upward tilt
+	# Rotate -PI/2 around local X to lay horizontal, then +PI/12 (~15°) for slight upward tilt
+	var arm_basis := lamp_basis.rotated(lamp_basis.x, -PI/2.0 + PI/12.0)
 	var arm_start := lamp_pos + Vector3(0, 5.5, 0)  # Top of pole
-	# Arm cylinder is oriented along Y axis, so center should be at +Y direction
-	var arm_center := arm_start + arm_basis.y * 1.0  # Midpoint of 2m arm (along rotated Y)
+	# After rotation, cylinder Y axis now points roughly along lamp_basis.z (toward road) + slightly up
+	var arm_dir := arm_basis.y.normalized()  # Direction arm extends in
+	var arm_center := arm_start + arm_dir * 1.0  # Midpoint of 2m arm
 	var arm_transform := Transform3D(arm_basis, arm_center)
 	_lamp_batch_data[chunk_key]["arm_transforms"].append(arm_transform)
 
-	# GLOBE transform (at end of arm - at top of arm cylinder)
-	var arm_end := arm_start + arm_basis.y * 2.0  # End of 2m arm (along rotated Y)
+	# GLOBE transform (at end of arm)
+	var arm_end := arm_start + arm_dir * 2.0  # End of 2m arm
 	var globe_transform := Transform3D(Basis(), arm_end)
 	_lamp_batch_data[chunk_key]["globe_transforms"].append(globe_transform)
 
