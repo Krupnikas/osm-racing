@@ -8973,25 +8973,37 @@ func _update_chunk_culling() -> void:
 		# dot > 0 = впереди, dot < 0 = позади
 		var dot := car_forward.dot(to_chunk_from_car.normalized())
 
-		# КОНСЕРВАТИВНАЯ СТРАТЕГИЯ CULLING:
-		# Объекты внутри чанка могут выходить за его границы на chunk_size/2 + overlap (~250m)
-		# Поэтому скрываем только чанки, которые ГАРАНТИРОВАННО не видны
-		var safe_radius := chunk_size / 2.0 + 100.0  # Радиус содержимого чанка от его центра
+		# SMART CULLING: используем расстояние до ближайшей точки чанка (AABB),
+		# а не до центра. Объекты могут выходить за край чанка на 100м (OSM overlap).
+		var chunk_min := Vector3(chunk_x * chunk_size, 0, chunk_z * chunk_size)
+		var chunk_max := Vector3(chunk_min.x + chunk_size, 0, chunk_min.z + chunk_size)
+		# Ближайшая точка AABB к машине
+		var nearest := Vector3(
+			clampf(car_pos.x, chunk_min.x, chunk_max.x),
+			0,
+			clampf(car_pos.z, chunk_min.z, chunk_max.z)
+		)
+		var dist_to_nearest_edge := car_pos.distance_to(Vector3(nearest.x, car_pos.y, nearest.z))
+
 		var should_hide := false
 
-		# 1. ВПЕРЕДИ или СБОКУ машины (dot > -0.3) - всегда видим
-		if dot > -0.3:
+		# 1. Чанк близко (edge < 100м + overlap) - всегда видим
+		if dist_to_nearest_edge < 200.0:
 			should_hide = false
 
-		# 2. ПОЗАДИ машины (dot < -0.3) - скрываем только если чанк далеко
-		#    и его содержимое гарантированно не торчит в область видимости
+		# 2. ВПЕРЕДИ или СБОКУ машины - всегда видим
+		elif dot > -0.2:
+			should_hide = false
+
+		# 3. ПОЗАДИ машины - скрываем агрессивнее по расстоянию до края
 		else:
-			# Даже если центр чанка позади, его содержимое может быть впереди
-			# Скрываем только если расстояние > safe_radius (содержимое точно не видно)
-			if dist_from_car > safe_radius + 150.0:
+			# edge > 200м и позади - проверяем как далеко позади
+			if dist_to_nearest_edge > 400.0:
 				should_hide = true  # Далеко позади - точно не видим
-			elif dist_from_car > safe_radius:
-				should_hide = dot < -0.7  # Средне далеко - только строго позади
+			elif dist_to_nearest_edge > 300.0:
+				should_hide = dot < -0.5  # Средне далеко позади
+			else:
+				should_hide = dot < -0.7  # Близко позади - только строго за спиной
 
 		if should_hide:
 			culled_count += 1
