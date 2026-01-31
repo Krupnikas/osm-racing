@@ -7982,14 +7982,21 @@ func _print_draw_call_stats() -> void:
 
 ## Camera-based frustum culling для чанков
 func _update_chunk_culling() -> void:
-	# Найти камеру если еще не нашли
+	# Найти камеру
 	if not _camera:
 		_camera = get_viewport().get_camera_3d()
 		if not _camera:
 			return
 
+	if not _car:
+		return
+
 	var camera_pos := _camera.global_position
-	var camera_forward := -_camera.global_transform.basis.z  # Forward direction
+	var car_pos := _car.global_position
+
+	# Направление взгляда камеры = от камеры К машине (target для Orbit)
+	var camera_look_dir := (car_pos - camera_pos).normalized()
+	camera_look_dir.y = 0  # Проецируем на XZ плоскость
 
 	# Обходим все загруженные чанки
 	for chunk_key in _loaded_chunks.keys():
@@ -8007,18 +8014,18 @@ func _update_chunk_culling() -> void:
 			chunk_z * chunk_size + chunk_size / 2.0
 		)
 
-		# Вектор от камеры к центру чанка
+		# Вектор от камеры к чанку
 		var to_chunk := chunk_center - camera_pos
-		to_chunk.y = 0  # Игнорируем высоту
-		var distance := to_chunk.length()
+		to_chunk.y = 0
+		var dist_from_camera := to_chunk.length()
 
-		# Dot product для определения направления (> 0 = впереди, < 0 = сзади)
-		var dot := camera_forward.dot(to_chunk.normalized())
+		# Dot product относительно направления взгляда камеры
+		var dot := camera_look_dir.dot(to_chunk.normalized())
 
-		# Скрываем чанк если он:
-		# 1. Сзади камеры (dot < -0.3) И далеко (> 200m)
-		# 2. ИЛИ очень далеко сзади (dot < -0.5)
-		var should_hide := (dot < -0.3 and distance > 200.0) or (dot < -0.5)
+		# Расстояние от машины до чанка
+		var dist_from_car := (chunk_center - car_pos).length()
 
-		# Применяем видимость
+		# Скрываем если сзади камеры И далеко от машины
+		var should_hide := (dot < -0.2 and dist_from_car > 300.0) or (dot < -0.5 and dist_from_car > 200.0)
+
 		chunk_node.visible = not should_hide
