@@ -303,8 +303,9 @@ func _init_textures() -> void:
 	_road_textures["intersection"] = TextureGeneratorScript.create_intersection_texture(256)  # Чистый асфальт
 
 	# Текстуры зданий (без окон - окна добавляются как 3D объекты)
-	_building_textures["panel"] = TextureGeneratorScript.create_panel_building_no_windows(512, 5)
-	_building_textures["brick"] = TextureGeneratorScript.create_brick_building_no_windows(512)
+	# Уменьшено до 256 для performance (было 512)
+	_building_textures["panel"] = TextureGeneratorScript.create_panel_building_no_windows(256, 5)
+	_building_textures["brick"] = TextureGeneratorScript.create_brick_building_no_windows(256)
 	_building_textures["wall"] = TextureGeneratorScript.create_wall_texture(256)
 	_building_textures["roof"] = TextureGeneratorScript.create_roof_texture(256)
 
@@ -321,7 +322,7 @@ func _init_textures() -> void:
 	_normal_textures["asphalt"] = TextureGeneratorScript.create_asphalt_normal(256)
 	_normal_textures["brick"] = TextureGeneratorScript.create_brick_normal(256)
 	_normal_textures["concrete"] = TextureGeneratorScript.create_concrete_normal(256)
-	_normal_textures["panel"] = TextureGeneratorScript.create_panel_building_normal(512, 5, 4)
+	_normal_textures["panel"] = TextureGeneratorScript.create_panel_building_normal(256, 5, 4)  # Было 512
 
 	_textures_initialized = true
 	var elapsed := Time.get_ticks_msec() - start_time
