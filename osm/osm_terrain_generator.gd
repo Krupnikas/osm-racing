@@ -3269,9 +3269,9 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 
 	# Вычисляем расстояние до игрока для LOD (shadows)
 	var distance_to_player: float = INF
-	if car:
+	if _car:
 		var building_pos_3d := Vector3(center.x, base_elev, center.y)
-		distance_to_player = car.global_position.distance_to(building_pos_3d)
+		distance_to_player = _car.global_position.distance_to(building_pos_3d)
 
 	# Определяем тип текстуры здания
 	var building_type: String = str(tags.get("building", "yes"))
@@ -5230,7 +5230,12 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	wall_mesh_instance.mesh = wall_mesh
 
 	# Shadow LOD: только близкие здания отбрасывают тени (< 150m)
-	var distance: float = result.get("distance_to_player", INF)
+	var distance: float = INF
+	if _car:
+		var center := _get_polygon_center(points)
+		var building_pos_3d := Vector3(center.x, base_elev, center.y)
+		distance = _car.global_position.distance_to(building_pos_3d)
+
 	if distance < _building_shadow_lod_distance:
 		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	else:
