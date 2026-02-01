@@ -1984,10 +1984,12 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		if tags.get("natural") == "tree":
 			# Пропускаем деревья слишком близко к дорогам
 			if not _is_point_near_road(local, 3.0):
-				if chunk_key != "":
-					_add_tree_to_batch(chunk_key, local, elevation, target)
-				else:
-					_create_tree(local, elevation, target)  # Fallback for non-chunk mode
+				var tree_chunk_key := chunk_key
+				if tree_chunk_key.is_empty():
+					var cx := int(floor(local.x / chunk_size))
+					var cz := int(floor(local.y / chunk_size))
+					tree_chunk_key = "%d,%d" % [cx, cz]
+				_add_tree_to_batch(tree_chunk_key, local, elevation, target)
 				tree_count += 1
 		elif tags.has("traffic_sign"):
 			_create_traffic_sign(local, elevation, tags, target)
