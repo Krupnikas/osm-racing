@@ -23,41 +23,136 @@ const GLASS_COLOR := Color(0.3, 0.4, 0.5, 0.6)    # полупрозрачное
 const CONCRETE_COLOR := Color(0.55, 0.53, 0.50)   # бетон/камень
 const FRAME_COLOR := Color(0.12, 0.12, 0.15)      # тёмная рама
 
-# Кэш материалов
-static var _metal_material: StandardMaterial3D
-static var _glass_material: StandardMaterial3D
+# Кэш shared материалов (создаются один раз)
 static var _concrete_material: StandardMaterial3D
+static var _glass_material: StandardMaterial3D
 static var _frame_material: StandardMaterial3D
+static var _metal_material: StandardMaterial3D
 
 
-static func create_entrance_group(door_count: int = 2) -> Node3D:
-	var root = Node3D.new()
-	root.name = "EntranceGroup"
-
+## Создаёт входную группу как один MeshInstance3D с 4 surfaces (4 draw calls вместо ~15)
+static func create_entrance_group(door_count: int = 2) -> MeshInstance3D:
 	_ensure_materials()
 
-	# Рассчитываем общую ширину
-	var total_door_width = door_count * DOOR_WIDTH + (door_count - 1) * DOOR_GAP
+	var total_door_width := door_count * DOOR_WIDTH + (door_count - 1) * DOOR_GAP
+	var platform_height := STEP_COUNT * STEP_HEIGHT
 
-	# 1. Ступени и площадка
-	_add_steps(root, total_door_width)
+	# 4 набора геометрии по типу материала
+	var concrete_verts := PackedVector3Array()
+	var concrete_norms := PackedVector3Array()
+	var concrete_idx := PackedInt32Array()
 
-	# 2. Двери с рамами
-	_add_doors(root, door_count, total_door_width)
+	var glass_verts := PackedVector3Array()
+	var glass_norms := PackedVector3Array()
+	var glass_idx := PackedInt32Array()
 
-	# 3. Козырёк
-	_add_canopy(root, total_door_width)
+	var frame_verts := PackedVector3Array()
+	var frame_norms := PackedVector3Array()
+	var frame_idx := PackedInt32Array()
 
-	return root
+	var metal_verts := PackedVector3Array()
+	var metal_norms := PackedVector3Array()
+	var metal_idx := PackedInt32Array()
+
+	# === CONCRETE: площадка + ступени ===
+	var step_width := total_door_width + 0.6
+
+	# Площадка
+	_add_box(concrete_verts, concrete_norms, concrete_idx,
+		Vector3(0, platform_height / 2.0, PLATFORM_DEPTH / 2.0),
+		Vector3(step_width, platform_height, PLATFORM_DEPTH))
+
+	# Ступени
+	for i in range(STEP_COUNT):
+		var step_y := (STEP_COUNT - 1 - i) * STEP_HEIGHT
+		var step_z := PLATFORM_DEPTH + i * STEP_DEPTH
+		_add_box(concrete_verts, concrete_norms, concrete_idx,
+			Vector3(0, step_y + STEP_HEIGHT / 2.0, step_z + STEP_DEPTH / 2.0),
+			Vector3(step_width, STEP_HEIGHT, STEP_DEPTH))
+
+	# === GLASS: стёкла дверей ===
+	var start_x := -total_door_width / 2.0 + DOOR_WIDTH / 2.0
+	for i in range(door_count):
+		var door_x := start_x + i * (DOOR_WIDTH + DOOR_GAP)
+		_add_quad(glass_verts, glass_norms, glass_idx,
+			Vector3(door_x, platform_height + DOOR_HEIGHT / 2.0, FRAME_THICKNESS / 2.0),
+			Vector2(DOOR_WIDTH - FRAME_WIDTH * 2, DOOR_HEIGHT - FRAME_WIDTH * 2))
+
+	# === FRAME: рамы дверей ===
+	for i in range(door_count):
+		var door_x := start_x + i * (DOOR_WIDTH + DOOR_GAP)
+		# Вертикальные планки
+		for side in [-1, 1]:
+			_add_box(frame_verts, frame_norms, frame_idx,
+				Vector3(door_x + side * (DOOR_WIDTH / 2.0 - FRAME_WIDTH / 2.0),
+					platform_height + DOOR_HEIGHT / 2.0, FRAME_THICKNESS / 2.0),
+				Vector3(FRAME_WIDTH, DOOR_HEIGHT, FRAME_THICKNESS))
+		# Горизонтальные планки
+		_add_box(frame_verts, frame_norms, frame_idx,
+			Vector3(door_x, platform_height + FRAME_WIDTH / 2.0, FRAME_THICKNESS / 2.0),
+			Vector3(DOOR_WIDTH, FRAME_WIDTH, FRAME_THICKNESS))
+		_add_box(frame_verts, frame_norms, frame_idx,
+			Vector3(door_x, platform_height + DOOR_HEIGHT - FRAME_WIDTH / 2.0, FRAME_THICKNESS / 2.0),
+			Vector3(DOOR_WIDTH, FRAME_WIDTH, FRAME_THICKNESS))
+
+	# === METAL: козырёк ===
+	var canopy_width := total_door_width + CANOPY_OVERHANG * 2
+	_add_box(metal_verts, metal_norms, metal_idx,
+		Vector3(0, platform_height + DOOR_HEIGHT + CANOPY_HEIGHT / 2.0, CANOPY_DEPTH / 2.0 - 0.1),
+		Vector3(canopy_width, CANOPY_HEIGHT, CANOPY_DEPTH))
+
+	# Собираем ArrayMesh с 4 surfaces
+	var arr_mesh := ArrayMesh.new()
+
+	if concrete_verts.size() > 0:
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = concrete_verts
+		arrays[Mesh.ARRAY_NORMAL] = concrete_norms
+		arrays[Mesh.ARRAY_INDEX] = concrete_idx
+		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		arr_mesh.surface_set_material(arr_mesh.get_surface_count() - 1, _concrete_material)
+
+	if glass_verts.size() > 0:
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = glass_verts
+		arrays[Mesh.ARRAY_NORMAL] = glass_norms
+		arrays[Mesh.ARRAY_INDEX] = glass_idx
+		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		arr_mesh.surface_set_material(arr_mesh.get_surface_count() - 1, _glass_material)
+
+	if frame_verts.size() > 0:
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = frame_verts
+		arrays[Mesh.ARRAY_NORMAL] = frame_norms
+		arrays[Mesh.ARRAY_INDEX] = frame_idx
+		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		arr_mesh.surface_set_material(arr_mesh.get_surface_count() - 1, _frame_material)
+
+	if metal_verts.size() > 0:
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = metal_verts
+		arrays[Mesh.ARRAY_NORMAL] = metal_norms
+		arrays[Mesh.ARRAY_INDEX] = metal_idx
+		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		arr_mesh.surface_set_material(arr_mesh.get_surface_count() - 1, _metal_material)
+
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.mesh = arr_mesh
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mesh_inst.name = "EntranceGroup"
+	return mesh_inst
 
 
 static func _ensure_materials() -> void:
-	if _metal_material == null:
-		_metal_material = StandardMaterial3D.new()
-		_metal_material.albedo_color = METAL_COLOR
-		_metal_material.metallic = 0.7
-		_metal_material.roughness = 0.4
-		_metal_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if _concrete_material == null:
+		_concrete_material = StandardMaterial3D.new()
+		_concrete_material.albedo_color = CONCRETE_COLOR
+		_concrete_material.roughness = 0.9
+		_concrete_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	if _glass_material == null:
 		_glass_material = StandardMaterial3D.new()
@@ -67,12 +162,6 @@ static func _ensure_materials() -> void:
 		_glass_material.roughness = 0.1
 		_glass_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
-	if _concrete_material == null:
-		_concrete_material = StandardMaterial3D.new()
-		_concrete_material.albedo_color = CONCRETE_COLOR
-		_concrete_material.roughness = 0.9
-		_concrete_material.cull_mode = BaseMaterial3D.CULL_DISABLED
-
 	if _frame_material == null:
 		_frame_material = StandardMaterial3D.new()
 		_frame_material.albedo_color = FRAME_COLOR
@@ -80,125 +169,90 @@ static func _ensure_materials() -> void:
 		_frame_material.roughness = 0.3
 		_frame_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
-
-static func _add_steps(root: Node3D, total_door_width: float) -> void:
-	# Ширина ступеней = ширина дверей + отступы
-	var step_width = total_door_width + 0.6
-
-	# Высота площадки = количество ступеней * высота ступени
-	var platform_height = STEP_COUNT * STEP_HEIGHT
-
-	# Площадка перед дверью
-	var platform_mesh = BoxMesh.new()
-	platform_mesh.size = Vector3(step_width, platform_height, PLATFORM_DEPTH)
-
-	var platform = MeshInstance3D.new()
-	platform.mesh = platform_mesh
-	platform.material_override = _concrete_material
-	platform.name = "Platform"
-	# Позиция: центр площадки
-	platform.position = Vector3(0, platform_height / 2.0, PLATFORM_DEPTH / 2.0)
-	root.add_child(platform)
-
-	# Ступени (выступающие части)
-	for i in range(STEP_COUNT):
-		var step_y = (STEP_COUNT - 1 - i) * STEP_HEIGHT  # от верхней к нижней
-		var step_z = PLATFORM_DEPTH + i * STEP_DEPTH      # каждая следующая дальше
-
-		var step_mesh = BoxMesh.new()
-		step_mesh.size = Vector3(step_width, STEP_HEIGHT, STEP_DEPTH)
-
-		var step = MeshInstance3D.new()
-		step.mesh = step_mesh
-		step.material_override = _concrete_material
-		step.name = "Step_%d" % i
-		step.position = Vector3(0, step_y + STEP_HEIGHT / 2.0, step_z + STEP_DEPTH / 2.0)
-		root.add_child(step)
+	if _metal_material == null:
+		_metal_material = StandardMaterial3D.new()
+		_metal_material.albedo_color = METAL_COLOR
+		_metal_material.metallic = 0.7
+		_metal_material.roughness = 0.4
+		_metal_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 
-static func _add_doors(root: Node3D, door_count: int, total_door_width: float) -> void:
-	var platform_height = STEP_COUNT * STEP_HEIGHT
+## Добавляет Box геометрию (6 граней) в буферы
+static func _add_box(verts: PackedVector3Array, norms: PackedVector3Array, idx: PackedInt32Array,
+		center: Vector3, size: Vector3) -> void:
+	var hx := size.x * 0.5
+	var hy := size.y * 0.5
+	var hz := size.z * 0.5
+	var base := verts.size()
 
-	# Стартовая позиция X для первой двери (центрирование)
-	var start_x = -total_door_width / 2.0 + DOOR_WIDTH / 2.0
+	# 6 граней × 4 вершины = 24 вершины, 6 × 2 = 12 треугольников
+	# Front (+Z)
+	verts.append(center + Vector3(-hx, -hy, hz))
+	verts.append(center + Vector3(hx, -hy, hz))
+	verts.append(center + Vector3(hx, hy, hz))
+	verts.append(center + Vector3(-hx, hy, hz))
+	for _i in range(4): norms.append(Vector3(0, 0, 1))
+	idx.append_array([base, base+1, base+2, base, base+2, base+3])
 
-	for i in range(door_count):
-		var door_x = start_x + i * (DOOR_WIDTH + DOOR_GAP)
+	# Back (-Z)
+	var b := base + 4
+	verts.append(center + Vector3(hx, -hy, -hz))
+	verts.append(center + Vector3(-hx, -hy, -hz))
+	verts.append(center + Vector3(-hx, hy, -hz))
+	verts.append(center + Vector3(hx, hy, -hz))
+	for _i in range(4): norms.append(Vector3(0, 0, -1))
+	idx.append_array([b, b+1, b+2, b, b+2, b+3])
 
-		# Стекло двери
-		var glass_mesh = QuadMesh.new()
-		glass_mesh.size = Vector2(DOOR_WIDTH - FRAME_WIDTH * 2, DOOR_HEIGHT - FRAME_WIDTH * 2)
+	# Top (+Y)
+	b = base + 8
+	verts.append(center + Vector3(-hx, hy, -hz))
+	verts.append(center + Vector3(-hx, hy, hz))
+	verts.append(center + Vector3(hx, hy, hz))
+	verts.append(center + Vector3(hx, hy, -hz))
+	for _i in range(4): norms.append(Vector3(0, 1, 0))
+	idx.append_array([b, b+1, b+2, b, b+2, b+3])
 
-		var glass = MeshInstance3D.new()
-		glass.mesh = glass_mesh
-		glass.material_override = _glass_material
-		glass.name = "DoorGlass_%d" % i
-		glass.position = Vector3(door_x, platform_height + DOOR_HEIGHT / 2.0, FRAME_THICKNESS / 2.0)
-		root.add_child(glass)
+	# Bottom (-Y)
+	b = base + 12
+	verts.append(center + Vector3(-hx, -hy, hz))
+	verts.append(center + Vector3(-hx, -hy, -hz))
+	verts.append(center + Vector3(hx, -hy, -hz))
+	verts.append(center + Vector3(hx, -hy, hz))
+	for _i in range(4): norms.append(Vector3(0, -1, 0))
+	idx.append_array([b, b+1, b+2, b, b+2, b+3])
 
-		# Рама двери (4 планки)
-		_add_door_frame(root, door_x, platform_height, i)
+	# Right (+X)
+	b = base + 16
+	verts.append(center + Vector3(hx, -hy, hz))
+	verts.append(center + Vector3(hx, -hy, -hz))
+	verts.append(center + Vector3(hx, hy, -hz))
+	verts.append(center + Vector3(hx, hy, hz))
+	for _i in range(4): norms.append(Vector3(1, 0, 0))
+	idx.append_array([b, b+1, b+2, b, b+2, b+3])
 
-
-static func _add_door_frame(root: Node3D, door_x: float, base_y: float, door_index: int) -> void:
-	# Вертикальные планки (левая и правая)
-	for side in [-1, 1]:
-		var frame_mesh = BoxMesh.new()
-		frame_mesh.size = Vector3(FRAME_WIDTH, DOOR_HEIGHT, FRAME_THICKNESS)
-
-		var frame = MeshInstance3D.new()
-		frame.mesh = frame_mesh
-		frame.material_override = _frame_material
-		frame.name = "DoorFrameV_%d_%d" % [door_index, side]
-		frame.position = Vector3(
-			door_x + side * (DOOR_WIDTH / 2.0 - FRAME_WIDTH / 2.0),
-			base_y + DOOR_HEIGHT / 2.0,
-			FRAME_THICKNESS / 2.0
-		)
-		root.add_child(frame)
-
-	# Горизонтальные планки (верхняя и нижняя)
-	for is_top in [false, true]:
-		var frame_mesh = BoxMesh.new()
-		frame_mesh.size = Vector3(DOOR_WIDTH, FRAME_WIDTH, FRAME_THICKNESS)
-
-		var frame = MeshInstance3D.new()
-		frame.mesh = frame_mesh
-		frame.material_override = _frame_material
-		frame.name = "DoorFrameH_%d_%s" % [door_index, "top" if is_top else "bottom"]
-
-		var y_pos = base_y + FRAME_WIDTH / 2.0
-		if is_top:
-			y_pos = base_y + DOOR_HEIGHT - FRAME_WIDTH / 2.0
-
-		frame.position = Vector3(door_x, y_pos, FRAME_THICKNESS / 2.0)
-		root.add_child(frame)
+	# Left (-X)
+	b = base + 20
+	verts.append(center + Vector3(-hx, -hy, -hz))
+	verts.append(center + Vector3(-hx, -hy, hz))
+	verts.append(center + Vector3(-hx, hy, hz))
+	verts.append(center + Vector3(-hx, hy, -hz))
+	for _i in range(4): norms.append(Vector3(-1, 0, 0))
+	idx.append_array([b, b+1, b+2, b, b+2, b+3])
 
 
-static func _add_canopy(root: Node3D, total_door_width: float) -> void:
-	var platform_height = STEP_COUNT * STEP_HEIGHT
-	var canopy_width = total_door_width + CANOPY_OVERHANG * 2
+## Добавляет Quad геометрию (2 треугольника) в буферы
+static func _add_quad(verts: PackedVector3Array, norms: PackedVector3Array, idx: PackedInt32Array,
+		center: Vector3, size: Vector2) -> void:
+	var hx := size.x * 0.5
+	var hy := size.y * 0.5
+	var base := verts.size()
 
-	# Основная плита козырька
-	var canopy_mesh = BoxMesh.new()
-	canopy_mesh.size = Vector3(canopy_width, CANOPY_HEIGHT, CANOPY_DEPTH)
-
-	var canopy = MeshInstance3D.new()
-	canopy.mesh = canopy_mesh
-	canopy.material_override = _metal_material
-	canopy.name = "Canopy"
-
-	# Позиция: над дверью, с выступом вперёд
-	canopy.position = Vector3(
-		0,
-		platform_height + DOOR_HEIGHT + CANOPY_HEIGHT / 2.0,
-		CANOPY_DEPTH / 2.0 - 0.1  # немного ближе к стене
-	)
-
-	# Небольшой наклон вперёд (3 градуса) для стока воды
-	canopy.rotation.x = deg_to_rad(3)
-
-	root.add_child(canopy)
+	verts.append(center + Vector3(-hx, -hy, 0))
+	verts.append(center + Vector3(hx, -hy, 0))
+	verts.append(center + Vector3(hx, hy, 0))
+	verts.append(center + Vector3(-hx, hy, 0))
+	for _i in range(4): norms.append(Vector3(0, 0, 1))
+	idx.append_array([base, base+1, base+2, base, base+2, base+3])
 
 
 # Вспомогательные функции для интеграции

@@ -26,7 +26,7 @@ var chromatic_aberration_enabled := false
 var vignette_enabled := false  # Виньетка (по умолчанию выключена)
 
 # Дальность прорисовки
-var render_distance := 600.0  # Метры
+var render_distance := 400.0  # Метры
 
 # Ссылки на сцену
 var _environment: Environment
@@ -446,7 +446,7 @@ func _load_settings() -> void:
 		motion_blur_enabled = config.get_value("graphics", "motion_blur", false)
 		dof_enabled = config.get_value("graphics", "dof", false)
 		vignette_enabled = config.get_value("graphics", "vignette", false)  # Дефолт false как при инициализации
-		render_distance = config.get_value("graphics", "render_distance", 600.0)  # Дефолт как при инициализации
+		render_distance = config.get_value("graphics", "render_distance", 400.0)  # Дефолт как при инициализации
 		print("GraphicsSettings: Settings loaded - FXAA: ", fxaa_enabled, ", TAA: ", taa_enabled, ", MSAA: ", msaa_mode)
 	else:
 		print("GraphicsSettings: No saved settings found (err: ", err, "), using defaults")

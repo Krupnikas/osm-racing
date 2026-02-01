@@ -463,12 +463,12 @@ size_flags_horizontal = 3
 min_value = 100.0
 max_value = 800.0
 step = 50.0
-value = 600.0
+value = 400.0
 
 [node name="RenderDistValue" type="Label" parent="SettingsPanel/VBox/RenderDistBox"]
 custom_minimum_size = Vector2(60, 0)
 layout_mode = 2
-text = "600 м"
+text = "400 м"
 
 [node name="Spacer2" type="Control" parent="SettingsPanel/VBox"]
 layout_mode = 2

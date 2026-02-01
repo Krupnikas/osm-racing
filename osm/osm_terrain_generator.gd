@@ -11,18 +11,7 @@ const TextureGeneratorScript = preload("res://textures/texture_generator.gd")
 const BuildingWallShader = preload("res://osm/building_wall.gdshader")
 const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
-const BIRCH_TREE_SCENE = preload("res://models/trees/birch/scene.gltf")
 
-# Пути к моделям растительности Kenney Nature Kit (CC0)
-const GRASS_MODEL_PATH := "res://models/vegetation/grass.glb"
-const GRASS_LARGE_MODEL_PATH := "res://models/vegetation/grass_large.glb"
-const BUSH_SMALL_MODEL_PATH := "res://models/vegetation/plant_bushSmall.glb"
-const BUSH_MODEL_PATH := "res://models/vegetation/plant_bush.glb"
-const BUSH_LARGE_MODEL_PATH := "res://models/vegetation/plant_bushLarge.glb"
-
-# Кэш загруженных моделей растительности
-var _grass_model: PackedScene
-var _bush_model: PackedScene
 
 # Кэш текстур (создаются один раз)
 var _road_textures: Dictionary = {}
@@ -37,7 +26,7 @@ var _textures_initialized := false
 @export var chunk_size := 300.0  # Размер чанка в метрах
 @export var load_distance := 500.0  # Дистанция подгрузки чанков
 @export var unload_distance := 800.0  # Дистанция выгрузки чанков
-@export var render_distance := 600.0  # Дальность прорисовки (и начало тумана)
+@export var render_distance := 400.0  # Дальность прорисовки (и начало тумана)
 @export var fog_enabled := true  # Включить туман для скрытия края мира
 @export var car_path: NodePath
 @export var camera_path: NodePath
@@ -115,10 +104,7 @@ var _culling_camera: Camera3D = null  # Ссылка на камеру для cu
 var _culling_update_timer: float = 0.0  # Таймер обновления culling
 const CULLING_UPDATE_INTERVAL := 0.2  # Обновлять каждые 200ms (5 раз в секунду)
 
-# Raycast-based occlusion culling (дополняет frustum culling)
-var _raycast_occlusion_cache: Dictionary = {}  # chunk_key -> {visible: bool, time: float}
-const RAYCAST_CACHE_DURATION := 1.0  # Кеш на 1 секунду
-const RAYCAST_BUDGET_PER_UPDATE := 3  # Макс чанков для проверки за одно обновление
+var _culling_debug_counter := 0
 
 # Отложенная генерация дорог и других тяжёлых объектов
 var _road_queue: Array = []  # Очередь {nodes, tags, parent, elev_data}
@@ -132,28 +118,24 @@ var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batc
 var _window_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], colors: Array[Color], parent: Node3D}
 var _window_batch_materials: Array[ShaderMaterial] = []  # Материалы всех window batches для обновления is_night параметра
 
-# BUILDING BATCHING: собираем все здания чанка в MultiMesh для снижения draw calls и vertices
-var _building_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], sizes: Array[Vector3], colors: Array[Color], parent: Node3D}
-var _building_batches_to_finalize: Array[String] = []  # Очередь chunk_key для финализации building batches
+# BUILDING GEOMETRY MERGE: объединяем все стены/крыши чанка в один ArrayMesh для снижения draw calls
+var _building_geo_batch: Dictionary = {}  # chunk_key -> {parent, panel_walls: {verts,uvs,normals,indices}, brick_walls, wall_walls, roofs, collisions, decorations}
+var _building_geo_finalize_queue: Array[String] = []  # Очередь chunk_key для финализации
+var _building_wall_materials: Dictionary = {}  # texture_type -> ShaderMaterial (shared)
+var _building_roof_material: StandardMaterial3D = null  # shared
 
 # Lamp lights - для управления ночным режимом
 var _lamp_batch_lights: Array[OmniLight3D] = []  # Все OmniLight3D (теперь без батчинга, по одному фонарю за раз)
 
 var _curb_smoothed_queue: Array = []  # Очередь сглаженных бордюров для генерации меша
 var _curb_mesh_state: Dictionary = {}  # Текущее состояние генерации меша бордюра (для разбивки по кадрам)
+var _curb_geo_batch: Dictionary = {}  # chunk_key -> {parent, vertices, normals, indices}
+var _curb_material: StandardMaterial3D = null  # Shared material для всех бордюров
 
 # Vegetation batching system - MultiMesh with LOD
-var _tree_batch_data: Dictionary = {}  # key: chunk_key -> {close: [], medium: [], far: [], collisions: []}
-#   close: Array[Transform3D] - full detail trees (<100m)
-#   medium: Array[Transform3D] - simplified trees (100-200m)
-#   far: Array[Transform3D] - billboard quads (>200m)
-#   collisions: Array[Dictionary] - {position: Vector3, radius: float} for StaticBody3D
+var _tree_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: [], collisions: [], parent: Node3D}
 var _tree_batches_to_finalize: Array[String] = []  # Chunk keys ready for finalization
-# Pregenerated tree meshes for LOD
-var _tree_mesh_close: Mesh  # Full detail (original scene)
-var _tree_mesh_medium: Mesh  # Simplified (cylinder trunk + sphere leaves)
-var _tree_mesh_far: Mesh  # Billboard quad
-var _tree_materials: Dictionary = {}  # Materials for each LOD level
+var _tree_mesh: ArrayMesh  # Единый упрощённый меш дерева (ствол + крона)
 
 # Lamp batching system - MultiMesh with per-chunk batching
 var _lamp_batch_data: Dictionary = {}  # key: chunk_key -> batch data
@@ -195,6 +177,9 @@ var _draw_call_stats: Dictionary = {
 	"signs": 0,
 	"vegetation": 0,
 	"terrain": 0,
+	"neon_signs": 0,
+	"traffic_lights": 0,
+	"npc_cars": 0,
 	"other": 0
 }
 var _draw_call_logging_enabled := true  # PHASE 1 DIAGNOSTIC: Track draw calls by category
@@ -368,6 +353,32 @@ func _init_textures() -> void:
 	_building_textures["wall"] = TextureGeneratorScript.create_wall_texture(256)
 	_building_textures["roof"] = TextureGeneratorScript.create_roof_texture(256)
 
+	# Shared материалы зданий (создаются один раз, переиспользуются для merged meshes)
+	for tex_type in ["panel", "brick", "wall"]:
+		var mat := ShaderMaterial.new()
+		mat.shader = BuildingWallShader
+		if _building_textures.has(tex_type):
+			mat.set_shader_parameter("albedo_texture", _building_textures[tex_type])
+			mat.set_shader_parameter("use_texture", true)
+		else:
+			mat.set_shader_parameter("albedo_color", Color(0.7, 0.6, 0.5))
+			mat.set_shader_parameter("use_texture", false)
+		_building_wall_materials[tex_type] = mat
+
+	_building_roof_material = StandardMaterial3D.new()
+	_building_roof_material.cull_mode = BaseMaterial3D.CULL_BACK
+	if _building_textures.has("roof"):
+		_building_roof_material.albedo_texture = _building_textures["roof"]
+		_building_roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	else:
+		_building_roof_material.albedo_color = Color(0.4, 0.35, 0.3)
+
+	# Shared material бордюров
+	_curb_material = StandardMaterial3D.new()
+	_curb_material.albedo_color = Color(0.6, 0.6, 0.58)
+	_curb_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_curb_material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
+
 	# Текстуры земли - загружаем PBR текстуру травы
 	var grass_img := Image.load_from_file("res://textures/Grass004_1K-JPG_Color.jpg")
 	if grass_img:
@@ -418,84 +429,52 @@ void fragment() {
 	print("OSM: Window shader compiled")
 
 func _init_tree_meshes() -> void:
-	"""Initialize simplified tree meshes for LOD batching"""
-	print("OSM: Initializing tree LOD meshes...")
+	"""Создаёт единый упрощённый меш дерева (ствол + крона) для MultiMesh батчинга"""
+	print("OSM: Initializing tree mesh...")
 
-	# LOD CLOSE: Full detail - use original birch scene's first mesh
-	# Extract mesh from BIRCH_TREE_SCENE instead of instantiating full scene
-	var birch_instance = BIRCH_TREE_SCENE.instantiate()
-	var first_mesh_instance: MeshInstance3D = null
-	# Find first MeshInstance3D in tree
-	for child in birch_instance.get_children():
-		if child is MeshInstance3D:
-			first_mesh_instance = child
-			break
-		# Check nested children
-		for nested in child.get_children():
-			if nested is MeshInstance3D:
-				first_mesh_instance = nested
-				break
-		if first_mesh_instance:
-			break
+	# Ствол — цилиндр
+	var trunk := CylinderMesh.new()
+	trunk.top_radius = 0.3
+	trunk.bottom_radius = 0.4
+	trunk.height = 5.0
+	trunk.radial_segments = 6
+	trunk.rings = 1
 
-	if first_mesh_instance:
-		_tree_mesh_close = first_mesh_instance.mesh
-		_tree_materials["close"] = first_mesh_instance.material_override
-	birch_instance.queue_free()
+	# Крона — сфера, смещённая вверх
+	var crown := SphereMesh.new()
+	crown.radius = 2.8
+	crown.height = 5.5
+	crown.radial_segments = 8
+	crown.rings = 4
 
-	# LOD MEDIUM: Simplified tree - cylinder trunk + sphere leaves
-	var arrays_trunk := []
-	arrays_trunk.resize(Mesh.ARRAY_MAX)
-	var trunk_mesh := CylinderMesh.new()
-	trunk_mesh.top_radius = 0.3
-	trunk_mesh.bottom_radius = 0.35
-	trunk_mesh.height = 6.0
-	trunk_mesh.radial_segments = 6  # Low poly
-	trunk_mesh.rings = 1
+	_tree_mesh = ArrayMesh.new()
 
-	var arrays_leaves := []
-	arrays_leaves.resize(Mesh.ARRAY_MAX)
-	var leaves_mesh := SphereMesh.new()
-	leaves_mesh.radius = 2.5
-	leaves_mesh.height = 5.0
-	leaves_mesh.radial_segments = 8  # Low poly
-	leaves_mesh.rings = 4
+	# Surface 0: ствол
+	var trunk_arrays := trunk.get_mesh_arrays()
+	# Сдвигаем ствол вверх на половину высоты (центр = 2.5м)
+	var trunk_verts: PackedVector3Array = trunk_arrays[Mesh.ARRAY_VERTEX]
+	for i in range(trunk_verts.size()):
+		trunk_verts[i].y += 2.5
+	trunk_arrays[Mesh.ARRAY_VERTEX] = trunk_verts
+	_tree_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, trunk_arrays)
 
-	# Combine trunk + leaves into one mesh
-	_tree_mesh_medium = ArrayMesh.new()
-	# Add trunk
-	arrays_trunk = trunk_mesh.get_mesh_arrays()
-	_tree_mesh_medium.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays_trunk)
-	# Add leaves offset upward
-	arrays_leaves = leaves_mesh.get_mesh_arrays()
-	var vertices: PackedVector3Array = arrays_leaves[Mesh.ARRAY_VERTEX]
-	for i in range(vertices.size()):
-		vertices[i].y += 4.0  # Offset leaves up
-	arrays_leaves[Mesh.ARRAY_VERTEX] = vertices
-	_tree_mesh_medium.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays_leaves)
-
-	# Materials for medium LOD
 	var trunk_mat := StandardMaterial3D.new()
-	trunk_mat.albedo_color = Color(0.3, 0.2, 0.1)  # Brown
-	_tree_mesh_medium.surface_set_material(0, trunk_mat)
+	trunk_mat.albedo_color = Color(0.35, 0.22, 0.1)
+	_tree_mesh.surface_set_material(0, trunk_mat)
 
-	var leaves_mat := StandardMaterial3D.new()
-	leaves_mat.albedo_color = Color(0.2, 0.5, 0.2)  # Green
-	_tree_mesh_medium.surface_set_material(1, leaves_mat)
+	# Surface 1: крона
+	var crown_arrays := crown.get_mesh_arrays()
+	var crown_verts: PackedVector3Array = crown_arrays[Mesh.ARRAY_VERTEX]
+	for i in range(crown_verts.size()):
+		crown_verts[i].y += 6.5  # Верх ствола(5) + половина кроны(1.5)
+	crown_arrays[Mesh.ARRAY_VERTEX] = crown_verts
+	_tree_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, crown_arrays)
 
-	# LOD FAR: Billboard quad with tree texture
-	var quad_mesh := QuadMesh.new()
-	quad_mesh.size = Vector2(8.0, 10.0)  # Tree size
-	_tree_mesh_far = quad_mesh
+	var crown_mat := StandardMaterial3D.new()
+	crown_mat.albedo_color = Color(0.2, 0.5, 0.15)
+	_tree_mesh.surface_set_material(1, crown_mat)
 
-	var billboard_mat := StandardMaterial3D.new()
-	billboard_mat.albedo_color = Color(0.25, 0.4, 0.2)  # Dark green
-	billboard_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	billboard_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
-	billboard_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_tree_materials["far"] = billboard_mat
-
-	print("OSM: Tree LOD meshes initialized (close/medium/far)")
+	print("OSM: Tree mesh initialized (trunk + crown, 2 surfaces)")
 
 func _init_lamp_meshes() -> void:
 	"""Initialize lamp component meshes for MultiMesh batching"""
@@ -1212,12 +1191,16 @@ func _unload_chunk(chunk_key: String) -> void:
 		if finalize_idx >= 0:
 			_tree_batches_to_finalize.remove_at(finalize_idx)
 
-		# Clean up building batch data if not yet finalized
-		if _building_batch_data.has(chunk_key):
-			_building_batch_data.erase(chunk_key)
-		var building_finalize_idx := _building_batches_to_finalize.find(chunk_key)
+		# Clean up curb geo batch
+		if _curb_geo_batch.has(chunk_key):
+			_curb_geo_batch.erase(chunk_key)
+
+		# Clean up building geometry merge batch
+		if _building_geo_batch.has(chunk_key):
+			_building_geo_batch.erase(chunk_key)
+		var building_finalize_idx := _building_geo_finalize_queue.find(chunk_key)
 		if building_finalize_idx >= 0:
-			_building_batches_to_finalize.remove_at(building_finalize_idx)
+			_building_geo_finalize_queue.remove_at(building_finalize_idx)
 
 		# Clean up window batch data if not yet finalized
 		if _window_batch_data.has(chunk_key):
@@ -1351,8 +1334,9 @@ func reset_terrain() -> void:
 	_lamp_batch_lights.clear()
 	_tree_batch_data.clear()
 	_tree_batches_to_finalize.clear()
-	_building_batch_data.clear()
-	_building_batches_to_finalize.clear()
+	_building_geo_batch.clear()
+	_building_geo_finalize_queue.clear()
+	_curb_geo_batch.clear()
 	_window_batch_data.clear()
 	_window_batch_materials.clear()
 	_pending_batch_chunks.clear()
@@ -1483,9 +1467,6 @@ func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: 
 	if gen != _load_generation:
 		print("OSM: Ignoring stale chunk generation %s (gen %d != %d)" % [chunk_key, gen, _load_generation])
 		return
-
-	# Генерируем растительность на пустых участках чанка (временно отключено)
-	# _queue_chunk_vegetation(chunk_key, chunk_node)
 
 	# OLD: Создаём фонари для этого чанка (DEPRECATED - now using batching)
 	if not _initial_loading:
@@ -2590,174 +2571,6 @@ func update_window_night_mode(is_night: bool) -> void:
 	])
 
 
-# ===== BUILDING BATCHING SYSTEM =====
-
-## Добавляет здание в batch для чанка (вместо создания отдельного MeshInstance3D)
-func _add_building_to_batch(chunk_key: String, center: Vector3, size: Vector3, color: Color, parent: Node3D) -> void:
-	if not _building_batch_data.has(chunk_key):
-		_building_batch_data[chunk_key] = {
-			"transforms": [],
-			"sizes": [],
-			"colors": [],
-			"parent": parent
-		}
-
-	# Создаем transform для здания (box mesh будет в center с size)
-	var transform := Transform3D(Basis.IDENTITY, center)
-
-	_building_batch_data[chunk_key]["transforms"].append(transform)
-	_building_batch_data[chunk_key]["sizes"].append(size)
-	_building_batch_data[chunk_key]["colors"].append(color)
-
-## Финализирует все building batches для чанка (создает MultiMesh)
-func _finalize_building_batches_for_chunk(chunk_key: String) -> void:
-	if not _building_batch_data.has(chunk_key):
-		return
-
-	var batch: Dictionary = _building_batch_data[chunk_key]
-	var transforms: Array = batch.get("transforms", [])
-	var sizes: Array = batch.get("sizes", [])
-	var colors: Array = batch.get("colors", [])
-	var parent: Node3D = batch.get("parent", null)
-
-	# SAFETY: Проверяем что parent ещё существует
-	if transforms.is_empty() or not parent or not is_instance_valid(parent):
-		if not is_instance_valid(parent):
-			print("OSM: ⚠️ Skipped building batch %s - chunk was unloaded" % chunk_key)
-		_building_batch_data.erase(chunk_key)
-		return
-
-	# НЕ МОЖЕМ использовать простой MultiMesh с одним mesh - у каждого здания разный размер!
-	# Вместо этого создадим НЕСКОЛЬКО MultiMesh батчей по размерам
-
-	# Группируем здания по размерам (округляем до 5м)
-	var size_groups: Dictionary = {}  # size_key -> {transforms: [], colors: []}
-
-	for i in range(transforms.size()):
-		var size: Vector3 = sizes[i]
-		# Округляем размер до 5м для группировки
-		var size_key := "%d_%d_%d" % [
-			int(size.x / 5.0) * 5,
-			int(size.y / 5.0) * 5,
-			int(size.z / 5.0) * 5
-		]
-
-		if not size_groups.has(size_key):
-			size_groups[size_key] = {
-				"size": Vector3(
-					int(size.x / 5.0) * 5.0,
-					int(size.y / 5.0) * 5.0,
-					int(size.z / 5.0) * 5.0
-				),
-				"transforms": [],
-				"colors": []
-			}
-
-		size_groups[size_key]["transforms"].append(transforms[i])
-		size_groups[size_key]["colors"].append(colors[i])
-
-	# Создаем MultiMesh для каждой группы размеров
-	var total_buildings := 0
-	for size_key in size_groups.keys():
-		var group: Dictionary = size_groups[size_key]
-		var group_size: Vector3 = group["size"]
-		var group_transforms: Array = group["transforms"]
-		var group_colors: Array = group["colors"]
-
-		if group_transforms.is_empty():
-			continue
-
-		# Создаём MultiMesh
-		var mm := MultiMesh.new()
-		mm.transform_format = MultiMesh.TRANSFORM_3D
-		mm.use_colors = true
-		mm.use_custom_data = false
-
-		# Используем BoxMesh с размером группы
-		var box := BoxMesh.new()
-		box.size = group_size
-		mm.mesh = box
-
-		mm.instance_count = group_transforms.size()
-
-		# Устанавливаем трансформы и цвета
-		for i in range(group_transforms.size()):
-			mm.set_instance_transform(i, group_transforms[i])
-			mm.set_instance_color(i, group_colors[i])
-
-		# Создаём материал (простой unshaded для производительности)
-		var mat := StandardMaterial3D.new()
-		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		mat.vertex_color_use_as_albedo = true
-
-		# Создаём MultiMeshInstance3D
-		var mm_instance := MultiMeshInstance3D.new()
-		mm_instance.multimesh = mm
-		mm_instance.material_override = mat
-		mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		mm_instance.name = "BuildingBatch_" + size_key
-
-		# Добавляем к родителю
-		parent.add_child(mm_instance)
-
-		total_buildings += group_transforms.size()
-
-	print("OSM: ✅ Finalized building batch %s: %d buildings in %d size groups (was %d draw calls before)" % [
-		chunk_key, total_buildings, size_groups.size(), total_buildings
-	])
-
-	# Очищаем batch data
-	_building_batch_data.erase(chunk_key)
-
-
-## Создаёт упрощенное здание (простой box) и добавляет в batch для чанка
-func _create_3d_building_simple_batched(points: PackedVector2Array, color: Color, building_height: float, parent: Node3D, base_elev: float = 0.0) -> void:
-	# Минимум 3 точки
-	if points.size() < 3:
-		return
-
-	# Вычисляем bounding box здания
-	var min_x := points[0].x
-	var max_x := points[0].x
-	var min_z := points[0].y
-	var max_z := points[0].y
-
-	for p in points:
-		min_x = min(min_x, p.x)
-		max_x = max(max_x, p.x)
-		min_z = min(min_z, p.y)
-		max_z = max(max_z, p.y)
-
-	var size_x := max_x - min_x
-	var size_z := max_z - min_z
-
-	# Пропускаем слишком маленькие здания
-	if size_x < 3.0 or size_z < 3.0:
-		return
-
-	# Пропускаем слишком большие здания
-	if size_x > 200.0 or size_z > 200.0:
-		return
-
-	# Центр здания
-	var center_x := (min_x + max_x) / 2.0
-	var center_z := (min_z + max_z) / 2.0
-	var center_y := base_elev + building_height / 2.0
-
-	var center := Vector3(center_x, center_y, center_z)
-	var size := Vector3(size_x, building_height, size_z)
-
-	# Вычисляем chunk_key из центра здания
-	var chunk_x := int(floor(center_x / chunk_size))
-	var chunk_z := int(floor(center_z / chunk_size))
-	var chunk_key := "%d,%d" % [chunk_x, chunk_z]
-
-	# Добавляем в batch
-	_add_building_to_batch(chunk_key, center, size, color, parent)
-
-	# Добавляем chunk_key в очередь для финализации (если еще не добавлен)
-	if not _building_batches_to_finalize.has(chunk_key):
-		_building_batches_to_finalize.append(chunk_key)
 
 
 # Создаёт бордюры вдоль дороги (старая версия для обратной совместимости)
@@ -4426,12 +4239,15 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 	_building_mutex.unlock()
 
 
-## Применяет результат вычислений на главном потоке (создаёт Node)
+func _make_empty_geo_batch() -> Dictionary:
+	return {"vertices": PackedVector3Array(), "uvs": PackedVector2Array(), "normals": PackedVector3Array(), "indices": PackedInt32Array()}
+
+
+## Накапливает геометрию здания в batch для последующего merge в один ArrayMesh на чанк
 func _apply_building_mesh_result(result: Dictionary) -> void:
 	if not result.valid:
 		return
 
-	# Проверяем валидность parent до присваивания
 	if not is_instance_valid(result.get("parent")):
 		return
 	var parent: Node3D = result.parent
@@ -4441,92 +4257,151 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 	var base_elev: float = result.base_elev
 	var points: PackedVector2Array = result.points
 
-	# === СОЗДАНИЕ МЕША СТЕН ===
-	var wall_arrays := []
-	wall_arrays.resize(Mesh.ARRAY_MAX)
-	wall_arrays[Mesh.ARRAY_VERTEX] = result.wall_vertices
-	wall_arrays[Mesh.ARRAY_TEX_UV] = result.wall_uvs
-	wall_arrays[Mesh.ARRAY_NORMAL] = result.wall_normals
-	wall_arrays[Mesh.ARRAY_INDEX] = result.wall_indices
+	# Определяем chunk_key из parent node или из координат здания
+	var chunk_key := _get_chunk_key_from_node(parent)
+	if chunk_key.is_empty():
+		# parent не Chunk_ — вычисляем chunk_key из центра здания
+		var center := _get_polygon_center(points)
+		var cx := int(floor(center.x / chunk_size))
+		var cz := int(floor(center.y / chunk_size))
+		chunk_key = "%d,%d" % [cx, cz]
+		# Используем chunk node если он уже загружен, иначе parent
+		if _loaded_chunks.has(chunk_key):
+			parent = _loaded_chunks[chunk_key]
 
-	var wall_mesh := ArrayMesh.new()
-	wall_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, wall_arrays)
+	# Инициализируем batch для чанка
+	if not _building_geo_batch.has(chunk_key):
+		_building_geo_batch[chunk_key] = {
+			"parent": parent,
+			"panel_walls": _make_empty_geo_batch(),
+			"brick_walls": _make_empty_geo_batch(),
+			"wall_walls": _make_empty_geo_batch(),
+			"roofs": _make_empty_geo_batch(),
+			"collisions": [],
+		}
 
-	var wall_mesh_instance := MeshInstance3D.new()
-	wall_mesh_instance.mesh = wall_mesh
+	var batch: Dictionary = _building_geo_batch[chunk_key]
 
-	# Shadow LOD: только близкие здания отбрасывают тени (< 150m)
-	var distance: float = result.get("distance_to_player", 0.0)  # Default 0 = shadows ON when unknown
-	if distance < _building_shadow_lod_distance:
-		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	else:
-		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # LOD optimization
+	# === НАКАПЛИВАЕМ СТЕНЫ ===
+	var wall_key: String = texture_type + "_walls"
+	if not batch.has(wall_key):
+		wall_key = "brick_walls"
 
-	# Visibility range для автоматического скрытия далёких зданий
-	wall_mesh_instance.visibility_range_end = 400.0
-	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+	var wall_batch: Dictionary = batch[wall_key]
+	var base_idx: int = wall_batch["vertices"].size()
+	wall_batch["vertices"].append_array(result.wall_vertices)
+	wall_batch["uvs"].append_array(result.wall_uvs)
+	wall_batch["normals"].append_array(result.wall_normals)
+	# Сдвигаем индексы на base_idx
+	for i in range(result.wall_indices.size()):
+		wall_batch["indices"].append(result.wall_indices[i] + base_idx)
 
-	# Материал стен
-	var wall_material := ShaderMaterial.new()
-	wall_material.shader = BuildingWallShader
-	if _building_textures.has(texture_type):
-		wall_material.set_shader_parameter("albedo_texture", _building_textures[texture_type])
-		wall_material.set_shader_parameter("use_texture", true)
-	else:
-		wall_material.set_shader_parameter("albedo_color", Color(0.7, 0.6, 0.5))
-		wall_material.set_shader_parameter("use_texture", false)
-	wall_mesh_instance.material_override = wall_material
-
-	# Track draw calls
-	if _draw_call_logging_enabled:
-		_draw_call_stats["buildings"] += 1
-
-	# === СОЗДАНИЕ МЕША КРЫШИ ===
+	# === НАКАПЛИВАЕМ КРЫШУ ===
 	if result.roof_indices.size() >= 3:
+		var roof_batch: Dictionary = batch["roofs"]
+		var roof_base_idx: int = roof_batch["vertices"].size()
+		roof_batch["vertices"].append_array(result.roof_vertices)
+		roof_batch["uvs"].append_array(result.roof_uvs)
+		roof_batch["normals"].append_array(result.roof_normals)
+		for i in range(result.roof_indices.size()):
+			roof_batch["indices"].append(result.roof_indices[i] + roof_base_idx)
+
+	# === СОХРАНЯЕМ ДАННЫЕ КОЛЛИЗИЙ ===
+	batch["collisions"].append({
+		"points": points,
+		"base_elev": base_elev,
+		"building_height": building_height,
+	})
+
+	# === ОКНА — вызываем сразу (они сами накапливаются в _window_batch_data) ===
+	_add_building_night_decorations.call_deferred(null, points, building_height, parent)
+
+
+## Создаёт merged ArrayMesh для всех зданий чанка (вызывается при финализации)
+func _finalize_building_geo_batch(chunk_key: String) -> void:
+	if not _building_geo_batch.has(chunk_key):
+		return
+
+	var batch: Dictionary = _building_geo_batch[chunk_key]
+	var parent: Node3D = batch.get("parent")
+
+	if not parent or not is_instance_valid(parent):
+		_building_geo_batch.erase(chunk_key)
+		return
+
+	# Shadow LOD по расстоянию чанка до игрока
+	var shadow_setting: int = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if _car:
+		var coords := chunk_key.split(",")
+		if coords.size() == 2:
+			var cx := int(coords[0])
+			var cz := int(coords[1])
+			var chunk_center := Vector3(cx * chunk_size + chunk_size * 0.5, 0.0, cz * chunk_size + chunk_size * 0.5)
+			if _car.global_position.distance_to(chunk_center) < _building_shadow_lod_distance:
+				shadow_setting = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+	# === MERGED СТЕНЫ (по типу текстуры) ===
+	for tex_type in ["panel", "brick", "wall"]:
+		var geo: Dictionary = batch[tex_type + "_walls"]
+		if geo["vertices"].size() == 0:
+			continue
+
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = geo["vertices"]
+		arrays[Mesh.ARRAY_TEX_UV] = geo["uvs"]
+		arrays[Mesh.ARRAY_NORMAL] = geo["normals"]
+		arrays[Mesh.ARRAY_INDEX] = geo["indices"]
+
+		var arr_mesh := ArrayMesh.new()
+		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+		var mesh_inst := MeshInstance3D.new()
+		mesh_inst.mesh = arr_mesh
+		mesh_inst.name = "BuildingWalls_" + tex_type
+		mesh_inst.material_override = _building_wall_materials[tex_type]
+		mesh_inst.cast_shadow = shadow_setting
+		mesh_inst.visibility_range_end = 400.0
+		mesh_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+		parent.add_child(mesh_inst)
+
+		if _draw_call_logging_enabled:
+			_draw_call_stats["buildings"] += 1
+
+	# === MERGED КРЫШИ ===
+	var roof_geo: Dictionary = batch["roofs"]
+	if roof_geo["vertices"].size() > 0:
 		var roof_arrays := []
 		roof_arrays.resize(Mesh.ARRAY_MAX)
-		roof_arrays[Mesh.ARRAY_VERTEX] = result.roof_vertices
-		roof_arrays[Mesh.ARRAY_TEX_UV] = result.roof_uvs
-		roof_arrays[Mesh.ARRAY_NORMAL] = result.roof_normals
-		roof_arrays[Mesh.ARRAY_INDEX] = result.roof_indices
+		roof_arrays[Mesh.ARRAY_VERTEX] = roof_geo["vertices"]
+		roof_arrays[Mesh.ARRAY_TEX_UV] = roof_geo["uvs"]
+		roof_arrays[Mesh.ARRAY_NORMAL] = roof_geo["normals"]
+		roof_arrays[Mesh.ARRAY_INDEX] = roof_geo["indices"]
 
 		var roof_mesh := ArrayMesh.new()
 		roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, roof_arrays)
 
-		var roof_mesh_instance := MeshInstance3D.new()
-		roof_mesh_instance.mesh = roof_mesh
+		var roof_inst := MeshInstance3D.new()
+		roof_inst.mesh = roof_mesh
+		roof_inst.name = "BuildingRoofs"
+		roof_inst.material_override = _building_roof_material
+		roof_inst.cast_shadow = shadow_setting
+		roof_inst.visibility_range_end = 400.0
+		roof_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+		parent.add_child(roof_inst)
 
-		# Shadow LOD: только близкие здания отбрасывают тени (< 150m)
-		if distance < _building_shadow_lod_distance:
-			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		else:
-			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # LOD optimization
-
-		var roof_material := StandardMaterial3D.new()
-		roof_material.cull_mode = BaseMaterial3D.CULL_BACK  # Оптимизация: включить backface culling
-		if _building_textures.has("roof"):
-			roof_material.albedo_texture = _building_textures["roof"]
-			roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-		else:
-			roof_material.albedo_color = Color(0.4, 0.35, 0.3)
-		roof_mesh_instance.material_override = roof_material
-
-		# Track draw calls
 		if _draw_call_logging_enabled:
-			_draw_call_stats["buildings"] += 1  # Roof counts as building
+			_draw_call_stats["buildings"] += 1
 
-		wall_mesh_instance.add_child(roof_mesh_instance)
+	# === КОЛЛИЗИИ (per-building, нельзя объединить) ===
+	for coll_data in batch["collisions"]:
+		var body := StaticBody3D.new()
+		body.collision_layer = 2
+		body.collision_mask = 0
+		parent.add_child(body)
+		_create_building_collisions_deferred.call_deferred(body, coll_data["points"], coll_data["base_elev"], coll_data["building_height"])
 
-	# Физическое тело
-	var body := StaticBody3D.new()
-	body.collision_layer = 2
-	body.collision_mask = 0  # Статика не проверяет коллизии
-	body.add_child(wall_mesh_instance)
-	parent.add_child(body)
-
-	# Коллизии и декорации - отложенно
-	_create_building_collisions_deferred.call_deferred(body, points, base_elev, building_height)
-	_add_building_night_decorations.call_deferred(wall_mesh_instance, points, building_height, parent)
+	_building_geo_batch.erase(chunk_key)
 
 
 ## Обрабатывает готовые результаты из worker threads (вызывается из _process)
@@ -4661,8 +4536,25 @@ func _process_road_queue() -> void:
 				_record_perf("lamp_batch_finalize", Time.get_ticks_usec() - t_lamp)
 			return  # Один чанк за кадр
 
-		# Window and building batches wait until ALL buildings processed
+		# Building geo merge и window batches ждут завершения ВСЕХ зданий
 		if _pending_building_tasks == 0 and _building_results.is_empty():
+			# Сначала финализируем building geometry merge (создаёт merged meshes + коллизии)
+			if not _building_geo_batch.is_empty():
+				# Добавляем все накопленные чанки в очередь
+				for key in _building_geo_batch.keys():
+					if not _building_geo_finalize_queue.has(key):
+						_building_geo_finalize_queue.append(key)
+
+			if not _building_geo_finalize_queue.is_empty():
+				var t_geo := Time.get_ticks_usec()
+				var chunk_key: String = _building_geo_finalize_queue[0]
+				_building_geo_finalize_queue.remove_at(0)
+				_finalize_building_geo_batch(chunk_key)
+				if Time.get_ticks_usec() - t_geo > 100:
+					_record_perf("building_geo_finalize", Time.get_ticks_usec() - t_geo)
+				return
+
+			# Затем финализируем окна (MultiMesh per chunk)
 			var window_chunks := _window_batch_data.keys()
 			if not window_chunks.is_empty():
 				var t_window := Time.get_ticks_usec()
@@ -4670,15 +4562,6 @@ func _process_road_queue() -> void:
 				_finalize_window_batches_for_chunk(chunk_key)
 				if Time.get_ticks_usec() - t_window > 100:
 					_record_perf("window_batch_finalize", Time.get_ticks_usec() - t_window)
-				return
-
-			if not _building_batches_to_finalize.is_empty():
-				var t_building := Time.get_ticks_usec()
-				var chunk_key: String = _building_batches_to_finalize[0]
-				_building_batches_to_finalize.remove_at(0)
-				_finalize_building_batches_for_chunk(chunk_key)
-				if Time.get_ticks_usec() - t_building > 100:
-					_record_perf("building_batch_finalize", Time.get_ticks_usec() - t_building)
 				return
 
 		# Когда все дороги созданы, обрабатываем бордюры
@@ -4745,6 +4628,13 @@ func _process_curb_queue() -> void:
 	var t0 := Time.get_ticks_usec()
 	_process_curb_mesh_incremental(50)
 	_record_perf("curb_mesh", Time.get_ticks_usec() - t0)
+
+	# Этап 3: Финализация merged mesh когда все бордюры обработаны
+	if _curb_queue.is_empty() and _curb_smoothed_queue.is_empty() and _curb_mesh_state.is_empty():
+		if not _curb_geo_batch.is_empty():
+			var keys := _curb_geo_batch.keys()
+			for key in keys:
+				_finalize_curb_geo_batch(key)
 
 
 ## Инкрементальная генерация меша бордюра
@@ -4985,7 +4875,7 @@ func _process_curb_segments(max_count: int) -> int:
 	return processed
 
 
-## Финализирует меш бордюра и добавляет в сцену
+## Накапливает геометрию бордюра в batch для merged mesh на чанк
 func _finalize_curb_mesh() -> void:
 	var state := _curb_mesh_state
 	if not state or not is_instance_valid(state.get("parent")):
@@ -4999,29 +4889,30 @@ func _finalize_curb_mesh() -> void:
 	if vertices.size() == 0:
 		return
 
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = vertices
-	arrays[Mesh.ARRAY_NORMAL] = normals
-	arrays[Mesh.ARRAY_INDEX] = indices
+	# Накапливаем геометрию в batch по chunk_key
+	var chunk_key := _get_chunk_key_from_node(parent)
+	if chunk_key.is_empty():
+		chunk_key = parent.name
 
-	var arr_mesh := ArrayMesh.new()
-	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	if not _curb_geo_batch.has(chunk_key):
+		_curb_geo_batch[chunk_key] = {
+			"parent": parent,
+			"vertices": PackedVector3Array(),
+			"normals": PackedVector3Array(),
+			"indices": PackedInt32Array()
+		}
 
-	var mesh := MeshInstance3D.new()
-	mesh.mesh = arr_mesh
-	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var batch: Dictionary = _curb_geo_batch[chunk_key]
+	var base_idx: int = batch["vertices"].size()
 
-	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.6, 0.6, 0.58)
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
-	mesh.material_override = material
+	batch["vertices"].append_array(vertices)
+	batch["normals"].append_array(normals)
 
-	parent.add_child(mesh)
+	# Сдвигаем индексы на base_idx
+	for idx in indices:
+		batch["indices"].append(idx + base_idx)
 
 	# Запускаем расчёт коллизий в worker thread
-	# Передаём groups (уже вычисленные валидные сегменты) чтобы избежать race condition
 	var collision_task := {
 		"points": state.points,
 		"groups": state.groups,
@@ -5034,6 +4925,39 @@ func _finalize_curb_mesh() -> void:
 		"parent": parent
 	}
 	WorkerThreadPool.add_task(_compute_curb_collisions_thread.bind(collision_task))
+
+
+## Финализирует merged mesh бордюров для чанка
+func _finalize_curb_geo_batch(chunk_key: String) -> void:
+	if not _curb_geo_batch.has(chunk_key):
+		return
+	var batch: Dictionary = _curb_geo_batch[chunk_key]
+	var parent: Node3D = batch["parent"]
+
+	if not is_instance_valid(parent) or batch["vertices"].size() == 0:
+		_curb_geo_batch.erase(chunk_key)
+		return
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = batch["vertices"]
+	arrays[Mesh.ARRAY_NORMAL] = batch["normals"]
+	arrays[Mesh.ARRAY_INDEX] = batch["indices"]
+
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	var mesh := MeshInstance3D.new()
+	mesh.mesh = arr_mesh
+	mesh.name = "CurbsMerged"
+	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mesh.material_override = _curb_material
+
+	if _draw_call_logging_enabled:
+		_draw_call_stats["curbs"] += 1
+
+	parent.add_child(mesh)
+	_curb_geo_batch.erase(chunk_key)
 
 
 ## Сортирует очередь по расстоянию до игрока (ближайшие первые)
@@ -5192,12 +5116,6 @@ func _process_vegetation_queue() -> void:
 		"trees":
 			_create_trees_immediate(item.points, item.elev_data, item.parent, item.dense)
 			_record_perf("veg_trees", Time.get_ticks_usec() - t0)
-		"vegetation":
-			_create_vegetation_immediate(item.points, item.elev_data, item.parent, item.dense)
-			_record_perf("veg_bushes_grass", Time.get_ticks_usec() - t0)
-		"chunk_vegetation":
-			_create_chunk_vegetation_immediate(item.chunk_key, item.points, item.elev_data, item.parent)
-			_record_perf("veg_chunk", Time.get_ticks_usec() - t0)
 
 
 func _create_3d_building_with_texture(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
@@ -5734,12 +5652,10 @@ func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
 func _get_chunk_key_from_node(node: Node3D) -> String:
 	if not node:
 		return ""
-	var node_name := node.name
-	# Format: "Chunk_x_z"
-	if "_" in node_name:
-		var parts := node_name.split("_")
-		if parts.size() >= 3:
-			return "%s,%s" % [parts[1], parts[2]]
+	var node_name: String = node.name
+	# Format: "Chunk_x,z" (e.g. "Chunk_1,2")
+	if node_name.begins_with("Chunk_"):
+		return node_name.substr(6)  # Возвращаем "x,z" часть
 	return ""
 
 ## Add lamp to batch for chunk with pre-calculated transforms
@@ -5985,42 +5901,28 @@ func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, paren
 	if not enable_vegetation:
 		return
 
-	# Initialize batch if needed
 	if not _tree_batch_data.has(chunk_key):
 		_tree_batch_data[chunk_key] = {
-			"close": [],
-			"medium": [],
-			"far": [],
+			"transforms": [],
 			"collisions": [],
 			"parent": parent
 		}
 
 	var tree_pos := Vector3(pos.x, elevation, pos.y)
 
-	# Determine LOD based on distance from car
-	var car_pos := _car.global_position if _car else Vector3.ZERO
-	var distance := tree_pos.distance_to(car_pos)
+	# Случайный масштаб и поворот вокруг Y для разнообразия
+	var scale_factor := randf_range(0.8, 1.3)
+	var rotation_y := randf() * TAU
+	var basis := Basis(Vector3.UP, rotation_y).scaled(Vector3(scale_factor, scale_factor, scale_factor))
+	var transform := Transform3D(basis, tree_pos)
 
-	var scale_factor := randf_range(0.015, 0.022)
-	var transform := Transform3D(Basis().scaled(Vector3(scale_factor, scale_factor, scale_factor)), tree_pos)
+	_tree_batch_data[chunk_key]["transforms"].append(transform)
 
-	if distance < 100.0:
-		# Close: full detail
-		_tree_batch_data[chunk_key]["close"].append(transform)
-	elif distance < 200.0:
-		# Medium: simplified
-		_tree_batch_data[chunk_key]["medium"].append(transform)
-	else:
-		# Far: billboard
-		_tree_batch_data[chunk_key]["far"].append(transform)
-
-	# Add collision data
 	_tree_batch_data[chunk_key]["collisions"].append({
 		"position": tree_pos,
 		"radius": 0.4
 	})
 
-	# Mark for finalization
 	if not _tree_batches_to_finalize.has(chunk_key):
 		_tree_batches_to_finalize.append(chunk_key)
 
@@ -6036,62 +5938,30 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		_tree_batch_data.erase(chunk_key)
 		return
 
-	# Create container for all tree batches in this chunk
-	var tree_container := Node3D.new()
-	tree_container.name = "TreeBatches"
-	parent.add_child(tree_container)
+	var transforms: Array = batch.transforms
+	if transforms.size() == 0:
+		_tree_batch_data.erase(chunk_key)
+		return
 
-	# Close LOD
-	if batch.close.size() > 0:
-		var mm_inst := MultiMeshInstance3D.new()
-		mm_inst.name = "Trees_Close"
-		var mm := MultiMesh.new()
-		mm.transform_format = MultiMesh.TRANSFORM_3D
-		mm.mesh = _tree_mesh_close if _tree_mesh_close else _tree_mesh_medium  # Fallback
-		mm.instance_count = batch.close.size()
-		for i in range(batch.close.size()):
-			mm.set_instance_transform(i, batch.close[i])
-		mm_inst.multimesh = mm
-		tree_container.add_child(mm_inst)
+	# Один MultiMesh на все деревья чанка — 1 draw call (2 surface = 2 draw calls)
+	var mm_inst := MultiMeshInstance3D.new()
+	mm_inst.name = "Trees"
+	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mm_inst.visibility_range_end = render_distance
+	mm_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = _tree_mesh
+	mm.instance_count = transforms.size()
+	for i in range(transforms.size()):
+		mm.set_instance_transform(i, transforms[i])
+	mm_inst.multimesh = mm
+	parent.add_child(mm_inst)
 
-		if _draw_call_logging_enabled:
-			_draw_call_stats["vegetation"] += 1  # One draw call for all close trees
+	if _draw_call_logging_enabled:
+		_draw_call_stats["vegetation"] += 2  # 2 surfaces = 2 draw calls
 
-	# Medium LOD
-	if batch.medium.size() > 0:
-		var mm_inst := MultiMeshInstance3D.new()
-		mm_inst.name = "Trees_Medium"
-		var mm := MultiMesh.new()
-		mm.transform_format = MultiMesh.TRANSFORM_3D
-		mm.mesh = _tree_mesh_medium
-		mm.instance_count = batch.medium.size()
-		for i in range(batch.medium.size()):
-			mm.set_instance_transform(i, batch.medium[i])
-		mm_inst.multimesh = mm
-		tree_container.add_child(mm_inst)
-
-		if _draw_call_logging_enabled:
-			_draw_call_stats["vegetation"] += 1
-
-	# Far LOD (billboard)
-	if batch.far.size() > 0:
-		var mm_inst := MultiMeshInstance3D.new()
-		mm_inst.name = "Trees_Far"
-		var mm := MultiMesh.new()
-		mm.transform_format = MultiMesh.TRANSFORM_3D
-		mm.mesh = _tree_mesh_far
-		mm.instance_count = batch.far.size()
-		for i in range(batch.far.size()):
-			mm.set_instance_transform(i, batch.far[i])
-		mm_inst.multimesh = mm
-		if _tree_materials.has("far"):
-			mm_inst.material_override = _tree_materials["far"]
-		tree_container.add_child(mm_inst)
-
-		if _draw_call_logging_enabled:
-			_draw_call_stats["vegetation"] += 1
-
-	# Create collision bodies (separate from visuals for performance)
+	# Коллизии деревьев
 	for collision_data in batch.collisions:
 		var body := StaticBody3D.new()
 		body.collision_layer = 2
@@ -6105,74 +5975,11 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		collision.position = Vector3(0, 4.0, 0)
 		collision.shape = shape
 		body.add_child(collision)
-		tree_container.add_child(body)
+		parent.add_child(body)
 
-	print("OSM: Finalized tree batch for chunk %s: %d close, %d medium, %d far" % [
-		chunk_key, batch.close.size(), batch.medium.size(), batch.far.size()
-	])
+	print("OSM: Trees for chunk %s: %d trees (1 MultiMesh)" % [chunk_key, transforms.size()])
 
-	# Clear batch data
 	_tree_batch_data.erase(chunk_key)
-
-## OLD: Individual tree creation (deprecated, kept for fallback)
-func _create_tree(pos: Vector2, elevation: float, parent: Node3D) -> void:
-	if not enable_vegetation:
-		return
-	# Контейнер без масштабирования (для коллизии)
-	var tree_root := Node3D.new()
-	tree_root.name = "Tree"
-	tree_root.position = Vector3(pos.x, elevation, pos.y)
-
-	# Визуальная модель дерева (масштабируется)
-	var tree_model: Node3D = BIRCH_TREE_SCENE.instantiate()
-	var scale_factor := randf_range(0.015, 0.022)
-	tree_model.scale = Vector3(scale_factor, scale_factor, scale_factor)
-	tree_root.add_child(tree_model)
-
-	# Track draw calls (tree scene has ~10 meshes: trunk + branches + leaves)
-	if _draw_call_logging_enabled:
-		_draw_call_stats["vegetation"] += 10  # Approximate
-
-	# Коллизия для ствола
-	# Ствол в модели находится примерно на (200, 0, 200) в единицах модели
-	# После масштабирования: позиция = координаты_модели * scale_factor
-	# При scale 0.0185 (среднее): 200 * 0.0185 = 3.7
-	var trunk_offset_x := 195.0  # X чуть к 9 часам
-	var trunk_offset_z := 190.0  # Z чуть к 12 часам
-	var trunk_x := trunk_offset_x * scale_factor
-	var trunk_z := trunk_offset_z * scale_factor
-
-	var body := StaticBody3D.new()
-	body.collision_layer = 2  # Слой статических объектов
-	body.collision_mask = 0   # Статика не проверяет коллизии
-	body.name = "TreeCollision"
-
-	var collision := CollisionShape3D.new()
-	var shape := CylinderShape3D.new()
-	shape.radius = 0.4  # Радиус ствола
-	shape.height = 8.0  # Высота коллизии 8м
-	collision.shape = shape
-	# Коллизия на позиции ствола (масштабируется вместе с моделью)
-	collision.position = Vector3(trunk_x, 4.0, trunk_z)
-	body.add_child(collision)
-	tree_root.add_child(body)
-
-	# DEBUG: Визуализация коллизии (зелёный цилиндр)
-	# Раскомментировать для отладки позиции коллизии
-	#var debug_mesh := MeshInstance3D.new()
-	#var cylinder := CylinderMesh.new()
-	#cylinder.top_radius = 0.4
-	#cylinder.bottom_radius = 0.4
-	#cylinder.height = 8.0
-	#debug_mesh.mesh = cylinder
-	#var debug_mat := StandardMaterial3D.new()
-	#debug_mat.albedo_color = Color(0, 1, 0, 0.5)
-	#debug_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	#debug_mesh.material_override = debug_mat
-	#debug_mesh.position = Vector3(trunk_x, 4.0, trunk_z)
-	#tree_root.add_child(debug_mesh)
-
-	parent.add_child(tree_root)
 
 
 # Создание дорожного знака - разрушаемый при столкновении
@@ -6415,15 +6222,6 @@ func _generate_trees_in_polygon(points: PackedVector2Array, elev_data: Dictionar
 		"dense": dense
 	})
 
-	# Также добавляем траву и кусты в парках и на газонах
-	_vegetation_queue.append({
-		"type": "vegetation",
-		"points": points,
-		"elev_data": elev_data,
-		"parent": parent,
-		"dense": dense
-	})
-
 
 # Немедленное создание деревьев (вызывается из очереди)
 func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D, dense: bool = false) -> void:
@@ -6481,446 +6279,6 @@ func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, 
 
 			if tree_count >= max_trees:
 				break
-
-
-# Немедленное создание травы и кустов (вызывается из очереди, без коллизий)
-func _create_vegetation_immediate(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D, dense: bool = false) -> void:
-	if points.size() < 3:
-		return
-
-	# Вычисляем bounding box
-	var min_x := points[0].x
-	var max_x := points[0].x
-	var min_y := points[0].y
-	var max_y := points[0].y
-
-	for p in points:
-		min_x = min(min_x, p.x)
-		max_x = max(max_x, p.x)
-		min_y = min(min_y, p.y)
-		max_y = max(max_y, p.y)
-
-	var width := max_x - min_x
-	var height := max_y - min_y
-	var area := width * height
-
-	# Пропускаем слишком маленькие или большие полигоны
-	if area < 100.0 or area > 50000.0:
-		return
-
-	# Создаём контейнер для растительности
-	var veg_container := Node3D.new()
-	veg_container.name = "Vegetation"
-	parent.add_child(veg_container)
-
-	# Генерация кустов с использованием MultiMesh
-	var bush_count := mini(int(area * 0.005), 30)  # ~5 кустов на 1000 кв.м
-	if dense:
-		bush_count = mini(int(area * 0.01), 50)
-
-	# Временно отключено
-	# if bush_count > 0:
-	# 	_create_bush_multimesh(points, bush_count, elev_data, veg_container)
-
-	# Генерация травяных пучков с использованием MultiMesh
-	var grass_count := mini(int(area * 0.02), 100)  # ~20 пучков на 1000 кв.м
-	if dense:
-		grass_count = mini(int(area * 0.05), 200)
-
-	# Временно отключено
-	# if grass_count > 0:
-	# 	_create_grass_multimesh(points, grass_count, elev_data, veg_container)
-
-
-# Создаёт MultiMesh с кустами
-func _create_bush_multimesh(points: PackedVector2Array, count: int, elev_data: Dictionary, parent: Node3D) -> void:
-	var min_x := points[0].x
-	var max_x := points[0].x
-	var min_y := points[0].y
-	var max_y := points[0].y
-
-	for p in points:
-		min_x = min(min_x, p.x)
-		max_x = max(max_x, p.x)
-		min_y = min(min_y, p.y)
-		max_y = max(max_y, p.y)
-
-	var width := max_x - min_x
-	var height := max_y - min_y
-
-	# Создаём меш куста
-	var bush_mesh := _create_bush_mesh()
-
-	var multimesh := MultiMesh.new()
-	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	multimesh.mesh = bush_mesh
-	multimesh.instance_count = count
-
-	var seed_value := int(abs(min_x * 1000 + min_y * 100)) % 10000
-	var valid_count := 0
-
-	for i in range(count * 3):  # Пробуем больше точек чтобы набрать нужное количество
-		if valid_count >= count:
-			break
-
-		var hash1 := fmod(float(seed_value + i * 7919) * 0.61803398875, 1.0)
-		var hash2 := fmod(float(seed_value + i * 104729) * 0.41421356237, 1.0)
-
-		var test_x := min_x + hash1 * width
-		var test_y := min_y + hash2 * height
-		var test_point := Vector2(test_x, test_y)
-
-		if Geometry2D.is_point_in_polygon(test_point, points):
-			if _is_point_near_road(test_point, 2.0):
-				continue
-
-			var elevation := _get_elevation_at_point(test_point, elev_data)
-			var transform := Transform3D()
-
-			# Случайный поворот
-			var rotation := fmod(float(seed_value + i * 31) * 2.718281828, TAU)
-			transform = transform.rotated(Vector3.UP, rotation)
-
-			# Случайный масштаб
-			var scale_factor := 0.6 + fmod(float(seed_value + i * 17) * 1.414, 0.8)
-			transform = transform.scaled(Vector3(scale_factor, scale_factor, scale_factor))
-
-			# Позиция
-			transform.origin = Vector3(test_x, elevation, test_y)
-
-			multimesh.set_instance_transform(valid_count, transform)
-			valid_count += 1
-
-	if valid_count == 0:
-		return
-
-	multimesh.instance_count = valid_count
-
-	var mmi := MultiMeshInstance3D.new()
-	mmi.name = "Bushes"
-	mmi.multimesh = multimesh
-	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	parent.add_child(mmi)
-
-
-# Извлекает меш куста из загруженной GLB модели (Kenney Nature Kit)
-func _create_bush_mesh() -> Mesh:
-	print("OSM: Loading bush model from ", BUSH_MODEL_PATH)
-	if not _bush_model:
-		_bush_model = load(BUSH_MODEL_PATH)
-		if not _bush_model:
-			print("ERROR: Failed to load bush model!")
-			return null
-		print("OSM: Bush model loaded successfully")
-	return _extract_mesh_from_scene(_bush_model)
-
-
-# Создаёт MultiMesh с травой
-func _create_grass_multimesh(points: PackedVector2Array, count: int, elev_data: Dictionary, parent: Node3D) -> void:
-	var min_x := points[0].x
-	var max_x := points[0].x
-	var min_y := points[0].y
-	var max_y := points[0].y
-
-	for p in points:
-		min_x = min(min_x, p.x)
-		max_x = max(max_x, p.x)
-		min_y = min(min_y, p.y)
-		max_y = max(max_y, p.y)
-
-	var width := max_x - min_x
-	var height := max_y - min_y
-
-	# Создаём меш пучка травы
-	var grass_mesh := _create_grass_clump_mesh()
-
-	var multimesh := MultiMesh.new()
-	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	multimesh.mesh = grass_mesh
-	multimesh.instance_count = count
-
-	var seed_value := int(abs(min_x * 1234 + min_y * 567)) % 10000
-	var valid_count := 0
-
-	for i in range(count * 3):
-		if valid_count >= count:
-			break
-
-		var hash1 := fmod(float(seed_value + i * 6271) * 0.61803398875, 1.0)
-		var hash2 := fmod(float(seed_value + i * 89123) * 0.41421356237, 1.0)
-
-		var test_x := min_x + hash1 * width
-		var test_y := min_y + hash2 * height
-		var test_point := Vector2(test_x, test_y)
-
-		if Geometry2D.is_point_in_polygon(test_point, points):
-			if _is_point_near_road(test_point, 1.5):
-				continue
-
-			var elevation := _get_elevation_at_point(test_point, elev_data)
-			var transform := Transform3D()
-
-			var rotation := fmod(float(seed_value + i * 41) * 2.718281828, TAU)
-			transform = transform.rotated(Vector3.UP, rotation)
-
-			var scale_factor := 0.7 + fmod(float(seed_value + i * 23) * 1.618, 0.6)
-			transform = transform.scaled(Vector3(scale_factor, scale_factor, scale_factor))
-
-			transform.origin = Vector3(test_x, elevation, test_y)
-
-			multimesh.set_instance_transform(valid_count, transform)
-			valid_count += 1
-
-	if valid_count == 0:
-		return
-
-	multimesh.instance_count = valid_count
-
-	var mmi := MultiMeshInstance3D.new()
-	mmi.name = "GrassClumps"
-	mmi.multimesh = multimesh
-	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	parent.add_child(mmi)
-
-
-# Извлекает меш травы из загруженной GLB модели (Kenney Nature Kit)
-func _create_grass_clump_mesh() -> Mesh:
-	print("OSM: Loading grass model from ", GRASS_MODEL_PATH)
-	if not _grass_model:
-		_grass_model = load(GRASS_MODEL_PATH)
-		if not _grass_model:
-			print("ERROR: Failed to load grass model!")
-			return null
-		print("OSM: Grass model loaded successfully")
-	return _extract_mesh_from_scene(_grass_model)
-
-
-# Вспомогательная функция для извлечения меша из PackedScene (GLB модели)
-func _extract_mesh_from_scene(scene: PackedScene) -> Mesh:
-	if not scene:
-		print("ERROR: Scene is null in _extract_mesh_from_scene")
-		return null
-
-	print("OSM: Instantiating scene...")
-	var instance := scene.instantiate()
-	if not instance:
-		print("ERROR: Failed to instantiate scene!")
-		return null
-
-	print("OSM: Searching for mesh in node tree...")
-	var mesh: Mesh = null
-
-	# Ищем MeshInstance3D в дереве
-	mesh = _find_mesh_in_node(instance)
-
-	if not mesh:
-		print("ERROR: No mesh found in scene!")
-	else:
-		print("OSM: Mesh found successfully")
-
-	# Освобождаем ноду напрямую (она не в дереве сцены)
-	instance.free()
-	return mesh
-
-
-# Рекурсивно ищет первый меш в дереве нод
-func _find_mesh_in_node(node: Node) -> Mesh:
-	if node is MeshInstance3D:
-		return node.mesh
-
-	for child in node.get_children():
-		var found := _find_mesh_in_node(child)
-		if found:
-			return found
-
-	return null
-
-
-# Добавляет растительность на пустые участки чанка в очередь
-func _queue_chunk_vegetation(chunk_key: String, parent: Node3D) -> void:
-	var coords: Array = chunk_key.split(",")
-	var chunk_x := int(coords[0])
-	var chunk_z := int(coords[1])
-
-	var chunk_min_x := chunk_x * chunk_size
-	var chunk_min_z := chunk_z * chunk_size
-
-	# Создаём прямоугольник чанка для генерации
-	var chunk_points: PackedVector2Array = []
-	chunk_points.append(Vector2(chunk_min_x, chunk_min_z))
-	chunk_points.append(Vector2(chunk_min_x + chunk_size, chunk_min_z))
-	chunk_points.append(Vector2(chunk_min_x + chunk_size, chunk_min_z + chunk_size))
-	chunk_points.append(Vector2(chunk_min_x, chunk_min_z + chunk_size))
-
-	# Получаем данные высот
-	var elev_data: Dictionary = {}
-	if _chunk_elevations.has(chunk_key):
-		elev_data = _chunk_elevations[chunk_key]
-
-	# Добавляем в очередь растительности для пустых участков
-	_vegetation_queue.append({
-		"type": "chunk_vegetation",
-		"chunk_key": chunk_key,
-		"points": chunk_points,
-		"elev_data": elev_data,
-		"parent": parent
-	})
-
-
-# Создаёт растительность на пустых участках чанка
-func _create_chunk_vegetation_immediate(chunk_key: String, points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
-	if not is_instance_valid(parent):
-		return
-
-	var min_x := points[0].x
-	var max_x := points[2].x
-	var min_z := points[0].y
-	var max_z := points[2].y
-
-	# Параметры генерации
-	var grass_spacing := 8.0  # Расстояние между пучками травы
-	var bush_spacing := 25.0  # Расстояние между кустами
-
-	var seed_value := hash(chunk_key)
-	var grass_count := 0
-	var bush_count := 0
-	var max_grass := 100
-	var max_bushes := 15
-
-	# Создаём контейнер для растительности чанка
-	var veg_container := Node3D.new()
-	veg_container.name = "ChunkVegetation"
-	parent.add_child(veg_container)
-
-	# Меши для MultiMesh
-	var grass_mesh := _create_grass_clump_mesh()
-	var bush_mesh := _create_bush_mesh()
-
-	# Собираем позиции травы и кустов
-	var grass_transforms: Array[Transform3D] = []
-	var bush_transforms: Array[Transform3D] = []
-
-	# Генерируем позиции на сетке с джиттером
-	var x := min_x + grass_spacing / 2.0
-	while x < max_x and grass_count < max_grass:
-		var z := min_z + grass_spacing / 2.0
-		while z < max_z and grass_count < max_grass:
-			# Псевдослучайное смещение
-			var hash1 := fmod(float(seed_value + int(x * 100) * 7 + int(z * 100) * 13) * 0.61803, 1.0)
-			var hash2 := fmod(float(seed_value + int(x * 100) * 11 + int(z * 100) * 17) * 0.41421, 1.0)
-
-			var jitter_x := (hash1 - 0.5) * grass_spacing * 0.8
-			var jitter_z := (hash2 - 0.5) * grass_spacing * 0.8
-
-			var pos := Vector2(x + jitter_x, z + jitter_z)
-
-			# Проверяем что не на дороге
-			if not _is_point_near_road(pos, 4.0):
-				var elevation := _get_elevation_at_point(pos, elev_data)
-
-				# ПРОВЕРКА: Пропускаем если высота невалидна
-				if not is_finite(elevation):
-					z += grass_spacing
-					continue
-
-				var transform := Transform3D()
-				var rotation := fmod(float(seed_value + int(x * 10) + int(z * 10)) * 2.718, TAU)
-
-				# ПРОВЕРКА: Пропускаем если rotation невалиден
-				if not is_finite(rotation):
-					z += grass_spacing
-					continue
-
-				transform = transform.rotated(Vector3.UP, rotation)
-
-				var scale_factor := 0.8 + hash1 * 0.5
-				transform = transform.scaled(Vector3(scale_factor, scale_factor, scale_factor))
-				transform.origin = Vector3(pos.x, elevation + 0.01, pos.y)
-
-				# Финальная проверка transform перед добавлением
-				if transform.origin.is_finite() and transform.basis.x.is_finite() and transform.basis.y.is_finite() and transform.basis.z.is_finite():
-					grass_transforms.append(transform)
-					grass_count += 1
-
-			z += grass_spacing
-		x += grass_spacing
-
-	# Генерируем кусты (реже)
-	x = min_x + bush_spacing / 2.0
-	while x < max_x and bush_count < max_bushes:
-		var z := min_z + bush_spacing / 2.0
-		while z < max_z and bush_count < max_bushes:
-			var hash1 := fmod(float(seed_value + int(x * 50) * 23 + int(z * 50) * 31) * 0.61803, 1.0)
-			var hash2 := fmod(float(seed_value + int(x * 50) * 29 + int(z * 50) * 37) * 0.41421, 1.0)
-
-			# Только 40% позиций получают куст
-			if hash1 < 0.4:
-				var jitter_x := (hash2 - 0.5) * bush_spacing * 0.6
-				var jitter_z := (fmod(hash1 * 3.14, 1.0) - 0.5) * bush_spacing * 0.6
-
-				var pos := Vector2(x + jitter_x, z + jitter_z)
-
-				if not _is_point_near_road(pos, 5.0):
-					var elevation := _get_elevation_at_point(pos, elev_data)
-
-					# ПРОВЕРКА: Пропускаем если высота невалидна
-					if not is_finite(elevation):
-						z += bush_spacing
-						continue
-
-					var transform := Transform3D()
-					var rotation := fmod(float(seed_value + int(x * 20) + int(z * 20)) * 1.618, TAU)
-
-					# ПРОВЕРКА: Пропускаем если rotation невалиден
-					if not is_finite(rotation):
-						z += bush_spacing
-						continue
-
-					transform = transform.rotated(Vector3.UP, rotation)
-
-					var scale_factor := 0.7 + hash2 * 0.6
-					transform = transform.scaled(Vector3(scale_factor, scale_factor, scale_factor))
-					transform.origin = Vector3(pos.x, elevation, pos.y)
-
-					# Финальная проверка transform перед добавлением
-					if transform.origin.is_finite() and transform.basis.x.is_finite() and transform.basis.y.is_finite() and transform.basis.z.is_finite():
-						bush_transforms.append(transform)
-						bush_count += 1
-
-			z += bush_spacing
-		x += bush_spacing
-
-	# Создаём MultiMesh для травы
-	if grass_transforms.size() > 0:
-		var grass_mm := MultiMesh.new()
-		grass_mm.transform_format = MultiMesh.TRANSFORM_3D
-		grass_mm.mesh = grass_mesh
-		grass_mm.instance_count = grass_transforms.size()
-
-		for i in range(grass_transforms.size()):
-			grass_mm.set_instance_transform(i, grass_transforms[i])
-
-		var grass_mmi := MultiMeshInstance3D.new()
-		grass_mmi.name = "ChunkGrass"
-		grass_mmi.multimesh = grass_mm
-		grass_mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		veg_container.add_child(grass_mmi)
-
-	# Создаём MultiMesh для кустов
-	if bush_transforms.size() > 0:
-		var bush_mm := MultiMesh.new()
-		bush_mm.transform_format = MultiMesh.TRANSFORM_3D
-		bush_mm.mesh = bush_mesh
-		bush_mm.instance_count = bush_transforms.size()
-
-		for i in range(bush_transforms.size()):
-			bush_mm.set_instance_transform(i, bush_transforms[i])
-
-		var bush_mmi := MultiMeshInstance3D.new()
-		bush_mmi.name = "ChunkBushes"
-		bush_mmi.multimesh = bush_mm
-		bush_mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		veg_container.add_child(bush_mmi)
 
 
 # Процедурная генерация промышленных зданий внутри территории
@@ -7368,6 +6726,9 @@ func _create_traffic_light_immediate(pos: Vector2, elevation: float, parent: Nod
 	traffic_light.add_child(body)
 
 	parent.add_child(traffic_light)
+
+	if _draw_call_logging_enabled:
+		_draw_call_stats["traffic_lights"] += 5  # pole + box + red + yellow + green
 
 
 # Создание знаков на перекрёстке (уступи дорогу)
@@ -7817,6 +7178,9 @@ func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNum
 	sign_container.visible = false  # Включается ночью
 
 	parent.add_child(sign_container)
+
+	if _draw_call_logging_enabled:
+		_draw_call_stats["neon_signs"] += 1
 
 
 func _add_building_windows(points: PackedVector2Array, height: float, rng: RandomNumberGenerator, parent: Node3D) -> void:
@@ -8856,6 +8220,11 @@ func _print_draw_call_stats() -> void:
 	if not _draw_call_logging_enabled:
 		return
 
+	# Подсчитываем NPC draw calls динамически (~7 meshes per car)
+	var traffic_mgr_node = get_parent().get_node_or_null("TrafficManager")
+	if traffic_mgr_node:
+		_draw_call_stats["npc_cars"] = traffic_mgr_node.active_npcs.size() * 7
+
 	var total_draw_calls = 0
 	for category in _draw_call_stats:
 		total_draw_calls += _draw_call_stats[category]
@@ -8954,15 +8323,11 @@ func _update_chunk_culling() -> void:
 
 	var culled_count := 0
 	var visible_count := 0
-	var raycast_culled := 0
 
 	# Высота зданий для AABB (макс ~50м)
 	var chunk_height := 60.0
 
 	var cam_pos := _culling_camera.global_position
-	var current_time := Time.get_ticks_msec() / 1000.0
-	var raycast_checks_this_frame := 0
-	var space_state: PhysicsDirectSpaceState3D = null
 
 	for chunk_key in _loaded_chunks.keys():
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
@@ -9012,36 +8377,6 @@ func _update_chunk_culling() -> void:
 				if dot < -0.4 and dist > chunk_size * 1.5:
 					should_hide = true
 
-			# Raycast occlusion: только для далёких чанков, прошедших frustum
-			if not should_hide and dist > chunk_size:
-				# Проверяем кеш
-				if _raycast_occlusion_cache.has(chunk_key):
-					var cached: Dictionary = _raycast_occlusion_cache[chunk_key]
-					if current_time - cached["time"] < RAYCAST_CACHE_DURATION:
-						if not cached["visible"]:
-							should_hide = true
-							raycast_culled += 1
-					elif raycast_checks_this_frame < RAYCAST_BUDGET_PER_UPDATE:
-						# Кеш устарел — перепроверяем
-						if not space_state:
-							space_state = get_world_3d().direct_space_state
-						var is_visible := _check_chunk_visibility_raycast(space_state, cam_pos, aabb_center, aabb_half)
-						_raycast_occlusion_cache[chunk_key] = {"visible": is_visible, "time": current_time}
-						raycast_checks_this_frame += 1
-						if not is_visible:
-							should_hide = true
-							raycast_culled += 1
-				elif raycast_checks_this_frame < RAYCAST_BUDGET_PER_UPDATE:
-					# Нет в кеше — проверяем
-					if not space_state:
-						space_state = get_world_3d().direct_space_state
-					var is_visible := _check_chunk_visibility_raycast(space_state, cam_pos, aabb_center, aabb_half)
-					_raycast_occlusion_cache[chunk_key] = {"visible": is_visible, "time": current_time}
-					raycast_checks_this_frame += 1
-					if not is_visible:
-						should_hide = true
-						raycast_culled += 1
-
 		if should_hide:
 			culled_count += 1
 		else:
@@ -9049,36 +8384,10 @@ func _update_chunk_culling() -> void:
 
 		chunk_node.visible = not should_hide
 
-	# Чистим кеш для выгруженных чанков
-	for key in _raycast_occlusion_cache.keys():
-		if not _loaded_chunks.has(key):
-			_raycast_occlusion_cache.erase(key)
-
-	# DEBUG: раз в 5 секунд
-	if Engine.get_frames_drawn() % 300 == 0:
-		print("Culling: %d visible, %d culled (%d frustum, %d raycast)" % [
-			visible_count, culled_count, culled_count - raycast_culled, raycast_culled
+	# DEBUG: раз в 5 секунд (~25 вызовов culling при 200ms интервале)
+	_culling_debug_counter += 1
+	if _culling_debug_counter >= 25:
+		_culling_debug_counter = 0
+		print("Culling: %d visible, %d culled (frustum), loaded: %d" % [
+			visible_count, culled_count, _loaded_chunks.size()
 		])
-
-
-## Проверяет видимость чанка из камеры через raycast к зданиям
-## Бросает 5 лучей (центр + 4 угла на уровне земли). Если хотя бы один проходит — чанк видим.
-func _check_chunk_visibility_raycast(space_state: PhysicsDirectSpaceState3D, cam_pos: Vector3, aabb_center: Vector3, aabb_half: Vector3) -> bool:
-	# 5 контрольных точек на уровне земли чанка
-	var ground_y := 1.5  # Чуть выше земли
-	var test_points := [
-		Vector3(aabb_center.x, ground_y, aabb_center.z),  # Центр
-		Vector3(aabb_center.x - aabb_half.x * 0.8, ground_y, aabb_center.z - aabb_half.z * 0.8),  # Ближний-левый
-		Vector3(aabb_center.x + aabb_half.x * 0.8, ground_y, aabb_center.z - aabb_half.z * 0.8),  # Ближний-правый
-		Vector3(aabb_center.x - aabb_half.x * 0.8, ground_y, aabb_center.z + aabb_half.z * 0.8),  # Дальний-левый
-		Vector3(aabb_center.x + aabb_half.x * 0.8, ground_y, aabb_center.z + aabb_half.z * 0.8),  # Дальний-правый
-	]
-
-	for target in test_points:
-		var query := PhysicsRayQueryParameters3D.create(cam_pos, target)
-		query.collision_mask = 2  # Только слой зданий
-		var result := space_state.intersect_ray(query)
-		if result.is_empty():
-			return true  # Луч прошёл — чанк виден
-
-	return false  # Все лучи заблокированы — чанк скрыт
