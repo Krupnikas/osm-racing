@@ -1761,7 +1761,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 	if not _poi_nodes.is_empty():
 		print("OSM: Found %d POI nodes in chunk" % _poi_nodes.size())
 
-	# Первый проход: собираем полигоны парковок (для исключения фонарей)
+	# Первый проход: собираем полигоны парковок, сегменты дорог и зданий из ВСЕХ OSM данных
+	# (включая объекты за пределами чанка - они нужны для корректной проверки расстояний)
 	for way in ways:
 		var tags: Dictionary = way.get("tags", {})
 		var nodes: Array = way.get("nodes", [])
@@ -1771,6 +1772,28 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 				points.append(local)
 			_parking_polygons.append(points)
+
+		# Все дороги из OSM данных -> spatial hash (для проверки расстояний при генерации деревьев/фонарей)
+		if tags.has("highway") and nodes.size() >= 2:
+			var highway_type: String = tags.get("highway", "residential")
+			var road_w: float = ROAD_WIDTHS.get(highway_type, 5.0)
+			for j in range(nodes.size() - 1):
+				var rp1 = _latlon_to_local(nodes[j].lat, nodes[j].lon)
+				var rp2 = _latlon_to_local(nodes[j + 1].lat, nodes[j + 1].lon)
+				var rseg := {"p1": rp1, "p2": rp2, "width": road_w}
+				# Добавляем только в spatial hash (не в _road_segments чтобы избежать дубликатов)
+				_add_road_segment_to_spatial_hash(rseg)
+
+		# Все здания из OSM данных -> spatial hash
+		if (tags.has("building") or (tags.has("amenity") and not tags.has("highway"))) and nodes.size() >= 3:
+			var bpoints: PackedVector2Array = []
+			for node in nodes:
+				bpoints.append(_latlon_to_local(node.lat, node.lon))
+			for j in range(bpoints.size()):
+				var bp1 := bpoints[j]
+				var bp2 := bpoints[(j + 1) % bpoints.size()]
+				var bseg := {"p1": bp1, "p2": bp2}
+				_add_building_segment_to_spatial_hash(bseg)
 
 	# Сбор перекрёстков (узлы, где сходятся несколько дорог)
 	# НЕ очищаем массивы - накапливаем из всех чанков (очистка в start_loading)
@@ -6604,9 +6627,11 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 				var lamp_pos_left := road_pos + perp * lamp_offset
 				var lamp_pos_right := road_pos - perp * lamp_offset
 
-				# Проверяем, не попадают ли фонари на парковку
+				# Проверяем, не попадают ли фонари на парковку или другую дорогу
 				var left_on_parking := _is_point_in_any_parking(lamp_pos_left)
 				var right_on_parking := _is_point_in_any_parking(lamp_pos_right)
+				var left_on_road := _is_point_near_road_fast(lamp_pos_left, 0.0)
+				var right_on_road := _is_point_near_road_fast(lamp_pos_right, 0.0)
 
 				var elev_left := _get_elevation_at_point(lamp_pos_left, elev_data)
 				var elev_right := _get_elevation_at_point(lamp_pos_right, elev_data)
@@ -6617,7 +6642,7 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 
 				# NEW: Add lamps to batch instead of pending queue
 				# Left lamp
-				if not left_on_parking:
+				if not left_on_parking and not left_on_road:
 					var lamp_3d_left := Vector3(lamp_pos_left.x, elev_left, lamp_pos_left.y)
 					var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
 					var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
@@ -6629,7 +6654,7 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 						_add_lamp_to_batch(chunk_key, lamp_3d_left, Vector3(dir_to_road_left.x, 0, dir_to_road_left.y), chunk_parent)
 
 				# Right lamp
-				if not right_on_parking:
+				if not right_on_parking and not right_on_road:
 					var lamp_3d_right := Vector3(lamp_pos_right.x, elev_right, lamp_pos_right.y)
 					var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
 					var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
