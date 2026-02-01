@@ -75,6 +75,9 @@ var _parking_polygons: Array[PackedVector2Array] = []  # Полигоны пар
 var _road_segments: Array = []  # Сегменты дорог для позиционирования знаков парковки
 var _road_spatial_hash: Dictionary = {}  # Spatial hash для быстрого поиска дорог
 const ROAD_CELL_SIZE := 20.0  # Размер ячейки spatial hash для дорог
+var _building_segments: Array = []  # Сегменты стен зданий {p1: Vector2, p2: Vector2}
+var _building_spatial_hash: Dictionary = {}  # Spatial hash для быстрого поиска зданий
+const BUILDING_CELL_SIZE := 20.0  # Размер ячейки spatial hash для зданий
 var _intersection_positions: Array[Vector2] = []  # Позиции перекрёстков (центры)
 var _intersection_radii: Array[Vector2] = []  # Полуоси эллипсов (x=вдоль широкой дороги, y=вдоль узкой)
 var _intersection_angles: Array[float] = []  # Углы поворота эллипсов (радианы, направление широкой дороги)
@@ -1426,6 +1429,8 @@ func reset_terrain() -> void:
 	_created_sign_positions.clear()
 	_road_segments.clear()
 	_road_spatial_hash.clear()
+	_building_segments.clear()
+	_building_spatial_hash.clear()
 	_parking_polygons.clear()
 
 	# Clear ALL batching data on reset
@@ -2099,6 +2104,10 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				lamp_count += 1
 
 	print("OSM: Generated %d roads, %d buildings, %d trees, %d signs, %d lamps, %d intersections" % [road_count, building_count, tree_count, sign_count, lamp_count, intersection_count])
+
+	# Генерация деревьев по всей площади чанка (вне дорог и зданий)
+	if chunk_key != "":
+		_generate_trees_for_chunk(chunk_key, elev_data, target)
 
 	# OPTIMIZATION: Помечаем чанк для финализации road batches (когда road_queue опустеет)
 	var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
@@ -3122,6 +3131,14 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
+	# Сохраняем рёбра здания для проверки расстояния при генерации деревьев
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
+		var seg := {"p1": p1, "p2": p2}
+		_building_segments.append(seg)
+		_add_building_segment_to_spatial_hash(seg)
+
 	# Debug name для отладки конкретных зданий
 	var addr_street: String = str(tags.get("addr:street", ""))
 	var addr_housenumber: String = str(tags.get("addr:housenumber", ""))
@@ -3749,10 +3766,6 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 	# Natural объекты ниже дорог чтобы не было z-fighting
 	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
-	# Процедурная генерация деревьев в лесах
-	if natural_type in ["wood"]:
-		_generate_trees_in_polygon(points, elev_data, parent, true)  # dense=true для леса
-
 
 ## Немедленное создание землепользования (вызывается из очереди)
 func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
@@ -3794,10 +3807,6 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 	# Landuse ниже дорог чтобы не было z-fighting
 	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
-	# Процедурная генерация деревьев в лесах
-	if landuse_type == "forest":
-		_generate_trees_in_polygon(points, elev_data, parent, true)  # dense=true для леса
-
 
 ## Немедленное создание объекта отдыха (вызывается из очереди)
 func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
@@ -3833,10 +3842,6 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 	if leisure_type in ["park", "garden", "pitch"]:
 		_create_park_collision(points, elev_data, parent)
 
-	# Процедурная генерация деревьев в парках и садах
-	if leisure_type in ["park", "garden"]:
-		_generate_trees_in_polygon(points, elev_data, parent)
-
 func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 3:
 		return
@@ -3845,6 +3850,14 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 	for node in nodes:
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
+
+	# Сохраняем рёбра для проверки расстояния при генерации деревьев
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
+		var seg := {"p1": p1, "p2": p2}
+		_building_segments.append(seg)
+		_add_building_segment_to_spatial_hash(seg)
 
 	var amenity_type: String = str(tags.get("amenity", ""))
 
@@ -5219,6 +5232,9 @@ func _process_vegetation_queue() -> void:
 		"trees":
 			_create_trees_immediate(item.points, item.elev_data, item.parent, item.dense)
 			_record_perf("veg_trees", Time.get_ticks_usec() - t0)
+		"chunk_trees":
+			_create_chunk_trees_immediate(item.chunk_key, item.elev_data, item.parent)
+			_record_perf("veg_chunk_trees", Time.get_ticks_usec() - t0)
 
 
 func _create_3d_building_with_texture(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
@@ -6390,6 +6406,91 @@ func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, 
 
 			if tree_count >= max_trees:
 				break
+
+
+# Проверка близости к дороге через spatial hash (быстрая версия)
+func _is_point_near_road_fast(point: Vector2, min_distance: float) -> bool:
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not _road_spatial_hash.has(key):
+				continue
+			for seg in _road_spatial_hash[key]:
+				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+				var dist := point.distance_to(closest)
+				if dist < (seg.width / 2.0) + min_distance:
+					return true
+
+	return false
+
+
+# Генерация деревьев по всему чанку (на обычной земле, вне дорог и зданий)
+func _generate_trees_for_chunk(chunk_key: String, elev_data: Dictionary, parent: Node3D) -> void:
+	if not enable_vegetation:
+		return
+
+	# Добавляем в очередь растительности для обработки по кадрам
+	_vegetation_queue.append({
+		"type": "chunk_trees",
+		"chunk_key": chunk_key,
+		"elev_data": elev_data,
+		"parent": parent
+	})
+
+
+# Немедленная генерация деревьев по всей площади чанка
+func _create_chunk_trees_immediate(chunk_key: String, elev_data: Dictionary, parent: Node3D) -> void:
+	if not is_instance_valid(parent):
+		return
+
+	var coords: Array = chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+	var min_x := chunk_x * chunk_size
+	var min_z := chunk_z * chunk_size
+
+	var avg_spacing := 25.0  # Среднее расстояние между деревьями (метры)
+	var max_trees := 50  # Максимум деревьев на чанк
+	var tree_count := 0
+
+	# Псевдорандом на основе координат чанка (используем chunk_x/chunk_z для уникальности)
+	var seed_value := int(abs(chunk_x * 73856093 + chunk_z * 19349669)) % 100000
+
+	var estimated_trees := int((chunk_size * chunk_size) / (avg_spacing * avg_spacing))
+	estimated_trees = mini(estimated_trees, max_trees)
+
+	for i in range(estimated_trees):
+		var hash1 := fmod(float(seed_value + i * 7919) * 0.61803398875, 1.0)
+		var hash2 := fmod(float(seed_value + i * 104729) * 0.41421356237, 1.0)
+
+		var hash3 := fmod(hash1 * 17.0 + hash2 * 31.0, 1.0)
+		var hash4 := fmod(hash2 * 23.0 + hash1 * 13.0, 1.0)
+
+		var test_x := min_x + (hash1 * 0.7 + hash3 * 0.3) * chunk_size
+		var test_y := min_z + (hash2 * 0.7 + hash4 * 0.3) * chunk_size
+		var test_point := Vector2(test_x, test_y)
+
+		# Пропускаем если близко к дороге (2м от края дороги)
+		if _is_point_near_road_fast(test_point, 2.0):
+			continue
+
+		# Пропускаем если близко к зданию (2м от стены)
+		if _is_point_near_building(test_point, 2.0):
+			continue
+
+		# Пропускаем если на парковке
+		if _is_point_in_any_parking(test_point):
+			continue
+
+		var elevation := _get_elevation_at_point(test_point, elev_data)
+		_add_tree_to_batch(chunk_key, test_point, elevation, parent)
+
+		tree_count += 1
+		if tree_count >= max_trees:
+			break
 
 
 # Процедурная генерация промышленных зданий внутри территории
@@ -8116,6 +8217,48 @@ func _is_point_on_road(pos: Vector2, margin: float = 0.5) -> bool:
 		# Проверяем, находится ли точка в пределах ширины дороги + margin
 		if dist <= (width / 2.0 + margin):
 			return true
+
+	return false
+
+
+## Добавляет сегмент стены здания в spatial hash
+func _add_building_segment_to_spatial_hash(seg: Dictionary) -> void:
+	var p1: Vector2 = seg.p1
+	var p2: Vector2 = seg.p2
+
+	var min_x := minf(p1.x, p2.x)
+	var max_x := maxf(p1.x, p2.x)
+	var min_y := minf(p1.y, p2.y)
+	var max_y := maxf(p1.y, p2.y)
+
+	var min_cell_x := int(floor(min_x / BUILDING_CELL_SIZE))
+	var max_cell_x := int(floor(max_x / BUILDING_CELL_SIZE))
+	var min_cell_y := int(floor(min_y / BUILDING_CELL_SIZE))
+	var max_cell_y := int(floor(max_y / BUILDING_CELL_SIZE))
+
+	for cx in range(min_cell_x, max_cell_x + 1):
+		for cy in range(min_cell_y, max_cell_y + 1):
+			var key := Vector2i(cx, cy)
+			if not _building_spatial_hash.has(key):
+				_building_spatial_hash[key] = []
+			_building_spatial_hash[key].append(seg)
+
+
+## Проверяет, находится ли точка слишком близко к любому зданию
+func _is_point_near_building(point: Vector2, min_distance: float) -> bool:
+	var cell_x := int(floor(point.x / BUILDING_CELL_SIZE))
+	var cell_y := int(floor(point.y / BUILDING_CELL_SIZE))
+
+	# Проверяем текущую и соседние ячейки (здание может быть в соседней ячейке)
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not _building_spatial_hash.has(key):
+				continue
+			for seg in _building_spatial_hash[key]:
+				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+				if point.distance_to(closest) < min_distance:
+					return true
 
 	return false
 
