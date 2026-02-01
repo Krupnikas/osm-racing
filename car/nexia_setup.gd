@@ -26,7 +26,7 @@ var _headlights: Array[SpotLight3D] = []
 var _underglow_lights: Array[SpotLight3D] = []
 var _underglow_strips: Array[MeshInstance3D] = []
 var _underglow_material: StandardMaterial3D
-var _underglow_enabled := false
+var _underglow_enabled := true
 var _underglow_color_index := 0
 var _is_night := false
 var _vehicle: Node  # Ссылка на Vehicle для проверки торможения
@@ -410,7 +410,7 @@ func _setup_underglow() -> void:
 		light.light_energy = 0.8
 		light.light_color = color
 		light.shadow_enabled = true
-		light.visible = false
+		light.visible = _underglow_enabled
 		get_parent().add_child(light)
 		_underglow_lights.append(light)
 
@@ -425,7 +425,7 @@ func _setup_underglow() -> void:
 		light.light_energy = 0.8
 		light.light_color = color
 		light.shadow_enabled = true
-		light.visible = false
+		light.visible = _underglow_enabled
 		get_parent().add_child(light)
 		_underglow_lights.append(light)
 
@@ -440,7 +440,7 @@ func _setup_underglow() -> void:
 		light.light_energy = 0.8
 		light.light_color = color
 		light.shadow_enabled = true
-		light.visible = false
+		light.visible = _underglow_enabled
 		get_parent().add_child(light)
 		_underglow_lights.append(light)
 
