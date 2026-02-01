@@ -1,4 +1,4 @@
-[gd_scene load_steps=21 format=3 uid="uid://crace_scene_001"]
+[gd_scene load_steps=22 format=3 uid="uid://crace_scene_001"]
 
 [ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://race/race_scene.gd" id="1_scene"]
@@ -22,6 +22,7 @@
 [ext_resource type="Script" path="res://textures/ground_setup.gd" id="17_ground"]
 [ext_resource type="Script" path="res://debug/collision_visualizer.gd" id="18_collision_vis"]
 [ext_resource type="Script" path="res://debug/performance_profiler.gd" id="19_profiler"]
+[ext_resource type="Script" path="res://car/lane_assist.gd" id="30_lane_assist"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -96,6 +97,9 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)
 [node name="VehicleController" type="Node3D" parent="Car" node_paths=PackedStringArray("vehicle_node")]
 script = ExtResource("2_controller")
 vehicle_node = NodePath("..")
+
+[node name="LaneAssist" type="Node" parent="Car"]
+script = ExtResource("30_lane_assist")
 
 [node name="TrafficManager" type="Node" parent="."]
 script = ExtResource("11_traffic")
