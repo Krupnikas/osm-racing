@@ -12,6 +12,7 @@ const BuildingWallShader = preload("res://osm/building_wall.gdshader")
 const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
 const BIRCH_TREE_SCENE = preload("res://models/trees/birch/scene.gltf")
+const BUS_STOP_SCENE = preload("res://models/bus_stop/scene.gltf")
 
 
 # Кэш текстур (создаются один раз)
@@ -92,6 +93,7 @@ var _intersection_spatial_hash: Dictionary = {}  # Spatial hash для быст�
 const INTERSECTION_CELL_SIZE := 50.0  # Размер ячейки spatial hash в метрах
 var _created_lamp_positions: Dictionary = {}  # Позиции созданных фонарей для избежания дубликатов (ключ: chunk_key)
 var _created_sign_positions: Dictionary = {}  # Позиции созданных знаков для избежания дубликатов
+var _created_bus_stop_positions: Dictionary = {}  # Позиции созданных остановок для избежания дубликатов
 var _pending_lamps: Array = []  # Отложенные фонари (создаются после загрузки всех парковок)
 var _lamps_created := false  # Флаг что фонари уже созданы
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
@@ -744,6 +746,7 @@ func start_loading() -> void:
 	_initial_chunks_loaded = 0
 	_parking_polygons.clear()  # Очищаем парковки при новой загрузке
 	_created_lamp_positions.clear()  # Очищаем позиции фонарей
+	_created_bus_stop_positions.clear()  # Очищаем позиции остановок
 	_pending_lamps.clear()  # Очищаем отложенные фонари
 	_pending_parking_signs.clear()  # Очищаем отложенные знаки парковки
 	_lamps_created = false  # Сбрасываем флаг
@@ -1451,6 +1454,7 @@ func reset_terrain() -> void:
 	# Очищаем словари позиций объектов и парковок
 	_created_lamp_positions.clear()
 	_created_sign_positions.clear()
+	_created_bus_stop_positions.clear()
 	_road_segments.clear()
 	_road_spatial_hash.clear()
 	_building_segments.clear()
@@ -2151,6 +2155,35 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				lamp_count += 1
 
 	print("OSM: Generated %d roads, %d buildings, %d trees, %d signs, %d lamps, %d intersections" % [road_count, building_count, tree_count, sign_count, lamp_count, intersection_count])
+
+	# Обрабатываем автобусные остановки
+	var bus_stops: Array = osm_data.get("bus_stops", [])
+	var bus_stop_count := 0
+	# Список остановок для исключения (не существуют в реальности)
+	var excluded_stops := ["Улица Партизана Окинина"]
+	for stop in bus_stops:
+		var lat: float = stop.get("lat", 0.0)
+		var lon: float = stop.get("lon", 0.0)
+		var tags: Dictionary = stop.get("tags", {})
+		var stop_name: String = tags.get("name", "")
+
+		# Пропускаем исключённые остановки
+		if stop_name in excluded_stops:
+			continue
+
+		var local: Vector2 = _latlon_to_local(lat, lon)
+
+		# Фильтруем по чанку
+		if filter_by_chunk:
+			if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
+				continue
+
+		var elevation := _get_elevation_at_point(local, elev_data)
+		_create_bus_stop(local, elevation, tags, target)
+		bus_stop_count += 1
+
+	if bus_stop_count > 0:
+		print("OSM: Created %d bus stops" % bus_stop_count)
 
 	# Генерация деревьев по всей площади чанка (вне дорог и зданий)
 	if chunk_key != "":
@@ -6386,6 +6419,65 @@ func _create_street_lamp_immediate_legacy(pos: Vector2, elevation: float, parent
 	# Старая реализация (создаёт отдельные меши) - используется только для специальных случаев
 	# В текущей версии не используется - все фонари батчатся
 	pass
+
+
+# Создание автобусной остановки
+func _create_bus_stop(pos: Vector2, elevation: float, tags: Dictionary, parent: Node3D) -> void:
+	# Дедупликация
+	var pos_key := "bs_%d_%d" % [int(pos.x), int(pos.y)]
+	if _created_bus_stop_positions.has(pos_key):
+		return
+	_created_bus_stop_positions[pos_key] = true
+
+	# Находим направление к ближайшей дороге
+	var road_dir := _get_direction_to_nearest_road(pos)
+	var angle := atan2(road_dir.x, road_dir.y) - PI / 2.0  # -90°
+
+	# Создаём контейнер
+	var stop_root := Node3D.new()
+	stop_root.name = "BusStop"
+	stop_root.position = Vector3(pos.x, elevation + 1.1, pos.y)  # +1.1м над землёй
+	stop_root.rotation.y = angle
+
+	# Инстанцируем модель
+	var model := BUS_STOP_SCENE.instantiate()
+	model.scale = Vector3(0.1, 0.1, 0.1)
+	stop_root.add_child(model)
+
+	parent.add_child(stop_root)
+
+
+func _get_direction_to_nearest_road(pos: Vector2) -> Vector2:
+	"""Находит направление К ближайшей дороге (перпендикуляр)"""
+	if _road_segments.is_empty():
+		return Vector2(0, 1)  # По умолчанию - на север
+
+	var min_dist := INF
+	var best_dir := Vector2(0, 1)
+
+	for seg in _road_segments:
+		var road_p1: Vector2 = seg.p1
+		var road_p2: Vector2 = seg.p2
+		var road_vec: Vector2 = road_p2 - road_p1
+		var road_len: float = road_vec.length()
+		if road_len < 0.1:
+			continue
+
+		# Проекция точки на отрезок дороги
+		var t: float = clamp((pos - road_p1).dot(road_vec) / (road_len * road_len), 0.0, 1.0)
+		var closest: Vector2 = road_p1 + road_vec * t
+		var dist: float = pos.distance_to(closest)
+
+		if dist < min_dist:
+			min_dist = dist
+			# Направление ОТ остановки К дороге
+			if dist > 0.1:
+				best_dir = (closest - pos).normalized()
+			else:
+				# Если на дороге - перпендикуляр к дороге
+				best_dir = Vector2(-road_vec.y, road_vec.x).normalized()
+
+	return best_dir
 
 
 # Процедурная генерация деревьев в полигоне (парк, лес) - добавляет в очередь

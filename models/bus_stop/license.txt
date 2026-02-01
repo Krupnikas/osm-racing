@@ -1,0 +1,11 @@
+Model Information:
+* title:	Bus Stop - low
+* source:	https://sketchfab.com/3d-models/bus-stop-low-977fe8fc309548299cbc537f382e1a03
+* author:	Milionna (https://sketchfab.com/milionna)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Bus Stop - low" (https://sketchfab.com/3d-models/bus-stop-low-977fe8fc309548299cbc537f382e1a03) by Milionna (https://sketchfab.com/milionna) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
