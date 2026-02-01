@@ -218,17 +218,26 @@ func _on_settings_back_pressed() -> void:
 
 func _create_test_tracks_panel() -> void:
 	"""Создать панель выбора тестовых трасс программно"""
-	var panel := PanelContainer.new()
+	var panel := Panel.new()
 	panel.name = "TestTracksPanel"
 	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.anchor_left = 0.5
+	panel.anchor_top = 0.5
+	panel.anchor_right = 0.5
+	panel.anchor_bottom = 0.5
 	panel.offset_left = -300
 	panel.offset_right = 300
-	panel.offset_top = -300
-	panel.offset_bottom = 300
+	panel.offset_top = -250
+	panel.offset_bottom = 250
 	panel.visible = true
 	add_child(panel)
 
 	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 30
+	vbox.offset_top = 30
+	vbox.offset_right = -30
+	vbox.offset_bottom = -30
 	panel.add_child(vbox)
 
 	# Title
@@ -240,29 +249,38 @@ func _create_test_tracks_panel() -> void:
 
 	# Spacer
 	var spacer := Control.new()
-	spacer.custom_minimum_size = Vector2(0, 20)
+	spacer.custom_minimum_size = Vector2(0, 25)
 	vbox.add_child(spacer)
 
 	# Test track buttons
 	var test_tracks = TestTracksScript.get_all_test_tracks()
 	for track in test_tracks:
 		var btn := Button.new()
-		btn.text = track.track_name
-		btn.custom_minimum_size = Vector2(500, 60)
+		btn.text = track["track_name"]
+		btn.custom_minimum_size = Vector2(0, 60)
 		btn.add_theme_font_size_override("font_size", 28)
 		btn.pressed.connect(_on_test_track_selected.bind(track))
 		vbox.add_child(btn)
 
+		# Описание под кнопкой
+		if track.has("description"):
+			var desc := Label.new()
+			desc.text = track["description"]
+			desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			desc.add_theme_font_size_override("font_size", 16)
+			desc.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7, 1))
+			vbox.add_child(desc)
+
 	# Spacer
 	var spacer2 := Control.new()
-	spacer2.custom_minimum_size = Vector2(0, 20)
+	spacer2.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(spacer2)
 
 	# Back button
 	var back_btn := Button.new()
 	back_btn.text = "Назад"
-	back_btn.custom_minimum_size = Vector2(200, 50)
-	back_btn.add_theme_font_size_override("font_size", 24)
+	back_btn.custom_minimum_size = Vector2(0, 60)
+	back_btn.add_theme_font_size_override("font_size", 28)
 	back_btn.pressed.connect(_on_test_tracks_back_pressed)
 	vbox.add_child(back_btn)
 
@@ -274,19 +292,18 @@ func _on_test_tracks_back_pressed() -> void:
 	$VBox.visible = true
 
 
-func _on_test_track_selected(track) -> void:
-	"""Выбрана тестовая трасса - загружаем как free roam"""
-	print("MainMenu: Selected test track: ", track.track_name)
+func _on_test_track_selected(track: Dictionary) -> void:
+	"""Выбрана тестовая трасса - загружаем процедурную сцену (без OSM)"""
+	print("MainMenu: Selected test track: ", track["track_name"])
 
-	# Тестовые трассы работают как free roam с заданными координатами
-	RaceState.free_roam_location = "Test: " + track.track_name
-	RaceState.free_roam_lat = track.start_lat
-	RaceState.free_roam_lon = track.start_lon
-	RaceState.selected_track = null  # Не гонка
+	# Сохраняем ID тестовой трассы
+	RaceState.test_track_id = track["track_id"]
+	RaceState.selected_track = null
+	RaceState.free_roam_location = ""
 
 	# Переключаем музыку
 	if MusicManager:
 		MusicManager.play_next_track()
 
-	# Загружаем main.tscn
-	get_tree().change_scene_to_file("res://main.tscn")
+	# Загружаем сцену тестовой трассы (без OSM)
+	get_tree().change_scene_to_file("res://race/test_track_scene.tscn")
