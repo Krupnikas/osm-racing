@@ -65,11 +65,9 @@ func _ready() -> void:
 	# Создаём систему дождя
 	_create_rain_system()
 
-	# Устанавливаем дневное небо по умолчанию
-	_switch_to_day_sky()
-
-	# По умолчанию: день без дождя
-	print("NightModeManager: Ready (day mode, no rain)")
+	# По умолчанию: ночной режим
+	enable_night_mode()
+	print("NightModeManager: Ready (night mode, no rain)")
 
 
 func _find_scene_components() -> void:
