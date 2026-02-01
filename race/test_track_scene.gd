@@ -17,12 +17,14 @@ var _track_id: String = ""
 const SPAWN_POSITIONS := {
 	"test_flat": Vector3(80, 1.0, 0),
 	"test_suspension": Vector3(0, 1.0, 5),
+	"test_npc": Vector3(80, 1.0, 0),
 }
 
 ## Повороты спавна (Y rotation в радианах)
 const SPAWN_ROTATIONS := {
 	"test_flat": 0.0,
 	"test_suspension": PI,  # 180° — лицом к трассе (Z+)
+	"test_npc": 0.0,
 }
 
 
@@ -68,6 +70,10 @@ func _ready() -> void:
 			_terrain.enable_elevation = true
 			_terrain.elevation_scale = 1.0
 			_terrain.elevation_grid_resolution = 32
+		"test_npc":
+			_terrain.test_data_provider = func(lat: float, lon: float, size: float) -> Dictionary:
+				return TrackData.get_flat_track_data(lat, lon, size)
+			_setup_traffic_manager()
 
 	# Подключаемся к сигналу завершения загрузки
 	_terrain.initial_load_complete.connect(_on_generation_complete)
@@ -115,3 +121,18 @@ func _on_generation_complete() -> void:
 		MusicManager.play_random_track()
 
 	print("TestTrackScene: Ready to drive!")
+
+
+func _setup_traffic_manager() -> void:
+	## Создаём TrafficManager как sibling OSMTerrain (нужен для _extract_road_for_traffic)
+	var TrafficManagerScript = preload("res://traffic/traffic_manager.gd")
+	var traffic_mgr = TrafficManagerScript.new()
+	traffic_mgr.name = "TrafficManager"
+	# Много NPC
+	traffic_mgr.max_npcs = 100
+	traffic_mgr.npcs_per_chunk = 15
+	traffic_mgr.spawn_distance = 300.0
+	traffic_mgr.despawn_distance = 400.0
+	traffic_mgr.min_spawn_separation = 10.0
+	add_child(traffic_mgr)
+	print("TestTrackScene: TrafficManager created (max_npcs=100, per_chunk=15)")

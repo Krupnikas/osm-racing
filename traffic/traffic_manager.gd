@@ -5,11 +5,11 @@ class_name TrafficManager
 ## Управляет spawning, despawning и жизненным циклом NPC машин
 
 # Параметры spawning
-const MAX_NPCS := 30  # Максимум машин одновременно
-const SPAWN_DISTANCE := 200.0  # Радиус spawning от игрока
-const DESPAWN_DISTANCE := 300.0  # Дистанция despawning
-const MIN_SPAWN_SEPARATION := 15.0  # Мин. расстояние между NPC
-const NPCS_PER_CHUNK := 4  # Машин на чанк
+var max_npcs := 30  # Максимум машин одновременно
+var spawn_distance := 200.0  # Радиус spawning от игрока
+var despawn_distance := 300.0  # Дистанция despawning
+var min_spawn_separation := 15.0  # Мин. расстояние между NPC
+var npcs_per_chunk := 4  # Машин на чанк
 
 # Ссылки
 var npc_car_scene: PackedScene
@@ -75,7 +75,7 @@ func _ready() -> void:
 		add_child(_profiler)
 		print("[TrafficManager] Profiler created for diagnostics")
 
-	print("TrafficManager: Initialized (max %d NPCs)" % MAX_NPCS)
+	print("TrafficManager: Initialized (max %d NPCs)" % max_npcs)
 
 
 func _process(delta: float) -> void:
@@ -127,7 +127,7 @@ func toggle_waypoint_visualization() -> void:
 
 func _update_spawning() -> void:
 	"""Обновляет spawning NPC машин"""
-	if active_npcs.size() >= MAX_NPCS:
+	if active_npcs.size() >= max_npcs:
 		return
 
 	if not terrain_generator:
@@ -149,7 +149,7 @@ func _update_spawning() -> void:
 
 	# Проходим по всем загруженным чанкам
 	for chunk_key in loaded_chunks.keys():
-		if active_npcs.size() >= MAX_NPCS:
+		if active_npcs.size() >= max_npcs:
 			break
 		if spawns_this_frame >= MAX_SPAWNS_PER_FRAME:
 			break
@@ -163,7 +163,7 @@ func _update_spawning() -> void:
 
 		# Считаем реальное количество NPC в чанке (не по spawned_positions)
 		var current_count := _count_npcs_in_chunk(chunk_key)
-		if current_count < NPCS_PER_CHUNK:
+		if current_count < npcs_per_chunk:
 			if _attempt_spawn_in_chunk(chunk_key, player_pos):
 				spawns_this_frame += 1
 
@@ -179,7 +179,7 @@ func _attempt_spawn_in_chunk(chunk_key: String, player_pos: Vector3) -> bool:
 	var nearby_waypoints: Array = []
 	for wp in waypoints:
 		var dist: float = wp.position.distance_to(player_pos)
-		if dist < SPAWN_DISTANCE and dist > 30.0:  # Не слишком близко
+		if dist < spawn_distance and dist > 30.0:  # Не слишком близко
 			nearby_waypoints.append(wp)
 
 	if nearby_waypoints.is_empty():
@@ -267,14 +267,14 @@ func _update_despawning() -> void:
 	for i in range(active_npcs.size() - 1, -1, -1):
 		var npc = active_npcs[i]
 		var distance: float = npc.global_position.distance_to(player_pos)
-		if distance > DESPAWN_DISTANCE:
+		if distance > despawn_distance:
 			_return_npc_to_pool(npc)
 
 
 func _check_spawn_separation(position: Vector3) -> bool:
 	"""Проверяет минимальную дистанцию до других NPC"""
 	# Используем distance_squared для оптимизации (избегаем sqrt)
-	var min_dist_sq := MIN_SPAWN_SEPARATION * MIN_SPAWN_SEPARATION
+	var min_dist_sq := min_spawn_separation * min_spawn_separation
 	for npc in active_npcs:
 		if npc.global_position.distance_squared_to(position) < min_dist_sq:
 			return false
@@ -348,7 +348,7 @@ func _get_npc_from_pool():
 		# Сигнал уже подключён при первом создании, не переподключаем
 		return npc
 
-	if active_npcs.size() < MAX_NPCS:
+	if active_npcs.size() < max_npcs:
 		# Распределение: 5% Lada 2109 DPS, 15% Такси, 15% ПАЗ, 25% ВАЗ-2107, 40% блочные
 		var rand := randf()
 		var scene_to_use: PackedScene
@@ -485,7 +485,7 @@ func clear_chunk(chunk_key: String) -> void:
 
 func get_debug_info() -> String:
 	"""Возвращает отладочную информацию"""
-	var info := "Traffic: %d/%d NPCs active, %d in pool" % [active_npcs.size(), MAX_NPCS, inactive_npcs.size()]
+	var info := "Traffic: %d/%d NPCs active, %d in pool" % [active_npcs.size(), max_npcs, inactive_npcs.size()]
 	if road_network:
 		info += "\n" + road_network.get_debug_info()
 	return info
