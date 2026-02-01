@@ -1255,14 +1255,24 @@ func _clear_chunk_objects_positions(chunk_key: String) -> void:
 		_created_lamp_positions.erase(key)
 
 	# Очищаем позиции знаков в этом чанке
+	# Ключи: "%d_%d" (parking), "ts_%d_%d" (traffic), "ys_%d_%d" (yield)
 	var signs_to_remove: Array = []
 	for pos_key in _created_sign_positions.keys():
 		var parts: PackedStringArray = pos_key.split("_")
-		if parts.size() >= 2:
-			var x := int(parts[0])
-			var z := int(parts[1])
-			if x >= min_x and x < max_x and z >= min_z and z < max_z:
-				signs_to_remove.append(pos_key)
+		var x: int
+		var z: int
+		if parts.size() == 2:
+			# Формат "%d_%d"
+			x = int(parts[0])
+			z = int(parts[1])
+		elif parts.size() == 3:
+			# Формат "prefix_%d_%d"
+			x = int(parts[1])
+			z = int(parts[2])
+		else:
+			continue
+		if x >= min_x and x < max_x and z >= min_z and z < max_z:
+			signs_to_remove.append(pos_key)
 
 	for key in signs_to_remove:
 		_created_sign_positions.erase(key)
@@ -5932,13 +5942,13 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		return
 
 	var batch: Dictionary = _tree_batch_data[chunk_key]
-	var parent: Node3D = batch.parent
+	var parent: Node3D = batch["parent"]
 
 	if not is_instance_valid(parent):
 		_tree_batch_data.erase(chunk_key)
 		return
 
-	var transforms: Array = batch.transforms
+	var transforms: Array = batch["transforms"]
 	if transforms.size() == 0:
 		_tree_batch_data.erase(chunk_key)
 		return
@@ -5962,15 +5972,15 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		_draw_call_stats["vegetation"] += 2  # 2 surfaces = 2 draw calls
 
 	# Коллизии деревьев
-	for collision_data in batch.collisions:
+	for collision_data in batch["collisions"]:
 		var body := StaticBody3D.new()
 		body.collision_layer = 2
 		body.collision_mask = 0
-		body.position = collision_data.position
+		body.position = collision_data["position"]
 
 		var collision := CollisionShape3D.new()
 		var shape := CylinderShape3D.new()
-		shape.radius = collision_data.radius
+		shape.radius = collision_data["radius"]
 		shape.height = 8.0
 		collision.position = Vector3(0, 4.0, 0)
 		collision.shape = shape
