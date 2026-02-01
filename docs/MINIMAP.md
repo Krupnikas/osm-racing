@@ -7,13 +7,15 @@
 - `ui/minimap.gd` - основная логика и отрисовка
 - `ui/hud.tscn` - узел MiniMap добавлен в HUD
 - `ui/hud.gd` - метод `set_race_mode()` для показа соперников
+- `osm/osm_terrain_generator.gd` - метод `get_road_segments_in_radius()` для получения дорог
 
 ## Функционал
 - Круглая карта 220x220 пикселей
 - Игрок (зелёная стрелка) всегда в центре
 - Карта вращается под направление движения
-- Серые линии дорог из RoadNetwork waypoints
+- Дороги разной толщины и прозрачности в зависимости от типа
 - Красные точки соперников (в режиме гонки)
+- Пешеходные дорожки не отображаются
 
 ## Архитектура
 
@@ -21,8 +23,8 @@
 | Данные | Источник |
 |--------|----------|
 | Позиция игрока | `get_tree().get_first_node_in_group("car").global_position` |
-| Направление | `-_car.global_transform.basis.z` |
-| Дороги | `TrafficManager.get_road_network().get_waypoints_in_radius()` |
+| Направление | `_car.global_rotation.y` |
+| Дороги | `OSMTerrainGenerator.get_road_segments_in_radius()` |
 | Соперники | `get_tree().get_nodes_in_group("race_opponent")` |
 
 ### Константы
@@ -33,11 +35,27 @@ CACHE_UPDATE_DISTANCE := 50.0  # Обновлять кэш каждые 50м
 CACHE_EXTRA_RADIUS := 100.0    # Дополнительный радиус кэширования
 ```
 
+### Стили дорог
+| Тип дороги | Ширина (м) | Толщина линии | Прозрачность |
+|------------|------------|---------------|--------------|
+| motorway, trunk, primary | >= 12 | 3.5px | 95% |
+| secondary, tertiary | 8-11 | 2.5px | 80% |
+| residential, service | < 8 | 1.5px | 55% |
+
+### Фильтрация дорог
+Следующие типы дорог НЕ отображаются на миникарте:
+- `footway` - тротуары
+- `path` - дорожки
+- `cycleway` - велодорожки
+- `track` - грунтовые дороги
+- `steps` - лестницы
+- `pedestrian` - пешеходные зоны
+
 ### Алгоритм отрисовки
 1. Получить позицию и направление игрока
-2. Обновить кэш дорог если нужно (ленивая загрузка)
+2. Обновить кэш дорог если нужно (каждые 50м)
 3. Нарисовать фон (круг)
-4. Нарисовать дороги (с трансформацией координат)
+4. Нарисовать дороги (сначала мелкие, потом крупные)
 5. Нарисовать соперников (если режим гонки)
 6. Нарисовать стрелку игрока в центре
 7. Нарисовать рамку
@@ -53,66 +71,39 @@ world_pos -> (world_pos - player_pos) -> rotated(angle) -> * scale -> + MAP_CENT
 
 ## Решённые проблемы
 
-### 1. RoadNetwork не найден при старте
-**Проблема:** `find_child("TrafficManager")` не находил менеджер при инициализации.
+### 1. Поворот карты
+**Проблема:** Карта была повёрнута на ~45° относительно реального направления.
 
-**Решение:** Ленивая инициализация - `_try_find_road_network()` вызывается каждый кадр пока не найдёт.
-
-### 2. Дороги появлялись с задержкой ~50м
-**Проблема:** Кэш начинал работать только после проезда CACHE_UPDATE_DISTANCE.
-
-**Решение:** Добавлена проверка `is_first_load` - первая загрузка происходит сразу.
-
-### 3. Не хватало дорог сзади
-**Проблема:** Радиус кэширования был слишком мал.
-
-**Решение:** Добавлен CACHE_EXTRA_RADIUS = 100м для большего охвата.
-
----
-
-## НЕРЕШЁННЫЕ ПРОБЛЕМЫ
-
-### 1. Карта повёрнута на ~45° против часовой стрелки
-**Симптом:** Дороги на карте не совпадают с реальным направлением.
-
-**Текущий код:**
+**Решение:** Использование `global_rotation.y` напрямую с правильным углом:
 ```gdscript
-var forward := -_car.global_transform.basis.z
-var player_rotation := atan2(forward.x, forward.z)
-// ...
-var angle := -player_rotation + PI / 2
+var player_rotation := _car.global_rotation.y
+var angle := player_rotation  # Без дополнительных смещений
 ```
 
-**Возможные причины:**
-- Неправильный расчёт угла через atan2
-- Несоответствие систем координат (Godot Y-up, Z-forward vs 2D X-right, Y-down)
-- Нужна дополнительная коррекция угла
+### 2. Направление вращения
+**Проблема:** При повороте машины влево карта вращалась в неправильную сторону.
 
-**TODO:** Попробовать разные формулы:
-- `atan2(-forward.z, forward.x)`
-- Добавить коррекцию `+ PI/4` или `- PI/4`
-- Использовать `global_rotation.y` вместо basis
+**Решение:** Убрали знак минус перед `player_rotation`.
 
-### 2. Дороги не обновляются при движении
-**Симптом:** Загружается только начальный набор дорог, новые не появляются.
+### 3. Мелкие дороги не отображались
+**Проблема:** RoadNetwork содержит только крупные дороги (для трафика).
 
-**Текущий код:**
+**Решение:** Переключились на `OSMTerrainGenerator.get_road_segments_in_radius()`, который содержит все дороги.
+
+### 4. Тротуары на карте
+**Проблема:** На карте отображались пешеходные дорожки.
+
+**Решение:** Фильтрация по типу highway в `osm_terrain_generator.gd`:
 ```gdscript
-var distance_from_cache := player_pos.distance_to(_cache_center)
-if not is_first_load and distance_from_cache < CACHE_UPDATE_DISTANCE:
-    return  # Кэш актуален
+const PEDESTRIAN_ROADS := ["footway", "path", "cycleway", "track", "steps", "pedestrian"]
+if highway_type in PEDESTRIAN_ROADS:
+    return
 ```
 
-**Возможные причины:**
-- Условие обновления не срабатывает (distance_from_cache всегда < 50?)
-- `get_waypoints_in_radius()` не возвращает новые waypoints
-- Waypoints не добавляются в RoadNetwork при загрузке новых чанков
-- `_cache_radius >= WORLD_RADIUS` всегда true после первой загрузки
+### 5. Дороги появлялись с задержкой
+**Проблема:** Кэш начинал работать только после проезда 50м.
 
-**TODO:**
-- Добавить отладочный вывод distance_from_cache
-- Проверить что waypoints добавляются в RoadNetwork при загрузке чанков
-- Возможно нужно принудительно обновлять кэш периодически
+**Решение:** Проверка `is_first_load` - первая загрузка происходит сразу.
 
 ---
 
@@ -120,10 +111,8 @@ if not is_first_load and distance_from_cache < CACHE_UPDATE_DISTANCE:
 
 ### Включить отладочный вывод
 В консоли должны появляться:
-- `MiniMap: Initialized (car=true, roads=true)`
-- `MiniMap: RoadNetwork found (lazy init)`
-- `MiniMap: Found X waypoints, building segments...`
-- `MiniMap: Built X road segments`
+- `MiniMap: Initialized (car=true, terrain=true)`
+- `MiniMap: Cached X road segments`
 
 ### Проверить waypoints
 Нажать клавишу **V** для визуализации waypoints в TrafficManager.
@@ -131,8 +120,6 @@ if not is_first_load and distance_from_cache < CACHE_UPDATE_DISTANCE:
 ---
 
 ## Будущие улучшения
-- [ ] Исправить поворот карты на 45°
-- [ ] Исправить обновление дорог при движении
 - [ ] Добавить zoom (+/-)
 - [ ] Показывать финиш на карте в режиме гонки
 - [ ] Показывать чекпоинты трассы

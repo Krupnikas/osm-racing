@@ -12,7 +12,7 @@ const CACHE_EXTRA_RADIUS := 100.0  # Дополнительный радиус �
 
 # Цвета (как на референсе NFS)
 const BG_COLOR := Color(0.12, 0.12, 0.15, 0.85)    # Тёмный фон
-const ROAD_COLOR := Color(0.65, 0.65, 0.65, 0.9)   # Серые дороги
+const ROAD_COLOR_BASE := Color(0.65, 0.65, 0.65)   # Базовый серый для дорог
 const BORDER_COLOR := Color(0.35, 0.4, 0.5, 1.0)   # Серая рамка
 const BORDER_WIDTH := 3.0
 
@@ -21,15 +21,25 @@ const PLAYER_COLOR := Color(0.2, 0.9, 0.3, 1.0)    # Зелёная стрелк
 const OPPONENT_COLOR := Color(1.0, 0.35, 0.2, 1.0) # Красные/оранжевые точки
 const PLAYER_SIZE := 10.0        # Размер стрелки игрока
 const OPPONENT_SIZE := 6.0       # Размер точек соперников
-const ROAD_WIDTH := 2.5          # Ширина линий дорог
+
+# Ширина линий дорог в пикселях (зависит от ширины дороги в метрах)
+# motorway=16, trunk=14, primary=12, secondary=10, tertiary=8, residential=6, service=4
+const ROAD_LINE_WIDTH_MAJOR := 3.5    # ширина >= 12м (motorway, trunk, primary)
+const ROAD_LINE_WIDTH_MEDIUM := 2.5   # ширина 8-11м (secondary, tertiary)
+const ROAD_LINE_WIDTH_MINOR := 1.5    # ширина < 8м (residential, service)
+
+# Прозрачность дорог (чем меньше дорога, тем прозрачнее)
+const ROAD_ALPHA_MAJOR := 0.95
+const ROAD_ALPHA_MEDIUM := 0.8
+const ROAD_ALPHA_MINOR := 0.55
 
 # Ссылки
 var _car: Node3D
-var _road_network  # RoadNetwork
-var _traffic_manager: Node
+var _terrain_generator: Node  # OSMTerrainGenerator для получения всех дорог
 
 # Кэш дорог (статичны, обновляем редко)
-var _cached_road_segments: Array = []  # Array[PackedVector2Array] - линии дорог в мировых координатах
+# Array[{p1: Vector2, p2: Vector2, width: float}] - сегменты дорог
+var _cached_road_segments: Array = []
 var _cache_center: Vector3 = Vector3.ZERO
 var _cache_radius: float = 0.0
 const CACHE_UPDATE_DISTANCE := 50.0  # Обновлять кэш каждые 50м движения
@@ -49,10 +59,10 @@ func _ready() -> void:
 	if not _car:
 		_car = get_tree().get_first_node_in_group("player")
 
-	# Пробуем найти RoadNetwork (может быть не готов сразу)
-	_try_find_road_network()
+	# Пробуем найти terrain generator
+	_try_find_terrain_generator()
 
-	print("MiniMap: Initialized (car=%s, roads=%s)" % [_car != null, _road_network != null])
+	print("MiniMap: Initialized (car=%s, terrain=%s)" % [_car != null, _terrain_generator != null])
 	queue_redraw()
 
 
@@ -106,10 +116,10 @@ func _draw_empty_map() -> void:
 
 func _update_road_cache(player_pos: Vector3) -> void:
 	"""Обновляет кэш дорог если игрок уехал далеко от точки кэширования"""
-	# Ленивая инициализация road_network (может быть не готов при старте)
-	if not _road_network:
-		_try_find_road_network()
-		if not _road_network:
+	# Ленивая инициализация terrain generator
+	if not _terrain_generator:
+		_try_find_terrain_generator()
+		if not _terrain_generator:
 			return
 
 	var distance_from_cache := player_pos.distance_to(_cache_center)
@@ -120,61 +130,41 @@ func _update_road_cache(player_pos: Vector3) -> void:
 	if not needs_update:
 		return  # Кэш актуален
 
-	print("MiniMap: Updating cache (first=%s, dist=%.1f)" % [is_first_load, distance_from_cache])
-
 	_cached_road_segments.clear()
 	_cache_center = player_pos
 	# Большой радиус кэширования: видимость + запас впереди/сзади + запас на обновление
 	_cache_radius = WORLD_RADIUS + CACHE_EXTRA_RADIUS + CACHE_UPDATE_DISTANCE
 
-	# Получаем waypoints в расширенном радиусе
-	if not _road_network.has_method("get_waypoints_in_radius"):
+	# Получаем сегменты дорог из terrain generator
+	if not _terrain_generator.has_method("get_road_segments_in_radius"):
 		return
 
-	var waypoints: Array = _road_network.get_waypoints_in_radius(player_pos, _cache_radius)
-
-	if waypoints.is_empty():
-		print("MiniMap: No waypoints found in radius %.0f at pos %s" % [_cache_radius, player_pos])
-		return
-
-	print("MiniMap: Found %d waypoints, building segments..." % waypoints.size())
-
-	# Группируем waypoints в линии дорог (следуем по next_waypoints)
-	var processed: Dictionary = {}  # waypoint -> true
-
-	for wp in waypoints:
-		if processed.has(wp):
-			continue
-
-		# Строим линию от этого waypoint
-		var line := PackedVector2Array()
-		var current = wp
-		var iteration := 0
-		const MAX_ITERATIONS := 200  # Защита от бесконечного цикла
-
-		while current != null and not processed.has(current) and iteration < MAX_ITERATIONS:
-			processed[current] = true
-			line.append(Vector2(current.position.x, current.position.z))
-			iteration += 1
-
-			# Переходим к следующему waypoint
-			if current.next_waypoints.is_empty():
-				break
-
-			# Берём первый next_waypoint (основное направление)
-			var next = current.next_waypoints[0]
-
-			# Проверяем что next в радиусе кэша
-			if next.position.distance_to(player_pos) > _cache_radius * 1.2:
-				break
-
-			current = next
-
-		if line.size() >= 2:
-			_cached_road_segments.append(line)
+	_cached_road_segments = _terrain_generator.get_road_segments_in_radius(player_pos, _cache_radius)
 
 	if not _cached_road_segments.is_empty():
-		print("MiniMap: Built %d road segments" % _cached_road_segments.size())
+		print("MiniMap: Cached %d road segments" % _cached_road_segments.size())
+
+
+func _get_road_style(width: float) -> Dictionary:
+	"""Возвращает толщину линии и цвет в зависимости от ширины дороги"""
+	var line_width: float
+	var alpha: float
+
+	if width >= 12.0:
+		# Крупные дороги: motorway, trunk, primary
+		line_width = ROAD_LINE_WIDTH_MAJOR
+		alpha = ROAD_ALPHA_MAJOR
+	elif width >= 8.0:
+		# Средние дороги: secondary, tertiary
+		line_width = ROAD_LINE_WIDTH_MEDIUM
+		alpha = ROAD_ALPHA_MEDIUM
+	else:
+		# Мелкие дороги: residential, service
+		line_width = ROAD_LINE_WIDTH_MINOR
+		alpha = ROAD_ALPHA_MINOR
+
+	var color := Color(ROAD_COLOR_BASE.r, ROAD_COLOR_BASE.g, ROAD_COLOR_BASE.b, alpha)
+	return {"width": line_width, "color": color}
 
 
 func _draw_roads(player_pos: Vector3, player_rotation: float) -> void:
@@ -185,56 +175,61 @@ func _draw_roads(player_pos: Vector3, player_rotation: float) -> void:
 	# Угол вращения: +player_rotation чтобы карта вращалась в правильную сторону
 	var angle := player_rotation
 
-	for road_line in _cached_road_segments:
-		var screen_points := PackedVector2Array()
-		var prev_inside := false
+	# Сначала рисуем мелкие дороги, потом крупные (чтобы крупные были сверху)
+	# Сортируем сегменты по ширине
+	var sorted_segments := _cached_road_segments.duplicate()
+	sorted_segments.sort_custom(func(a, b): return a.width < b.width)
 
-		for i in range(road_line.size()):
-			var world_point: Vector2 = road_line[i]
+	for seg in sorted_segments:
+		var p1: Vector2 = seg.p1
+		var p2: Vector2 = seg.p2
+		var road_width: float = seg.width
 
-			# Мировые координаты -> относительно игрока
-			var relative := world_point - player_pos_2d
+		# Получаем стиль для этой дороги
+		var style := _get_road_style(road_width)
 
-			# Грубый clip по дистанции
-			var dist := relative.length()
-			if dist > WORLD_RADIUS * 1.3:
-				# Точка слишком далеко - если были точки внутри, рисуем сегмент
-				if screen_points.size() >= 2:
-					draw_polyline(screen_points, ROAD_COLOR, ROAD_WIDTH, true)
-				screen_points.clear()
-				prev_inside = false
-				continue
+		# Трансформируем точки
+		var rel1 := p1 - player_pos_2d
+		var rel2 := p2 - player_pos_2d
 
-			# Вращаем относительно игрока (карта вращается)
-			var rotated := relative.rotated(angle)
+		# Грубый clip по дистанции
+		var dist1 := rel1.length()
+		var dist2 := rel2.length()
+		if dist1 > WORLD_RADIUS * 1.5 and dist2 > WORLD_RADIUS * 1.5:
+			continue
 
-			# Масштабируем и переводим в экранные координаты
-			var screen_pos := MAP_CENTER + rotated * scale
+		# Вращаем
+		var rot1 := rel1.rotated(angle)
+		var rot2 := rel2.rotated(angle)
 
-			# Точный clip по кругу
-			var from_center := screen_pos - MAP_CENTER
-			var inside := from_center.length() <= MAP_RADIUS
+		# Экранные координаты
+		var screen1 := MAP_CENTER + rot1 * scale
+		var screen2 := MAP_CENTER + rot2 * scale
 
-			if inside:
-				screen_points.append(screen_pos)
-				prev_inside = true
-			else:
-				# Точка за пределами круга
-				if prev_inside and screen_points.size() >= 1:
-					# Интерполируем до границы круга
-					var last_inside: Vector2 = screen_points[-1]
-					var edge_point := _clip_to_circle(last_inside, screen_pos)
-					screen_points.append(edge_point)
+		# Clip по кругу
+		var from_center1 := screen1 - MAP_CENTER
+		var from_center2 := screen2 - MAP_CENTER
+		var inside1 := from_center1.length() <= MAP_RADIUS
+		var inside2 := from_center2.length() <= MAP_RADIUS
 
-				# Рисуем накопленный сегмент
-				if screen_points.size() >= 2:
-					draw_polyline(screen_points, ROAD_COLOR, ROAD_WIDTH, true)
-				screen_points.clear()
-				prev_inside = false
-
-		# Рисуем оставшиеся точки
-		if screen_points.size() >= 2:
-			draw_polyline(screen_points, ROAD_COLOR, ROAD_WIDTH, true)
+		if inside1 and inside2:
+			# Обе точки внутри - рисуем линию
+			draw_line(screen1, screen2, style.color, style.width, true)
+		elif inside1 or inside2:
+			# Одна точка внутри - clip до границы
+			var inside_pt := screen1 if inside1 else screen2
+			var outside_pt := screen2 if inside1 else screen1
+			var edge_pt := _clip_to_circle(inside_pt, outside_pt)
+			draw_line(inside_pt, edge_pt, style.color, style.width, true)
+		else:
+			# Обе точки снаружи - проверяем пересечение с кругом
+			# Упрощённая проверка: если линия близка к центру, рисуем
+			var mid := (screen1 + screen2) / 2.0
+			if (mid - MAP_CENTER).length() <= MAP_RADIUS:
+				# Находим точки пересечения
+				var clip1 := _clip_to_circle(MAP_CENTER, screen1)
+				var clip2 := _clip_to_circle(MAP_CENTER, screen2)
+				draw_line(clip1, clip2, style.color, style.width, true)
 
 
 func _clip_to_circle(inside_point: Vector2, outside_point: Vector2) -> Vector2:
@@ -319,18 +314,18 @@ func set_world_radius(radius: float) -> void:
 	pass  # TODO: сделать WORLD_RADIUS переменной если нужен zoom
 
 
-func _try_find_road_network() -> void:
-	"""Пытается найти RoadNetwork разными способами"""
-	# Способ 1: через TrafficManager
-	if not _traffic_manager:
-		_traffic_manager = get_tree().current_scene.find_child("TrafficManager", true, false)
-		if not _traffic_manager:
-			# Способ 2: через группу
-			var managers = get_tree().get_nodes_in_group("traffic_manager")
-			if not managers.is_empty():
-				_traffic_manager = managers[0]
+func _try_find_terrain_generator() -> void:
+	"""Пытается найти OSMTerrainGenerator"""
+	# Способ 1: через группу
+	var generators = get_tree().get_nodes_in_group("terrain_generator")
+	if not generators.is_empty():
+		_terrain_generator = generators[0]
+		return
 
-	if _traffic_manager and _traffic_manager.has_method("get_road_network"):
-		_road_network = _traffic_manager.get_road_network()
-		if _road_network:
-			print("MiniMap: RoadNetwork found (lazy init)")
+	# Способ 2: по имени в корне сцены
+	_terrain_generator = get_tree().current_scene.find_child("OSMTerrainGenerator", true, false)
+	if _terrain_generator:
+		return
+
+	# Способ 3: по имени TerrainGenerator
+	_terrain_generator = get_tree().current_scene.find_child("TerrainGenerator", true, false)

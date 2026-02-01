@@ -271,6 +271,9 @@ const ROAD_WIDTHS := {
 }
 
 func _ready() -> void:
+	# Добавляем в группу для поиска из MiniMap
+	add_to_group("terrain_generator")
+
 	# Инициализируем mutex для многопоточности
 	_building_mutex = Mutex.new()
 	_curb_collision_mutex = Mutex.new()
@@ -2172,6 +2175,12 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, 
 
 	# Сегменты дорог сохраняем сразу (нужны для знаков парковки и проверки фонарей)
 	var highway_type: String = tags.get("highway", "residential")
+
+	# Пропускаем пешеходные дорожки (не нужны для миникарты)
+	const PEDESTRIAN_ROADS := ["footway", "path", "cycleway", "track", "steps", "pedestrian"]
+	if highway_type in PEDESTRIAN_ROADS:
+		return
+
 	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
 	for i in range(nodes.size() - 1):
 		var p1 = _latlon_to_local(nodes[i].lat, nodes[i].lon)
@@ -8232,6 +8241,47 @@ func _get_nearby_road_segments(pos: Vector2) -> Array:
 	if _road_spatial_hash.has(key):
 		return _road_spatial_hash[key]
 	return []
+
+
+## Публичный метод для получения сегментов дорог в радиусе (для миникарты)
+## Возвращает Array[{p1: Vector2, p2: Vector2, width: float}]
+func get_road_segments_in_radius(center: Vector3, radius: float) -> Array:
+	var result: Array = []
+	var seen: Dictionary = {}  # Для избежания дубликатов
+
+	var center_2d := Vector2(center.x, center.z)
+	var radius_sq := radius * radius
+
+	# Определяем диапазон ячеек для проверки
+	var cells_to_check := int(ceil(radius / ROAD_CELL_SIZE)) + 1
+	var center_cell_x := int(floor(center.x / ROAD_CELL_SIZE))
+	var center_cell_y := int(floor(center.z / ROAD_CELL_SIZE))
+
+	for dx in range(-cells_to_check, cells_to_check + 1):
+		for dy in range(-cells_to_check, cells_to_check + 1):
+			var key := Vector2i(center_cell_x + dx, center_cell_y + dy)
+			if not _road_spatial_hash.has(key):
+				continue
+
+			for seg in _road_spatial_hash[key]:
+				# Используем id сегмента для избежания дубликатов
+				var seg_id := "%s_%s" % [seg.p1, seg.p2]
+				if seen.has(seg_id):
+					continue
+				seen[seg_id] = true
+
+				# Проверяем что хотя бы одна точка в радиусе
+				var p1: Vector2 = seg.p1
+				var p2: Vector2 = seg.p2
+				if center_2d.distance_squared_to(p1) <= radius_sq or center_2d.distance_squared_to(p2) <= radius_sq:
+					result.append(seg)
+				else:
+					# Проверяем центр сегмента
+					var mid := (p1 + p2) / 2.0
+					if center_2d.distance_squared_to(mid) <= radius_sq:
+						result.append(seg)
+
+	return result
 
 
 ## Проверяет, находится ли точка на дороге
