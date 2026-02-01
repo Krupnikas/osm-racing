@@ -13,11 +13,11 @@ func _physics_process(_delta: float) -> void:
 	vehicle.throttle_input = Input.get_action_strength("Throttle")
 
 	# Brake (S / Down)
-	vehicle.brake_input = Input.get_action_strength("Brake")
+	vehicle.brake_input = Input.get_action_strength("Brakes")
 
 	# Steering (A/D or Left/Right)
-	var steer_left = Input.get_action_strength("SteerLeft")
-	var steer_right = Input.get_action_strength("SteerRight")
+	var steer_left = Input.get_action_strength("Steer Left")
+	var steer_right = Input.get_action_strength("Steer Right")
 	vehicle.steering_input = steer_right - steer_left
 
 	# Handbrake (Space)
