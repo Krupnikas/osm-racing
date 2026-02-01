@@ -11,6 +11,7 @@ const TextureGeneratorScript = preload("res://textures/texture_generator.gd")
 const BuildingWallShader = preload("res://osm/building_wall.gdshader")
 const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
+const BIRCH_TREE_SCENE = preload("res://models/trees/birch/scene.gltf")
 
 
 # Кэш текстур (создаются один раз)
@@ -135,7 +136,8 @@ var _curb_material: StandardMaterial3D = null  # Shared material для всех
 # Vegetation batching system - MultiMesh with LOD
 var _tree_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: [], collisions: [], parent: Node3D}
 var _tree_batches_to_finalize: Array[String] = []  # Chunk keys ready for finalization
-var _tree_mesh: ArrayMesh  # Единый упрощённый меш дерева (ствол + крона)
+var _tree_mesh: ArrayMesh  # Меш дерева для MultiMesh (модель или процедурный)
+var _tree_simplified := false  # true = процедурный меш, false = GLTF модель
 
 # Lamp batching system - MultiMesh with per-chunk batching
 var _lamp_batch_data: Dictionary = {}  # key: chunk_key -> batch data
@@ -429,10 +431,23 @@ void fragment() {
 	print("OSM: Window shader compiled")
 
 func _init_tree_meshes() -> void:
-	"""Создаёт единый упрощённый меш дерева (ствол + крона) для MultiMesh батчинга"""
-	print("OSM: Initializing tree mesh...")
+	# Проверяем настройку упрощённых деревьев из конфига
+	var use_simplified := false
+	var config := ConfigFile.new()
+	if config.load("user://graphics.cfg") == OK:
+		use_simplified = config.get_value("graphics", "simplified_trees", false)
 
-	# Ствол — цилиндр
+	if use_simplified:
+		_init_tree_meshes_simplified()
+		return
+
+	_init_tree_meshes_model()
+
+
+func _init_tree_meshes_simplified() -> void:
+	"""Создаёт упрощённый процедурный меш дерева (ствол + крона) для MultiMesh"""
+	print("OSM: Initializing simplified tree mesh...")
+
 	var trunk := CylinderMesh.new()
 	trunk.top_radius = 0.3
 	trunk.bottom_radius = 0.4
@@ -440,7 +455,6 @@ func _init_tree_meshes() -> void:
 	trunk.radial_segments = 6
 	trunk.rings = 1
 
-	# Крона — сфера, смещённая вверх
 	var crown := SphereMesh.new()
 	crown.radius = 2.8
 	crown.height = 5.5
@@ -449,9 +463,8 @@ func _init_tree_meshes() -> void:
 
 	_tree_mesh = ArrayMesh.new()
 
-	# Surface 0: ствол
+	# Surface 0: ствол (сдвинут вверх на 2.5)
 	var trunk_arrays := trunk.get_mesh_arrays()
-	# Сдвигаем ствол вверх на половину высоты (центр = 2.5м)
 	var trunk_verts: PackedVector3Array = trunk_arrays[Mesh.ARRAY_VERTEX]
 	for i in range(trunk_verts.size()):
 		trunk_verts[i].y += 2.5
@@ -462,11 +475,11 @@ func _init_tree_meshes() -> void:
 	trunk_mat.albedo_color = Color(0.35, 0.22, 0.1)
 	_tree_mesh.surface_set_material(0, trunk_mat)
 
-	# Surface 1: крона
+	# Surface 1: крона (сдвинута вверх на 6.5)
 	var crown_arrays := crown.get_mesh_arrays()
 	var crown_verts: PackedVector3Array = crown_arrays[Mesh.ARRAY_VERTEX]
 	for i in range(crown_verts.size()):
-		crown_verts[i].y += 6.5  # Верх ствола(5) + половина кроны(1.5)
+		crown_verts[i].y += 6.5
 	crown_arrays[Mesh.ARRAY_VERTEX] = crown_verts
 	_tree_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, crown_arrays)
 
@@ -474,7 +487,85 @@ func _init_tree_meshes() -> void:
 	crown_mat.albedo_color = Color(0.2, 0.5, 0.15)
 	_tree_mesh.surface_set_material(1, crown_mat)
 
-	print("OSM: Tree mesh initialized (trunk + crown, 2 surfaces)")
+	_tree_simplified = true
+	print("OSM: Simplified tree mesh initialized (trunk + crown, 2 surfaces)")
+
+
+func _init_tree_meshes_model() -> void:
+	"""Извлекает меш из GLTF модели берёзы, масштабирует и собирает ArrayMesh для MultiMesh"""
+	print("OSM: Initializing tree mesh from birch model...")
+
+	# Инстанцируем сцену чтобы извлечь меши и материалы
+	var scene_inst: Node3D = BIRCH_TREE_SCENE.instantiate()
+
+	# Модель Sketchfab: корневой узел имеет поворот Y→Z (rotation matrix в GLTF)
+	# Дочерние MeshInstance3D содержат 3 меша: Branches, Leaves, Trunk
+	# Координаты модели ~0-420 по X, -400..0 по Y, 0-800 по Z (до поворота)
+	# Базовый масштаб: 0.018 (среднее от оригинального 0.015-0.022)
+	const BASE_SCALE := 0.018
+
+	# Собираем все MeshInstance3D из дерева сцены
+	var mesh_instances: Array[MeshInstance3D] = []
+	_collect_mesh_instances(scene_inst, mesh_instances)
+
+	_tree_mesh = ArrayMesh.new()
+
+	for mi in mesh_instances:
+		var mesh: Mesh = mi.mesh
+		if mesh == null:
+			continue
+
+		# Получаем глобальный трансформ этого MeshInstance3D (включая родительские повороты)
+		# Так как сцена не в дереве, вычисляем вручную
+		var xform := _get_node_transform_recursive(mi)
+		# Добавляем масштаб
+		xform = xform.scaled(Vector3(BASE_SCALE, BASE_SCALE, BASE_SCALE))
+
+		for surf_idx in range(mesh.get_surface_count()):
+			var arrays := mesh.surface_get_arrays(surf_idx)
+			var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+			var norms = arrays[Mesh.ARRAY_NORMAL]
+
+			# Трансформируем вершины и нормали
+			var transformed_verts := PackedVector3Array()
+			transformed_verts.resize(verts.size())
+			for i in range(verts.size()):
+				transformed_verts[i] = xform * verts[i]
+			arrays[Mesh.ARRAY_VERTEX] = transformed_verts
+
+			if norms != null and norms is PackedVector3Array:
+				var normal_basis := xform.basis.inverse().transposed()
+				var transformed_norms := PackedVector3Array()
+				transformed_norms.resize(norms.size())
+				for i in range(norms.size()):
+					transformed_norms[i] = (normal_basis * norms[i]).normalized()
+				arrays[Mesh.ARRAY_NORMAL] = transformed_norms
+
+			_tree_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+			var mat := mesh.surface_get_material(surf_idx)
+			if mat:
+				_tree_mesh.surface_set_material(_tree_mesh.get_surface_count() - 1, mat)
+
+	scene_inst.queue_free()
+	print("OSM: Tree mesh initialized from birch model (%d surfaces)" % _tree_mesh.get_surface_count())
+
+
+## Рекурсивно собирает все MeshInstance3D из дерева узлов
+static func _collect_mesh_instances(node: Node, result: Array[MeshInstance3D]) -> void:
+	if node is MeshInstance3D:
+		result.append(node)
+	for child in node.get_children():
+		_collect_mesh_instances(child, result)
+
+
+## Вычисляет полный трансформ узла от корня (для узлов не в SceneTree)
+static func _get_node_transform_recursive(node: Node3D) -> Transform3D:
+	var xform := node.transform
+	var parent := node.get_parent()
+	while parent != null and parent is Node3D:
+		xform = parent.transform * xform
+		parent = parent.get_parent()
+	return xform
 
 func _init_lamp_meshes() -> void:
 	"""Initialize lamp component meshes for MultiMesh batching"""
@@ -5908,7 +5999,7 @@ func _update_lamp_night_mode(is_night: bool) -> void:
 
 	print("OSM: Updated lamp night mode (is_night=%s)" % is_night)
 
-## Add tree to batch with LOD based on distance from car
+## Add tree to batch for MultiMesh rendering
 func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, parent: Node3D) -> void:
 	if not enable_vegetation:
 		return
@@ -5930,8 +6021,16 @@ func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, paren
 
 	_tree_batch_data[chunk_key]["transforms"].append(transform)
 
+	# Для GLTF модели: ствол берёзы смещён от центра (~195, ~190 в модельных координатах)
+	# После Sketchfab root rotation и BASE_SCALE 0.018: offset ≈ (3.5, 0, 3.4)
+	var collision_pos := tree_pos
+	if not _tree_simplified:
+		var trunk_offset := Vector3(3.5, 0, 3.4) * scale_factor
+		trunk_offset = Basis(Vector3.UP, rotation_y) * trunk_offset
+		collision_pos += trunk_offset
+
 	_tree_batch_data[chunk_key]["collisions"].append({
-		"position": tree_pos,
+		"position": collision_pos,
 		"radius": 0.4
 	})
 
@@ -5971,7 +6070,7 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 	parent.add_child(mm_inst)
 
 	if _draw_call_logging_enabled:
-		_draw_call_stats["vegetation"] += 2  # 2 surfaces = 2 draw calls
+		_draw_call_stats["vegetation"] += _tree_mesh.get_surface_count()
 
 	# Коллизии деревьев
 	for collision_data in batch["collisions"]:

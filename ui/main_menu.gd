@@ -631,6 +631,7 @@ func _update_graphics_checkboxes() -> void:
 	$SettingsPanel/VBox/FXAACheck.set_pressed_no_signal(_graphics_settings.fxaa_enabled)
 	$SettingsPanel/VBox/DOFCheck.set_pressed_no_signal(_graphics_settings.dof_enabled)
 	$SettingsPanel/VBox/VignetteCheck.set_pressed_no_signal(_graphics_settings.vignette_enabled)
+	$SettingsPanel/VBox/SimplifiedTreesCheck.set_pressed_no_signal(_graphics_settings.simplified_trees)
 	# MSAA option
 	var msaa_idx := 0
 	match _graphics_settings.msaa_mode:
@@ -731,6 +732,11 @@ func _on_vignette_toggled(toggled_on: bool) -> void:
 		_graphics_settings.vignette_enabled = toggled_on
 		_graphics_settings._apply_vignette()
 		_graphics_settings.settings_changed.emit()
+
+
+func _on_simplified_trees_toggled(toggled_on: bool) -> void:
+	if _graphics_settings:
+		_graphics_settings.set_simplified_trees(toggled_on)
 
 
 func _on_render_dist_changed(value: float) -> void:

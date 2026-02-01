@@ -25,6 +25,9 @@ var dof_enabled := false  # Размытие от расстояния
 var chromatic_aberration_enabled := false
 var vignette_enabled := false  # Виньетка (по умолчанию выключена)
 
+# Упрощённые деревья (процедурные вместо GLTF модели)
+var simplified_trees := false
+
 # Дальность прорисовки
 var render_distance := 400.0  # Метры
 
@@ -247,6 +250,13 @@ func toggle_vignette() -> void:
 	settings_changed.emit()
 
 
+func set_simplified_trees(value: bool) -> void:
+	simplified_trees = value
+	print("Simplified trees: ", "ON" if simplified_trees else "OFF")
+	print("NOTE: Tree style change requires terrain reload to take effect")
+	settings_changed.emit()
+
+
 func _apply_ssr() -> void:
 	if _environment:
 		_environment.ssr_enabled = ssr_enabled
@@ -377,6 +387,7 @@ func set_quality_low() -> void:
 	motion_blur_enabled = false
 	dof_enabled = false
 	vignette_enabled = false
+	simplified_trees = true
 	_apply_all()
 	print("Graphics: LOW")
 	settings_changed.emit()
@@ -394,6 +405,7 @@ func set_quality_medium() -> void:
 	motion_blur_enabled = false
 	dof_enabled = false
 	vignette_enabled = false
+	simplified_trees = false
 	_apply_all()
 	print("Graphics: MEDIUM")
 	settings_changed.emit()
@@ -411,6 +423,7 @@ func set_quality_high() -> void:
 	motion_blur_enabled = false
 	dof_enabled = false  # DOF тяжёлый
 	vignette_enabled = false
+	simplified_trees = false
 	_apply_all()
 	print("Graphics: HIGH")
 	settings_changed.emit()
@@ -446,6 +459,7 @@ func _load_settings() -> void:
 		motion_blur_enabled = config.get_value("graphics", "motion_blur", false)
 		dof_enabled = config.get_value("graphics", "dof", false)
 		vignette_enabled = config.get_value("graphics", "vignette", false)  # Дефолт false как при инициализации
+		simplified_trees = config.get_value("graphics", "simplified_trees", false)
 		render_distance = config.get_value("graphics", "render_distance", 400.0)  # Дефолт как при инициализации
 		print("GraphicsSettings: Settings loaded - FXAA: ", fxaa_enabled, ", TAA: ", taa_enabled, ", MSAA: ", msaa_mode)
 	else:
@@ -468,6 +482,7 @@ func save_settings() -> void:
 	config.set_value("graphics", "motion_blur", motion_blur_enabled)
 	config.set_value("graphics", "dof", dof_enabled)
 	config.set_value("graphics", "vignette", vignette_enabled)
+	config.set_value("graphics", "simplified_trees", simplified_trees)
 	config.set_value("graphics", "render_distance", render_distance)
 	var err := config.save("user://graphics.cfg")
 	if err == OK:
