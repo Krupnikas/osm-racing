@@ -10,10 +10,10 @@
 [ext_resource type="Script" path="res://camera/cinematic_camera.gd" id="15_cinematic_cam"]
 [ext_resource type="Script" path="res://camera/orbit_camera.gd" id="16_orbit_cam"]
 [ext_resource type="PackedScene" uid="uid://hud123" path="res://ui/hud.tscn" id="10_hud"]
-[ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="12_night"]
 [ext_resource type="Script" path="res://settings/graphics_settings.gd" id="16_graphics"]
 [ext_resource type="Script" path="res://textures/ground_setup.gd" id="17_ground"]
 [ext_resource type="Script" path="res://debug/performance_profiler.gd" id="19_profiler"]
+[ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="4_osm"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -46,23 +46,24 @@ fog_density = 0.0003
 fog_sky_affect = 0.15
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
-size = Vector3(10000, 1, 10000)
+size = Vector3(10000, 0.1, 10000)
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
 size = Vector2(10000, 10000)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
-albedo_color = Color(0.35, 0.50, 0.30, 1)
+albedo_color = Color(0.4, 0.5, 0.4, 1)
 
 [node name="TestTrackScene" type="Node3D"]
 script = ExtResource("1_scene")
 car_path = NodePath("Car")
 hud_path = NodePath("UI/HUD")
+terrain_path = NodePath("OSMTerrain")
 
 [node name="StaticGround" type="StaticBody3D" parent="." groups=["Grass"]]
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="StaticGround"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
 shape = SubResource("BoxShape3D_ground")
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="StaticGround"]
@@ -117,17 +118,29 @@ car_path = NodePath("../../Car")
 
 [node name="PauseMenu" parent="UI" instance=ExtResource("22_pause_menu")]
 
-[node name="NightModeManager" type="Node" parent="."]
-script = ExtResource("12_night")
-
 [node name="GraphicsSettings" type="Node" parent="."]
 script = ExtResource("16_graphics")
 
 [node name="GroundSetup" type="Node" parent="."]
 script = ExtResource("17_ground")
 ground_mesh_path = NodePath("../StaticGround/MeshInstance3D")
-night_mode_manager_path = NodePath("../NightModeManager")
 
 [node name="PerformanceProfiler" type="Node" parent="."]
 script = ExtResource("19_profiler")
 print_interval = 5.0
+
+[node name="OSMTerrain" type="Node3D" parent="."]
+script = ExtResource("4_osm")
+start_lat = 0.0
+start_lon = 0.0
+chunk_size = 300.0
+load_distance = 400.0
+unload_distance = 600.0
+car_path = NodePath("../Car")
+enable_buildings = false
+enable_windows = false
+enable_vegetation = false
+enable_street_lamps = false
+enable_traffic_signs = false
+enable_traffic_lights = false
+enable_night_mode_windows = false

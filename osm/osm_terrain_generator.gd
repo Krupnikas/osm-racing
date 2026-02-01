@@ -48,6 +48,12 @@ var _textures_initialized := false
 @export var enable_traffic_lights := true  # Включить светофоры
 @export var enable_night_mode_windows := true  # Включить подсветку окон ночью
 @export var enable_frustum_culling := true  # Включить frustum culling чанков
+
+## Тестовый режим: провайдер данных вместо HTTP (Callable(lat, lon, size) -> Dictionary)
+var test_data_provider: Callable = Callable()
+## Тестовый режим: провайдер высот (Callable(chunk_key, lat, lon) -> Dictionary)
+var test_elevation_provider: Callable = Callable()
+
 var osm_loader: Node
 var _car: Node3D
 var _camera: Camera3D
@@ -1243,6 +1249,21 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 	var chunk_lon := start_lon + center_x / (111000.0 * cos(deg_to_rad(start_lat)))
 
 	print("OSM: Loading chunk %s at lat=%.4f, lon=%.4f" % [chunk_key, chunk_lat, chunk_lon])
+
+	# Тестовый режим — данные без HTTP
+	if test_data_provider.is_valid():
+		if test_elevation_provider.is_valid():
+			var elev: Dictionary = test_elevation_provider.call(chunk_key, chunk_lat, chunk_lon)
+			if not elev.is_empty():
+				_chunk_elevations[chunk_key] = elev
+		var osm_data: Dictionary = test_data_provider.call(chunk_lat, chunk_lon, chunk_size)
+		osm_data["center_lat"] = chunk_lat
+		osm_data["center_lon"] = chunk_lon
+		var fake_loader := Node.new()
+		fake_loader.name = "FakeLoader_" + chunk_key
+		add_child(fake_loader)
+		_on_chunk_data_loaded(osm_data, chunk_key, fake_loader, _load_generation)
+		return
 
 	# Добавляем в очередь загрузки высот
 	if enable_elevation and not _chunk_elevations.has(chunk_key) and not _loading_elevations.has(chunk_key):
