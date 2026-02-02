@@ -89,6 +89,10 @@ func _process(delta: float) -> void:
 
 	_update_despawning()
 
+	# Порционное соединение перекрёстков — 2ms бюджет на кадр
+	if road_network and road_network.has_method("process_pending_connections"):
+		road_network.process_pending_connections(2000)
+
 	# Обновляем визуализацию путей NPC
 	if debug_visualize:
 		_update_npc_path_visualization()

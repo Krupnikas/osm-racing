@@ -213,10 +213,13 @@ func _build_path_from(start_wp) -> void:
 	waypoint_path.append(start_wp)
 
 	var current = start_wp
+	var visited := {}
+	visited[start_wp] = true
 	for i in range(PATH_BUILD_COUNT):
-		var next = _get_next_waypoint(current)
-		if next == null or next in waypoint_path:
+		var next = _choose_next_waypoint_straight(current, visited)
+		if next == null:
 			break
+		visited[next] = true
 		waypoint_path.append(next)
 		current = next
 
@@ -246,32 +249,28 @@ func _extend_path() -> void:
 
 	var current = last_wp
 	var new_waypoints := []
+	var visited := {}  # Быстрая проверка циклов
 	for i in range(15):
-		var next = _get_next_waypoint(current)
-		if next == null or next in waypoint_path or next in new_waypoints:
+		var next = _choose_next_waypoint_straight(current, visited)
+		if next == null:
 			break
+		visited[next] = true
 		new_waypoints.append(next)
 		current = next
 
 	waypoint_path.append_array(new_waypoints)
 
 
-func _get_next_waypoint(current):
-	## Возвращает следующий вейпоинт (самое прямое продолжение).
-	## Кольцевые дороги замкнуты через next_waypoints в road_network.
-	return _choose_next_waypoint_straight(current)
-
-
-func _choose_next_waypoint_straight(current):
-	## Всегда выбирает самое прямое продолжение (не как НПС с 40% поворотов)
+func _choose_next_waypoint_straight(current, exclude: Dictionary = {}):
+	## Выбирает самое прямое продолжение, пропуская wp из exclude
 	if current.next_waypoints.is_empty():
 		return null
-	if current.next_waypoints.size() == 1:
-		return current.next_waypoints[0]
 
 	var best_wp = null
 	var best_dot := -INF
 	for wp in current.next_waypoints:
+		if wp in exclude:
+			continue
 		var d: float = current.direction.dot(wp.direction)
 		if d > best_dot:
 			best_dot = d
@@ -282,9 +281,11 @@ func _choose_next_waypoint_straight(current):
 func _update_waypoint_progress() -> void:
 	if waypoint_path.is_empty() or current_waypoint_index >= waypoint_path.size():
 		return
-	var current_wp = waypoint_path[current_waypoint_index]
-	var distance: float = vehicle.global_position.distance_to(current_wp.position)
-	if distance < 10.0 and current_waypoint_index < waypoint_path.size() - 1:
+	# Продвигаем индекс мимо всех пройденных wp (не только одного за кадр)
+	while current_waypoint_index < waypoint_path.size() - 1:
+		var wp = waypoint_path[current_waypoint_index]
+		if vehicle.global_position.distance_to(wp.position) >= 10.0:
+			break
 		current_waypoint_index += 1
 
 	# Обрезаем старые вейпоинты чтобы массив не рос бесконечно
@@ -295,7 +296,11 @@ func _update_waypoint_progress() -> void:
 
 	var waypoints_ahead := waypoint_path.size() - current_waypoint_index
 	if waypoints_ahead < 5:
+		var old_size := waypoint_path.size()
 		_extend_path()
+		# Настоящий тупик: путь не продлился и мы у последнего wp
+		if waypoint_path.size() == old_size and waypoints_ahead <= 1:
+			deactivate()
 
 
 func _ensure_path() -> void:

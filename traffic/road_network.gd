@@ -35,6 +35,11 @@ const GRID_CELL_SIZE := 20.0  # Размер ячейки сетки в метр
 # Счётчик для уникальных ID дорог
 var _next_road_id: int = 0
 
+# Отложенное соединение перекрёстков (порционно по кадрам)
+var _pending_connections: Array = []  # Массивы вейпоинтов, ожидающих соединения
+var _current_connect_batch: Array = []  # Текущий батч для обработки
+var _current_connect_index: int = 0  # Индекс в текущем батче (фаза 2)
+
 # Константы
 const WAYPOINT_SPACING := 8.0  # Расстояние между waypoints в метрах
 const INTERSECTION_THRESHOLD := 8.0  # Расстояние для определения пересечений
@@ -93,11 +98,9 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_k
 			_close_loop(forward_waypoints)
 			_close_loop(reverse_waypoints)
 
-	# OPTIMIZATION: НЕ соединяем пересечения при добавлении дороги
-	# Это занимает до 400ms и вызывает лаги при подгрузке чанков
-	# NPC машины и так будут следовать только по своей дороге
-	# _connect_intersections_fast(forward_waypoints)
-	# _connect_intersections_fast(reverse_waypoints)
+	# Откладываем соединение перекрёстков — порционно по кадрам через process_pending_connections()
+	_pending_connections.append(forward_waypoints)
+	_pending_connections.append(reverse_waypoints)
 
 
 func _close_loop(waypoints: Array) -> void:
@@ -260,6 +263,10 @@ func _connect_intersections_fast(new_waypoints: Array) -> void:
 			if distance >= INTERSECTION_THRESHOLD:
 				continue
 
+			# Пропускаем дубликаты (один OSM way загружен несколькими чанками)
+			if _is_duplicate_waypoint(new_wp, existing_wp):
+				continue
+
 			# Проверяем совместимость направлений для правостороннего движения
 			if _can_connect_waypoints(new_wp, existing_wp):
 				if not new_wp.next_waypoints.has(existing_wp):
@@ -288,10 +295,24 @@ func _connect_intersections_fast(new_waypoints: Array) -> void:
 			if distance >= INTERSECTION_THRESHOLD:
 				continue
 
+			# Пропускаем дубликаты
+			if _is_duplicate_waypoint(existing_wp, new_wp):
+				continue
+
 			# Связываем тупик с новой дорогой если направления совместимы
 			if _can_connect_waypoints(existing_wp, new_wp):
 				if not existing_wp.next_waypoints.has(new_wp):
 					existing_wp.next_waypoints.append(new_wp)
+
+
+## Проверяет являются ли два wp дубликатами (одна дорога загружена несколькими чанками)
+## Дубликаты: близкое расстояние + почти одинаковое направление
+func _is_duplicate_waypoint(wp_a: Waypoint, wp_b: Waypoint) -> bool:
+	if wp_a.position.distance_to(wp_b.position) > 2.0:
+		return false
+	# Направления почти совпадают или почти противоположны = дубликат
+	var dir_dot: float = abs(wp_a.direction.dot(wp_b.direction))
+	return dir_dot > 0.9
 
 
 ## Проверяет можно ли создать связь from_wp -> to_wp для правостороннего движения
@@ -316,6 +337,93 @@ func _can_connect_waypoints(from_wp: Waypoint, to_wp: Waypoint) -> bool:
 
 	# Всё остальное разрешено (прямо, слияние, повороты)
 	return true
+
+
+## Порционное соединение перекрёстков — вызывается каждый кадр из TrafficManager
+func process_pending_connections(time_budget_usec: int) -> bool:
+	"""Обрабатывает отложенные соединения перекрёстков порционно.
+	Возвращает true если есть ещё работа, false если всё обработано."""
+	if _pending_connections.is_empty() and _current_connect_batch.is_empty():
+		return false
+
+	var start := Time.get_ticks_usec()
+
+	while true:
+		# Нужен новый батч?
+		if _current_connect_batch.is_empty():
+			if _pending_connections.is_empty():
+				return false
+			_current_connect_batch = _pending_connections.pop_front()
+			_current_connect_index = 0
+			# Фаза 1: endpoints (быстро, делаем сразу)
+			_connect_endpoints(_current_connect_batch)
+
+		# Фаза 2: порционно проверяем все wp батча против тупиков
+		while _current_connect_index < _current_connect_batch.size():
+			var wp: Waypoint = _current_connect_batch[_current_connect_index]
+			_connect_deadends_for(wp, _current_connect_batch)
+			_current_connect_index += 1
+
+			if Time.get_ticks_usec() - start > time_budget_usec:
+				return true  # Есть ещё работа
+
+		# Батч завершён
+		_current_connect_batch = []
+		_current_connect_index = 0
+
+	return false
+
+
+## Фаза 1: соединяет endpoints (первый и последний wp) батча с соседними дорогами
+func _connect_endpoints(batch: Array) -> void:
+	if batch.is_empty():
+		return
+
+	var endpoints := [batch[0]]
+	if batch.size() > 1:
+		endpoints.append(batch[batch.size() - 1])
+
+	for new_wp in endpoints:
+		var nearby := _get_nearby_waypoints(new_wp.position)
+		for existing_wp in nearby:
+			if existing_wp == new_wp or existing_wp in batch:
+				continue
+			var distance: float = new_wp.position.distance_to(existing_wp.position)
+			if distance >= INTERSECTION_THRESHOLD:
+				continue
+			# Пропускаем дубликаты: два wp в одной точке с тем же направлением —
+			# это дублированная дорога (один OSM way загружен несколькими чанками)
+			if _is_duplicate_waypoint(new_wp, existing_wp):
+				continue
+			if _can_connect_waypoints(new_wp, existing_wp):
+				if not new_wp.next_waypoints.has(existing_wp):
+					new_wp.next_waypoints.append(existing_wp)
+					existing_wp.prev_waypoints.append(new_wp)
+			if _can_connect_waypoints(existing_wp, new_wp):
+				if not existing_wp.next_waypoints.has(new_wp):
+					existing_wp.next_waypoints.append(new_wp)
+					new_wp.prev_waypoints.append(existing_wp)
+
+
+## Фаза 2: проверяет один wp против тупиков (dead-ends) соседних дорог
+func _connect_deadends_for(wp: Waypoint, batch: Array) -> void:
+	var nearby := _get_nearby_waypoints(wp.position)
+	for existing_wp in nearby:
+		if existing_wp == wp or existing_wp in batch:
+			continue
+		# Только тупики — вейпоинты без следующих
+		if not existing_wp.next_waypoints.is_empty():
+			continue
+		var distance: float = wp.position.distance_to(existing_wp.position)
+		if distance >= INTERSECTION_THRESHOLD:
+			continue
+		# Пропускаем дубликаты
+		if _is_duplicate_waypoint(existing_wp, wp):
+			continue
+		if _can_connect_waypoints(existing_wp, wp):
+			if not existing_wp.next_waypoints.has(wp):
+				existing_wp.next_waypoints.append(wp)
+				wp.prev_waypoints.append(existing_wp)
 
 
 func get_nearest_waypoint(position: Vector3) -> Waypoint:
@@ -401,6 +509,23 @@ func clear_chunk(chunk_key: String) -> void:
 		for other_wp in all_waypoints:
 			other_wp.next_waypoints.erase(wp)
 			other_wp.prev_waypoints.erase(wp)
+
+	# Очищаем отложенные соединения: убираем батчи, содержащие удалённые wp
+	var chunk_wps_set := {}
+	for wp in chunk_waypoints:
+		chunk_wps_set[wp] = true
+	_pending_connections = _pending_connections.filter(func(batch: Array) -> bool:
+		for bwp in batch:
+			if bwp in chunk_wps_set:
+				return false
+		return true
+	)
+	if not _current_connect_batch.is_empty():
+		for bwp in _current_connect_batch:
+			if bwp in chunk_wps_set:
+				_current_connect_batch = []
+				_current_connect_index = 0
+				break
 
 	waypoints_by_chunk.erase(chunk_key)
 

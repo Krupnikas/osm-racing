@@ -369,11 +369,19 @@ func _update_waypoint_progress() -> void:
 	var current_wp = waypoint_path[current_waypoint_index]
 	var distance := global_position.distance_to(current_wp.position)
 
-	# Если близко к waypoint - переходим к следующему
-	if distance < 10.0 and current_waypoint_index < waypoint_path.size() - 1:
+	# Продвигаем индекс мимо всех пройденных wp (не только одного за кадр)
+	while distance < 10.0 and current_waypoint_index < waypoint_path.size() - 1:
 		current_waypoint_index += 1
+		if current_waypoint_index < waypoint_path.size():
+			distance = global_position.distance_to(waypoint_path[current_waypoint_index].position)
 
-	# НОВОЕ: Если приближаемся к концу пути - продлеваем его
+	# Обрезаем старые вейпоинты чтобы массив не рос бесконечно
+	if current_waypoint_index > 20:
+		var trim := current_waypoint_index - 5
+		waypoint_path = waypoint_path.slice(trim)
+		current_waypoint_index -= trim
+
+	# Если приближаемся к концу пути - продлеваем его
 	var waypoints_ahead := waypoint_path.size() - current_waypoint_index
 	if waypoints_ahead < 5:  # Осталось меньше 5 waypoints
 		_extend_path()
@@ -468,14 +476,15 @@ func _extend_path() -> void:
 	# Строим продолжение пути на 15 waypoints вперёд
 	var current = last_wp
 	var new_waypoints := []
+	var visited := {}  # Быстрая проверка циклов
 	var is_turning := false
 
 	for i in range(15):
 		if current.next_waypoints.is_empty():
 			break
 
-		# Выбираем следующий waypoint
-		var next = _choose_next_waypoint(current)
+		# Выбираем следующий waypoint, пропуская уже добавленные
+		var next = _choose_next_waypoint(current, visited)
 		if next == null:
 			break
 
@@ -484,10 +493,7 @@ func _extend_path() -> void:
 		if dir_dot < 0.7:  # Угол > ~45 градусов = поворот
 			is_turning = true
 
-		# Проверяем что waypoint ещё не в пути (избегаем циклов и дубликатов)
-		if next in waypoint_path or next in new_waypoints:
-			break
-
+		visited[next] = true
 		new_waypoints.append(next)
 		current = next
 
@@ -500,21 +506,29 @@ func _extend_path() -> void:
 	waypoint_path.append_array(new_waypoints)
 
 
-func _choose_next_waypoint(current) -> Variant:
+func _choose_next_waypoint(current, exclude: Dictionary = {}) -> Variant:
 	"""Выбирает следующий waypoint с приоритетом прямого направления.
-	60% шанс ехать прямо, 40% шанс повернуть."""
+	60% шанс ехать прямо, 40% шанс повернуть. Пропускает wp из exclude."""
 	if current.next_waypoints.is_empty():
 		return null
 
-	if current.next_waypoints.size() == 1:
-		return current.next_waypoints[0]
+	# Фильтруем исключённые
+	var candidates := []
+	for wp in current.next_waypoints:
+		if wp not in exclude:
+			candidates.append(wp)
+	if candidates.is_empty():
+		return null
+
+	if candidates.size() == 1:
+		return candidates[0]
 
 	# Находим waypoint с наиболее близким направлением (прямо)
 	var straight_wp = null
 	var best_dot := -INF
 	var turn_candidates := []
 
-	for wp in current.next_waypoints:
+	for wp in candidates:
 		var dir_dot: float = current.direction.dot(wp.direction)
 		if dir_dot > best_dot:
 			best_dot = dir_dot
