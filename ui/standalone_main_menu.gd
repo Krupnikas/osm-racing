@@ -104,6 +104,12 @@ func _on_races_pressed() -> void:
 	$ModesPanel.visible = true
 
 
+func _on_car_selection_pressed() -> void:
+	"""Выбор машины"""
+	$VBox.visible = false
+	$CarSelection.show_selection()
+
+
 func _on_controls_pressed() -> void:
 	"""Показать управление"""
 	$VBox.visible = false

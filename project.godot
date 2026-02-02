@@ -23,6 +23,7 @@ buses/default_bus_layout="res://audio/default_bus_layout.tres"
 
 MusicManager="*res://audio/music_manager.gd"
 RaceState="*res://race/race_state.gd"
+CarSettings="*res://settings/car_settings.gd"
 
 [display]
 

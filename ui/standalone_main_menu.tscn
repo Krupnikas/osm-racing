@@ -1,7 +1,8 @@
-[gd_scene load_steps=3 format=3 uid="uid://dxqmenu001"]
+[gd_scene load_steps=4 format=3 uid="uid://dxqmenu001"]
 
 [ext_resource type="Script" path="res://ui/standalone_main_menu.gd" id="1_script"]
 [ext_resource type="Texture2D" path="res://ui/assets/zhazhda-speed.png" id="2_bg"]
+[ext_resource type="PackedScene" uid="uid://car_selection_001" path="res://ui/car_selection.tscn" id="3_car_selection"]
 
 [node name="StandaloneMainMenu" type="Control"]
 process_mode = 3
@@ -72,6 +73,14 @@ theme_override_colors/font_color = Color(1, 1, 1, 1)
 theme_override_colors/font_hover_color = Color(1, 0.5, 0.5, 1)
 theme_override_font_sizes/font_size = 36
 text = "🏁 БЫСТРЫЙ ЗАЕЗД"
+
+[node name="CarSelectionButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(400, 70)
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_hover_color = Color(0.5, 0.8, 1, 1)
+theme_override_font_sizes/font_size = 36
+text = "🚗 ВЫБОР МАШИНЫ"
 
 [node name="CareerButton" type="Button" parent="VBox"]
 custom_minimum_size = Vector2(400, 70)
@@ -447,6 +456,8 @@ theme_override_font_sizes/font_size = 24
 text = "Загрузка карты..."
 horizontal_alignment = 1
 
+[node name="CarSelection" parent="." instance=ExtResource("3_car_selection")]
+
 [node name="Version" type="Label" parent="."]
 layout_mode = 1
 anchors_preset = 2
@@ -462,6 +473,7 @@ text = "v0.1 alpha"
 
 [connection signal="pressed" from="VBox/StartButton" to="." method="_on_start_pressed"]
 [connection signal="pressed" from="VBox/RacesButton" to="." method="_on_races_pressed"]
+[connection signal="pressed" from="VBox/CarSelectionButton" to="." method="_on_car_selection_pressed"]
 [connection signal="pressed" from="VBox/ControlsButton" to="." method="_on_controls_pressed"]
 [connection signal="pressed" from="VBox/SettingsButton" to="." method="_on_settings_pressed"]
 [connection signal="pressed" from="VBox/QuitButton" to="." method="_on_quit_pressed"]
