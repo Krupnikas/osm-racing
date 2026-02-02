@@ -1,6 +1,6 @@
 [gd_scene load_steps=22 format=3 uid="uid://bmain123"]
 
-[ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_car"]
+[ext_resource type="PackedScene" path="res://addons/gevp/scenes/beetle_car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://race/race_manager.gd" id="20_race_mgr"]
 [ext_resource type="PackedScene" uid="uid://race_hud_001" path="res://ui/race_hud.tscn" id="21_race_hud"]
 [ext_resource type="PackedScene" uid="uid://race_menu_001" path="res://ui/race_menu.tscn" id="22_race_menu"]

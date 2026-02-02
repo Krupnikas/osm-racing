@@ -6,6 +6,7 @@ extends Control
 var _car: Node3D  # Может быть VehicleBody3D или GEVP Vehicle
 var _car_rigidbody: RigidBody3D  # Для GEVP - доступ к RigidBody3D
 var _speedometer: Control
+var _minimap: Control
 var _terrain_generator: Node3D
 
 # Текущие значения
@@ -18,6 +19,7 @@ func _ready() -> void:
 	await get_tree().process_frame
 
 	_speedometer = $Speedometer
+	_minimap = $MiniMap if has_node("MiniMap") else null
 
 	if car_path:
 		_car = get_node(car_path)
@@ -101,3 +103,9 @@ func _input(event: InputEvent) -> void:
 func _toggle_chunk_debug() -> void:
 	if _terrain_generator and _terrain_generator.has_method("toggle_chunk_boundaries"):
 		_terrain_generator.toggle_chunk_boundaries()
+
+
+func set_race_mode(enabled: bool) -> void:
+	"""Включает режим гонки (показывает соперников на мини-карте)"""
+	if _minimap and _minimap.has_method("set_show_opponents"):
+		_minimap.set_show_opponents(enabled)

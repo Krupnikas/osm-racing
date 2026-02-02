@@ -13,7 +13,7 @@ const OVERPASS_SERVERS := [
 
 # Кеширование
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 2  # Увеличить при изменении формата запроса (v2: добавлены деревья, знаки, фонари)
+const CACHE_VERSION := 4  # Увеличить при изменении формата запроса (v4: добавлены bus_station)
 var use_cache := true
 
 var http_request: HTTPRequest
@@ -130,11 +130,15 @@ func load_area(lat: float, lon: float, radius: float = 500.0) -> void:
   node["entrance"](%s);
   node["shop"](%s);
   node["amenity"](%s);
+  node["highway"="bus_stop"](%s);
+  node["amenity"="bus_station"](%s);
+  node["public_transport"="platform"](%s);
+  node["public_transport"="station"](%s);
 );
 out body geom;
 >;
 out skel qt;
-""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
+""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
 	current_server_index = 0
@@ -200,6 +204,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	var point_objects := []  # Точечные объекты (деревья, знаки, фонари)
 	var entrance_nodes := []  # Входы в здания
 	var poi_nodes := []  # Точечные заведения (shop, amenity как node)
+	var bus_stops := []  # Автобусные остановки
 
 	# Собираем все узлы
 	for element in data.get("elements", []):
@@ -222,6 +227,18 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 				# Точечные заведения (shop или amenity с названием)
 				if (tags.has("shop") or tags.has("amenity")) and (tags.has("name") or tags.has("brand")):
 					poi_nodes.append({
+						"lat": element.lat,
+						"lon": element.lon,
+						"tags": tags
+					})
+
+				# Автобусные остановки (highway=bus_stop, amenity=bus_station, public_transport=platform/station)
+				var is_bus_stop: bool = tags.get("highway", "") == "bus_stop"
+				var is_bus_station: bool = tags.get("amenity", "") == "bus_station"
+				var pt_value: String = tags.get("public_transport", "")
+				var is_platform: bool = pt_value == "platform" or pt_value == "station"
+				if is_bus_stop or is_bus_station or is_platform:
+					bus_stops.append({
 						"lat": element.lat,
 						"lon": element.lon,
 						"tags": tags
@@ -286,7 +303,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	if relations_found > 0:
 		print("OSM: Found %d relations, %d with valid geometry" % [relations_found, relations_with_nodes])
 
-	print("OSM: Parsed %d nodes, %d ways, %d point objects, %d entrances, %d POI nodes" % [nodes.size(), ways.size(), point_objects.size(), entrance_nodes.size(), poi_nodes.size()])
+	print("OSM: Parsed %d nodes, %d ways, %d point objects, %d entrances, %d POI nodes, %d bus stops" % [nodes.size(), ways.size(), point_objects.size(), entrance_nodes.size(), poi_nodes.size(), bus_stops.size()])
 
 	return {
 		"center_lat": center_lat,
@@ -295,7 +312,8 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 		"ways": ways,
 		"point_objects": point_objects,
 		"entrance_nodes": entrance_nodes,
-		"poi_nodes": poi_nodes
+		"poi_nodes": poi_nodes,
+		"bus_stops": bus_stops
 	}
 
 # Конвертация координат в локальные метры относительно центра

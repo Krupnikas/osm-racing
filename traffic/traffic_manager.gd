@@ -17,6 +17,7 @@ var npc_paz_scene: PackedScene
 var npc_lada_scene: PackedScene
 var npc_taxi_scene: PackedScene
 var npc_vaz2107_scene: PackedScene
+var npc_polo_scene: PackedScene
 var road_network: Node  # RoadNetwork
 var terrain_generator: Node  # OSMTerrainGenerator
 var player_car: Node3D
@@ -49,6 +50,7 @@ func _ready() -> void:
 	npc_lada_scene = preload("res://traffic/npc_lada_2109.tscn")
 	npc_taxi_scene = preload("res://traffic/npc_taxi.tscn")
 	npc_vaz2107_scene = preload("res://traffic/npc_vaz_2107.tscn")
+	npc_polo_scene = preload("res://traffic/npc_polo.tscn")
 
 	# Создаём RoadNetwork
 	var RoadNetworkScript = preload("res://traffic/road_network.gd")
@@ -366,12 +368,16 @@ func _get_npc_from_pool():
 			# 15% - ПАЗ
 			scene_to_use = npc_paz_scene
 			car_type = "PAZ bus"
-		elif rand < 0.60:
-			# 25% - ВАЗ-2107
+		elif rand < 0.55:
+			# 20% - ВАЗ-2107
 			scene_to_use = npc_vaz2107_scene
 			car_type = "VAZ-2107"
+		elif rand < 0.75:
+			# 20% - VW Polo
+			scene_to_use = npc_polo_scene
+			car_type = "VW Polo"
 		else:
-			# 40% - блочные машинки
+			# 25% - блочные машинки
 			scene_to_use = npc_car_scene
 			car_type = "box car"
 
