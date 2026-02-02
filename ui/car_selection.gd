@@ -40,6 +40,7 @@ func _update_preview() -> void:
 	var car_scene := load(scene_path) as PackedScene
 	_preview_car = car_scene.instantiate()
 	_preview_car.position = Vector3.ZERO
+	_preview_car.scale = Vector3(1.5, 1.5, 1.5)  # Увеличиваем для превью
 
 	# Отключаем физику для превью
 	if _preview_car is RigidBody3D:
