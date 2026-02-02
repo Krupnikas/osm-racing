@@ -16,6 +16,8 @@ const LOCATIONS := {
 	"Дубай (Крик)": [25.208591, 55.344100],
 }
 
+var _current_mode: String = "sprint"  # "sprint" или "checkpoint"
+
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -29,9 +31,15 @@ func _ready() -> void:
 	_add_test_tracks_button()
 
 
-func _populate_tracks() -> void:
-	"""Создать кнопки для всех доступных трасс"""
-	var tracks = RaceTrackScript.get_all_tracks()
+func _populate_tracks(mode: String = "") -> void:
+	"""Создать кнопки для трасс указанного режима"""
+	var tracks: Array
+	if mode == "sprint":
+		tracks = RaceTrackScript.get_sprint_tracks()
+	elif mode == "checkpoint":
+		tracks = RaceTrackScript.get_checkpoint_tracks()
+	else:
+		tracks = RaceTrackScript.get_all_tracks()
 	var container = get_node_or_null("TracksPanel/VBox/TracksContainer")
 	if not container:
 		push_error("TracksContainer not found!")
@@ -175,6 +183,16 @@ func _on_modes_back_pressed() -> void:
 
 func _on_sprint_pressed() -> void:
 	"""Спринт - показать выбор трассы"""
+	_current_mode = "sprint"
+	_populate_tracks("sprint")
+	$ModesPanel.visible = false
+	$TracksPanel.visible = true
+
+
+func _on_checkpoint_pressed() -> void:
+	"""Чекпоинт - показать выбор трассы"""
+	_current_mode = "checkpoint"
+	_populate_tracks("checkpoint")
 	$ModesPanel.visible = false
 	$TracksPanel.visible = true
 

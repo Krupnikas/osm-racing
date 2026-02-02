@@ -13,6 +13,8 @@ signal countdown_go  # Старт!
 signal race_started
 signal race_finished(time: float)
 signal race_cancelled
+signal checkpoint_passed(index: int, time_bonus: float)  # Пройден чекпоинт
+signal checkpoint_timeout  # Время истекло
 
 enum State { IDLE, LOADING, COUNTDOWN, RACING, FINISHED }
 
@@ -31,6 +33,14 @@ var _camera: Camera3D
 var _finish_line: Area3D
 var _countdown_timer: float = 0.0
 var _countdown_current: int = 0
+
+# Checkpoint mode
+var _checkpoint_mode: bool = false
+var _checkpoint_timer: float = 0.0
+var _current_checkpoint_index: int = 0
+var _checkpoint_areas: Array = []  # Array[Area3D]
+var _checkpoint_local_positions: Array = []  # Array[Vector3] для minimap
+var _minimap: Control  # Ссылка на мини-карту
 
 
 func _ready() -> void:
@@ -51,6 +61,8 @@ func _process(delta: float) -> void:
 			_process_countdown(delta)
 		State.RACING:
 			race_time += delta
+			if _checkpoint_mode:
+				_process_checkpoint_timer(delta)
 
 
 func _process_countdown(delta: float) -> void:
@@ -71,6 +83,8 @@ func _process_countdown(delta: float) -> void:
 
 func start_race(track) -> void:
 	"""Запустить гонку на указанной трассе"""
+	print("RaceManager.start_race() called with track: ", track)
+	print("RaceManager: current_state = ", State.keys()[current_state])
 	if current_state != State.IDLE:
 		print("RaceManager: Cannot start race - already in state ", State.keys()[current_state])
 		return
@@ -78,6 +92,16 @@ func start_race(track) -> void:
 	current_track = track
 	race_time = 0.0
 	current_state = State.LOADING
+	print("RaceManager: State changed to LOADING")
+
+	# Reset checkpoint state
+	_checkpoint_mode = track.race_mode == "checkpoint"
+	print("RaceManager: checkpoint_mode = ", _checkpoint_mode)
+	_checkpoint_timer = 0.0
+	_current_checkpoint_index = 0
+	_checkpoint_local_positions.clear()
+
+	print("RaceManager: Emitting race_loading_started signal")
 	race_loading_started.emit()
 
 	print("RaceManager: Starting race on track '%s'" % track.track_name)
@@ -147,6 +171,10 @@ func _on_race_ready() -> void:
 	# Создаём финишную линию
 	_create_finish_line()
 
+	# Создаём чекпоинты для checkpoint mode
+	if _checkpoint_mode:
+		_create_checkpoints()
+
 	race_ready.emit()
 
 	# Небольшая пауза перед отсчётом
@@ -167,6 +195,14 @@ func _start_countdown() -> void:
 func _start_racing() -> void:
 	"""Начать гонку после отсчёта"""
 	print("RaceManager: GO!")
+
+	# ВАЖНО: Инициализируем таймер чекпоинтов ДО смены состояния на RACING
+	# Иначе _process() увидит RACING + timer=0 и вызовет мгновенный таймаут
+	if _checkpoint_mode and current_track and current_track.checkpoints.size() > 0:
+		_checkpoint_timer = current_track.checkpoints[0].get("time_limit", current_track.default_checkpoint_time)
+		_current_checkpoint_index = 0
+		print("RaceManager: Checkpoint timer initialized: %.1f" % _checkpoint_timer)
+
 	current_state = State.RACING
 	race_time = 0.0
 
@@ -204,6 +240,7 @@ func _start_racing() -> void:
 		_car_rigidbody.angular_velocity = Vector3.ZERO
 
 	print("RaceManager: AFTER reset - Y=%.2f" % _car.global_position.y)
+
 	race_started.emit()
 
 
@@ -405,6 +442,17 @@ func cancel_race() -> void:
 		_finish_line.queue_free()
 		_finish_line = null
 
+	# Удаляем чекпоинты
+	for area in _checkpoint_areas:
+		if is_instance_valid(area):
+			area.queue_free()
+	_checkpoint_areas.clear()
+	_checkpoint_local_positions.clear()
+
+	# Очищаем мини-карту
+	if _minimap and _minimap.has_method("clear_checkpoints"):
+		_minimap.clear_checkpoints()
+
 	current_state = State.IDLE
 	race_cancelled.emit()
 
@@ -523,3 +571,216 @@ func _latlon_to_local(lat: float, lon: float) -> Vector3:
 	var x := lon_diff * 111000.0 * cos(deg_to_rad(lat))
 
 	return Vector3(x, 0, z)
+
+
+# ============= Checkpoint Mode =============
+
+func _create_checkpoints() -> void:
+	"""Создать Area3D для каждого чекпоинта"""
+	if not current_track or current_track.checkpoints.is_empty():
+		return
+
+	# Очищаем старые чекпоинты
+	for area in _checkpoint_areas:
+		if is_instance_valid(area):
+			area.queue_free()
+	_checkpoint_areas.clear()
+	_checkpoint_local_positions.clear()
+
+	var start_pos := _latlon_to_local(current_track.start_lat, current_track.start_lon)
+
+	for i in range(current_track.checkpoints.size()):
+		var cp: Dictionary = current_track.checkpoints[i]
+		var cp_pos := _latlon_to_local(cp.lat, cp.lon)
+		_checkpoint_local_positions.append(cp_pos)
+
+		# Создаём Area3D
+		var area := Area3D.new()
+		area.name = "Checkpoint_%d" % i
+
+		# Создаём коллизию
+		var collision := CollisionShape3D.new()
+		var shape := BoxShape3D.new()
+		shape.size = Vector3(20.0, 4.0, 2.0)
+		collision.shape = shape
+		collision.position = Vector3(0, 1.5, 0)
+		area.add_child(collision)
+
+		# Визуализация - жёлтая разметка
+		_create_checkpoint_visuals(area)
+
+		# Позиция
+		area.global_position = cp_pos
+
+		# Ориентация - к следующему чекпоинту или финишу
+		var next_pos: Vector3
+		if i < current_track.checkpoints.size() - 1:
+			var next_cp: Dictionary = current_track.checkpoints[i + 1]
+			next_pos = _latlon_to_local(next_cp.lat, next_cp.lon)
+		else:
+			next_pos = _latlon_to_local(current_track.finish_lat, current_track.finish_lon)
+
+		var dir := next_pos - cp_pos
+		dir.y = 0
+		if dir.length_squared() > 0.01:
+			var yaw := atan2(dir.x, dir.z)
+			area.rotation = Vector3(0, yaw, 0)
+
+		# Подключаем сигнал с индексом
+		area.body_entered.connect(_on_checkpoint_entered.bind(i))
+
+		# Скрываем все кроме первого
+		area.visible = (i == 0)
+
+		add_child(area)
+		_checkpoint_areas.append(area)
+
+	print("RaceManager: Created %d checkpoints" % _checkpoint_areas.size())
+
+	# Обновляем мини-карту
+	_update_minimap_checkpoints()
+
+
+func _update_minimap_checkpoints() -> void:
+	"""Отправляем данные чекпоинтов на мини-карту"""
+	if not _minimap:
+		_minimap = get_tree().current_scene.find_child("MiniMap", true, false)
+
+	if _minimap and _minimap.has_method("set_checkpoints"):
+		var finish_pos := _latlon_to_local(current_track.finish_lat, current_track.finish_lon)
+		_minimap.set_checkpoints(_checkpoint_local_positions, finish_pos)
+
+
+func _create_checkpoint_visuals(area: Area3D) -> void:
+	"""Создать жёлтую визуализацию чекпоинта"""
+	var square_size := 1.0
+	var num_squares_x := 12
+	var num_squares_z := 2
+	var yellow := Color(1.0, 0.85, 0.0)
+
+	# Жёлтые квадраты
+	for ix in range(num_squares_x):
+		for iz in range(num_squares_z):
+			var square := MeshInstance3D.new()
+			var square_mesh := BoxMesh.new()
+			square_mesh.size = Vector3(square_size, 0.05, square_size)
+			square.mesh = square_mesh
+
+			var mat := StandardMaterial3D.new()
+			mat.albedo_color = yellow
+			mat.emission_enabled = true
+			mat.emission = yellow
+			mat.emission_energy_multiplier = 0.5
+			square.material_override = mat
+
+			var x_pos := (ix - num_squares_x / 2.0 + 0.5) * square_size
+			var z_pos := (iz - num_squares_z / 2.0 + 0.5) * square_size
+			square.position = Vector3(x_pos, 0.15, z_pos)
+			area.add_child(square)
+
+	# Жёлтые столбы
+	for side in [-1, 1]:
+		var pole := MeshInstance3D.new()
+		var pole_mesh := CylinderMesh.new()
+		pole_mesh.top_radius = 0.15
+		pole_mesh.bottom_radius = 0.15
+		pole_mesh.height = 4.0
+		pole.mesh = pole_mesh
+		var pole_mat := StandardMaterial3D.new()
+		pole_mat.albedo_color = yellow
+		pole_mat.emission_enabled = true
+		pole_mat.emission = yellow
+		pole_mat.emission_energy_multiplier = 0.5
+		pole.material_override = pole_mat
+		pole.position = Vector3(side * 6.5, 2.0, 0)
+		area.add_child(pole)
+
+
+func _on_checkpoint_entered(body: Node3D, index: int) -> void:
+	"""Обработка проезда чекпоинта"""
+	if current_state != State.RACING:
+		return
+
+	# Проверяем что это наша машина
+	if body != _car and body != _car_rigidbody:
+		return
+
+	# Проверяем что это текущий чекпоинт
+	if index != _current_checkpoint_index:
+		return
+
+	# Рассчитываем бонус времени (остаток)
+	var time_bonus := _checkpoint_timer
+	print("RaceManager: Checkpoint %d passed! Time bonus: +%.1f" % [index, time_bonus])
+
+	# Скрываем пройденный чекпоинт
+	if index < _checkpoint_areas.size():
+		_checkpoint_areas[index].visible = false
+
+	# Переходим к следующему чекпоинту
+	_current_checkpoint_index += 1
+
+	# Проверяем есть ли ещё чекпоинты
+	if _current_checkpoint_index < current_track.checkpoints.size():
+		# Показываем следующий чекпоинт
+		_checkpoint_areas[_current_checkpoint_index].visible = true
+
+		# Устанавливаем время для следующего чекпоинта (с бонусом)
+		var next_cp: Dictionary = current_track.checkpoints[_current_checkpoint_index]
+		var next_time: float = next_cp.get("time_limit", current_track.default_checkpoint_time)
+		_checkpoint_timer = next_time + time_bonus  # Переносим избыток
+		print("RaceManager: Next checkpoint time: %.1f (base %.1f + bonus %.1f)" % [_checkpoint_timer, next_time, time_bonus])
+	else:
+		# Все чекпоинты пройдены, таймер до финиша
+		_checkpoint_timer = current_track.default_checkpoint_time + time_bonus
+		print("RaceManager: All checkpoints passed! Time to finish: %.1f" % _checkpoint_timer)
+
+	# Обновляем мини-карту
+	if _minimap and _minimap.has_method("mark_checkpoint_passed"):
+		_minimap.mark_checkpoint_passed(index)
+
+	checkpoint_passed.emit(index, time_bonus)
+
+
+func _process_checkpoint_timer(delta: float) -> void:
+	"""Обработка таймера чекпоинтов"""
+	_checkpoint_timer -= delta
+
+	if _checkpoint_timer <= 0:
+		_on_checkpoint_timeout()
+
+
+func _on_checkpoint_timeout() -> void:
+	"""Время истекло - поражение"""
+	print("RaceManager: TIMEOUT! Race failed")
+	current_state = State.FINISHED
+
+	# Тормозим машину
+	if _car_rigidbody:
+		if _car_rigidbody.get("handbrake") != null:
+			_car_rigidbody.handbrake = 1.0
+		elif _car_rigidbody.get("brake") != null:
+			_car_rigidbody.brake = 1.0
+		_car_rigidbody.linear_damp = 3.0
+
+	checkpoint_timeout.emit()
+
+
+func get_checkpoint_timer() -> float:
+	"""Получить текущее время таймера чекпоинтов"""
+	return _checkpoint_timer
+
+
+func get_checkpoint_positions() -> Array:
+	"""Получить локальные позиции чекпоинтов для minimap"""
+	return _checkpoint_local_positions
+
+
+func get_current_checkpoint_index() -> int:
+	"""Получить индекс текущего чекпоинта"""
+	return _current_checkpoint_index
+
+
+func is_checkpoint_mode() -> bool:
+	"""Проверить активен ли режим чекпоинтов"""
+	return _checkpoint_mode

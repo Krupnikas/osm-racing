@@ -184,9 +184,9 @@ anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
 offset_left = -200.0
-offset_top = -150.0
+offset_top = -200.0
 offset_right = 200.0
-offset_bottom = 150.0
+offset_bottom = 200.0
 grow_horizontal = 2
 grow_vertical = 2
 
@@ -216,6 +216,12 @@ custom_minimum_size = Vector2(0, 60)
 layout_mode = 2
 theme_override_font_sizes/font_size = 24
 text = "Спринт"
+
+[node name="CheckpointButton" type="Button" parent="ModesPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "Чекпоинт"
 
 [node name="Spacer2" type="Control" parent="ModesPanel/VBox"]
 custom_minimum_size = Vector2(0, 20)
@@ -465,6 +471,7 @@ text = "v0.1 alpha"
 [connection signal="pressed" from="LocationPanel/VBox/DubaiButton" to="." method="_on_dubai_pressed"]
 [connection signal="pressed" from="LocationPanel/VBox/BackButton" to="." method="_on_location_back_pressed"]
 [connection signal="pressed" from="ModesPanel/VBox/SprintButton" to="." method="_on_sprint_pressed"]
+[connection signal="pressed" from="ModesPanel/VBox/CheckpointButton" to="." method="_on_checkpoint_pressed"]
 [connection signal="pressed" from="ModesPanel/VBox/BackButton" to="." method="_on_modes_back_pressed"]
 [connection signal="pressed" from="TracksPanel/VBox/BackButton" to="." method="_on_tracks_back_pressed"]
 [connection signal="pressed" from="ControlsPanel/VBox/BackButton" to="." method="_on_controls_back_pressed"]

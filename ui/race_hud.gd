@@ -10,13 +10,16 @@ var _race_manager  # RaceManager
 
 
 func _ready() -> void:
+	print("RaceHUD._ready() START")
 	visible = false
 	await get_tree().process_frame
 
 	if race_manager_path:
 		_race_manager = get_node_or_null(race_manager_path)
+		print("RaceHUD: _race_manager = ", _race_manager)
 
 	if _race_manager:
+		print("RaceHUD: Connecting signals to RaceManager")
 		_race_manager.race_loading_started.connect(_on_loading_started)
 		_race_manager.race_loading_progress.connect(_on_loading_progress)
 		_race_manager.race_ready.connect(_on_race_ready)
@@ -25,17 +28,31 @@ func _ready() -> void:
 		_race_manager.race_started.connect(_on_race_started)
 		_race_manager.race_finished.connect(_on_race_finished)
 		_race_manager.race_cancelled.connect(_on_race_cancelled)
+		_race_manager.checkpoint_passed.connect(_on_checkpoint_passed)
+		_race_manager.checkpoint_timeout.connect(_on_checkpoint_timeout)
 
 
 func _process(_delta: float) -> void:
 	if _race_manager and _race_manager.current_state == RaceManagerScript.State.RACING:
 		$TimerLabel.text = _race_manager.get_formatted_time()
 
+		# Обновляем таймер чекпоинтов
+		if _race_manager.is_checkpoint_mode():
+			var cp_time: float = _race_manager.get_checkpoint_timer()
+			$CheckpointTimer/TimeLabel.text = "%.1f" % cp_time
+
+			# Красный цвет при малом времени
+			if cp_time <= 3.0:
+				$CheckpointTimer/TimeLabel.modulate = Color(1.0, 0.3, 0.3)
+			else:
+				$CheckpointTimer/TimeLabel.modulate = Color.WHITE
+
 
 func show_hud() -> void:
 	visible = true
 	$CountdownLabel.visible = false
 	$TimerLabel.visible = false
+	$CheckpointTimer.visible = false
 	$ResultPanel.visible = false
 	$LoadingPanel.visible = false
 
@@ -45,12 +62,14 @@ func hide_hud() -> void:
 	# Сбрасываем все панели
 	$CountdownLabel.visible = false
 	$TimerLabel.visible = false
+	$CheckpointTimer.visible = false
 	$FinishBanner.visible = false
 	$ResultPanel.visible = false
 	$LoadingPanel.visible = false
 
 
 func _on_loading_started() -> void:
+	print("RaceHUD._on_loading_started() - SIGNAL RECEIVED!")
 	show_hud()
 	$LoadingPanel.visible = true
 	$LoadingPanel/VBox/ProgressBar.value = 0
@@ -92,13 +111,24 @@ func _on_race_started() -> void:
 	$TimerLabel.visible = true
 	$TimerLabel.text = "00:00.00"
 
+	# Показываем таймер чекпоинтов в checkpoint mode
+	if _race_manager and _race_manager.is_checkpoint_mode():
+		$CheckpointTimer.visible = true
+		$CheckpointTimer/TimeDiff.visible = false
+		$CheckpointTimer/TimeLabel.modulate = Color.WHITE
+
 
 var _last_race_time: float = 0.0
 
 func _on_race_finished(time: float) -> void:
 	_last_race_time = time
 
+	# Скрываем таймер чекпоинтов
+	$CheckpointTimer.visible = false
+
 	# Показываем баннер в стиле Underground
+	$FinishBanner/BannerText.text = "ЗАЕЗД ОКОНЧЕН"
+	$FinishBanner/BannerText.modulate = Color(0.85, 0.7, 0.1)
 	$FinishBanner.visible = true
 	$FinishBanner.modulate.a = 0.0
 
@@ -127,6 +157,12 @@ func _show_results_screen() -> void:
 
 	# Показываем курсор для кнопок
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+	# Сбрасываем стиль на победу
+	$ResultPanel/VBox/FinishLabel.text = "РЕЗУЛЬТАТЫ"
+	$ResultPanel/VBox/FinishLabel.modulate = Color(0, 1, 0)
+	$ResultPanel/VBox/TimeTitle.text = "Ваше время:"
+	$ResultPanel/VBox/TimeLabel.visible = true
 
 	# Форматируем время
 	var minutes := int(_last_race_time) / 60
@@ -158,8 +194,71 @@ func _on_back_to_menu_pressed() -> void:
 	get_tree().change_scene_to_file("res://ui/standalone_main_menu.tscn")
 
 
+func _on_checkpoint_passed(_index: int, time_bonus: float) -> void:
+	"""Показать анимацию при проезде чекпоинта"""
+	var diff_label := $CheckpointTimer/TimeDiff
+	diff_label.text = "+%.1f" % time_bonus
+	diff_label.modulate = Color(0.2, 1.0, 0.2)
+	diff_label.visible = true
+	diff_label.scale = Vector2(1.3, 1.3)
+
+	# Анимация scale down и затем скрытие
+	var tween := create_tween()
+	tween.tween_property(diff_label, "scale", Vector2(1.0, 1.0), 0.3).set_ease(Tween.EASE_OUT)
+	tween.tween_interval(2.7)
+	tween.tween_callback(func(): diff_label.visible = false)
+
+
+func _on_checkpoint_timeout() -> void:
+	"""Время истекло - показываем сообщение о поражении"""
+	# Скрываем таймер чекпоинтов
+	$CheckpointTimer.visible = false
+
+	# Показываем баннер "ЗАЕЗД ОКОНЧЕН" красным
+	$FinishBanner/BannerText.text = "ЗАЕЗД ОКОНЧЕН"
+	$FinishBanner/BannerText.modulate = Color(1.0, 0.3, 0.3)
+	$FinishBanner.visible = true
+	$FinishBanner.modulate.a = 0.0
+
+	var tween := create_tween()
+	tween.tween_property($FinishBanner, "modulate:a", 1.0, 0.3)
+
+	# Через 3 секунды показываем экран результатов
+	await get_tree().create_timer(3.0).timeout
+	_show_timeout_results()
+
+
+func _show_timeout_results() -> void:
+	"""Показать экран результатов при поражении"""
+	$FinishBanner.visible = false
+	$TimerLabel.visible = false
+	$ResultPanel.visible = true
+
+	# Показываем курсор
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+	# Меняем текст на поражение
+	$ResultPanel/VBox/FinishLabel.text = "ПОРАЖЕНИЕ"
+	$ResultPanel/VBox/FinishLabel.modulate = Color(1.0, 0.3, 0.3)
+	$ResultPanel/VBox/TimeTitle.text = "Время закончилось"
+	$ResultPanel/VBox/TimeLabel.text = ""
+	$ResultPanel/VBox/TimeLabel.visible = false
+
+	# Название трассы
+	if _race_manager and _race_manager.current_track:
+		$ResultPanel/VBox/TrackLabel.text = "Трасса: " + _race_manager.current_track.track_name
+
+
 func _on_restart_pressed() -> void:
 	"""Перезапустить гонку - полная перезагрузка сцены"""
+	# Сбрасываем стили результатов перед перезагрузкой
+	$ResultPanel/VBox/FinishLabel.text = "РЕЗУЛЬТАТЫ"
+	$ResultPanel/VBox/FinishLabel.modulate = Color.WHITE
+	$ResultPanel/VBox/TimeTitle.text = "Ваше время:"
+	$ResultPanel/VBox/TimeLabel.visible = true
+	$FinishBanner/BannerText.text = "ЗАЕЗД ОКОНЧЕН"
+	$FinishBanner/BannerText.modulate = Color(0.85, 0.7, 0.1)
+
 	if _race_manager and _race_manager.current_track:
 		# Сохраняем трек для автозапуска после перезагрузки
 		RaceState.selected_track = _race_manager.current_track
