@@ -1,0 +1,147 @@
+[gd_scene load_steps=2 format=3 uid="uid://car_selection_001"]
+
+[ext_resource type="Script" path="res://ui/car_selection.gd" id="1_script"]
+
+[node name="CarSelection" type="Control"]
+visible = false
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_script")
+
+[node name="Background" type="ColorRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0.05, 0.05, 0.1, 1)
+
+[node name="Title" type="Label" parent="."]
+layout_mode = 1
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -200.0
+offset_top = 40.0
+offset_right = 200.0
+offset_bottom = 100.0
+grow_horizontal = 2
+theme_override_font_sizes/font_size = 48
+text = "ВЫБОР МАШИНЫ"
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="CarouselContainer" type="HBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_left = -250.0
+offset_top = 120.0
+offset_right = 250.0
+offset_bottom = 180.0
+grow_horizontal = 2
+alignment = 1
+
+[node name="PrevButton" type="Button" parent="CarouselContainer"]
+custom_minimum_size = Vector2(80, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "◀"
+
+[node name="CarNameLabel" type="Label" parent="CarouselContainer"]
+custom_minimum_size = Vector2(300, 0)
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+text = "VW Beetle"
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="NextButton" type="Button" parent="CarouselContainer"]
+custom_minimum_size = Vector2(80, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 36
+text = "▶"
+
+[node name="PreviewViewport" type="SubViewportContainer" parent="."]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -400.0
+offset_top = -200.0
+offset_right = 400.0
+offset_bottom = 200.0
+grow_horizontal = 2
+grow_vertical = 2
+stretch = true
+
+[node name="SubViewport" type="SubViewport" parent="PreviewViewport"]
+transparent_bg = true
+handle_input_locally = false
+size = Vector2i(800, 400)
+render_target_update_mode = 4
+
+[node name="Camera3D" type="Camera3D" parent="PreviewViewport/SubViewport"]
+transform = Transform3D(1, 0, 0, 0, 0.95, 0.3, 0, -0.3, 0.95, 0, 2.5, 6)
+fov = 45.0
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="PreviewViewport/SubViewport"]
+transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 3, 5, 3)
+light_energy = 1.5
+shadow_enabled = true
+
+[node name="AmbientLight" type="DirectionalLight3D" parent="PreviewViewport/SubViewport"]
+transform = Transform3D(1, 0, 0, 0, -1, 0, 0, 0, -1, 0, -5, 0)
+light_color = Color(0.6, 0.6, 0.8, 1)
+light_energy = 0.5
+
+[node name="CarPreviewContainer" type="Node3D" parent="PreviewViewport/SubViewport"]
+
+[node name="ButtonsContainer" type="HBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 7
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -250.0
+offset_top = -120.0
+offset_right = 250.0
+offset_bottom = -40.0
+grow_horizontal = 2
+grow_vertical = 0
+alignment = 1
+
+[node name="SelectButton" type="Button" parent="ButtonsContainer"]
+custom_minimum_size = Vector2(200, 70)
+layout_mode = 2
+theme_override_colors/font_color = Color(0.2, 1, 0.2, 1)
+theme_override_colors/font_hover_color = Color(0.5, 1, 0.5, 1)
+theme_override_font_sizes/font_size = 32
+text = "ВЫБРАТЬ"
+
+[node name="Spacer" type="Control" parent="ButtonsContainer"]
+custom_minimum_size = Vector2(50, 0)
+layout_mode = 2
+
+[node name="BackButton" type="Button" parent="ButtonsContainer"]
+custom_minimum_size = Vector2(200, 70)
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.5, 0.5, 1)
+theme_override_colors/font_hover_color = Color(1, 0.7, 0.7, 1)
+theme_override_font_sizes/font_size = 32
+text = "ВЫЙТИ"
+
+[connection signal="pressed" from="CarouselContainer/PrevButton" to="." method="_on_prev_pressed"]
+[connection signal="pressed" from="CarouselContainer/NextButton" to="." method="_on_next_pressed"]
+[connection signal="pressed" from="ButtonsContainer/SelectButton" to="." method="_on_select_pressed"]
+[connection signal="pressed" from="ButtonsContainer/BackButton" to="." method="_on_back_pressed"]
