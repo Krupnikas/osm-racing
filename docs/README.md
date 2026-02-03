@@ -223,6 +223,7 @@ killall -9 Godot 2>/dev/null; sleep 1 && /Applications/Godot.app/Contents/MacOS/
 
 1. При таймауте Overpass API (504) - повторить запуск
 2. Дороги могут быть не видны при определённых условиях освещения
+3. AI соперники в режиме Sprint стартуют задом наперёд
 
 ## Тестирование
 
