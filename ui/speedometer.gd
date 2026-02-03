@@ -35,13 +35,13 @@ func _ready() -> void:
 	# Устанавливаем размер (увеличиваем)
 	custom_minimum_size = Vector2(450, 450)
 
-	# Загружаем italic шрифт Roboto
-	var italic_font := load("res://ui/fonts/Roboto-BoldItalic.ttf") as Font
-	if italic_font:
-		_font_large = italic_font
-		_font_medium = italic_font
-		_font_small = italic_font
-		print("Speedometer: Roboto-BoldItalic font loaded")
+	# Загружаем моноширинный шрифт для спидометра (цифры не прыгают)
+	var mono_font := load("res://ui/fonts/ShareTechMono-Regular.ttf") as Font
+	if mono_font:
+		_font_large = mono_font
+		_font_medium = mono_font
+		_font_small = mono_font
+		print("Speedometer: ShareTechMono font loaded")
 	else:
 		# Фоллбэк на системный шрифт
 		_font_large = ThemeDB.fallback_font

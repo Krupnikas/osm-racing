@@ -30,7 +30,13 @@ var _day_ambient_energy := 1.0
 var _day_fog_color := Color(0.7, 0.75, 0.85)
 var _day_fog_density := 0.0008
 var _day_tonemap_exposure := 1.0
-var _day_glow_intensity := 0.3
+var _day_tonemap_white := 5.0  # Важно: оригинальное значение из main.tscn
+var _day_tonemap_mode := Environment.TONE_MAPPER_FILMIC
+var _day_glow_intensity := 0.15
+var _day_glow_bloom := 0.05  # Оригинальное значение
+var _day_glow_blend_mode := Environment.GLOW_BLEND_MODE_SOFTLIGHT
+var _day_glow_hdr_threshold := 1.2  # Оригинальное значение
+var _day_glow_hdr_scale := 1.0
 
 # Ночные настройки в стиле NFS Underground
 const NIGHT_SUN_ENERGY := 0.02  # Почти нет солнца ночью
@@ -82,7 +88,13 @@ func _find_scene_components() -> void:
 			_day_fog_color = _environment.fog_light_color
 			_day_fog_density = _environment.fog_density
 			_day_tonemap_exposure = _environment.tonemap_exposure
+			_day_tonemap_white = _environment.tonemap_white
+			_day_tonemap_mode = _environment.tonemap_mode
 			_day_glow_intensity = _environment.glow_intensity
+			_day_glow_bloom = _environment.glow_bloom
+			_day_glow_blend_mode = _environment.glow_blend_mode
+			_day_glow_hdr_threshold = _environment.glow_hdr_threshold
+			_day_glow_hdr_scale = _environment.glow_hdr_scale
 
 	# Ищем DirectionalLight3D (солнце)
 	_sun_light = get_tree().current_scene.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
@@ -440,14 +452,15 @@ func disable_night_mode() -> void:
 
 		# Restore day glow settings
 		_environment.glow_intensity = _day_glow_intensity
-		_environment.glow_bloom = 0.1
-		_environment.glow_hdr_threshold = 1.0
-		_environment.glow_hdr_scale = 1.0
+		_environment.glow_bloom = _day_glow_bloom
+		_environment.glow_blend_mode = _day_glow_blend_mode
+		_environment.glow_hdr_threshold = _day_glow_hdr_threshold
+		_environment.glow_hdr_scale = _day_glow_hdr_scale
 
 		# Restore tonemap
-		_environment.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+		_environment.tonemap_mode = _day_tonemap_mode
 		_environment.tonemap_exposure = _day_tonemap_exposure
-		_environment.tonemap_white = 1.0
+		_environment.tonemap_white = _day_tonemap_white
 
 	night_mode_changed.emit(false)
 	print("Night mode disabled")

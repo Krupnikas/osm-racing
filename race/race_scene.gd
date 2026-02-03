@@ -87,6 +87,9 @@ func _replace_player_car() -> void:
 		new_car.add_child(vehicle_controller)
 		vehicle_controller.vehicle_node = new_car
 
+	# Применяем характеристики машины (ускорение, управляемость)
+	CarSettings.apply_car_stats(new_car)
+
 	# Обновляем все ссылки на машину
 	_update_car_references(new_car)
 

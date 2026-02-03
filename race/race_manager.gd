@@ -4,6 +4,7 @@ extends Node
 ## Менеджер гонки: состояния, таймер, обратный отсчёт
 
 const RaceTrackScript = preload("res://race/race_tracks.gd")
+const RaceBarriersScript = preload("res://race/race_barriers.gd")
 
 signal race_loading_started
 signal race_loading_progress(progress: float, status: String)
@@ -41,6 +42,7 @@ var _current_checkpoint_index: int = 0
 var _checkpoint_areas: Array = []  # Array[Area3D]
 var _checkpoint_local_positions: Array = []  # Array[Vector3] для minimap
 var _minimap: Control  # Ссылка на мини-карту
+var _barriers = null  # Визуальные барьеры вдоль маршрута
 
 
 func _ready() -> void:
@@ -174,6 +176,12 @@ func _on_race_ready() -> void:
 	# Создаём чекпоинты для checkpoint mode
 	if _checkpoint_mode:
 		_create_checkpoints()
+
+	# Отправляем маршрут на мини-карту для визуализации
+	_update_minimap_route()
+
+	# Создаём визуальные барьеры вдоль маршрута
+	_create_barriers()
 
 	race_ready.emit()
 
@@ -416,6 +424,9 @@ func _finish_race() -> void:
 	print("RaceManager: FINISH! Time: %.2f seconds" % race_time)
 	current_state = State.FINISHED
 
+	# Удаляем барьеры
+	_clear_barriers()
+
 	# Автоматическое торможение (ручной тормоз)
 	if _car_rigidbody:
 		# Для GEVP Vehicle - устанавливаем ручной тормоз
@@ -437,6 +448,9 @@ func cancel_race() -> void:
 
 	print("RaceManager: Race cancelled")
 
+	# Удаляем барьеры
+	_clear_barriers()
+
 	# Удаляем финишную линию
 	if _finish_line:
 		_finish_line.queue_free()
@@ -452,6 +466,8 @@ func cancel_race() -> void:
 	# Очищаем мини-карту
 	if _minimap and _minimap.has_method("clear_checkpoints"):
 		_minimap.clear_checkpoints()
+	if _minimap and _minimap.has_method("clear_route_points"):
+		_minimap.clear_route_points()
 
 	current_state = State.IDLE
 	race_cancelled.emit()
@@ -649,6 +665,59 @@ func _update_minimap_checkpoints() -> void:
 	if _minimap and _minimap.has_method("set_checkpoints"):
 		var finish_pos := _latlon_to_local(current_track.finish_lat, current_track.finish_lon)
 		_minimap.set_checkpoints(_checkpoint_local_positions, finish_pos)
+
+
+func _update_minimap_route() -> void:
+	"""Отправляем точки маршрута на мини-карту для визуализации"""
+	if not _minimap:
+		_minimap = get_tree().current_scene.find_child("MiniMap", true, false)
+
+	if not _minimap or not _minimap.has_method("set_route_points"):
+		return
+
+	if not current_track or current_track.route_points.is_empty():
+		return
+
+	# Конвертируем lat/lon в локальные координаты (Vector2: x, z)
+	var local_points: Array = []
+	for latlon in current_track.route_points:
+		var pos3d := _latlon_to_local(latlon.x, latlon.y)  # latlon = Vector2(lat, lon)
+		local_points.append(Vector2(pos3d.x, pos3d.z))
+
+	_minimap.set_route_points(local_points)
+	print("RaceManager: Sent %d route points to minimap" % local_points.size())
+
+
+func _create_barriers() -> void:
+	"""Создать визуальные барьеры вдоль маршрута"""
+	if _barriers:
+		_barriers.queue_free()
+		_barriers = null
+
+	if not current_track or current_track.route_points.is_empty():
+		return
+
+	_barriers = Node3D.new()
+	_barriers.set_script(RaceBarriersScript)
+	_barriers.name = "RaceBarriers"
+	add_child(_barriers)
+
+	# Конвертируем route_points в локальные 3D координаты
+	var local_points: Array = []
+	for latlon in current_track.route_points:
+		var pos := _latlon_to_local(latlon.x, latlon.y)
+		pos.y = 0.5  # Немного над землёй
+		local_points.append(pos)
+
+	_barriers.build_barriers(local_points)
+	print("RaceManager: Created barriers with %d route points" % local_points.size())
+
+
+func _clear_barriers() -> void:
+	"""Удалить визуальные барьеры"""
+	if _barriers:
+		_barriers.queue_free()
+		_barriers = null
 
 
 func _create_checkpoint_visuals(area: Area3D) -> void:

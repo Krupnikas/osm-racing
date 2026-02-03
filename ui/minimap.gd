@@ -56,6 +56,12 @@ var _finish_position: Vector3 = Vector3.ZERO
 var _current_checkpoint_index: int = 0
 var _show_checkpoints := false
 
+# Маршрут гонки (визуализация)
+var _route_points_local: Array = []  # Array[Vector2] - точки маршрута в локальных координатах (x, z)
+var _route_segments: Dictionary = {}  # {segment_key: true} - сегменты на маршруте
+const ROUTE_COLOR := Color(0.3, 0.7, 1.0, 0.95)  # Голубой
+const ROUTE_MATCH_DISTANCE := 10.0  # Метры - максимальное расстояние от отрезка маршрута
+
 
 func _ready() -> void:
 	custom_minimum_size = Vector2(220, 220)
@@ -158,6 +164,9 @@ func _update_road_cache(player_pos: Vector3) -> void:
 	if not _cached_road_segments.is_empty():
 		print("MiniMap: Cached %d road segments" % _cached_road_segments.size())
 
+	# Пересчитываем какие сегменты на маршруте
+	_update_route_segments_cache()
+
 
 func _get_road_style(width: float) -> Dictionary:
 	"""Возвращает толщину линии и цвет в зависимости от ширины дороги"""
@@ -201,6 +210,11 @@ func _draw_roads(player_pos: Vector3, player_rotation: float) -> void:
 
 		# Получаем стиль для этой дороги
 		var style := _get_road_style(road_width)
+
+		# Проверяем, на маршруте ли сегмент
+		var seg_key := _segment_key(p1, p2)
+		if _route_segments.has(seg_key):
+			style.color = ROUTE_COLOR
 
 		# Трансформируем точки
 		var rel1 := p1 - player_pos_2d
@@ -328,6 +342,24 @@ func set_world_radius(radius: float) -> void:
 	pass  # TODO: сделать WORLD_RADIUS переменной если нужен zoom
 
 
+func set_route_points(points_local: Array) -> void:
+	"""Установить точки маршрута для подсветки на карте.
+	points_local - Array[Vector2] в локальных координатах (x, z)"""
+	_route_points_local = points_local
+	_route_segments.clear()
+	# Принудительно обновим кэш при следующей отрисовке
+	_cache_center = Vector3(INF, 0, INF)
+	print("MiniMap: Set %d route points for visualization" % points_local.size())
+	queue_redraw()
+
+
+func clear_route_points() -> void:
+	"""Очистить маршрут"""
+	_route_points_local.clear()
+	_route_segments.clear()
+	queue_redraw()
+
+
 func _try_find_terrain_generator() -> void:
 	"""Пытается найти OSMTerrainGenerator"""
 	# Способ 1: через группу
@@ -343,6 +375,76 @@ func _try_find_terrain_generator() -> void:
 
 	# Способ 3: по имени TerrainGenerator
 	_terrain_generator = get_tree().current_scene.find_child("TerrainGenerator", true, false)
+
+
+# ===== ROUTE MATCHING =====
+
+func _is_segment_on_route(p1: Vector2, p2: Vector2) -> bool:
+	"""Проверяет, принадлежит ли сегмент дороги маршруту.
+	Условия: близко к ОТРЕЗКУ маршрута (не точке) И направление совпадает."""
+	if _route_points_local.size() < 2:
+		return false
+
+	var mid: Vector2 = (p1 + p2) / 2.0
+	var seg_dir: Vector2 = (p2 - p1).normalized()
+
+	# Ищем ближайший ОТРЕЗОК маршрута (не точку!)
+	for i in range(_route_points_local.size() - 1):
+		var route_a: Vector2 = _route_points_local[i]
+		var route_b: Vector2 = _route_points_local[i + 1]
+
+		# Расстояние от середины сегмента до отрезка маршрута
+		var dist: float = _point_to_segment_distance(mid, route_a, route_b)
+		if dist > ROUTE_MATCH_DISTANCE:
+			continue
+
+		# Направление отрезка маршрута
+		var route_dir: Vector2 = (route_b - route_a).normalized()
+
+		# Проверяем совпадение направлений (abs т.к. дорога двусторонняя)
+		var dot: float = abs(seg_dir.dot(route_dir))
+		if dot > 0.7:  # ~45 градусов допуск
+			return true
+
+	return false
+
+
+func _point_to_segment_distance(point: Vector2, seg_a: Vector2, seg_b: Vector2) -> float:
+	"""Расстояние от точки до отрезка (не прямой!)"""
+	var ab: Vector2 = seg_b - seg_a
+	var ap: Vector2 = point - seg_a
+	var ab_len_sq: float = ab.length_squared()
+
+	if ab_len_sq < 0.001:
+		return point.distance_to(seg_a)
+
+	# Проекция точки на отрезок [0, 1]
+	var t: float = clamp(ap.dot(ab) / ab_len_sq, 0.0, 1.0)
+	var closest: Vector2 = seg_a + ab * t
+
+	return point.distance_to(closest)
+
+
+func _segment_key(p1: Vector2, p2: Vector2) -> String:
+	"""Уникальный ключ для сегмента"""
+	return "%d_%d_%d_%d" % [int(p1.x), int(p1.y), int(p2.x), int(p2.y)]
+
+
+func _update_route_segments_cache() -> void:
+	"""Пересчитывает какие сегменты на маршруте"""
+	_route_segments.clear()
+
+	if _route_points_local.is_empty():
+		return
+
+	for seg in _cached_road_segments:
+		if _is_segment_on_route(seg.p1, seg.p2):
+			var key := _segment_key(seg.p1, seg.p2)
+			_route_segments[key] = true
+
+	print("MiniMap: Found %d road segments on route (of %d total, %d route points)" % [
+		_route_segments.size(), _cached_road_segments.size(), _route_points_local.size()
+	])
 
 
 # ===== CHECKPOINT MODE =====

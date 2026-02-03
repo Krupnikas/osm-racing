@@ -1,0 +1,125 @@
+[gd_scene load_steps=3 format=3 uid="uid://race_menu_001"]
+
+[ext_resource type="Script" path="res://ui/race_menu.gd" id="1_race_menu"]
+[ext_resource type="Theme" path="res://ui/racing_theme.tres" id="2_theme"]
+
+[node name="RaceMenu" type="Control"]
+process_mode = 3
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+theme = ExtResource("2_theme")
+script = ExtResource("1_race_menu")
+
+[node name="ModesPanel" type="Panel" parent="."]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -200.0
+offset_top = -200.0
+offset_right = 200.0
+offset_bottom = 200.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="ModesPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 20.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = -20.0
+alignment = 1
+
+[node name="TitleLabel" type="Label" parent="ModesPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+text = "Режим гонки"
+horizontal_alignment = 1
+
+[node name="Spacer1" type="Control" parent="ModesPanel/VBox"]
+custom_minimum_size = Vector2(0, 20)
+layout_mode = 2
+
+[node name="SprintButton" type="Button" parent="ModesPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "Спринт"
+
+[node name="CheckpointButton" type="Button" parent="ModesPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "Чекпоинт"
+
+[node name="Spacer2" type="Control" parent="ModesPanel/VBox"]
+custom_minimum_size = Vector2(0, 20)
+layout_mode = 2
+
+[node name="BackButton" type="Button" parent="ModesPanel/VBox"]
+custom_minimum_size = Vector2(0, 50)
+layout_mode = 2
+theme_override_font_sizes/font_size = 20
+text = "Назад"
+
+[node name="TracksPanel" type="Panel" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -200.0
+offset_top = -200.0
+offset_right = 200.0
+offset_bottom = 200.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBox" type="VBoxContainer" parent="TracksPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 20.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = -20.0
+alignment = 1
+
+[node name="TitleLabel" type="Label" parent="TracksPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 32
+text = "Выбор трассы"
+horizontal_alignment = 1
+
+[node name="Spacer1" type="Control" parent="TracksPanel/VBox"]
+custom_minimum_size = Vector2(0, 20)
+layout_mode = 2
+
+[node name="TracksContainer" type="VBoxContainer" parent="TracksPanel/VBox"]
+layout_mode = 2
+alignment = 1
+
+[node name="Spacer2" type="Control" parent="TracksPanel/VBox"]
+custom_minimum_size = Vector2(0, 20)
+layout_mode = 2
+
+[node name="BackButton" type="Button" parent="TracksPanel/VBox"]
+custom_minimum_size = Vector2(0, 50)
+layout_mode = 2
+theme_override_font_sizes/font_size = 20
+text = "Назад"
+
+[connection signal="pressed" from="ModesPanel/VBox/SprintButton" to="." method="_on_sprint_pressed"]
+[connection signal="pressed" from="ModesPanel/VBox/CheckpointButton" to="." method="_on_checkpoint_pressed"]
+[connection signal="pressed" from="ModesPanel/VBox/BackButton" to="." method="_on_modes_back_pressed"]
+[connection signal="pressed" from="TracksPanel/VBox/BackButton" to="." method="_on_tracks_back_pressed"]
