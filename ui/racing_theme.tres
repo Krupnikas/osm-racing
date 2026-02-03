@@ -1,0 +1,11 @@
+[gd_resource type="Theme" load_steps=5 format=3]
+
+[ext_resource type="FontFile" path="res://ui/fonts/RussoOne-Regular.ttf" id="1_russo"]
+[ext_resource type="FontFile" path="res://ui/fonts/GolosText-SemiBold.ttf" id="2_golos_semibold"]
+[ext_resource type="FontFile" path="res://ui/fonts/GolosText-Regular.ttf" id="3_golos_regular"]
+[ext_resource type="FontFile" path="res://ui/fonts/GolosText-Bold.ttf" id="4_golos_bold"]
+
+[resource]
+default_font = ExtResource("2_golos_semibold")
+Button/fonts/font = ExtResource("1_russo")
+Label/fonts/font = ExtResource("2_golos_semibold")
