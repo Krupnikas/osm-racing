@@ -16,6 +16,9 @@ class_name RaceTrack
 @export var checkpoints: Array = []        # [{lat, lon, time_limit}] для checkpoint mode
 @export var default_checkpoint_time: float = 30.0
 
+# Route visualization - густые точки маршрута для миникарты (не влияют на геймплей)
+@export var route_points: Array = []  # Array[Vector2(lat, lon)] каждые ~30м
+
 
 static func get_all_tracks() -> Array:
 	return [_create_pionerskaya(), _create_fanera()]
@@ -83,6 +86,33 @@ static func _create_fanera() -> Resource:
 		Vector2(59.144855, 37.938141),  # CP2
 		Vector2(59.141942, 37.937057),  # CP3
 		Vector2(59.141354, 37.943516)   # Финиш
+	]
+	# Густые точки маршрута для визуализации на миникарте (каждые ~30м)
+	track.route_points = [
+		Vector2(59.149827, 37.948859),
+		Vector2(59.149307, 37.948601),
+		Vector2(59.148223, 37.947829),
+		Vector2(59.147065, 37.94704),
+		Vector2(59.146691, 37.946772),
+		Vector2(59.146212, 37.946402),
+		Vector2(59.145588, 37.945919),
+		Vector2(59.144677, 37.945254),
+		Vector2(59.144251, 37.944948),
+		Vector2(59.144204, 37.944905),
+		Vector2(59.144234, 37.94468),
+		Vector2(59.144564, 37.942051),
+		Vector2(59.145029, 37.938409),
+		Vector2(59.145043, 37.938243),
+		Vector2(59.144952, 37.938189),
+		Vector2(59.14397, 37.937706),
+		Vector2(59.143021, 37.937234),
+		Vector2(59.142036, 37.936757),
+		Vector2(59.141978, 37.936741),
+		Vector2(59.141554, 37.939927),
+		Vector2(59.141153, 37.942953),
+		Vector2(59.141131, 37.943237),
+		Vector2(59.141166, 37.943414),
+		Vector2(59.141354, 37.943516),
 	]
 	return track
 

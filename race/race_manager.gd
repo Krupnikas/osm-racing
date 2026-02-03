@@ -175,6 +175,9 @@ func _on_race_ready() -> void:
 	if _checkpoint_mode:
 		_create_checkpoints()
 
+	# Отправляем маршрут на мини-карту для визуализации
+	_update_minimap_route()
+
 	race_ready.emit()
 
 	# Небольшая пауза перед отсчётом
@@ -452,6 +455,8 @@ func cancel_race() -> void:
 	# Очищаем мини-карту
 	if _minimap and _minimap.has_method("clear_checkpoints"):
 		_minimap.clear_checkpoints()
+	if _minimap and _minimap.has_method("clear_route_points"):
+		_minimap.clear_route_points()
 
 	current_state = State.IDLE
 	race_cancelled.emit()
@@ -649,6 +654,27 @@ func _update_minimap_checkpoints() -> void:
 	if _minimap and _minimap.has_method("set_checkpoints"):
 		var finish_pos := _latlon_to_local(current_track.finish_lat, current_track.finish_lon)
 		_minimap.set_checkpoints(_checkpoint_local_positions, finish_pos)
+
+
+func _update_minimap_route() -> void:
+	"""Отправляем точки маршрута на мини-карту для визуализации"""
+	if not _minimap:
+		_minimap = get_tree().current_scene.find_child("MiniMap", true, false)
+
+	if not _minimap or not _minimap.has_method("set_route_points"):
+		return
+
+	if not current_track or current_track.route_points.is_empty():
+		return
+
+	# Конвертируем lat/lon в локальные координаты (Vector2: x, z)
+	var local_points: Array = []
+	for latlon in current_track.route_points:
+		var pos3d := _latlon_to_local(latlon.x, latlon.y)  # latlon = Vector2(lat, lon)
+		local_points.append(Vector2(pos3d.x, pos3d.z))
+
+	_minimap.set_route_points(local_points)
+	print("RaceManager: Sent %d route points to minimap" % local_points.size())
 
 
 func _create_checkpoint_visuals(area: Area3D) -> void:
