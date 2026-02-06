@@ -2,6 +2,50 @@
 
 3D гоночная игра на движке Godot 4 с загрузкой карт из OpenStreetMap.
 
+## ⚠️ ВАЖНО: Запуск игры
+
+### Правильный способ запуска
+
+```bash
+# Из командной строки - БЕЗ указания сцены:
+/Applications/Godot.app/Contents/MacOS/Godot --path /путь/к/osm-racing
+
+# Или просто открыть проект в Godot и нажать F5
+```
+
+### ❌ НЕЛЬЗЯ запускать напрямую main.tscn:
+
+```bash
+# НЕПРАВИЛЬНО! Это сломает меню:
+/Applications/Godot.app/Contents/MacOS/Godot --path . res://main.tscn
+```
+
+### Архитектура меню (NFS Underground стиль)
+
+```
+standalone_main_menu.tscn  ←── Точка входа (project.godot main_scene)
+         │
+         │ (выбор локации/машины/гонки)
+         ↓
+      main.tscn  ←── Игровая сцена
+         │           └── MainMenu node (только loader, не UI!)
+         │           └── PauseMenu node
+         │
+         │ (Esc во время игры)
+         ↓
+   pause_menu.tscn  ←── Меню паузы (overlay)
+         │
+         │ (выход в меню)
+         ↓
+standalone_main_menu.tscn
+```
+
+**Ключевые моменты:**
+- `standalone_main_menu.tscn` - главное меню со всеми кнопками, шрифтами, выбором машины
+- `main.tscn` содержит встроенный `MainMenu` node, но он работает ТОЛЬКО как loader (показывает LoadingPanel, запускает загрузку террейна)
+- При запуске `main.tscn` напрямую — встроенный MainMenu показывает старый UI вместо загрузки
+- `ui/main_menu.tscn` и `ui/main_menu.gd` — НЕ deprecated, но используются только для loading flow
+
 ## Структура проекта
 
 ```
@@ -36,7 +80,10 @@ osm-racing/
 │   ├── texture_generator.gd   # Процедурная генерация текстур
 │   └── texture_manager.gd     # Кэширование текстур и материалов
 ├── ui/
-│   ├── main_menu.gd           # Главное меню с выбором локации
+│   ├── standalone_main_menu.tscn/gd  # Главное меню (NFS-стиль, точка входа)
+│   ├── main_menu.tscn/gd      # Loader для main.tscn (НЕ главное меню!)
+│   ├── pause_menu.tscn/gd     # Меню паузы (overlay в игре)
+│   ├── car_selection.tscn/gd  # Выбор машины
 │   ├── hud.gd                 # HUD (скорость, обороты, передача)
 │   └── coordinates_display.gd # Отображение координат
 └── docs/
