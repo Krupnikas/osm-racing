@@ -89,6 +89,9 @@ const BRAND_LOGOS := {
 # Кэш загруженных текстур логотипов
 static var _logo_cache: Dictionary = {}
 
+# Шрифт для аптек (Roboto Slab Bold)
+static var _pharmacy_font: Font = null
+
 # Цвета фонов по типу заведения
 const SIGN_COLORS := {
 	"restaurant": Color(0.8, 0.3, 0.2),  # Красно-коричневый
@@ -265,8 +268,14 @@ static func _create_text_sign(sign_root: Node3D, sign_text: String, sign_color: 
 	var font_size := 256
 	var pixel_size := 0.001
 
-	# Используем системный шрифт для измерения ширины текста
+	# Для аптек используем Roboto Slab Bold
 	var font: Font = ThemeDB.fallback_font
+	if amenity_type == "pharmacy":
+		if _pharmacy_font == null:
+			_pharmacy_font = load("res://ui/fonts/RobotoSlab-Bold.ttf")
+		if _pharmacy_font:
+			font = _pharmacy_font
+
 	var text_size_px: Vector2 = font.get_string_size(sign_text, HORIZONTAL_ALIGNMENT_CENTER, -1, font_size)
 
 	# Переводим пиксели в метры
@@ -297,6 +306,9 @@ static func _create_text_sign(sign_root: Node3D, sign_text: String, sign_color: 
 	var label = Label3D.new()
 	label.text = sign_text
 	label.font_size = 256
+	# Для аптек используем Roboto Slab Bold
+	if amenity_type == "pharmacy" and _pharmacy_font:
+		label.font = _pharmacy_font
 	label.modulate = text_color  # Цвет текста по типу заведения
 	label.outline_size = int(8 * text_scale)
 	label.outline_modulate = text_color.darkened(0.3)  # Контур чуть темнее
