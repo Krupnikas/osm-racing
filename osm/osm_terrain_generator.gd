@@ -8189,7 +8189,7 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 
 	Также ищет POI nodes (точечные заведения) внутри здания и создаёт для них вывески
 	"""
-	var BusinessSignGen = preload("res://osm/business_sign_generator.gd")
+	# BusinessSignGenerator доступен через class_name (статические функции)
 
 	# Список заведений для создания вывесок
 	var businesses_to_process: Array = []
@@ -8214,7 +8214,7 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 		var business_tags: Dictionary = business.tags
 		var poi_pos = business.poi_position  # Vector2 или null
 
-		var sign_text = BusinessSignGen.get_sign_text(business_tags)
+		var sign_text = BusinessSignGenerator.get_sign_text(business_tags)
 		if sign_text == "":
 			continue
 
@@ -8257,15 +8257,17 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 		var has_entrance_group = placement_method in ["entrance", "poi_node"]
 
 		# Создаём вывеску (ограничиваем ширину для входных групп)
-		var max_sign_width = EntranceGroupGenerator.get_canopy_width(2) / 3.0 if has_entrance_group else 4.0
-		var sign = BusinessSignGen.create_sign(business_tags, max_sign_width)
+		var max_sign_width = EntranceGroupGenerator.get_canopy_width(2) / 2.0 if has_entrance_group else 5.5
+		var sign = BusinessSignGenerator.create_sign(business_tags, max_sign_width)
 		if sign.get_child_count() == 0:
 			continue
 
 		var sign_height: float
 		if has_entrance_group:
-			# Входная группа: вывеска над козырьком
-			sign_height = base_elev + EntranceGroupGenerator.get_canopy_top_height() + 0.3
+			# Входная группа: низ вывески на верхе козырька
+			# Высота вывески ~0.45м * scale 3.3 = ~1.5м, половина = ~0.75м
+			var half_sign_height := 0.75
+			sign_height = base_elev + EntranceGroupGenerator.get_canopy_top_height() + half_sign_height
 		elif placement_method == "poi_node":
 			# Магазин на первом этаже жилого дома - вывеска на 4м
 			sign_height = base_elev + min(4.0, building_height * 0.7)
