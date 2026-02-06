@@ -272,6 +272,14 @@ const ROAD_WIDTHS := {
 	"track": 3.5,
 }
 
+# Константы для мостов и туннелей
+const BRIDGE_BASE_HEIGHT := 3.0       # Базовая высота моста в метрах (пологий подъём)
+const LAYER_HEIGHT := 3.0             # Высота на один layer (разделение уровней)
+const BRIDGE_RAMP_LENGTH := 30.0      # Длина рампы подъёма/спуска в метрах
+const BRIDGE_PILLAR_SPACING := 20.0   # Расстояние между опорами моста
+const BRIDGE_PILLAR_RADIUS := 0.5     # Радиус опоры моста
+const BRIDGE_PILLAR_COLOR := Color(0.55, 0.53, 0.5)  # Цвет бетонных опор
+
 func _ready() -> void:
 	# Добавляем в группу для поиска из MiniMap
 	add_to_group("terrain_generator")
@@ -2195,6 +2203,90 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		_pending_batch_chunks.append(batch_chunk_key)
 		print("OSM: Marked chunk '%s' for road batch finalization" % batch_chunk_key)
 
+
+## Вычисляет высоту дороги с учётом моста/туннеля/layer
+## Возвращает словарь {height: float, is_bridge: bool, is_tunnel: bool, layer: int, ramp_length: float}
+func _calculate_road_elevation(tags: Dictionary, base_elevation: float, road_length: float = 0.0) -> Dictionary:
+	var result := {
+		"height": base_elevation,
+		"is_bridge": false,
+		"is_tunnel": false,
+		"layer": 0,
+		"bridge_height": 0.0,
+		"ramp_length": 0.0
+	}
+
+	# Парсим layer (по умолчанию 0)
+	var layer: int = 0
+	if tags.has("layer"):
+		var layer_str: String = str(tags.get("layer", "0"))
+		layer = int(layer_str) if layer_str.is_valid_int() else 0
+		layer = clamp(layer, -5, 5)
+	result.layer = layer
+
+	# Проверяем bridge
+	var bridge_val: String = str(tags.get("bridge", ""))
+	if bridge_val == "yes" or bridge_val == "viaduct" or bridge_val == "true":
+		result.is_bridge = true
+		# Высота моста = базовая + layer * высота слоя
+		# Минимум BRIDGE_BASE_HEIGHT чтобы машины могли проехать под мостом
+		var bridge_height: float = maxf(BRIDGE_BASE_HEIGHT, BRIDGE_BASE_HEIGHT + layer * LAYER_HEIGHT)
+		result.bridge_height = bridge_height
+		result.height = base_elevation + bridge_height
+		# Длина рампы - не больше 1/3 длины дороги
+		result.ramp_length = minf(BRIDGE_RAMP_LENGTH, road_length / 3.0) if road_length > 0.0 else BRIDGE_RAMP_LENGTH
+
+	# Проверяем tunnel
+	elif str(tags.get("tunnel", "")) == "yes":
+		result.is_tunnel = true
+		# Туннели пока просто помечаем, не опускаем под землю (сложно визуализировать)
+		result.height = base_elevation
+
+	# Только layer без bridge/tunnel - поднимаем эстакады
+	elif layer > 0:
+		# Эстакада (layer > 0 без bridge=yes) - тоже поднимаем
+		result.is_bridge = true
+		result.bridge_height = layer * LAYER_HEIGHT
+		result.height = base_elevation + result.bridge_height
+		result.ramp_length = minf(BRIDGE_RAMP_LENGTH, road_length / 3.0) if road_length > 0.0 else BRIDGE_RAMP_LENGTH
+
+	return result
+
+
+## Smooth step interpolation для плавных рамп (ease in/out)
+func _smooth_step(t: float) -> float:
+	t = clampf(t, 0.0, 1.0)
+	return t * t * (3.0 - 2.0 * t)
+
+
+## Вычисляет усреднённые перпендикуляры для каждой точки пути
+## Для сглаживания углов дороги на поворотах
+func _compute_averaged_perpendiculars(points: PackedVector2Array) -> Array[Vector2]:
+	var perpendiculars: Array[Vector2] = []
+
+	for i in range(points.size()):
+		var perp: Vector2
+
+		if i == 0:
+			# Первая точка - перпендикуляр к первому сегменту
+			var dir: Vector2 = (points[1] - points[0]).normalized()
+			perp = Vector2(-dir.y, dir.x)
+		elif i == points.size() - 1:
+			# Последняя точка - перпендикуляр к последнему сегменту
+			var dir: Vector2 = (points[i] - points[i - 1]).normalized()
+			perp = Vector2(-dir.y, dir.x)
+		else:
+			# Средняя точка - усреднённый перпендикуляр
+			var dir1: Vector2 = (points[i] - points[i - 1]).normalized()
+			var dir2: Vector2 = (points[i + 1] - points[i]).normalized()
+			var avg_dir: Vector2 = (dir1 + dir2).normalized()
+			perp = Vector2(-avg_dir.y, avg_dir.x)
+
+		perpendiculars.append(perp)
+
+	return perpendiculars
+
+
 func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	if not enable_roads:
 		return
@@ -2230,6 +2322,17 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 
 	var highway_type: String = tags.get("highway", "residential")
 	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
+
+	# Вычисляем длину дороги для расчёта рамп
+	var road_length := 0.0
+	for i in range(nodes.size() - 1):
+		var p1: Vector2 = _latlon_to_local(nodes[i].lat, nodes[i].lon)
+		var p2: Vector2 = _latlon_to_local(nodes[i + 1].lat, nodes[i + 1].lon)
+		road_length += p1.distance_to(p2)
+
+	# Проверяем является ли дорога мостом/туннелем
+	var elevation_info := _calculate_road_elevation(tags, 0.0, road_length)
+	var is_bridge: bool = elevation_info.get("is_bridge", false)
 
 	var texture_key: String
 	var height_offset: float
@@ -2270,8 +2373,19 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 			height_offset = 0.014
 			curb_height = 0.008
 
-	# OPTIMIZATION: Road batching - добавляем данные в batch вместо создания MeshInstance3D
-	_add_road_to_batch(nodes, width, texture_key, height_offset, parent, elev_data)
+	# Создаём дорогу - обычную или мост
+	if is_bridge:
+		# Мост: создаём с рампами и опорами
+		_create_bridge_road(nodes, width, texture_key, height_offset, elevation_info, parent, elev_data)
+		# Логируем для отладки
+		var b_height: float = elevation_info.get("bridge_height", 0.0)
+		var b_ramp: float = elevation_info.get("ramp_length", 0.0)
+		var b_layer: int = elevation_info.get("layer", 0)
+		if b_height > 0:
+			print("OSM: 🌉 Bridge created: height=%.1fm, ramp=%.1fm, layer=%d" % [b_height, b_ramp, b_layer])
+	else:
+		# OPTIMIZATION: Road batching - добавляем данные в batch вместо создания MeshInstance3D
+		_add_road_to_batch(nodes, width, texture_key, height_offset, parent, elev_data)
 
 	if curb_height > 0.0:
 		# Бордюры добавляем в очередь - создадим после детекции всех перекрёстков
@@ -2281,7 +2395,9 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 			"height_offset": height_offset,
 			"curb_height": curb_height,
 			"parent": parent,
-			"elev_data": elev_data
+			"elev_data": elev_data,
+			"is_bridge": is_bridge,
+			"bridge_info": elevation_info
 		})
 
 	# Процедурная генерация фонарей вдоль дорог (позиции сохраняются для отложенного создания)
@@ -2289,7 +2405,400 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 		_generate_street_lamps_along_road(nodes, width, elev_data, parent)
 
 	# Извлекаем данные для RoadNetwork (для навигации NPC)
-	_extract_road_for_traffic(nodes, tags, elev_data)
+	_extract_road_for_traffic(nodes, tags, elev_data, elevation_info)
+
+
+## Создаёт дорогу-мост с рампами подъёма/спуска и опорами
+func _create_bridge_road(nodes: Array, width: float, texture_key: String, height_offset: float, bridge_info: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
+	if nodes.size() < 2:
+		return
+
+	# Конвертируем в локальные координаты
+	var points: PackedVector2Array = []
+	for node in nodes:
+		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+		points.append(local)
+
+	# Вычисляем общую длину моста
+	var total_length := 0.0
+	for i in range(points.size() - 1):
+		total_length += points[i].distance_to(points[i + 1])
+
+	if total_length < 1.0:
+		return
+
+	# Добавляем промежуточные точки для плавных рамп (минимум каждые 10м)
+	const BRIDGE_SEGMENT_LENGTH := 10.0
+	if total_length > BRIDGE_SEGMENT_LENGTH * 2:
+		var refined_points: PackedVector2Array = []
+		for i in range(points.size() - 1):
+			var p1: Vector2 = points[i]
+			var p2: Vector2 = points[i + 1]
+			var seg_length: float = p1.distance_to(p2)
+			var num_subdivs: int = max(1, int(ceil(seg_length / BRIDGE_SEGMENT_LENGTH)))
+
+			refined_points.append(p1)
+			for j in range(1, num_subdivs):
+				var t: float = float(j) / float(num_subdivs)
+				refined_points.append(p1.lerp(p2, t))
+		refined_points.append(points[points.size() - 1])
+		points = refined_points
+
+	# Параметры моста
+	var bridge_height: float = bridge_info.get("bridge_height", BRIDGE_BASE_HEIGHT)
+	var ramp_length: float = bridge_info.get("ramp_length", minf(BRIDGE_RAMP_LENGTH, total_length / 3.0))
+
+	# Создаём массивы для меша
+	var vertices := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var normals := PackedVector3Array()
+	var indices := PackedInt32Array()
+
+	var half_w := width * 0.5
+	var accumulated_length := 0.0
+
+	# Вычисляем перпендикуляры для каждой точки (усреднённые для сглаживания)
+	var perpendiculars: Array[Vector2] = _compute_averaged_perpendiculars(points)
+
+	for i in range(points.size()):
+		var p: Vector2 = points[i]
+		var perp: Vector2 = perpendiculars[i]
+
+		# Базовая высота из elevation data
+		var base_elev: float = _get_elevation_at_point(p, elev_data) + height_offset
+
+		# Вычисляем высоту моста в этой точке с учётом рамп
+		var point_height := base_elev
+		if ramp_length > 0.1:
+			# Рампа в начале
+			if accumulated_length < ramp_length:
+				var t: float = accumulated_length / ramp_length
+				t = _smooth_step(t)
+				point_height = base_elev + bridge_height * t
+			# Рампа в конце
+			elif accumulated_length > total_length - ramp_length:
+				var t: float = (total_length - accumulated_length) / ramp_length
+				t = _smooth_step(t)
+				point_height = base_elev + bridge_height * t
+			# Плоская часть моста
+			else:
+				point_height = base_elev + bridge_height
+		else:
+			# Короткий мост - просто приподнимаем
+			point_height = base_elev + bridge_height
+
+		# Добавляем вершины (левая и правая сторона дороги)
+		var left := Vector3(p.x - perp.x * half_w, point_height, p.y - perp.y * half_w)
+		var right := Vector3(p.x + perp.x * half_w, point_height, p.y + perp.y * half_w)
+
+		vertices.append(left)
+		vertices.append(right)
+
+		# UV координаты
+		uvs.append(Vector2(0.0, accumulated_length * 0.1))
+		uvs.append(Vector2(1.0, accumulated_length * 0.1))
+
+		# Нормали (вверх)
+		normals.append(Vector3.UP)
+		normals.append(Vector3.UP)
+
+		# Обновляем накопленную длину
+		if i < points.size() - 1:
+			accumulated_length += points[i].distance_to(points[i + 1])
+
+	# Создаём индексы (квады -> треугольники)
+	for i in range(points.size() - 1):
+		var base_idx := i * 2
+		# Первый треугольник
+		indices.append(base_idx)
+		indices.append(base_idx + 2)
+		indices.append(base_idx + 1)
+		# Второй треугольник
+		indices.append(base_idx + 1)
+		indices.append(base_idx + 2)
+		indices.append(base_idx + 3)
+
+	# Создаём меш
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = indices
+
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	# Материал
+	var material: Material = WetRoadMaterial.create_road_shader_material(
+		_road_textures.get(texture_key, null),
+		_normal_textures.get("asphalt", null),
+		_is_wet_mode,
+		_is_night_mode
+	)
+
+	# Создаём MeshInstance3D
+	var mesh_instance := MeshInstance3D.new()
+	mesh_instance.name = "BridgeRoad"
+	mesh_instance.mesh = mesh
+	mesh_instance.material_override = material  # Используем material_override для обновления wet mode
+	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mesh_instance)
+
+	# Создаём коллизию для моста
+	_create_bridge_collision(vertices, indices, parent)
+
+	# Создаём опоры моста
+	_create_bridge_pillars(points, bridge_height, ramp_length, total_length, elev_data, parent)
+
+	# Создаём отбойники по краям моста
+	_create_bridge_barriers(points, width, bridge_height, ramp_length, total_length, elev_data, height_offset, parent)
+
+
+## Создаёт коллизию для моста
+func _create_bridge_collision(vertices: PackedVector3Array, indices: PackedInt32Array, parent: Node3D) -> void:
+	var body := StaticBody3D.new()
+	body.name = "BridgeCollision"
+	body.collision_layer = 1  # Road layer
+
+	var shape := CollisionShape3D.new()
+	var coll_shape := ConcavePolygonShape3D.new()
+
+	# Конвертируем индексы в PackedVector3Array для faces
+	var faces := PackedVector3Array()
+	for i in range(0, indices.size(), 3):
+		faces.append(vertices[indices[i]])
+		faces.append(vertices[indices[i + 1]])
+		faces.append(vertices[indices[i + 2]])
+
+	coll_shape.set_faces(faces)
+	shape.shape = coll_shape
+	body.add_child(shape)
+	parent.add_child(body)
+
+
+## Создаёт опоры моста
+func _create_bridge_pillars(points: PackedVector2Array, bridge_height: float, ramp_length: float, total_length: float, elev_data: Dictionary, parent: Node3D) -> void:
+	if bridge_height < 1.0:
+		return  # Слишком низкий мост - опоры не нужны
+
+	# Создаём опоры только на плоской части моста (не на рампах)
+	var accumulated := 0.0
+	var last_pillar_pos := -BRIDGE_PILLAR_SPACING  # Чтобы первая опора была сразу после рампы
+
+	for i in range(points.size() - 1):
+		var p1 := points[i]
+		var p2 := points[i + 1]
+		var segment_length := p1.distance_to(p2)
+
+		# Начало и конец сегмента в терминах accumulated distance
+		var seg_start := accumulated
+		var seg_end := accumulated + segment_length
+
+		# Границы плоской части (после рампы в начале, до рампы в конце)
+		var flat_start := ramp_length
+		var flat_end := total_length - ramp_length
+
+		# Пересечение сегмента с плоской частью
+		var check_start := maxf(seg_start, flat_start)
+		var check_end := minf(seg_end, flat_end)
+
+		if check_start < check_end:
+			# Создаём опоры вдоль этого сегмента
+			var pos := check_start
+			while pos <= check_end:
+				if pos - last_pillar_pos >= BRIDGE_PILLAR_SPACING:
+					# Интерполируем позицию на сегменте
+					var t := (pos - seg_start) / segment_length if segment_length > 0 else 0.0
+					t = clampf(t, 0.0, 1.0)
+					var pillar_pos_2d := p1.lerp(p2, t)
+					var ground_elev := _get_elevation_at_point(pillar_pos_2d, elev_data)
+
+					# Создаём опору
+					_create_single_pillar(pillar_pos_2d, ground_elev, bridge_height, parent)
+					last_pillar_pos = pos
+
+				pos += BRIDGE_PILLAR_SPACING * 0.5  # Шаг проверки меньше spacing для точности
+
+		accumulated += segment_length
+
+
+## Создаёт одну опору моста
+func _create_single_pillar(pos: Vector2, ground_elev: float, bridge_height: float, parent: Node3D) -> void:
+	var pillar := MeshInstance3D.new()
+	pillar.name = "BridgePillar"
+
+	# Создаём цилиндрический меш для опоры
+	var cylinder := CylinderMesh.new()
+	cylinder.top_radius = BRIDGE_PILLAR_RADIUS
+	cylinder.bottom_radius = BRIDGE_PILLAR_RADIUS * 1.3  # Немного шире внизу для устойчивости
+	cylinder.height = bridge_height
+	pillar.mesh = cylinder
+
+	# Материал опоры (бетон)
+	var material := StandardMaterial3D.new()
+	material.albedo_color = BRIDGE_PILLAR_COLOR
+	material.roughness = 0.85
+	material.metallic = 0.0
+	pillar.material_override = material
+
+	# Позиция: центр цилиндра на половине высоты от земли
+	pillar.position = Vector3(pos.x, ground_elev + bridge_height * 0.5, pos.y)
+
+	parent.add_child(pillar)
+
+	# Добавляем коллизию для опоры
+	var body := StaticBody3D.new()
+	body.name = "PillarCollision"
+	body.collision_layer = 2  # Obstacle layer
+
+	var shape := CollisionShape3D.new()
+	var coll_shape := CylinderShape3D.new()
+	coll_shape.radius = BRIDGE_PILLAR_RADIUS * 1.3
+	coll_shape.height = bridge_height
+	shape.shape = coll_shape
+
+	body.add_child(shape)
+	pillar.add_child(body)
+
+
+## Создаёт отбойники по краям моста
+func _create_bridge_barriers(points: PackedVector2Array, road_width: float, bridge_height: float, ramp_length: float, total_length: float, elev_data: Dictionary, height_offset: float, parent: Node3D) -> void:
+	if points.size() < 2:
+		return
+
+	const BARRIER_HEIGHT := 0.8  # Высота отбойника
+	const BARRIER_WIDTH := 0.15  # Толщина отбойника
+	const BARRIER_COLOR := Color(0.6, 0.6, 0.6)  # Серый металл
+
+	var half_road := road_width * 0.5
+	var perpendiculars: Array[Vector2] = _compute_averaged_perpendiculars(points)
+
+	# Создаём меши для левого и правого отбойника
+	for side in [-1, 1]:  # -1 = левый, 1 = правый
+		var vertices := PackedVector3Array()
+		var indices := PackedInt32Array()
+		var normals := PackedVector3Array()
+
+		var accumulated := 0.0
+
+		for i in range(points.size()):
+			var p: Vector2 = points[i]
+			var perp: Vector2 = perpendiculars[i]
+
+			# Базовая высота
+			var base_elev: float = _get_elevation_at_point(p, elev_data) + height_offset
+
+			# Высота моста в этой точке
+			var bridge_y := 0.0
+			if ramp_length > 0.1:
+				if accumulated < ramp_length:
+					var t: float = accumulated / ramp_length
+					bridge_y = _smooth_step(t) * bridge_height
+				elif accumulated > total_length - ramp_length:
+					var t: float = (total_length - accumulated) / ramp_length
+					bridge_y = _smooth_step(t) * bridge_height
+				else:
+					bridge_y = bridge_height
+			else:
+				bridge_y = bridge_height
+
+			var road_y: float = base_elev + bridge_y
+
+			# Позиция отбойника (на краю дороги)
+			var barrier_x: float = p.x + perp.x * half_road * side
+			var barrier_z: float = p.y + perp.y * half_road * side
+
+			# Добавляем 4 вершины для этой секции (низ и верх, внутри и снаружи)
+			var inner_offset: float = BARRIER_WIDTH * 0.5 * (-side)
+			var outer_offset: float = BARRIER_WIDTH * 0.5 * side
+
+			# Нижняя внутренняя
+			vertices.append(Vector3(barrier_x + perp.x * inner_offset, road_y, barrier_z + perp.y * inner_offset))
+			# Нижняя внешняя
+			vertices.append(Vector3(barrier_x + perp.x * outer_offset, road_y, barrier_z + perp.y * outer_offset))
+			# Верхняя внутренняя
+			vertices.append(Vector3(barrier_x + perp.x * inner_offset, road_y + BARRIER_HEIGHT, barrier_z + perp.y * inner_offset))
+			# Верхняя внешняя
+			vertices.append(Vector3(barrier_x + perp.x * outer_offset, road_y + BARRIER_HEIGHT, barrier_z + perp.y * outer_offset))
+
+			# Нормали (направлены наружу от дороги)
+			var normal := Vector3(perp.x * side, 0, perp.y * side)
+			for _j in range(4):
+				normals.append(normal)
+
+			# Обновляем accumulated
+			if i < points.size() - 1:
+				accumulated += points[i].distance_to(points[i + 1])
+
+		# Создаём индексы для граней
+		for i in range(points.size() - 1):
+			var base_idx := i * 4
+
+			# Внешняя стенка (2 треугольника)
+			indices.append(base_idx + 1)
+			indices.append(base_idx + 5)
+			indices.append(base_idx + 3)
+
+			indices.append(base_idx + 3)
+			indices.append(base_idx + 5)
+			indices.append(base_idx + 7)
+
+			# Верхняя грань
+			indices.append(base_idx + 2)
+			indices.append(base_idx + 3)
+			indices.append(base_idx + 6)
+
+			indices.append(base_idx + 6)
+			indices.append(base_idx + 3)
+			indices.append(base_idx + 7)
+
+		if vertices.size() < 8:
+			continue
+
+		# Создаём меш
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = vertices
+		arrays[Mesh.ARRAY_NORMAL] = normals
+		arrays[Mesh.ARRAY_INDEX] = indices
+
+		var mesh := ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+		# Материал отбойника
+		var material := StandardMaterial3D.new()
+		material.albedo_color = BARRIER_COLOR
+		material.metallic = 0.6
+		material.roughness = 0.4
+		material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		mesh.surface_set_material(0, material)
+
+		var mesh_instance := MeshInstance3D.new()
+		mesh_instance.name = "BridgeBarrier_" + ("Left" if side == -1 else "Right")
+		mesh_instance.mesh = mesh
+		mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		parent.add_child(mesh_instance)
+
+		# Коллизия для отбойника
+		var body := StaticBody3D.new()
+		body.name = "BarrierCollision"
+		body.collision_layer = 2  # Obstacle layer
+
+		var coll_shape := CollisionShape3D.new()
+		var shape := ConcavePolygonShape3D.new()
+
+		var faces := PackedVector3Array()
+		for j in range(0, indices.size(), 3):
+			faces.append(vertices[indices[j]])
+			faces.append(vertices[indices[j + 1]])
+			faces.append(vertices[indices[j + 2]])
+
+		shape.set_faces(faces)
+		coll_shape.shape = shape
+		body.add_child(coll_shape)
+		parent.add_child(body)
+
 
 func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: String, height_offset: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
 	var prof_start := 0
@@ -2400,22 +2909,12 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 	var mesh: MeshInstance3D = MeshInstance3D.new()
 	mesh.mesh = arr_mesh
 
-	# Материал с текстурой
-	var material: StandardMaterial3D = StandardMaterial3D.new()
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	if _road_textures.has(texture_key):
-		material.albedo_texture = _road_textures[texture_key]
-		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-		if _normal_textures.has("asphalt"):
-			material.normal_enabled = true
-			material.normal_texture = _normal_textures["asphalt"]
-			material.normal_scale = 0.3  # Уменьшено для меньшего шума
-	else:
-		material.albedo_color = COLORS.get("road_residential", Color(0.4, 0.4, 0.4))
-
-	if _is_wet_mode:
-		WetRoadMaterial.apply_wet_properties(material, true, _is_night_mode)
-
+	# Материал с текстурой (используем шейдер с noise вариацией)
+	var albedo_tex: Texture2D = _road_textures.get(texture_key, null)
+	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
+	var material: Material = WetRoadMaterial.create_road_shader_material(
+		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode
+	)
 	mesh.material_override = material
 
 	# Создаём коллизию дороги с группой Road для GEVP
@@ -2585,22 +3084,12 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		if _draw_call_logging_enabled:
 			_draw_call_stats["roads"] += 1
 
-		# Создаём материал (копируем логику из _create_road_mesh_with_texture)
-		var material: StandardMaterial3D = StandardMaterial3D.new()
-		material.cull_mode = BaseMaterial3D.CULL_DISABLED  # Оставляем DISABLED как в оригинале
-		if _road_textures.has(texture_key):
-			material.albedo_texture = _road_textures[texture_key]
-			material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-			if _normal_textures.has("asphalt"):
-				material.normal_enabled = true
-				material.normal_texture = _normal_textures["asphalt"]
-				material.normal_scale = 0.3
-		else:
-			material.albedo_color = COLORS.get("road_residential", Color(0.4, 0.4, 0.4))
-
-		if _is_wet_mode:
-			WetRoadMaterial.apply_wet_properties(material, true, _is_night_mode)
-
+		# Создаём материал с шейдером (noise вариация roughness + лужи)
+		var albedo_tex: Texture2D = _road_textures.get(texture_key, null)
+		var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
+		var material: Material = WetRoadMaterial.create_road_shader_material(
+			albedo_tex, normal_tex, _is_wet_mode, _is_night_mode
+		)
 		mesh_instance.material_override = material
 
 		# Создаём коллизию для merged road mesh
@@ -2649,9 +3138,9 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		parent.add_child(road_body)
 
 		# DEBUG: Всегда выводим информацию о созданных road batches
+		var mat_info: String = "ShaderMaterial" if material is ShaderMaterial else str(material.albedo_texture) if material is StandardMaterial3D and material.albedo_texture else "color only"
 		print("OSM: ✅ Finalized road batch %s/%s: %d vertices, %d triangles, material: %s" % [
-			chunk_key, texture_key, batch["vertices"].size(), batch["indices"].size() / 3,
-			material.albedo_texture if material.albedo_texture else "color only"
+			chunk_key, texture_key, batch["vertices"].size(), batch["indices"].size() / 3, mat_info
 		])
 
 	# Очищаем batch data для этого чанка
@@ -7193,7 +7682,7 @@ func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D
 	parent.add_child(body)
 
 # Извлечение данных дороги для навигации NPC
-func _extract_road_for_traffic(nodes: Array, tags: Dictionary, elev_data: Dictionary) -> void:
+func _extract_road_for_traffic(nodes: Array, tags: Dictionary, elev_data: Dictionary, bridge_info: Dictionary = {}) -> void:
 	"""Извлекает данные дороги в RoadNetwork для навигации NPC"""
 	# Проверяем наличие TrafficManager
 	if not get_parent().has_node("TrafficManager"):
@@ -7222,8 +7711,8 @@ func _extract_road_for_traffic(nodes: Array, tags: Dictionary, elev_data: Dictio
 	# Получаем тип дороги
 	var highway_type: String = tags.get("highway", "residential")
 
-	# Добавляем дорожный сегмент в RoadNetwork
-	road_network.add_road_segment(local_points, highway_type, chunk_key, elev_data)
+	# Добавляем дорожный сегмент в RoadNetwork (с информацией о мосте если есть)
+	road_network.add_road_segment(local_points, highway_type, chunk_key, elev_data, bridge_info)
 
 
 # === NIGHT MODE ===
@@ -7261,31 +7750,41 @@ func _update_chunk_road_wetness(chunk: Node3D, is_wet: bool, is_night: bool = tr
 	for child in chunk.get_children():
 		# Дороги добавляются как MeshInstance3D прямо в чанк
 		if child is MeshInstance3D:
-			var mat := child.material_override as StandardMaterial3D
+			var mat: Material = child.material_override
 			if mat and _is_road_material(mat):
 				_apply_wet_material(mat, is_wet, is_night)
 		# Также проверяем внутри StaticBody3D (бордюры и коллизии)
 		elif child is StaticBody3D:
 			for mesh_child in child.get_children():
 				if mesh_child is MeshInstance3D:
-					var mat := mesh_child.material_override as StandardMaterial3D
+					var mat: Material = mesh_child.material_override
 					if mat and _is_road_material(mat):
 						_apply_wet_material(mat, is_wet, is_night)
 
 
-func _is_road_material(mat: StandardMaterial3D) -> bool:
+func _is_road_material(mat: Material) -> bool:
 	"""Проверяет, является ли материал дорожным (не бордюр, не здание)"""
-	# Дороги имеют текстуру или тёмный цвет асфальта
-	if mat.albedo_texture:
-		return true
-	# Проверяем цвет - дороги обычно тёмно-серые
-	var color := mat.albedo_color
-	if color.r < 0.5 and color.g < 0.5 and color.b < 0.5:
-		return true
+	# ShaderMaterial с нашим road shader - это дорога
+	if mat is ShaderMaterial:
+		# Проверяем что это наш road shader по наличию параметра is_wet
+		if mat.get_shader_parameter("is_wet") != null:
+			return true
+		return false
+
+	# StandardMaterial3D (fallback) - проверяем по текстуре/цвету
+	if mat is StandardMaterial3D:
+		# Дороги имеют текстуру или тёмный цвет асфальта
+		if mat.albedo_texture:
+			return true
+		# Проверяем цвет - дороги обычно тёмно-серые
+		var color: Color = mat.albedo_color
+		if color.r < 0.5 and color.g < 0.5 and color.b < 0.5:
+			return true
+
 	return false
 
 
-func _apply_wet_material(mat: StandardMaterial3D, is_wet: bool, is_night: bool = true) -> void:
+func _apply_wet_material(mat: Material, is_wet: bool, is_night: bool = true) -> void:
 	"""Применяет свойства мокрого/сухого асфальта к материалу"""
 	WetRoadMaterial.apply_wet_properties(mat, is_wet, is_night)
 
@@ -8587,18 +9086,12 @@ func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, 
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.mesh = mesh
 
-	# Материал с текстурой перекрёстка
-	var material := StandardMaterial3D.new()
-	material.albedo_texture = _road_textures["intersection"]
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	# Добавляем карту нормалей как у дорог
-	if _normal_textures.has("asphalt"):
-		material.normal_enabled = true
-		material.normal_texture = _normal_textures["asphalt"]
-		material.normal_scale = 0.3  # Уменьшено для меньшего шума
-	# Применяем мокрый эффект если дождь
-	if _is_wet_mode:
-		WetRoadMaterial.apply_wet_properties(material, true, _is_night_mode)
+	# Материал с текстурой перекрёстка (используем шейдер с noise вариацией)
+	var albedo_tex: Texture2D = _road_textures.get("intersection", null)
+	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
+	var material: Material = WetRoadMaterial.create_road_shader_material(
+		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode
+	)
 	mesh_instance.material_override = material
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 

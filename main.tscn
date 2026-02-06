@@ -25,6 +25,7 @@
 [ext_resource type="Script" path="res://textures/ground_setup.gd" id="17_ground"]
 [ext_resource type="Script" path="res://debug/collision_visualizer.gd" id="18_collision_vis"]
 [ext_resource type="Script" path="res://debug/performance_profiler.gd" id="19_profiler"]
+[ext_resource type="Script" path="res://settings/color_grading.gd" id="20_color_grading"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -183,6 +184,9 @@ script = ExtResource("12_track_display")
 
 [node name="GraphicsSettings" type="Node" parent="."]
 script = ExtResource("16_graphics")
+
+[node name="ColorGrading" type="CanvasLayer" parent="."]
+script = ExtResource("20_color_grading")
 
 [node name="GroundSetup" type="Node" parent="."]
 script = ExtResource("17_ground")
