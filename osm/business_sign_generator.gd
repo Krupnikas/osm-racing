@@ -282,17 +282,26 @@ static func _create_text_sign(sign_root: Node3D, sign_text: String, sign_color: 
 	var text_width: float = text_size_px.x * pixel_size
 	var text_height: float = text_size_px.y * pixel_size
 
-	# Размер подложки = размер текста + отступы
+	# Для аптек добавляем место под красный плюс слева
+	var plus_width: float = 0.0
+	var plus_gap: float = 0.0
+	if amenity_type == "pharmacy":
+		var plus_size_px: Vector2 = font.get_string_size("+", HORIZONTAL_ALIGNMENT_CENTER, -1, font_size)
+		plus_width = plus_size_px.x * pixel_size
+		plus_gap = 0.04  # Отступ между плюсом и текстом
+
+	# Размер подложки = размер текста + отступы (+ плюс для аптек)
 	var padding_h: float = 0.08
 	var padding_v: float = 0.05
-	var desired_sign_width: float = text_width + padding_h * 2
+	var total_content_width: float = text_width + plus_width + plus_gap
+	var desired_sign_width: float = total_content_width + padding_h * 2
 	var sign_width: float = clampf(desired_sign_width, 0.5, max_width)
 	var sign_height: float = text_height + padding_v * 2
 
 	# Если ширина была ограничена, масштабируем текст
 	var text_scale: float = 1.0
 	if desired_sign_width > max_width:
-		text_scale = (max_width - padding_h * 2) / text_width
+		text_scale = (max_width - padding_h * 2) / total_content_width
 		sign_height = text_height * text_scale + padding_v * 2
 
 	# 1. Создаём объёмную светлую подложку
@@ -302,6 +311,28 @@ static func _create_text_sign(sign_root: Node3D, sign_text: String, sign_color: 
 
 	# 2. Создаём объёмный текст с цветом по типу заведения
 	var text_color = get_text_color(amenity_type)
+
+	# Для аптек добавляем красный плюс слева
+	var text_offset_x: float = 0.0
+	if amenity_type == "pharmacy" and _pharmacy_font:
+		var plus_label = Label3D.new()
+		plus_label.text = "+"
+		plus_label.font = _pharmacy_font
+		plus_label.font_size = 256
+		plus_label.modulate = Color(0.85, 0.1, 0.1)  # Ярко-красный
+		plus_label.outline_size = int(12 * text_scale)
+		plus_label.outline_modulate = Color(0.5, 0.0, 0.0)  # Тёмно-красный контур
+		plus_label.billboard = BaseMaterial3D.BILLBOARD_DISABLED
+		plus_label.no_depth_test = false
+		plus_label.pixel_size = 0.001 * text_scale
+		plus_label.render_priority = 10
+		plus_label.alpha_cut = Label3D.ALPHA_CUT_DISABLED
+		plus_label.position.z = 0.04
+		# Позиционируем плюс слева от центра
+		plus_label.position.x = -(text_width * text_scale / 2.0 + plus_gap * text_scale)
+		sign_root.add_child(plus_label)
+		# Сдвигаем основной текст вправо
+		text_offset_x = (plus_width * text_scale + plus_gap * text_scale) / 2.0
 
 	var label = Label3D.new()
 	label.text = sign_text
@@ -318,6 +349,7 @@ static func _create_text_sign(sign_root: Node3D, sign_text: String, sign_color: 
 	label.render_priority = 10
 	label.alpha_cut = Label3D.ALPHA_CUT_DISABLED
 	label.position.z = 0.04  # Чуть впереди подложки
+	label.position.x = text_offset_x  # Сдвиг для аптек
 	sign_root.add_child(label)
 
 

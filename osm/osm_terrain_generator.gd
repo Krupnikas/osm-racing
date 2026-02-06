@@ -273,11 +273,16 @@ const ROAD_WIDTHS := {
 }
 
 # Константы для мостов и туннелей
-const BRIDGE_BASE_HEIGHT := 3.0       # Базовая высота моста в метрах (пологий подъём)
-const LAYER_HEIGHT := 3.0             # Высота на один layer (разделение уровней)
-const BRIDGE_RAMP_LENGTH := 30.0      # Длина рампы подъёма/спуска в метрах
-const BRIDGE_PILLAR_SPACING := 20.0   # Расстояние между опорами моста
-const BRIDGE_PILLAR_RADIUS := 0.5     # Радиус опоры моста
+# Эталон: Северное шоссе (way 63269622) - 107.5м длина, 3м высота
+const BRIDGE_REFERENCE_LENGTH := 100.0  # Эталонная длина моста для полной высоты (метры)
+const BRIDGE_BASE_HEIGHT := 3.0         # Базовая высота для эталонного моста (метры)
+const BRIDGE_MIN_HEIGHT := 0.5          # Минимальная высота моста (метры) - очень пологий
+const LAYER_HEIGHT := 3.0               # Высота на один layer (разделение уровней)
+const BRIDGE_RAMP_RATIO := 0.4          # Рампа = 40% от длины моста (более пологий подъём)
+const BRIDGE_MAX_RAMP := 35.0           # Максимальная длина рампы (метры)
+const BRIDGE_MIN_LENGTH_FOR_PILLARS := 60.0  # Минимальная длина моста для опор (метры)
+const BRIDGE_PILLAR_SPACING := 20.0     # Расстояние между опорами моста
+const BRIDGE_PILLAR_RADIUS := 0.5       # Радиус опоры моста
 const BRIDGE_PILLAR_COLOR := Color(0.55, 0.53, 0.5)  # Цвет бетонных опор
 
 func _ready() -> void:
@@ -2228,13 +2233,17 @@ func _calculate_road_elevation(tags: Dictionary, base_elevation: float, road_len
 	var bridge_val: String = str(tags.get("bridge", ""))
 	if bridge_val == "yes" or bridge_val == "viaduct" or bridge_val == "true":
 		result.is_bridge = true
-		# Высота моста = базовая + layer * высота слоя
-		# Минимум BRIDGE_BASE_HEIGHT чтобы машины могли проехать под мостом
-		var bridge_height: float = maxf(BRIDGE_BASE_HEIGHT, BRIDGE_BASE_HEIGHT + layer * LAYER_HEIGHT)
+		# Высота моста пропорциональна длине (эталон: 100м → 3м)
+		# Короткие мосты ниже и с более пологими рампами
+		var length_ratio: float = clampf(road_length / BRIDGE_REFERENCE_LENGTH, 0.0, 1.0) if road_length > 0.0 else 1.0
+		var base_height: float = maxf(BRIDGE_MIN_HEIGHT, BRIDGE_BASE_HEIGHT * length_ratio)
+		# Добавляем layer если есть
+		var bridge_height: float = base_height + maxf(0, layer) * LAYER_HEIGHT
 		result.bridge_height = bridge_height
 		result.height = base_elevation + bridge_height
-		# Длина рампы - не больше 1/3 длины дороги
-		result.ramp_length = minf(BRIDGE_RAMP_LENGTH, road_length / 3.0) if road_length > 0.0 else BRIDGE_RAMP_LENGTH
+		# Рампа пропорциональна длине моста (30% с каждой стороны, макс 30м)
+		var ramp_from_ratio: float = road_length * BRIDGE_RAMP_RATIO if road_length > 0.0 else BRIDGE_MAX_RAMP
+		result.ramp_length = minf(BRIDGE_MAX_RAMP, ramp_from_ratio)
 
 	# Проверяем tunnel
 	elif str(tags.get("tunnel", "")) == "yes":
@@ -2246,9 +2255,13 @@ func _calculate_road_elevation(tags: Dictionary, base_elevation: float, road_len
 	elif layer > 0:
 		# Эстакада (layer > 0 без bridge=yes) - тоже поднимаем
 		result.is_bridge = true
-		result.bridge_height = layer * LAYER_HEIGHT
+		# Для эстакад тоже применяем пропорцию
+		var length_ratio: float = clampf(road_length / BRIDGE_REFERENCE_LENGTH, 0.0, 1.0) if road_length > 0.0 else 1.0
+		var base_height: float = maxf(BRIDGE_MIN_HEIGHT, BRIDGE_BASE_HEIGHT * length_ratio)
+		result.bridge_height = base_height + (layer - 1) * LAYER_HEIGHT  # layer уже учтён в base
 		result.height = base_elevation + result.bridge_height
-		result.ramp_length = minf(BRIDGE_RAMP_LENGTH, road_length / 3.0) if road_length > 0.0 else BRIDGE_RAMP_LENGTH
+		var ramp_from_ratio: float = road_length * BRIDGE_RAMP_RATIO if road_length > 0.0 else BRIDGE_MAX_RAMP
+		result.ramp_length = minf(BRIDGE_MAX_RAMP, ramp_from_ratio)
 
 	return result
 
@@ -2446,7 +2459,7 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 
 	# Параметры моста
 	var bridge_height: float = bridge_info.get("bridge_height", BRIDGE_BASE_HEIGHT)
-	var ramp_length: float = bridge_info.get("ramp_length", minf(BRIDGE_RAMP_LENGTH, total_length / 3.0))
+	var ramp_length: float = bridge_info.get("ramp_length", minf(BRIDGE_MAX_RAMP, total_length * BRIDGE_RAMP_RATIO))
 
 	# Создаём массивы для меша
 	var vertices := PackedVector3Array()
@@ -2579,8 +2592,9 @@ func _create_bridge_collision(vertices: PackedVector3Array, indices: PackedInt32
 
 ## Создаёт опоры моста
 func _create_bridge_pillars(points: PackedVector2Array, bridge_height: float, ramp_length: float, total_length: float, elev_data: Dictionary, parent: Node3D) -> void:
-	if bridge_height < 1.0:
-		return  # Слишком низкий мост - опоры не нужны
+	# Короткие и низкие мосты не нуждаются в опорах
+	if bridge_height < 1.5 or total_length < BRIDGE_MIN_LENGTH_FOR_PILLARS:
+		return
 
 	# Создаём опоры только на плоской части моста (не на рампах)
 	var accumulated := 0.0
