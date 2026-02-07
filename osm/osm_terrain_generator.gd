@@ -2392,39 +2392,39 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 	var height_offset: float
 	var curb_height: float
 	# Высота дорог по приоритету (большие дороги выше малых для правильного отображения на перекрёстках)
-	# Увеличены offset'ы чтобы дорожная коллизия была выше террейна для GEVP
+	# Offset'ы: 0.05m базовый подъём над террейном + z-order между типами дорог
 	match highway_type:
 		"motorway", "trunk":
 			texture_key = "highway"
-			height_offset = 0.020  # Самые высокие
+			height_offset = 0.070  # Самые высокие
 			curb_height = 0.020
 		"primary":
 			texture_key = "primary"
-			height_offset = 0.018
+			height_offset = 0.068
 			curb_height = 0.018
 		"secondary":
 			texture_key = "primary"
-			height_offset = 0.016
+			height_offset = 0.066
 			curb_height = 0.014
 		"tertiary":
 			texture_key = "residential"  # 2 полосы для узкой дороги (8м)
-			height_offset = 0.015
+			height_offset = 0.065
 			curb_height = 0.012
 		"residential", "unclassified":
 			texture_key = "residential"
-			height_offset = 0.014
+			height_offset = 0.064
 			curb_height = 0.010
 		"service":
 			texture_key = "residential"
-			height_offset = 0.012  # Самые низкие дороги
+			height_offset = 0.062  # Самые низкие дороги
 			curb_height = 0.006
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
-			height_offset = 0.005  # Пешеходные значительно ниже
+			height_offset = 0.055  # Пешеходные значительно ниже
 			curb_height = 0.0
 		_:
 			texture_key = "residential"
-			height_offset = 0.014
+			height_offset = 0.064
 			curb_height = 0.008
 
 	# Создаём дорогу - обычную или мост
@@ -2923,19 +2923,24 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 	for i in range(points.size()):
 		var p: Vector2 = points[i]
 		var perp: Vector2 = perpendiculars[i]
-		var h: float = _get_elevation_at_point(p, elev_data) + height_offset + z_offset
 
 		if i > 0:
 			accumulated_length += points[i - 1].distance_to(p)
 		var uv_y: float = accumulated_length * uv_scale
 
+		# Sample elevation at each edge to tilt road on slopes
+		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
+		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
+		var h_left: float = _get_elevation_at_point(left_pos, elev_data) + height_offset + z_offset
+		var h_right: float = _get_elevation_at_point(right_pos, elev_data) + height_offset + z_offset
+
 		# Left vertex
-		vertices.append(Vector3(p.x - perp.x * half_w, h, p.y - perp.y * half_w))
+		vertices.append(Vector3(left_pos.x, h_left, left_pos.y))
 		uvs.append(Vector2(0.0, uv_y))
 		normals.append(Vector3.UP)
 
 		# Right vertex
-		vertices.append(Vector3(p.x + perp.x * half_w, h, p.y + perp.y * half_w))
+		vertices.append(Vector3(right_pos.x, h_right, right_pos.y))
 		uvs.append(Vector2(1.0, uv_y))
 		normals.append(Vector3.UP)
 
@@ -3069,19 +3074,24 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 	for i in range(points.size()):
 		var p: Vector2 = points[i]
 		var perp: Vector2 = perpendiculars[i]
-		var h: float = _get_elevation_at_point(p, elev_data) + height_offset + z_offset
 
 		if i > 0:
 			accumulated_length += points[i - 1].distance_to(p)
 		var uv_y: float = accumulated_length * uv_scale
 
+		# Sample elevation at each edge to tilt road on slopes
+		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
+		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
+		var h_left: float = _get_elevation_at_point(left_pos, elev_data) + height_offset + z_offset
+		var h_right: float = _get_elevation_at_point(right_pos, elev_data) + height_offset + z_offset
+
 		# Left vertex
-		batch["vertices"].append(Vector3(p.x - perp.x * half_w, h, p.y - perp.y * half_w))
+		batch["vertices"].append(Vector3(left_pos.x, h_left, left_pos.y))
 		batch["uvs"].append(Vector2(0.0, uv_y))
 		batch["normals"].append(Vector3.UP)
 
 		# Right vertex
-		batch["vertices"].append(Vector3(p.x + perp.x * half_w, h, p.y + perp.y * half_w))
+		batch["vertices"].append(Vector3(right_pos.x, h_right, right_pos.y))
 		batch["uvs"].append(Vector2(1.0, uv_y))
 		batch["normals"].append(Vector3.UP)
 
@@ -6594,24 +6604,46 @@ func _get_way_center(nodes: Array) -> Vector2:
 
 # Получение высоты террейна в точке
 func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
-	if elev_data.is_empty():
+	if elev_data.is_empty() and _chunk_elevations.is_empty():
 		return 0.0
 
-	var grid: Array = elev_data.get("grid", [])
-	var grid_size: int = elev_data.get("grid_size", 0)
-	var min_elev: float = elev_data.get("min_elevation", 0.0)
+	# Определяем chunk_key по локальным координатам точки
+	var chunk_x := int(floor(point.x / chunk_size))
+	var chunk_z := int(floor(point.y / chunk_size))
+	var point_chunk_key := "%d,%d" % [chunk_x, chunk_z]
+
+	# Используем elev_data того чанка, где находится точка
+	var actual_elev: Dictionary = elev_data
+	if not elev_data.is_empty():
+		# Проверяем, попадает ли точка в переданный elev_data
+		var center_lat_check: float = elev_data.get("center_lat", start_lat)
+		var center_lon_check: float = elev_data.get("center_lon", start_lon)
+		var lon_check := start_lon + point.x / (111000.0 * cos(deg_to_rad(start_lat)))
+		var lat_check := start_lat - point.y / 111000.0
+		var lat_delta_check := chunk_size / 111000.0
+		var lon_delta_check := chunk_size / (111000.0 * cos(deg_to_rad(center_lat_check)))
+		var x_n := (lon_check - (center_lon_check - lon_delta_check / 2)) / lon_delta_check
+		var z_n := ((center_lat_check + lat_delta_check / 2) - lat_check) / lat_delta_check
+		if x_n < -0.01 or x_n > 1.01 or z_n < -0.01 or z_n > 1.01:
+			# Точка вне переданного чанка — ищем правильный
+			if _chunk_elevations.has(point_chunk_key):
+				actual_elev = _chunk_elevations[point_chunk_key]
+			# else: используем переданный с clamping (лучше чем ничего)
+	else:
+		# elev_data пустой — пробуем найти по chunk_key
+		if _chunk_elevations.has(point_chunk_key):
+			actual_elev = _chunk_elevations[point_chunk_key]
+		else:
+			return 0.0
+
+	var grid: Array = actual_elev.get("grid", [])
+	var grid_size: int = actual_elev.get("grid_size", 0)
 
 	if grid_size < 2 or grid.size() == 0:
 		return 0.0
 
-	# Определяем позицию в сетке
-	# Точка в локальных координатах, нужно преобразовать в координаты сетки чанка
-	# Сетка покрывает chunk_size x chunk_size метров
-
-	# Нормализуем координаты относительно чанка
-	# Примечание: elev_data содержит данные для конкретного чанка
-	var center_lat: float = elev_data.get("center_lat", start_lat)
-	var center_lon: float = elev_data.get("center_lon", start_lon)
+	var center_lat: float = actual_elev.get("center_lat", start_lat)
+	var center_lon: float = actual_elev.get("center_lon", start_lon)
 
 	# Преобразуем точку обратно в lat/lon
 	var lon := start_lon + point.x / (111000.0 * cos(deg_to_rad(start_lat)))
