@@ -16,6 +16,9 @@ var track_info := {
 	"kristalniy_metod_rodilsya_medlennym.ogg": ["Кристальный метод", "Рожденный медленным"],
 	"stariy_pes_i_dimon_morison_vsadniki_grozy.ogg": ["Старый Пёс и Димон Морисон", "Всадники грозы"],
 	"element_80_s_menya_hvatit.ogg": ["Элемент-80", "С меня хватит"],
+	"maloy_dzhon_ron_don_don.ogg": ["Малой Джон", "Рон дон дон"],
+	"radio_tapok_edinstvenniy.ogg": ["Радио Тапок", "Единственный"],
+	"tuhliy_bez_kontrolya.ogg": ["Тухлый", "Без контроля"],
 }
 
 # Audio player
@@ -48,6 +51,9 @@ func _initialize_playlist() -> void:
 		"res://audio/music/kristalniy_metod_rodilsya_medlennym.ogg",
 		"res://audio/music/stariy_pes_i_dimon_morison_vsadniki_grozy.ogg",
 		"res://audio/music/element_80_s_menya_hvatit.ogg",
+		"res://audio/music/maloy_dzhon_ron_don_don.ogg",
+		"res://audio/music/radio_tapok_edinstvenniy.ogg",
+		"res://audio/music/tuhliy_bez_kontrolya.ogg",
 	]
 
 func play_track(index: int) -> void:

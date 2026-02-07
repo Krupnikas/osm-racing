@@ -63,10 +63,11 @@ const SPEED_LIMITS := {
 }
 
 
-func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_key: String, elev_data: Dictionary) -> void:
+func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_key: String, elev_data: Dictionary, bridge_info: Dictionary = {}) -> void:
 	"""Добавляет дорожный сегмент в навигационную сеть
 	Примечание: _chunk_key не используется, каждый waypoint определяет свой чанк по позиции
-	Создаёт waypoints в ОБОИХ направлениях для двустороннего движения"""
+	Создаёт waypoints в ОБОИХ направлениях для двустороннего движения
+	bridge_info содержит информацию о мосте: is_bridge, bridge_height, ramp_length"""
 	if points.size() < 2:
 		return
 
@@ -85,10 +86,10 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_k
 	_next_road_id += 1
 
 	# Создаём waypoints в прямом направлении
-	var forward_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, false, road_id)
+	var forward_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, false, road_id, bridge_info)
 
 	# Создаём waypoints в обратном направлении
-	var reverse_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, true, road_id)
+	var reverse_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, true, road_id, bridge_info)
 
 	# Замыкаем кольцевые дороги (последняя точка совпадает с первой)
 	if points.size() >= 3:
@@ -114,10 +115,24 @@ func _close_loop(waypoints: Array) -> void:
 		first_wp.prev_waypoints.append(last_wp)
 
 
-func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictionary, speed_limit: float, width: float, lanes: int, reverse: bool, road_id: int = 0) -> Array[Waypoint]:
-	"""Создаёт waypoints вдоль дороги в одном направлении"""
+func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictionary, speed_limit: float, width: float, lanes: int, reverse: bool, road_id: int = 0, bridge_info: Dictionary = {}) -> Array[Waypoint]:
+	"""Создаёт waypoints вдоль дороги в одном направлении
+	bridge_info содержит: is_bridge, bridge_height, ramp_length для расчёта высоты на мостах"""
 	var all_road_waypoints: Array[Waypoint] = []
 	var prev_segment_last: Waypoint = null
+
+	# Параметры моста
+	var is_bridge: bool = bridge_info.get("is_bridge", false)
+	var bridge_height: float = bridge_info.get("bridge_height", 0.0)
+	var ramp_length: float = bridge_info.get("ramp_length", 0.0)
+
+	# Вычисляем общую длину дороги для правильного расчёта рамп
+	var total_road_length := 0.0
+	if is_bridge:
+		for k in range(points.size() - 1):
+			var p1 := points[k]
+			var p2 := points[k + 1]
+			total_road_length += p1.distance_to(p2)
 
 	# Определяем порядок обхода точек
 	var start_idx: int
@@ -132,13 +147,16 @@ func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictio
 		end_idx = points.size() - 1
 		step = 1
 
+	# Отслеживаем пройденное расстояние для рамп моста
+	var accumulated_distance := 0.0
+
 	# Генерируем waypoints вдоль дороги
 	var i := start_idx
 	while (step > 0 and i < end_idx) or (step < 0 and i > end_idx):
 		var start_2d := points[i]
 		var end_2d := points[i + step]
 
-		# Получаем высоты
+		# Получаем базовые высоты из elevation data
 		var start_height := _get_elevation_at_point(start_2d, elev_data)
 		var end_height := _get_elevation_at_point(end_2d, elev_data)
 
@@ -162,6 +180,12 @@ func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictio
 		for j in range(num_waypoints):
 			var t := float(j) / float(num_waypoints - 1)
 			var pos := start_pos.lerp(end_pos, t)
+
+			# Добавляем высоту моста с учётом рамп
+			if is_bridge and bridge_height > 0.0:
+				var current_distance := accumulated_distance + t * segment_length
+				var bridge_y := _calculate_bridge_height_at_distance(current_distance, total_road_length, bridge_height, ramp_length)
+				pos.y += bridge_y
 
 			# Определяем chunk_key для этого waypoint на основе его позиции
 			var wp_chunk_key := _get_chunk_key_for_position(pos)
@@ -193,9 +217,42 @@ func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictio
 		if segment_waypoints.size() > 0:
 			prev_segment_last = segment_waypoints[segment_waypoints.size() - 1]
 
+		# Обновляем накопленное расстояние для рамп моста
+		accumulated_distance += segment_length
+
 		i += step
 
 	return all_road_waypoints
+
+
+## Вычисляет высоту на мосту с учётом плавных рамп подъёма/спуска
+func _calculate_bridge_height_at_distance(distance: float, total_length: float, bridge_height: float, ramp_length: float) -> float:
+	"""Возвращает Y-координату для точки на мосту.
+	Рампы: smooth_step интерполяция от 0 до bridge_height на длине ramp_length.
+	Плоская часть: bridge_height между рампами."""
+	if total_length <= 0.0 or bridge_height <= 0.0:
+		return 0.0
+
+	# Безопасная длина рампы (не более 1/3 длины моста)
+	var safe_ramp: float = minf(ramp_length, total_length / 3.0)
+
+	if distance < safe_ramp:
+		# Начальная рампа (подъём)
+		var t: float = distance / safe_ramp
+		return _smooth_step(t) * bridge_height
+	elif distance > total_length - safe_ramp:
+		# Конечная рампа (спуск)
+		var t: float = (total_length - distance) / safe_ramp
+		return _smooth_step(t) * bridge_height
+	else:
+		# Плоская часть моста
+		return bridge_height
+
+
+## Smooth step функция для плавных переходов (ease in-out)
+func _smooth_step(t: float) -> float:
+	t = clampf(t, 0.0, 1.0)
+	return t * t * (3.0 - 2.0 * t)
 
 
 ## Получает ключ чанка по позиции waypoint

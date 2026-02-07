@@ -66,6 +66,7 @@ func hide_hud() -> void:
 	$FinishBanner.visible = false
 	$ResultPanel.visible = false
 	$LoadingPanel.visible = false
+	_clear_standings()
 
 
 func _on_loading_started() -> void:
@@ -119,9 +120,11 @@ func _on_race_started() -> void:
 
 
 var _last_race_time: float = 0.0
+var _last_race_results: Array = []
 
-func _on_race_finished(time: float) -> void:
+func _on_race_finished(time: float, results: Array = []) -> void:
 	_last_race_time = time
+	_last_race_results = results
 
 	# Скрываем таймер чекпоинтов
 	$CheckpointTimer.visible = false
@@ -158,23 +161,108 @@ func _show_results_screen() -> void:
 	# Показываем курсор для кнопок
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
-	# Сбрасываем стиль на победу
-	$ResultPanel/VBox/FinishLabel.text = "РЕЗУЛЬТАТЫ"
-	$ResultPanel/VBox/FinishLabel.modulate = Color(0, 1, 0)
-	$ResultPanel/VBox/TimeTitle.text = "Ваше время:"
-	$ResultPanel/VBox/TimeLabel.visible = true
-
-	# Форматируем время
-	var minutes := int(_last_race_time) / 60
-	var seconds := int(_last_race_time) % 60
-	var ms := int((_last_race_time - int(_last_race_time)) * 100)
-	var time_str := "%02d:%02d.%02d" % [minutes, seconds, ms]
-
-	$ResultPanel/VBox/TimeLabel.text = time_str
+	# Очищаем предыдущую таблицу результатов (если есть)
+	_clear_standings()
 
 	# Название трассы
 	if _race_manager and _race_manager.current_track:
 		$ResultPanel/VBox/TrackLabel.text = "Трасса: " + _race_manager.current_track.track_name
+
+	# Проверяем режим: checkpoint или sprint
+	var is_checkpoint: bool = _race_manager != null and _race_manager.is_checkpoint_mode()
+
+	if is_checkpoint or _last_race_results.is_empty():
+		# Checkpoint mode: показываем только своё время
+		$ResultPanel/VBox/FinishLabel.text = "РЕЗУЛЬТАТЫ"
+		$ResultPanel/VBox/FinishLabel.modulate = Color(0, 1, 0)
+		$ResultPanel/VBox/TimeTitle.text = "Ваше время:"
+		$ResultPanel/VBox/TimeTitle.visible = true
+		$ResultPanel/VBox/TimeLabel.visible = true
+
+		# Форматируем время
+		var time_str := _format_time(_last_race_time)
+		$ResultPanel/VBox/TimeLabel.text = time_str
+	else:
+		# Sprint mode: показываем таблицу результатов
+		$ResultPanel/VBox/FinishLabel.text = "1 МЕСТО!"
+		$ResultPanel/VBox/FinishLabel.modulate = Color(1, 0.85, 0)  # Золотой
+		$ResultPanel/VBox/TimeTitle.visible = false
+		$ResultPanel/VBox/TimeLabel.visible = false
+
+		# Создаём таблицу результатов
+		_create_standings()
+
+
+func _format_time(time: float) -> String:
+	"""Форматирует время в MM:SS.ms"""
+	var minutes := int(time) / 60
+	var seconds := int(time) % 60
+	var ms := int((time - int(time)) * 100)
+	return "%02d:%02d.%02d" % [minutes, seconds, ms]
+
+
+func _clear_standings() -> void:
+	"""Удаляет предыдущую таблицу результатов"""
+	var vbox := get_node_or_null("ResultPanel/VBox")
+	if not vbox:
+		return
+	var standings_container := vbox.get_node_or_null("StandingsContainer")
+	if standings_container:
+		standings_container.queue_free()
+
+
+func _create_standings() -> void:
+	"""Создаёт таблицу результатов для sprint mode"""
+	var container := VBoxContainer.new()
+	container.name = "StandingsContainer"
+	container.add_theme_constant_override("separation", 8)
+
+	for result in _last_race_results:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 20)
+
+		# Позиция (1, 2, 3...)
+		var pos_label := Label.new()
+		pos_label.text = "%d." % result.position
+		pos_label.custom_minimum_size = Vector2(50, 0)
+		pos_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		pos_label.add_theme_font_size_override("font_size", 32)
+		if result.is_player:
+			pos_label.add_theme_color_override("font_color", Color(1, 0.85, 0))  # Золотой
+		else:
+			pos_label.add_theme_color_override("font_color", Color(0.8, 0.8, 0.8))
+		row.add_child(pos_label)
+
+		# Имя
+		var name_label := Label.new()
+		name_label.text = result.name
+		name_label.custom_minimum_size = Vector2(200, 0)
+		name_label.add_theme_font_size_override("font_size", 32)
+		if result.is_player:
+			name_label.add_theme_color_override("font_color", Color(1, 0.85, 0))
+		else:
+			name_label.add_theme_color_override("font_color", Color.WHITE)
+		row.add_child(name_label)
+
+		# Время
+		var time_label := Label.new()
+		time_label.text = _format_time(result.time)
+		time_label.custom_minimum_size = Vector2(150, 0)
+		time_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		time_label.add_theme_font_size_override("font_size", 32)
+		if result.is_player:
+			time_label.add_theme_color_override("font_color", Color(1, 0.85, 0))
+		else:
+			time_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+		row.add_child(time_label)
+
+		container.add_child(row)
+
+	# Вставляем контейнер перед кнопками (после HSpacer2)
+	var vbox := $ResultPanel/VBox
+	var spacer_idx := vbox.get_node("HSpacer2").get_index()
+	vbox.add_child(container)
+	vbox.move_child(container, spacer_idx + 1)
 
 
 func _on_race_cancelled() -> void:
@@ -229,7 +317,7 @@ func _on_checkpoint_timeout() -> void:
 
 
 func _show_timeout_results() -> void:
-	"""Показать экран результатов при поражении"""
+	"""Показать экран результатов при поражении (только checkpoint mode)"""
 	$FinishBanner.visible = false
 	$TimerLabel.visible = false
 	$ResultPanel.visible = true
@@ -237,10 +325,14 @@ func _show_timeout_results() -> void:
 	# Показываем курсор
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
+	# Очищаем standings (на всякий случай)
+	_clear_standings()
+
 	# Меняем текст на поражение
 	$ResultPanel/VBox/FinishLabel.text = "ПОРАЖЕНИЕ"
 	$ResultPanel/VBox/FinishLabel.modulate = Color(1.0, 0.3, 0.3)
 	$ResultPanel/VBox/TimeTitle.text = "Время закончилось"
+	$ResultPanel/VBox/TimeTitle.visible = true
 	$ResultPanel/VBox/TimeLabel.text = ""
 	$ResultPanel/VBox/TimeLabel.visible = false
 
@@ -252,9 +344,11 @@ func _show_timeout_results() -> void:
 func _on_restart_pressed() -> void:
 	"""Перезапустить гонку - полная перезагрузка сцены"""
 	# Сбрасываем стили результатов перед перезагрузкой
+	_clear_standings()
 	$ResultPanel/VBox/FinishLabel.text = "РЕЗУЛЬТАТЫ"
 	$ResultPanel/VBox/FinishLabel.modulate = Color.WHITE
 	$ResultPanel/VBox/TimeTitle.text = "Ваше время:"
+	$ResultPanel/VBox/TimeTitle.visible = true
 	$ResultPanel/VBox/TimeLabel.visible = true
 	$FinishBanner/BannerText.text = "ЗАЕЗД ОКОНЧЕН"
 	$FinishBanner/BannerText.modulate = Color(0.85, 0.7, 0.1)

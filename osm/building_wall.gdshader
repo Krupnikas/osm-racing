@@ -21,11 +21,11 @@ void fragment() {
 		color = albedo_color.rgb;
 	}
 
-	// AO отключён - вызывал проблемы с высокими зданиями
-
-	// Добавляем небольшую вариацию по высоте
-	float height_variation = 0.02 * sin(UV.y * 50.0);
-	color += vec3(height_variation);
+	// Для кастомных текстур не применяем вариацию, для процедурных - минимальная
+	if (!use_texture) {
+		float height_variation = 0.02 * sin(UV.y * 50.0);
+		color += vec3(height_variation);
+	}
 
 	ALBEDO = color;
 
@@ -41,11 +41,11 @@ void fragment() {
 		NORMAL = -NORMAL;
 	}
 
-	// Вариация roughness для интересных отражений
-	float roughness_variation = 0.0;
+	// Для кастомных текстур: меньше roughness = ярче отражения света
 	if (use_texture) {
-		roughness_variation = 0.05 * texture(albedo_texture, UV * 4.0).r;
+		ROUGHNESS = 0.6;  // Гладче, лучше отражает свет
+	} else {
+		ROUGHNESS = roughness_base;  // Процедурные текстуры - матовые
 	}
-	ROUGHNESS = roughness_base + roughness_variation;
 	METALLIC = 0.0;
 }

@@ -1,9 +1,10 @@
-[gd_scene load_steps=5 format=3 uid="uid://dxqmenu001"]
+[gd_scene load_steps=6 format=3 uid="uid://dxqmenu001"]
 
 [ext_resource type="Script" path="res://ui/standalone_main_menu.gd" id="1_script"]
 [ext_resource type="Texture2D" path="res://ui/assets/zhazhda-speed.png" id="2_bg"]
 [ext_resource type="PackedScene" uid="uid://car_selection_001" path="res://ui/car_selection.tscn" id="3_car_selection"]
 [ext_resource type="Theme" path="res://ui/racing_theme.tres" id="4_theme"]
+[ext_resource type="Script" path="res://ui/track_display.gd" id="5_track_display"]
 
 [node name="StandaloneMainMenu" type="Control"]
 process_mode = 3
@@ -459,6 +460,9 @@ text = "Загрузка карты..."
 horizontal_alignment = 1
 
 [node name="CarSelection" parent="." instance=ExtResource("3_car_selection")]
+
+[node name="TrackDisplay" type="CanvasLayer" parent="."]
+script = ExtResource("5_track_display")
 
 [node name="Version" type="Label" parent="."]
 layout_mode = 1

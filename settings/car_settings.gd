@@ -21,6 +21,13 @@ extends Node
 const CONFIG_PATH := "user://car_settings.cfg"
 const DEFAULT_CAR := "nexia"
 
+# Характеристики для UI (0.0-1.0)
+const DISPLAY_STATS := {
+	"nexia": {"accel": 0.65, "speed": 0.60, "handling": 0.70},
+	"beetle": {"accel": 0.85, "speed": 0.90, "handling": 0.80},
+	"polo": {"accel": 0.60, "speed": 0.55, "handling": 0.75}
+}
+
 var selected_car_id: String = DEFAULT_CAR
 const CARS := {
 	"nexia": {

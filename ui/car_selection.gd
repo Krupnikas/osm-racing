@@ -30,6 +30,9 @@ func _update_preview() -> void:
 	var car_id: String = _car_ids[_current_index]
 	$CarouselContainer/CarNameLabel.text = CarSettings.get_car_name(car_id)
 
+	# Обновляем прогрессбары характеристик
+	_update_stats_bars(car_id)
+
 	# Удаляем старую превью
 	var container := $PreviewViewport/SubViewport/CarPreviewContainer
 	for child in container.get_children():
@@ -49,6 +52,19 @@ func _update_preview() -> void:
 		_preview_car.set_physics_process(false)
 
 	container.add_child(_preview_car)
+
+
+func _update_stats_bars(car_id: String) -> void:
+	var stats: Dictionary = CarSettings.DISPLAY_STATS.get(car_id, {"accel": 0.5, "speed": 0.5, "handling": 0.5})
+	var accel_bar = get_node_or_null("StatsContainer/AccelRow/Bar")
+	var speed_bar = get_node_or_null("StatsContainer/SpeedRow/Bar")
+	var handle_bar = get_node_or_null("StatsContainer/HandleRow/Bar")
+	if accel_bar:
+		accel_bar.value = stats["accel"]
+	if speed_bar:
+		speed_bar.value = stats["speed"]
+	if handle_bar:
+		handle_bar.value = stats["handling"]
 
 
 func _on_prev_pressed() -> void:

@@ -5,6 +5,15 @@ extends Node
 
 const RaceTrackScript = preload("res://race/race_tracks.gd")
 const RaceBarriersScript = preload("res://race/race_barriers.gd")
+const RaceRouteScript = preload("res://race/race_route.gd")
+const RaceGridScript = preload("res://race/race_grid.gd")
+
+# Сцены AI соперников
+const OPPONENT_SCENES := [
+	"res://race/racer_nexia.tscn",
+	"res://race/racer_vaz2107.tscn",
+]
+const OPPONENT_COUNT := 3  # Количество AI соперников
 
 signal race_loading_started
 signal race_loading_progress(progress: float, status: String)
@@ -12,7 +21,7 @@ signal race_ready  # Чанки загружены, можно начинать 
 signal countdown_tick(number: int)  # 3, 2, 1
 signal countdown_go  # Старт!
 signal race_started
-signal race_finished(time: float)
+signal race_finished(time: float, results: Array)  # results: [{name, time, position}]
 signal race_cancelled
 signal checkpoint_passed(index: int, time_bonus: float)  # Пройден чекпоинт
 signal checkpoint_timeout  # Время истекло
@@ -43,6 +52,11 @@ var _checkpoint_areas: Array = []  # Array[Area3D]
 var _checkpoint_local_positions: Array = []  # Array[Vector3] для minimap
 var _minimap: Control  # Ссылка на мини-карту
 var _barriers = null  # Визуальные барьеры вдоль маршрута
+
+# AI соперники
+var _race_route: RaceRoute  # Маршрут для AI
+var _opponents: Array = []  # Array[RacerAI] - спавненные соперники
+var _finish_order: Array = []  # [{name, time, is_player}] - порядок финиша
 
 
 func _ready() -> void:
@@ -102,6 +116,7 @@ func start_race(track) -> void:
 	_checkpoint_timer = 0.0
 	_current_checkpoint_index = 0
 	_checkpoint_local_positions.clear()
+	_finish_order.clear()
 
 	print("RaceManager: Emitting race_loading_started signal")
 	race_loading_started.emit()
@@ -183,6 +198,14 @@ func _on_race_ready() -> void:
 	# Создаём визуальные барьеры вдоль маршрута
 	_create_barriers()
 
+	# Показываем чекпоинты/финиш на миникарте (универсально для всех режимов)
+	_update_minimap_markers()
+
+	# Строим маршрут и спавним AI соперников (только в Sprint mode)
+	if not is_checkpoint_mode():
+		_build_race_route()
+		_spawn_opponents()
+
 	race_ready.emit()
 
 	# Небольшая пауза перед отсчётом
@@ -248,6 +271,9 @@ func _start_racing() -> void:
 		_car_rigidbody.angular_velocity = Vector3.ZERO
 
 	print("RaceManager: AFTER reset - Y=%.2f" % _car.global_position.y)
+
+	# Запускаем AI соперников
+	_start_opponents_racing()
 
 	race_started.emit()
 
@@ -316,6 +342,178 @@ func _spawn_car_at_start() -> void:
 	])
 
 
+func _build_race_route() -> void:
+	"""Строит маршрут гонки для AI соперников"""
+	if not current_track:
+		return
+
+	# Используем route_points если есть, иначе waypoints
+	var points_to_use: Array = []
+	if current_track.route_points and current_track.route_points.size() > 0:
+		points_to_use = current_track.route_points
+		print("RaceManager: Building route from %d route_points" % points_to_use.size())
+	elif current_track.waypoints and current_track.waypoints.size() > 0:
+		points_to_use = current_track.waypoints
+		print("RaceManager: Building route from %d waypoints" % points_to_use.size())
+	else:
+		push_error("RaceManager: No route points or waypoints in track!")
+		return
+
+	# Создаём маршрут через RaceRoute.build_from_track_waypoints
+	var converter := func(lat: float, lon: float) -> Vector3:
+		return _latlon_to_local(lat, lon)
+
+	_race_route = RaceRouteScript.build_from_track_waypoints(points_to_use, converter)
+
+	if _race_route:
+		print("RaceManager: Race route built with %d points, length: %.1fm" % [
+			_race_route.points.size(), _race_route.total_length
+		])
+	else:
+		push_error("RaceManager: Failed to build race route!")
+
+
+func _spawn_opponents() -> void:
+	"""Спавнит AI соперников на стартовой сетке"""
+	if not _car or not current_track:
+		return
+
+	# Очищаем предыдущих соперников
+	_clear_opponents()
+
+	# Если нет маршрута - не спавним соперников
+	if not _race_route:
+		print("RaceManager: No race route, skipping opponent spawn")
+		return
+
+	# Рассчитываем позиции на стартовой сетке
+	var player_pos := _car.global_position
+	var forward_dir := -_car.global_transform.basis.z  # -Z это перед машины
+
+	var grid_positions := RaceGridScript.calculate_positions(player_pos, forward_dir, OPPONENT_COUNT)
+	print("RaceManager: Grid positions calculated:\n%s" % RaceGridScript.debug_grid_layout(OPPONENT_COUNT))
+
+	# Спавним соперников
+	for i in range(OPPONENT_COUNT):
+		if i >= grid_positions.size():
+			break
+
+		# Выбираем случайную сцену соперника
+		var scene_path: String = OPPONENT_SCENES[i % OPPONENT_SCENES.size()]
+		var scene := load(scene_path) as PackedScene
+		if not scene:
+			push_error("RaceManager: Failed to load opponent scene: " + scene_path)
+			continue
+
+		var opponent := scene.instantiate()
+		if not opponent:
+			push_error("RaceManager: Failed to instantiate opponent")
+			continue
+
+		# Даём имя
+		opponent.name = "Opponent_%d" % (i + 1)
+		if opponent.get("racer_name") != null:
+			opponent.racer_name = "AI %d" % (i + 1)
+
+		# ВАЖНО: Сначала добавляем в сцену, потом устанавливаем global_position!
+		# global_position работает только после добавления в дерево
+		get_tree().current_scene.add_child(opponent)
+
+		# Устанавливаем позицию и поворот из стартовой сетки
+		# RaceGrid уже рассчитывает правильный basis с учётом направления -Z для VehicleBody3D
+		var grid_transform: Transform3D = grid_positions[i]
+		opponent.global_position = grid_transform.origin
+		opponent.global_transform.basis = grid_transform.basis
+
+		# Устанавливаем маршрут
+		if opponent.has_method("set_race_route"):
+			opponent.set_race_route(_race_route)
+
+		# Замораживаем до старта
+		if opponent.has_method("freeze_for_countdown"):
+			opponent.freeze_for_countdown()
+		_opponents.append(opponent)
+
+		print("RaceManager: Spawned opponent %d at (%.1f, %.1f, %.1f)" % [
+			i + 1, opponent.global_position.x, opponent.global_position.y, opponent.global_position.z
+		])
+
+	print("RaceManager: Spawned %d opponents" % _opponents.size())
+
+	# Включаем отображение соперников на миникарте
+	if not _minimap:
+		_minimap = get_tree().current_scene.find_child("MiniMap", true, false)
+	if _minimap and _minimap.has_method("set_show_opponents"):
+		_minimap.set_show_opponents(true)
+
+
+func _start_opponents_racing() -> void:
+	"""Запускает всех AI соперников после GO!"""
+	for opponent in _opponents:
+		if is_instance_valid(opponent) and opponent.has_method("start_racing"):
+			opponent.start_racing()
+	print("RaceManager: Started %d opponents racing" % _opponents.size())
+
+
+func _clear_opponents() -> void:
+	"""Удаляет всех AI соперников"""
+	for opponent in _opponents:
+		if is_instance_valid(opponent):
+			opponent.queue_free()
+	_opponents.clear()
+
+	# Выключаем отображение соперников на миникарте
+	if _minimap and _minimap.has_method("set_show_opponents"):
+		_minimap.set_show_opponents(false)
+
+
+func _generate_race_results() -> Array:
+	"""Генерирует итоговые результаты гонки на основе реального порядка финиша.
+	Те кто финишировал - с реальным временем.
+	Те кто не финишировал - с оценочным временем в конце."""
+	var results: Array = []
+
+	# 1. Добавляем всех кто уже финишировал (в порядке финиша)
+	var position := 1
+	for finisher in _finish_order:
+		results.append({
+			"name": finisher.name,
+			"time": finisher.time,
+			"position": position,
+			"is_player": finisher.is_player
+		})
+		position += 1
+
+	# 2. Добавляем AI которые ещё не финишировали
+	var finished_names: Array = []
+	for finisher in _finish_order:
+		finished_names.append(finisher.name)
+
+	var unfinished: Array = []
+	for opponent in _opponents:
+		if is_instance_valid(opponent):
+			var opp_name: String = opponent.racer_name if opponent.get("racer_name") else "AI"
+			if opp_name not in finished_names:
+				unfinished.append(opp_name)
+
+	# Перемешиваем не финишировавших и добавляем с оценочным временем
+	unfinished.shuffle()
+	for i in range(unfinished.size()):
+		var estimated_time: float = race_time + randf_range(3.0, 8.0) + i * randf_range(1.0, 3.0)
+		results.append({
+			"name": unfinished[i],
+			"time": estimated_time,
+			"position": position,
+			"is_player": false
+		})
+		position += 1
+
+	print("RaceManager: Generated results - %d racers (%d finished, %d estimated)" % [
+		results.size(), _finish_order.size(), unfinished.size()
+	])
+	return results
+
+
 func _create_finish_line() -> void:
 	"""Создать финишную линию на конечной точке"""
 	if not current_track:
@@ -333,6 +531,8 @@ func _create_finish_line() -> void:
 	# Создаём Area3D
 	_finish_line = Area3D.new()
 	_finish_line.name = "FinishLine"
+	# Collision mask: слой 1 (игрок) + слой 8 (AI соперники, 128)
+	_finish_line.collision_mask = 1 + 128
 
 	# Создаём коллизию (широкая полоса поперёк дороги) - поднята для детекции машины
 	var collision := CollisionShape3D.new()
@@ -414,9 +614,38 @@ func _on_finish_line_entered(body: Node3D) -> void:
 	if current_state != State.RACING:
 		return
 
-	# Проверяем что это наша машина
+	# Проверяем что это игрок
 	if body == _car or body == _car_rigidbody:
+		# Записываем финиш игрока
+		_finish_order.append({
+			"name": "Игрок",
+			"time": race_time,
+			"is_player": true
+		})
+		print("RaceManager: Player finished at position %d, time %.2f" % [_finish_order.size(), race_time])
 		_finish_race()
+		return
+
+	# Проверяем что это AI соперник
+	for opponent in _opponents:
+		if is_instance_valid(opponent) and body == opponent:
+			# Проверяем, не финишировал ли уже этот соперник
+			for finished in _finish_order:
+				if finished.name == opponent.racer_name:
+					return  # Уже финишировал
+
+			# Записываем финиш AI
+			_finish_order.append({
+				"name": opponent.racer_name,
+				"time": race_time,
+				"is_player": false
+			})
+			print("RaceManager: %s finished at position %d, time %.2f" % [opponent.racer_name, _finish_order.size(), race_time])
+
+			# Останавливаем AI
+			if opponent.has_method("finish_race"):
+				opponent.finish_race()
+			return
 
 
 func _finish_race() -> void:
@@ -424,8 +653,19 @@ func _finish_race() -> void:
 	print("RaceManager: FINISH! Time: %.2f seconds" % race_time)
 	current_state = State.FINISHED
 
+	# Останавливаем всех AI соперников (но не удаляем!)
+	for opponent in _opponents:
+		if is_instance_valid(opponent) and opponent.has_method("finish_race"):
+			opponent.finish_race()
+
+	# Генерируем результаты гонки
+	var results := _generate_race_results()
+
 	# Удаляем барьеры
 	_clear_barriers()
+
+	# НЕ удаляем AI соперников сразу - они останутся видны
+	# Они будут удалены при reset() или cancel_race()
 
 	# Автоматическое торможение (ручной тормоз)
 	if _car_rigidbody:
@@ -438,7 +678,7 @@ func _finish_race() -> void:
 		# Замедляем машину
 		_car_rigidbody.linear_damp = 3.0
 
-	race_finished.emit(race_time)
+	race_finished.emit(race_time, results)
 
 
 func cancel_race() -> void:
@@ -450,6 +690,9 @@ func cancel_race() -> void:
 
 	# Удаляем барьеры
 	_clear_barriers()
+
+	# Удаляем AI соперников
+	_clear_opponents()
 
 	# Удаляем финишную линию
 	if _finish_line:
@@ -653,18 +896,29 @@ func _create_checkpoints() -> void:
 
 	print("RaceManager: Created %d checkpoints" % _checkpoint_areas.size())
 
-	# Обновляем мини-карту
-	_update_minimap_checkpoints()
 
-
-func _update_minimap_checkpoints() -> void:
-	"""Отправляем данные чекпоинтов на мини-карту"""
+func _update_minimap_markers() -> void:
+	"""Универсально обновляем маркеры на миникарте:
+	- Если есть чекпоинты → показываем их + финиш
+	- Если нет чекпоинтов но есть финиш → показываем только финиш
+	- Если ничего нет (свободная езда) → ничего не показываем"""
 	if not _minimap:
 		_minimap = get_tree().current_scene.find_child("MiniMap", true, false)
 
-	if _minimap and _minimap.has_method("set_checkpoints"):
-		var finish_pos := _latlon_to_local(current_track.finish_lat, current_track.finish_lon)
-		_minimap.set_checkpoints(_checkpoint_local_positions, finish_pos)
+	if not _minimap or not _minimap.has_method("set_checkpoints"):
+		return
+
+	if not current_track:
+		return
+
+	# Получаем позицию финиша (если есть координаты)
+	var finish_pos: Vector3 = Vector3.ZERO
+	var has_finish: bool = current_track.finish_lat != 0.0 or current_track.finish_lon != 0.0
+	if has_finish:
+		finish_pos = _latlon_to_local(current_track.finish_lat, current_track.finish_lon)
+
+	# Передаём чекпоинты (может быть пустой массив) и финиш
+	_minimap.set_checkpoints(_checkpoint_local_positions, finish_pos if has_finish else Vector3.ZERO)
 
 
 func _update_minimap_route() -> void:
