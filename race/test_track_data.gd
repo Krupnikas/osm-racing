@@ -184,6 +184,53 @@ static func _suspension_height(z: float) -> float:
 	return prev_h * (1.0 - blend)
 
 
+static func get_elevation_track_data(_chunk_lat: float, _chunk_lon: float, _chunk_size: float) -> Dictionary:
+	## Овальный трек (как flat) + здания вокруг
+	var flat_data := get_flat_track_data(_chunk_lat, _chunk_lon, _chunk_size)
+	var ways: Array = flat_data["ways"]
+
+	# Добавляем здания вокруг трассы
+	# Овал: прямые X=±80, Z=-150..+150, повороты radius=80
+	var buildings := [
+		# Внутри овала — небольшие дома
+		_make_building(20, -80, 15, 10, {"building": "house", "building:levels": "2"}),
+		_make_building(-30, -60, 12, 12, {"building": "house", "building:levels": "1"}),
+		_make_building(10, 0, 18, 12, {"building": "residential", "building:levels": "5"}),
+		_make_building(-25, 40, 14, 10, {"building": "house", "building:levels": "2"}),
+		_make_building(30, 80, 16, 11, {"building": "detached", "building:levels": "2"}),
+		_make_building(-10, 120, 20, 14, {"building": "apartments", "building:levels": "9"}),
+		# Снаружи овала — крупнее
+		_make_building(120, -100, 25, 15, {"building": "apartments", "building:levels": "9"}),
+		_make_building(130, -40, 30, 12, {"building": "residential", "building:levels": "5"}),
+		_make_building(125, 50, 20, 20, {"building": "commercial", "building:levels": "3"}),
+		_make_building(135, 120, 22, 14, {"building": "residential", "building:levels": "5"}),
+		_make_building(-120, -80, 18, 12, {"building": "house", "building:levels": "2"}),
+		_make_building(-130, 0, 28, 16, {"building": "apartments", "building:levels": "7"}),
+		_make_building(-125, 90, 24, 14, {"building": "residential", "building:levels": "4"}),
+	]
+
+	ways.append_array(buildings)
+	flat_data["ways"] = ways
+	print("TestTrackData: elevation track has %d ways (%d buildings)" % [ways.size(), buildings.size()])
+	return flat_data
+
+
+static func _make_building(cx: float, cz: float, w: float, d: float, tags: Dictionary) -> Dictionary:
+	## Создаёт прямоугольное здание с центром (cx, cz) размером w x d
+	var hw := w / 2.0
+	var hd := d / 2.0
+	return {
+		"nodes": [
+			_local_to_latlon(cx - hw, cz - hd),
+			_local_to_latlon(cx + hw, cz - hd),
+			_local_to_latlon(cx + hw, cz + hd),
+			_local_to_latlon(cx - hw, cz + hd),
+			_local_to_latlon(cx - hw, cz - hd),  # Замыкаем
+		],
+		"tags": tags,
+	}
+
+
 static func _local_to_latlon(x: float, z: float) -> Dictionary:
 	## Конвертирует локальные метры в lat/lon (start_lat=0, start_lon=0)
 	## _latlon_to_local делает: dx = (lon - start_lon) * 111000 * cos(lat), dz = -(lat - start_lat) * 111000

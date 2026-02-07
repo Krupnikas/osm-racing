@@ -1,8 +1,8 @@
 extends Node3D
 
-## Сцена тестовой трассы — использует osm_terrain_generator с захардкоженными данными
+## Сцена тестовой трассы — использует osm_terrain_generator с фейковыми OSM-данными
 
-const TrackData = preload("res://race/test_track_data.gd")
+const FakeOSMData = preload("res://osm/fake_osm.gd")
 
 @export var car_path: NodePath
 @export var hud_path: NodePath
@@ -18,6 +18,7 @@ const SPAWN_POSITIONS := {
 	"test_flat": Vector3(80, 1.0, 0),
 	"test_suspension": Vector3(0, 1.0, 5),
 	"test_npc": Vector3(80, 1.0, 0),
+	"test_elevation": Vector3(80, 1.0, 0),
 }
 
 ## Повороты спавна (Y rotation в радианах)
@@ -25,6 +26,7 @@ const SPAWN_ROTATIONS := {
 	"test_flat": 0.0,
 	"test_suspension": PI,  # 180° — лицом к трассе (Z+)
 	"test_npc": 0.0,
+	"test_elevation": 0.0,
 }
 
 
@@ -57,23 +59,27 @@ func _ready() -> void:
 		push_error("TestTrackScene: OSMTerrain node not found!")
 		return
 
-	# Настраиваем провайдер данных (lambda обёртки для статических методов)
-	match _track_id:
-		"test_flat":
-			_terrain.test_data_provider = func(lat: float, lon: float, size: float) -> Dictionary:
-				return TrackData.get_flat_track_data(lat, lon, size)
-		"test_suspension":
-			_terrain.test_data_provider = func(lat: float, lon: float, size: float) -> Dictionary:
-				return TrackData.get_suspension_track_data(lat, lon, size)
-			_terrain.test_elevation_provider = func(key: String, lat: float, lon: float) -> Dictionary:
-				return TrackData.get_suspension_elevation(key, lat, lon)
-			_terrain.enable_elevation = true
-			_terrain.elevation_scale = 1.0
-			_terrain.elevation_grid_resolution = 32
-		"test_npc":
-			_terrain.test_data_provider = func(lat: float, lon: float, size: float) -> Dictionary:
-				return TrackData.get_flat_track_data(lat, lon, size)
-			_setup_traffic_manager()
+	# Провайдер данных — FakeOSM отдаёт данные в формате osm_loader
+	var tid := _track_id
+	_terrain.test_data_provider = func(lat: float, lon: float, size: float) -> Dictionary:
+		return FakeOSMData.get_data(tid, lat, lon, size)
+
+	# Elevation (если есть)
+	var elev: Dictionary = FakeOSMData.get_elevation(tid, "0,0", 0.0, 0.0)
+	if not elev.is_empty():
+		_terrain.test_elevation_provider = func(key: String, lat: float, lon: float) -> Dictionary:
+			return FakeOSMData.get_elevation(tid, key, lat, lon)
+		_terrain.enable_elevation = true
+		_terrain.elevation_scale = 1.0
+		_terrain.elevation_grid_resolution = 32
+
+	# Включаем здания для треков с застройкой
+	if _track_id == "test_elevation":
+		_terrain.enable_buildings = true
+
+	# Доп. настройки по треку
+	if _track_id == "test_npc":
+		_setup_traffic_manager()
 
 	# Подключаемся к сигналу завершения загрузки
 	_terrain.initial_load_complete.connect(_on_generation_complete)

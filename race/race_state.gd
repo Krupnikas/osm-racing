@@ -16,3 +16,47 @@ var test_track_id: String = ""  # "test_flat" или "test_suspension"
 
 # (Legacy) Трасса для автозапуска после перезагрузки сцены
 var pending_track = null
+
+## Маппинг русских имён на track_id для CLI
+const _TRACK_NAME_MAP := {
+	"плоская": "test_flat",
+	"flat": "test_flat",
+	"подвеска": "test_suspension",
+	"suspension": "test_suspension",
+	"нпс": "test_npc",
+	"npc": "test_npc",
+	"рельеф": "test_elevation",
+	"elevation": "test_elevation",
+}
+
+
+func _ready() -> void:
+	var args := OS.get_cmdline_user_args()
+	for arg in args:
+		if arg.begins_with("--test-track="):
+			var value := arg.substr("--test-track=".length()).strip_edges().to_lower()
+			var tid := _resolve_track_id(value)
+			if tid != "":
+				test_track_id = tid
+				print("RaceState: CLI --test-track=", value, " -> ", tid)
+				call_deferred("_auto_launch_test_track")
+			else:
+				push_error("RaceState: Unknown test track: ", value)
+				print("RaceState: Available tracks: flat, подвеска/suspension, нпс/npc, рельеф/elevation")
+
+
+func _resolve_track_id(name: String) -> String:
+	# Сначала проверяем прямое совпадение с track_id
+	if name.begins_with("test_"):
+		for track in TestTracks.get_all_test_tracks():
+			if track["track_id"] == name:
+				return name
+	# Потом по маппингу имён
+	if _TRACK_NAME_MAP.has(name):
+		return _TRACK_NAME_MAP[name]
+	return ""
+
+
+func _auto_launch_test_track() -> void:
+	print("RaceState: Auto-launching test track: ", test_track_id)
+	get_tree().change_scene_to_file("res://race/test_track_scene.tscn")
