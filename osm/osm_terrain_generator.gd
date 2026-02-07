@@ -13,7 +13,11 @@ const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
 const BIRCH_TREE_SCENE = preload("res://models/trees/birch/scene.gltf")
 const BUS_STOP_SCENE = preload("res://models/bus_stop/scene.gltf")
+const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
 
+
+# Decoration Layer для добавления атмосферы поверх OSM данных
+var _decoration_layer: Node = null  # DecorationLayer
 
 # Кэш текстур (создаются один раз)
 var _road_textures: Dictionary = {}
@@ -169,6 +173,9 @@ var _lamp_materials: Dictionary = {}  # {pole, arm, globe}
 # Keep for night mode updates and chunk association
 var _lamp_lights_by_chunk: Dictionary = {}  # chunk_key -> Array[OmniLight3D]
 
+# Billboard batching - created from DecorationLayer
+var _billboard_batches_to_finalize: Array[String] = []  # Chunk keys ready for billboard finalization
+
 # Building shadow LOD - only cast shadows for close buildings
 var _building_shadow_lod_distance: float = 150.0  # Buildings > 150m don't cast shadows
 
@@ -297,6 +304,11 @@ func _ready() -> void:
 	add_child(osm_loader)
 	osm_loader.data_loaded.connect(_on_osm_data_loaded)
 	osm_loader.load_failed.connect(_on_osm_load_failed)
+
+	# Инициализируем Decoration Layer
+	_decoration_layer = DecorationLayerScript.new()
+	_decoration_layer.set_terrain_generator(self)
+	add_child(_decoration_layer)
 
 	# Создаём debug label для статистики
 	if show_debug_stats:
@@ -1325,6 +1337,11 @@ func _unload_chunk(chunk_key: String) -> void:
 		if finalize_idx >= 0:
 			_tree_batches_to_finalize.remove_at(finalize_idx)
 
+		# Clean up billboard batch data
+		var billboard_finalize_idx := _billboard_batches_to_finalize.find(chunk_key)
+		if billboard_finalize_idx >= 0:
+			_billboard_batches_to_finalize.remove_at(billboard_finalize_idx)
+
 		# Clean up curb geo batch
 		if _curb_geo_batch.has(chunk_key):
 			_curb_geo_batch.erase(chunk_key)
@@ -1620,6 +1637,10 @@ func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: 
 		# Batching happens automatically in _process() via _lamp_batches_to_finalize
 		pass
 		# _create_pending_lamps()  # DISABLED
+
+	# Добавляем чанк в очередь для создания билбордов из DecorationLayer
+	if _decoration_layer and not _billboard_batches_to_finalize.has(chunk_key):
+		_billboard_batches_to_finalize.append(chunk_key)
 
 	# Если ночь уже включена - активируем свет в новом чанке
 	_apply_night_mode_to_chunk(chunk_node)
@@ -1988,7 +2009,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			road_count += 1
 			objects_this_frame += 1
 		elif tags.has("building"):
-			_create_building(nodes, tags, target, loader, elev_data)
+			var way_id: int = int(way.get("id", 0))  # Ensure int conversion from JSON float
+			_create_building(nodes, tags, target, loader, elev_data, way_id)
 			building_count += 1
 			# Здания теперь в thread pool - не нужен await
 		elif tags.has("amenity") and not tags.has("building"):
@@ -3711,7 +3733,7 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: 
 	im.surface_end()
 	parent.add_child(mesh)
 
-func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
+func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}, way_id: int = 0) -> void:
 	if not enable_buildings or nodes.size() < 3:
 		return
 
@@ -3882,20 +3904,36 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		var building_pos_3d := Vector3(center.x, base_elev, center.y)
 		distance_to_player = _car.global_position.distance_to(building_pos_3d)
 
-	# Определяем тип текстуры здания
-	var building_type: String = str(tags.get("building", "yes"))
-	var texture_type := "panel"  # По умолчанию панельки
-	if building_height > 15.0:
-		texture_type = "panel"  # Высотки - панельные
-	elif building_type in ["house", "detached", "semidetached_house"]:
-		texture_type = "brick"  # Частные дома - кирпич
-	elif building_type in ["industrial", "warehouse", "garage", "garages"]:
-		texture_type = "wall"  # Промышленные - простая штукатурка
-	else:
-		texture_type = "brick"  # Остальное - кирпич
+	# Проверяем есть ли override для этого здания (из DecorationLayer)
+	var building_override = null  # BuildingOverride
+	if _decoration_layer and way_id > 0:
+		building_override = _decoration_layer.get_building_override_for_way(way_id)
 
-	# Используем многопоточную генерацию зданий
-	_queue_building_for_thread(points, building_height, texture_type, parent, base_elev, distance_to_player)
+	# Если есть override с текстурой или цветом, используем прямой рендеринг вместо батчинга
+	if building_override and building_override.wall_texture_path != "":
+		# Кастомная текстура
+		var repeat_y: float = building_override.texture_repeat_y if building_override.texture_repeat_y > 0 else 2.0
+		_create_3d_building_with_custom_texture(points, building_height, building_override.wall_texture_path, repeat_y, parent, base_elev, debug_name)
+		print("OSM: Building override applied for way %d with texture %s (repeat: %s)" % [way_id, building_override.wall_texture_path, repeat_y])
+	elif building_override and building_override.use_color_tint:
+		var override_color: Color = building_override.color_tint
+		_create_3d_building(points, override_color, building_height, parent, base_elev, debug_name)
+		print("OSM: Building override applied for way %d with color %s" % [way_id, override_color])
+	else:
+		# Определяем тип текстуры здания
+		var building_type: String = str(tags.get("building", "yes"))
+		var texture_type := "panel"  # По умолчанию панельки
+		if building_height > 15.0:
+			texture_type = "panel"  # Высотки - панельные
+		elif building_type in ["house", "detached", "semidetached_house"]:
+			texture_type = "brick"  # Частные дома - кирпич
+		elif building_type in ["industrial", "warehouse", "garage", "garages"]:
+			texture_type = "wall"  # Промышленные - простая штукатурка
+		else:
+			texture_type = "brick"  # Остальное - кирпич
+
+		# Используем многопоточную генерацию зданий
+		_queue_building_for_thread(points, building_height, texture_type, parent, base_elev, distance_to_player)
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
@@ -5241,6 +5279,13 @@ func _process_road_queue() -> void:
 				_record_perf("lamp_batch_finalize", Time.get_ticks_usec() - t_lamp)
 			return  # Один чанк за кадр
 
+		# Billboard creation from DecorationLayer
+		if not _billboard_batches_to_finalize.is_empty():
+			var chunk_key: String = _billboard_batches_to_finalize[0]
+			_billboard_batches_to_finalize.remove_at(0)
+			_finalize_billboard_batch_for_chunk(chunk_key)
+			return  # Один чанк за кадр
+
 		# Building geo merge и window batches ждут завершения ВСЕХ зданий
 		if _pending_building_tasks == 0 and _building_results.is_empty():
 			# Сначала финализируем building geometry merge (создаёт merged meshes + коллизии)
@@ -6049,6 +6094,222 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	_add_building_night_decorations.call_deferred(wall_mesh_instance, points, building_height, parent)
 
 
+# Кэш кастомных текстур зданий (загружаются по пути)
+var _custom_building_textures: Dictionary = {}
+
+
+func _create_3d_building_with_custom_texture(points: PackedVector2Array, building_height: float, texture_path: String, texture_repeat_y: float, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
+	"""Создаёт здание с кастомной текстурой из файла"""
+	# Минимум 4 точки для нормального здания
+	if points.size() < 4:
+		return
+
+	# Убираем дубликат последней точки если она совпадает с первой
+	if points.size() > 1 and points[0].distance_to(points[points.size() - 1]) < 0.1:
+		points.remove_at(points.size() - 1)
+
+	if points.size() < 3:
+		return
+
+	# Проверка на слишком маленькие здания
+	var min_x := points[0].x
+	var max_x := points[0].x
+	var min_z := points[0].y
+	var max_z := points[0].y
+
+	for p in points:
+		min_x = min(min_x, p.x)
+		max_x = max(max_x, p.x)
+		min_z = min(min_z, p.y)
+		max_z = max(max_z, p.y)
+
+	var size_x := max_x - min_x
+	var size_z := max_z - min_z
+
+	if size_x < 3.0 or size_z < 3.0:
+		return
+	if size_x > 200.0 or size_z > 200.0:
+		return
+
+	var min_size: float = min(size_x, size_z)
+	if min_size < 0.1:
+		return
+	var aspect: float = max(size_x, size_z) / min_size
+	if aspect > 20.0:
+		return
+
+	var area: float = _calculate_polygon_area(points)
+	if area < 10.0:
+		return
+
+	# Загружаем кастомную текстуру (с кэшированием)
+	var custom_texture: Texture2D = null
+	if _custom_building_textures.has(texture_path):
+		custom_texture = _custom_building_textures[texture_path]
+	elif ResourceLoader.exists(texture_path):
+		custom_texture = load(texture_path)
+		_custom_building_textures[texture_path] = custom_texture
+
+	# Высоты с учётом террейна
+	var floor_y := base_elev + 0.1
+	var roof_y := base_elev + building_height
+
+	# === СТЕНЫ с ArrayMesh для UV ===
+	var wall_arrays := []
+	wall_arrays.resize(Mesh.ARRAY_MAX)
+
+	var wall_vertices := PackedVector3Array()
+	var wall_uvs := PackedVector2Array()
+	var wall_normals := PackedVector3Array()
+	var wall_indices := PackedInt32Array()
+
+	var uv_scale_x := 0.1
+	var uv_scale_y := 0.1
+
+	var is_ccw := _is_polygon_ccw(points)
+	var normal_sign := 1.0 if is_ccw else -1.0
+
+	var accumulated_width := 0.0
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
+
+		var wall_width := p1.distance_to(p2)
+
+		var v1 := Vector3(p1.x, floor_y, p1.y)
+		var v2 := Vector3(p2.x, floor_y, p2.y)
+		var v3 := Vector3(p2.x, roof_y, p2.y)
+		var v4 := Vector3(p1.x, roof_y, p1.y)
+
+		var dir := (p2 - p1).normalized()
+		var normal := Vector3(-dir.y * normal_sign, 0, dir.x * normal_sign)
+
+		var u1 := accumulated_width * uv_scale_x
+		var u2 := (accumulated_width + wall_width) * uv_scale_x
+		# Для фото текстуры: N повторов по высоте, UV.y=0 вверху
+		var v_bottom := texture_repeat_y
+		var v_top := 0.0
+
+		var idx := wall_vertices.size()
+
+		wall_vertices.append(v1)
+		wall_vertices.append(v2)
+		wall_vertices.append(v3)
+		wall_vertices.append(v4)
+
+		# v1,v2 - низ стены (v_bottom=1.0), v3,v4 - верх стены (v_top=0.0)
+		wall_uvs.append(Vector2(u1, v_bottom))
+		wall_uvs.append(Vector2(u2, v_bottom))
+		wall_uvs.append(Vector2(u2, v_top))
+		wall_uvs.append(Vector2(u1, v_top))
+
+		wall_normals.append(normal)
+		wall_normals.append(normal)
+		wall_normals.append(normal)
+		wall_normals.append(normal)
+
+		wall_indices.append(idx + 0)
+		wall_indices.append(idx + 1)
+		wall_indices.append(idx + 2)
+
+		wall_indices.append(idx + 0)
+		wall_indices.append(idx + 2)
+		wall_indices.append(idx + 3)
+
+		accumulated_width += wall_width
+
+	wall_arrays[Mesh.ARRAY_VERTEX] = wall_vertices
+	wall_arrays[Mesh.ARRAY_TEX_UV] = wall_uvs
+	wall_arrays[Mesh.ARRAY_NORMAL] = wall_normals
+	wall_arrays[Mesh.ARRAY_INDEX] = wall_indices
+
+	var wall_mesh := ArrayMesh.new()
+	wall_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, wall_arrays)
+
+	var wall_mesh_instance := MeshInstance3D.new()
+	wall_mesh_instance.mesh = wall_mesh
+
+	# Shadow LOD
+	var distance: float = 0.0
+	if _car:
+		var center := _get_polygon_center(points)
+		var building_pos_3d := Vector3(center.x, base_elev, center.y)
+		distance = _car.global_position.distance_to(building_pos_3d)
+
+	if distance < _building_shadow_lod_distance:
+		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	else:
+		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	wall_mesh_instance.visibility_range_end = 400.0
+	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+
+	# Материал стен с кастомной текстурой - используем StandardMaterial3D для правильного освещения
+	var wall_material := StandardMaterial3D.new()
+	wall_material.cull_mode = BaseMaterial3D.CULL_DISABLED  # Двусторонний рендеринг
+	if custom_texture:
+		wall_material.albedo_texture = custom_texture
+		wall_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	else:
+		wall_material.albedo_color = Color(0.7, 0.6, 0.5)
+	wall_material.roughness = 0.5  # Гладче = ярче
+	wall_mesh_instance.material_override = wall_material
+
+	# === КРЫША ===
+	var roof_indices_2d := Geometry2D.triangulate_polygon(points)
+	if roof_indices_2d.size() >= 3:
+		var roof_arrays := []
+		roof_arrays.resize(Mesh.ARRAY_MAX)
+
+		var roof_vertices := PackedVector3Array()
+		var roof_uvs := PackedVector2Array()
+		var roof_normals := PackedVector3Array()
+
+		for p in points:
+			roof_vertices.append(Vector3(p.x, roof_y, p.y))
+			roof_uvs.append(Vector2(p.x * 0.1, p.y * 0.1))
+			roof_normals.append(Vector3(0, 1, 0))
+
+		roof_arrays[Mesh.ARRAY_VERTEX] = roof_vertices
+		roof_arrays[Mesh.ARRAY_TEX_UV] = roof_uvs
+		roof_arrays[Mesh.ARRAY_NORMAL] = roof_normals
+		roof_arrays[Mesh.ARRAY_INDEX] = roof_indices_2d
+
+		var roof_mesh := ArrayMesh.new()
+		roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, roof_arrays)
+
+		var roof_mesh_instance := MeshInstance3D.new()
+		roof_mesh_instance.mesh = roof_mesh
+
+		if distance < _building_shadow_lod_distance:
+			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		else:
+			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+		var roof_material := StandardMaterial3D.new()
+		roof_material.cull_mode = BaseMaterial3D.CULL_BACK
+		if _building_textures.has("roof"):
+			roof_material.albedo_texture = _building_textures["roof"]
+			roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		else:
+			roof_material.albedo_color = Color(0.4, 0.35, 0.3)
+		roof_mesh_instance.material_override = roof_material
+
+		wall_mesh_instance.add_child(roof_mesh_instance)
+
+	# Создаём физическое тело
+	var body := StaticBody3D.new()
+	body.collision_layer = 2
+	body.collision_mask = 0
+	body.add_child(wall_mesh_instance)
+
+	parent.add_child(body)
+
+	# Отложенные коллизии (без окон - у кастомной текстуры свои окна)
+	_create_building_collisions_deferred.call_deferred(body, points, base_elev, building_height)
+	# Не вызываем _add_building_night_decorations - текстура уже содержит окна
+
+
 # Отложенное создание коллизий зданий (вызывается через call_deferred)
 func _create_building_collisions_deferred(body: StaticBody3D, points: PackedVector2Array, base_elev: float, building_height: float) -> void:
 	if not is_instance_valid(body):
@@ -6696,6 +6957,46 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 	print("OSM: Trees for chunk %s: %d trees (1 MultiMesh)" % [chunk_key, transforms.size()])
 
 	_tree_batch_data.erase(chunk_key)
+
+
+## Финализирует билборды из DecorationLayer для чанка
+func _finalize_billboard_batch_for_chunk(chunk_key: String) -> void:
+	if not _decoration_layer:
+		return
+
+	# Парсим chunk_key для получения границ чанка
+	var parts := chunk_key.split(",")
+	if parts.size() != 2:
+		return
+
+	var chunk_x := float(parts[0]) * chunk_size
+	var chunk_z := float(parts[1]) * chunk_size
+	var chunk_min := Vector2(chunk_x, chunk_z)
+	var chunk_max := Vector2(chunk_x + chunk_size, chunk_z + chunk_size)
+
+	# Получаем билборды для этого чанка
+	var billboards: Array = _decoration_layer.get_billboards_in_chunk(chunk_min, chunk_max)
+	if billboards.is_empty():
+		return
+
+	# Находим parent node для чанка
+	if not _loaded_chunks.has(chunk_key):
+		return
+
+	var parent: Node3D = _loaded_chunks[chunk_key]
+	if not is_instance_valid(parent):
+		return
+
+	# Создаём каждый билборд
+	for billboard in billboards:
+		var pos: Vector2 = billboard.get_local_position(start_lat, start_lon)
+		var elev_data: Dictionary = _chunk_elevations.get(chunk_key, {})
+		var elevation: float = _get_elevation_at_point(pos, elev_data)
+
+		var billboard_mesh: Node3D = _decoration_layer.create_billboard_mesh(billboard, elevation)
+		parent.add_child(billboard_mesh)
+
+	print("OSM: Created %d billboards for chunk %s" % [billboards.size(), chunk_key])
 
 
 # Создание дорожного знака - разрушаемый при столкновении
