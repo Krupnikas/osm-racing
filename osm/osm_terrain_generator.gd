@@ -1287,6 +1287,20 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 			var elev: Dictionary = test_elevation_provider.call(chunk_key, chunk_lat, chunk_lon)
 			if not elev.is_empty():
 				_chunk_elevations[chunk_key] = elev
+				# Устанавливаем base_elevation по первому чанку с elevation
+				if _base_elevation == 0.0 and not elev.get("grid", []).is_empty():
+					var grid: Array = elev["grid"]
+					var mid := grid.size() / 2
+					var center_h: float = grid[mid][mid]
+					if center_h != 0.0:
+						_base_elevation = center_h
+						print("Elevation: Base elevation set to %.1f m (test mode, chunk %s)" % [_base_elevation, chunk_key])
+				# Скрываем StaticGround при первом чанке с elevation
+				if chunk_key == "0,0":
+					var static_ground := get_parent().get_node_or_null("StaticGround")
+					if static_ground:
+						static_ground.visible = false
+						static_ground.set_collision_layer_value(1, false)
 		var osm_data: Dictionary = test_data_provider.call(chunk_lat, chunk_lon, chunk_size)
 		osm_data["center_lat"] = chunk_lat
 		osm_data["center_lon"] = chunk_lon
@@ -1701,14 +1715,14 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 			var i01 := (z + 1) * grid_size + x
 			var i11 := (z + 1) * grid_size + (x + 1)
 
-			# Два треугольника на ячейку
+			# Два треугольника на ячейку (CCW — нормали вверх)
 			indices.append(i00)
-			indices.append(i01)
 			indices.append(i10)
+			indices.append(i01)
 
 			indices.append(i10)
-			indices.append(i01)
 			indices.append(i11)
+			indices.append(i01)
 
 	# Вычисляем нормали
 	normals.resize(vertices.size())
@@ -1746,7 +1760,7 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	material.albedo_color = COLORS["default"]
 	mesh.material_override = material
 
-	# Добавляем коллизию напрямую из vertices/indices (быстрее чем create_trimesh_collision)
+	# Коллизия: создаём ConcavePolygonShape3D из меш-данных
 	var body := StaticBody3D.new()
 	body.name = "TerrainBody"
 	body.collision_layer = 1  # Слой 1 - земля, по которой едет машина
@@ -1754,6 +1768,7 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	body.add_to_group("Grass")  # GEVP - террейн как трава (большое сопротивление)
 	body.add_child(mesh)
 
+	# Строим faces из indices (порядок вершин уже CCW — нормали вверх)
 	var faces := PackedVector3Array()
 	faces.resize(indices.size())
 	for fi in range(indices.size()):

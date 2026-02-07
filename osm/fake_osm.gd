@@ -9,19 +9,53 @@ extends RefCounted
 
 
 static func get_data(track_id: String, _chunk_lat: float, _chunk_lon: float, _chunk_size: float) -> Dictionary:
-	var ways := []
+	var all_ways := []
 
 	match track_id:
 		"test_flat", "test_npc":
-			ways.append_array(_make_oval_road())
+			all_ways.append_array(_make_oval_road())
 		"test_suspension":
-			ways.append_array(_make_suspension_road())
+			all_ways.append_array(_make_suspension_road())
 		"test_elevation":
-			ways.append_array(_make_oval_road())
-			ways.append_array(_make_elevation_buildings())
+			all_ways.append_array(_make_oval_road())
+			all_ways.append_array(_make_elevation_buildings())
+
+	# Фильтруем ways по bbox чанка (как реальный Overpass API)
+	# Каждый way отдаём только чанку, содержащему его первую точку — избегаем дублирования
+	var half := _chunk_size / 2.0
+	var lat_delta := half / 111000.0
+	var lon_delta := half / 111000.0  # cos(0)=1
+	var min_lat := _chunk_lat - lat_delta
+	var max_lat := _chunk_lat + lat_delta
+	var min_lon := _chunk_lon - lon_delta
+	var max_lon := _chunk_lon + lon_delta
+
+	var filtered_ways := []
+	for way in all_ways:
+		var nodes: Array = way.get("nodes", [])
+		if nodes.is_empty():
+			continue
+		# Для дорог: привязываем к чанку по первой точке (одна дорога → один чанк)
+		# Для зданий: привязываем к чанку по центру
+		var tags: Dictionary = way.get("tags", {})
+		if tags.has("highway"):
+			var first_node = nodes[0]
+			if first_node.lat >= min_lat and first_node.lat < max_lat and first_node.lon >= min_lon and first_node.lon < max_lon:
+				filtered_ways.append(way)
+		else:
+			# Здания и прочее — по центру
+			var cx := 0.0
+			var cz := 0.0
+			for node in nodes:
+				cx += node.lon
+				cz += node.lat
+			cx /= nodes.size()
+			cz /= nodes.size()
+			if cz >= min_lat and cz < max_lat and cx >= min_lon and cx < max_lon:
+				filtered_ways.append(way)
 
 	return {
-		"ways": ways,
+		"ways": filtered_ways,
 		"point_objects": [],
 		"entrance_nodes": [],
 		"poi_nodes": [],
@@ -33,7 +67,19 @@ static func get_elevation(track_id: String, chunk_key: String, _chunk_lat: float
 	match track_id:
 		"test_suspension":
 			return _make_suspension_elevation(chunk_key, _chunk_lat, _chunk_lon)
+		"test_elevation":
+			return _make_terrain_elevation(chunk_key, _chunk_lat, _chunk_lon)
 	return {}
+
+
+static func get_height_at(track_id: String, x: float, z: float) -> float:
+	## Высота terrain в локальных координатах (метры)
+	match track_id:
+		"test_elevation":
+			return _terrain_height(x, z)
+		"test_suspension":
+			return _suspension_height(z)
+	return 0.0
 
 
 # --- Дороги ---
@@ -158,6 +204,65 @@ static func _make_suspension_elevation(chunk_key: String, _chunk_lat: float, _ch
 		"min_elevation": min_elev,
 		"max_elevation": max_elev,
 	}
+
+
+static func _make_terrain_elevation(chunk_key: String, _chunk_lat: float, _chunk_lon: float) -> Dictionary:
+	var grid_size := 32
+	var chunk_size := 300.0
+
+	var parts := chunk_key.split(",")
+	var chunk_origin_x := int(parts[0]) * chunk_size
+	var chunk_origin_z := int(parts[1]) * chunk_size
+
+	var grid := []
+	var min_elev := 0.0
+	var max_elev := 0.0
+
+	for gz in range(grid_size):
+		var row := []
+		for gx in range(grid_size):
+			var world_x := chunk_origin_x + float(gx) / (grid_size - 1) * chunk_size
+			var world_z := chunk_origin_z + float(gz) / (grid_size - 1) * chunk_size
+			var h := _terrain_height(world_x, world_z)
+			row.append(h)
+			min_elev = min(min_elev, h)
+			max_elev = max(max_elev, h)
+		grid.append(row)
+
+	return {
+		"grid": grid,
+		"grid_size": grid_size,
+		"center_lat": _chunk_lat,
+		"center_lon": _chunk_lon,
+		"min_elevation": min_elev,
+		"max_elevation": max_elev,
+	}
+
+
+static func _terrain_height(x: float, z: float) -> float:
+	## Холмистый рельеф
+	# Холмы из суммы синусов разных частот
+	var h := sin(x * 0.02) * sin(z * 0.015) * 8.0
+	h += sin(x * 0.04 + 1.0) * sin(z * 0.03 + 2.0) * 4.0
+	h += sin(x * 0.01 + z * 0.008) * 12.0
+	return h
+
+
+static func _dist_to_oval(x: float, z: float, radius: float, half_straight: float) -> float:
+	## Приблизительное расстояние от точки до овальной трассы
+	if z >= -half_straight and z <= half_straight:
+		# В зоне прямых — расстояние до ближайшей прямой
+		return min(abs(x - radius), abs(x + radius))
+	elif z > half_straight:
+		# Верхний полукруг — расстояние до дуги
+		var dx := x
+		var dz := z - half_straight
+		return abs(sqrt(dx * dx + dz * dz) - radius)
+	else:
+		# Нижний полукруг
+		var dx := x
+		var dz := z + half_straight
+		return abs(sqrt(dx * dx + dz * dz) - radius)
 
 
 static func _suspension_height(z: float) -> float:

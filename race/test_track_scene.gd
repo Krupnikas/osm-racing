@@ -61,8 +61,13 @@ func _ready() -> void:
 
 	# Провайдер данных — FakeOSM отдаёт данные в формате osm_loader
 	var tid := _track_id
-	_terrain.test_data_provider = func(lat: float, lon: float, size: float) -> Dictionary:
-		return FakeOSMData.get_data(tid, lat, lon, size)
+	if _track_id == "test_elevation":
+		# TEMP: отключаем дороги и здания, только terrain с elevation
+		_terrain.test_data_provider = func(_lat: float, _lon: float, _size: float) -> Dictionary:
+			return {"ways": [], "point_objects": [], "entrance_nodes": [], "poi_nodes": [], "bus_stops": []}
+	else:
+		_terrain.test_data_provider = func(lat: float, lon: float, size: float) -> Dictionary:
+			return FakeOSMData.get_data(tid, lat, lon, size)
 
 	# Elevation (если есть)
 	var elev: Dictionary = FakeOSMData.get_elevation(tid, "0,0", 0.0, 0.0)
@@ -72,10 +77,6 @@ func _ready() -> void:
 		_terrain.enable_elevation = true
 		_terrain.elevation_scale = 1.0
 		_terrain.elevation_grid_resolution = 32
-
-	# Включаем здания для треков с застройкой
-	if _track_id == "test_elevation":
-		_terrain.enable_buildings = true
 
 	# Доп. настройки по треку
 	if _track_id == "test_npc":
@@ -93,11 +94,27 @@ func _ready() -> void:
 func _on_generation_complete() -> void:
 	print("TestTrackScene: Track generated, spawning car")
 
-	# Ждём кадр чтобы физика зарегистрировала коллизии трассы
-	await get_tree().process_frame
+	# Ждём несколько кадров чтобы физика зарегистрировала коллизии terrain mesh
+	for i in 3:
+		await get_tree().process_frame
 
 	# Позиционируем машину на старте
 	var spawn_pos: Vector3 = SPAWN_POSITIONS.get(_track_id, Vector3(0, 1.0, 0))
+
+	# Для elevation треков — находим высоту terrain рейкастом
+	if _terrain and _terrain.enable_elevation:
+		var space_state := get_world_3d().direct_space_state
+		var from := Vector3(spawn_pos.x, 100.0, spawn_pos.z)
+		var to := Vector3(spawn_pos.x, -100.0, spawn_pos.z)
+		var query := PhysicsRayQueryParameters3D.create(from, to)
+		query.collision_mask = 1
+		var result := space_state.intersect_ray(query)
+		if not result.is_empty():
+			spawn_pos.y = result.position.y + 1.5
+			print("TestTrackScene: raycast hit at y=%.2f, spawn_y=%.2f" % [result.position.y, spawn_pos.y])
+		else:
+			spawn_pos.y = 2.0
+			print("TestTrackScene: raycast miss, using default spawn_y=2.0")
 
 	print("TestTrackScene: spawn_pos=", spawn_pos)
 
