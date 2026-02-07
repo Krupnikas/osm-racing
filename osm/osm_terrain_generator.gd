@@ -1705,7 +1705,9 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 				chunk_origin.z + z * cell_size
 			)
 			vertices.append(pos)
-			uvs.append(Vector2(float(x) / (grid_size - 1), float(z) / (grid_size - 1)))
+			# UV с tiling: 1 повтор текстуры на 20м
+			var uv_scale := 0.05  # 1/20
+			uvs.append(Vector2(pos.x * uv_scale, pos.z * uv_scale))
 
 	# Вычисляем нормали и индексы
 	for z in range(grid_size - 1):
@@ -1724,28 +1726,26 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 			indices.append(i11)
 			indices.append(i01)
 
-	# Вычисляем нормали
+	# Вычисляем нормали по треугольникам (усреднение для smooth shading)
 	normals.resize(vertices.size())
 	for i in range(normals.size()):
-		normals[i] = Vector3.UP
+		normals[i] = Vector3.ZERO
 
-	# Пересчитываем нормали по треугольникам
 	for i in range(0, indices.size(), 3):
-		var i0 := indices[i]
-		var i1 := indices[i + 1]
-		var i2 := indices[i + 2]
+		var v0 := vertices[indices[i]]
+		var v1 := vertices[indices[i + 1]]
+		var v2 := vertices[indices[i + 2]]
 
-		var v0 := vertices[i0]
-		var v1 := vertices[i1]
-		var v2 := vertices[i2]
-
-		var normal := (v1 - v0).cross(v2 - v0).normalized()
-		normals[i0] += normal
-		normals[i1] += normal
-		normals[i2] += normal
+		var normal := (v2 - v0).cross(v1 - v0).normalized()  # Нормаль вверх
+		normals[indices[i]] += normal
+		normals[indices[i + 1]] += normal
+		normals[indices[i + 2]] += normal
 
 	for i in range(normals.size()):
-		normals[i] = normals[i].normalized()
+		if normals[i].length_squared() > 0:
+			normals[i] = normals[i].normalized()
+		else:
+			normals[i] = Vector3.UP
 
 	arrays[Mesh.ARRAY_VERTEX] = vertices
 	arrays[Mesh.ARRAY_NORMAL] = normals
@@ -1757,7 +1757,11 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	mesh.mesh = arr_mesh
 
 	var material := StandardMaterial3D.new()
-	material.albedo_color = COLORS["default"]
+	if _ground_textures.has("grass"):
+		material.albedo_texture = _ground_textures["grass"]
+		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	else:
+		material.albedo_color = COLORS["default"]
 	mesh.material_override = material
 
 	# Коллизия: создаём ConcavePolygonShape3D из меш-данных

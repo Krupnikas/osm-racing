@@ -23,6 +23,7 @@ var _underglow_enabled := true
 var _underglow_color_index := 0
 var _is_night := false
 var _vehicle: Node
+var _night_manager: Node
 
 # Цвета неона
 const UNDERGLOW_COLORS := [
@@ -56,9 +57,10 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	# Проверяем режим дня/ночи
-	var night_manager = get_node_or_null("/root/Main/NightModeManager")
-	if night_manager and "is_night" in night_manager:
-		var current_night: bool = night_manager.is_night
+	if not is_instance_valid(_night_manager):
+		_night_manager = get_tree().current_scene.find_child("NightModeManager", true, false)
+	if _night_manager and "is_night" in _night_manager:
+		var current_night: bool = _night_manager.is_night
 		if current_night != _is_night:
 			_is_night = current_night
 			_update_glass_materials()

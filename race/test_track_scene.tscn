@@ -1,4 +1,4 @@
-[gd_scene load_steps=21 format=3 uid="uid://ctest_track_001"]
+[gd_scene load_steps=22 format=3 uid="uid://ctest_track_001"]
 
 [ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://race/test_track_scene.gd" id="1_scene"]
@@ -16,6 +16,7 @@
 [ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="4_osm"]
 [ext_resource type="Script" path="res://car/lane_assist.gd" id="30_lane_assist"]
 [ext_resource type="Script" path="res://settings/color_grading.gd" id="20_color_grading"]
+[ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="12_night"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -136,6 +137,9 @@ ground_mesh_path = NodePath("../StaticGround/MeshInstance3D")
 [node name="PerformanceProfiler" type="Node" parent="."]
 script = ExtResource("19_profiler")
 print_interval = 5.0
+
+[node name="NightModeManager" type="Node" parent="."]
+script = ExtResource("12_night")
 
 [node name="OSMTerrain" type="Node3D" parent="."]
 script = ExtResource("4_osm")
