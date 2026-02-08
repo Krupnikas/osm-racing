@@ -140,6 +140,7 @@ print_interval = 5.0
 
 [node name="NightModeManager" type="Node" parent="."]
 script = ExtResource("12_night")
+start_night = false
 
 [node name="OSMTerrain" type="Node3D" parent="."]
 script = ExtResource("4_osm")

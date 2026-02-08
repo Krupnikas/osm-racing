@@ -6,6 +6,9 @@ class_name NightModeManager
 signal night_mode_changed(enabled: bool)
 signal rain_changed(enabled: bool)
 
+# Настройки
+@export var start_night := true  ## Включить ночной режим при старте
+
 # Состояние
 var is_night := false
 var is_raining := false
@@ -71,9 +74,10 @@ func _ready() -> void:
 	# Создаём систему дождя
 	_create_rain_system()
 
-	# По умолчанию: ночной режим
-	enable_night_mode()
-	print("NightModeManager: Ready (night mode, no rain)")
+	# Стартовый режим
+	if start_night:
+		enable_night_mode()
+	print("NightModeManager: Ready (%s mode, no rain)" % ("night" if is_night else "day"))
 
 
 func _find_scene_components() -> void:
