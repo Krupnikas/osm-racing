@@ -365,8 +365,19 @@ func _spawn_car_on_road() -> void:
 		print("ERROR: road_dir is NaN! Using default direction")
 		road_dir = Vector3(0, 0, 1)
 
-	# Поднимаем машину чуть выше дороги
-	road_pos.y += 0.5
+	# Находим реальную высоту поверхности рейкастом
+	var space_state := _car.get_world_3d().direct_space_state
+	var ray_from := Vector3(road_pos.x, road_pos.y + 200.0, road_pos.z)
+	var ray_to := Vector3(road_pos.x, road_pos.y - 200.0, road_pos.z)
+	var ray_query := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
+	ray_query.collision_mask = 1
+	var ray_result := space_state.intersect_ray(ray_query)
+	if not ray_result.is_empty():
+		road_pos.y = ray_result.position.y + 1.0
+		print("MainMenu: Raycast hit at y=%.2f, spawn y=%.2f" % [ray_result.position.y, road_pos.y])
+	else:
+		road_pos.y += 1.0
+		print("MainMenu: Raycast miss, using waypoint y + 1.0 = %.2f" % road_pos.y)
 
 	# КРИТИЧНО: Сначала замораживаем машину перед изменением transform
 	if not (_car_rigidbody is RigidBody3D):

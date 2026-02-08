@@ -908,6 +908,14 @@ func _check_initial_load_complete() -> void:
 
 	# Все начальные чанки загружены?
 	if loaded_count >= total_chunks:
+		# Ждём завершения загрузки elevation (если включен)
+		if enable_elevation and (not _loading_elevations.is_empty() or not _elevation_queue.is_empty()):
+			initial_load_progress.emit(chunk_progress * 0.6 + 0.3, "Загрузка рельефа: %d/%d..." % [
+				_chunk_elevations.size(),
+				_chunk_elevations.size() + _loading_elevations.size() + _elevation_queue.size()
+			])
+			return
+
 		# Проверяем что все очереди обработаны (для плавности старта)
 		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks == 0
 		if not queues_empty:
@@ -1286,6 +1294,7 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 		if test_elevation_provider.is_valid():
 			var elev: Dictionary = test_elevation_provider.call(chunk_key, chunk_lat, chunk_lon)
 			if not elev.is_empty():
+				elev["_chunk_key"] = chunk_key
 				_chunk_elevations[chunk_key] = elev
 				# Устанавливаем base_elevation по первому чанку с elevation
 				if _base_elevation == 0.0 and not elev.get("grid", []).is_empty():
@@ -1310,9 +1319,23 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 		_on_chunk_data_loaded(osm_data, chunk_key, fake_loader, _load_generation)
 		return
 
-	# Добавляем в очередь загрузки высот
+	# Добавляем в очередь загрузки высот (bbox строго по границам чанка)
 	if enable_elevation and not _chunk_elevations.has(chunk_key) and not _loading_elevations.has(chunk_key):
-		_elevation_queue.append({"key": chunk_key, "lat": chunk_lat, "lon": chunk_lon})
+		var cos_lat := cos(deg_to_rad(start_lat))
+		var chunk_min_x: float = float(chunk_x) * chunk_size
+		var chunk_max_x: float = chunk_min_x + chunk_size
+		var chunk_min_z: float = float(chunk_z) * chunk_size
+		var chunk_max_z: float = chunk_min_z + chunk_size
+		# z↑ = lat↓, поэтому min_z → max_lat
+		var bbox_min_lat := start_lat - chunk_max_z / 111000.0
+		var bbox_max_lat := start_lat - chunk_min_z / 111000.0
+		var bbox_min_lon := start_lon + chunk_min_x / (111000.0 * cos_lat)
+		var bbox_max_lon := start_lon + chunk_max_x / (111000.0 * cos_lat)
+		_elevation_queue.append({
+			"key": chunk_key,
+			"min_lat": bbox_min_lat, "max_lat": bbox_max_lat,
+			"min_lon": bbox_min_lon, "max_lon": bbox_max_lon,
+		})
 		_process_elevation_queue()
 
 	# Создаём отдельный загрузчик для этого чанка
@@ -1552,8 +1575,6 @@ func _process_elevation_queue() -> void:
 	while _active_elevation_requests < MAX_ELEVATION_REQUESTS and _elevation_queue.size() > 0:
 		var item: Dictionary = _elevation_queue.pop_front()
 		var chunk_key: String = item["key"]
-		var chunk_lat: float = item["lat"]
-		var chunk_lon: float = item["lon"]
 
 		if _chunk_elevations.has(chunk_key) or _loading_elevations.has(chunk_key):
 			continue
@@ -1565,7 +1586,11 @@ func _process_elevation_queue() -> void:
 		add_child(elev_loader)
 		elev_loader.elevation_loaded.connect(_on_elevation_loaded.bind(chunk_key, elev_loader))
 		elev_loader.elevation_failed.connect(_on_elevation_failed.bind(chunk_key, elev_loader))
-		elev_loader.load_elevation_grid(chunk_lat, chunk_lon, chunk_size / 2 + 50, elevation_grid_resolution)
+		elev_loader.load_elevation_grid_bbox(
+			item["min_lat"], item["max_lat"],
+			item["min_lon"], item["max_lon"],
+			elevation_grid_resolution
+		)
 
 func _on_elevation_loaded(elev_data: Dictionary, chunk_key: String, loader: Node) -> void:
 	print("Elevation: Chunk %s loaded" % chunk_key)
@@ -1587,6 +1612,15 @@ func _on_elevation_loaded(elev_data: Dictionary, chunk_key: String, loader: Node
 				# Отключаем коллизию статичной земли
 				static_ground.set_collision_layer_value(1, false)
 
+	# API возвращает grid в порядке lat (grid[0]=min_lat=south=большой world_z),
+	# но _create_terrain_mesh и _get_elevation_at_point ожидают world-z порядок
+	# (grid[0]=малый world_z=north). Переворачиваем строки.
+	var grid: Array = elev_data.get("grid", [])
+	if grid.size() > 1:
+		grid.reverse()
+		elev_data["grid"] = grid
+
+	elev_data["_chunk_key"] = chunk_key
 	_chunk_elevations[chunk_key] = elev_data
 
 	# Создаём меш террейна для этого чанка
@@ -1598,6 +1632,9 @@ func _on_elevation_loaded(elev_data: Dictionary, chunk_key: String, loader: Node
 	# Продолжаем обработку очереди
 	_process_elevation_queue()
 
+	# Проверяем завершение начальной загрузки (elevation мог быть последним)
+	_check_initial_load_complete()
+
 func _on_elevation_failed(error: String, chunk_key: String, loader: Node) -> void:
 	push_warning("Elevation chunk %s failed: %s" % [chunk_key, error])
 	_loading_elevations.erase(chunk_key)
@@ -1606,6 +1643,9 @@ func _on_elevation_failed(error: String, chunk_key: String, loader: Node) -> voi
 
 	# Продолжаем обработку очереди
 	_process_elevation_queue()
+
+	# Проверяем завершение начальной загрузки
+	_check_initial_load_complete()
 
 func _on_osm_data_loaded(osm_data: Dictionary) -> void:
 	print("OSM: Initial data loaded")
@@ -1694,6 +1734,8 @@ func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	var indices := PackedInt32Array()
 
 	# Создаём вершины
+	# Grid уже в world-z порядке: grid[0] = малый z (north), grid[N-1] = большой z (south)
+	# (API данные переворачиваются в _on_elevation_loaded, тестовые — уже в правильном порядке)
 	for z in range(grid_size):
 		for x in range(grid_size):
 			var elevation: float = grid[z][x] - _base_elevation
@@ -6681,39 +6723,31 @@ func _get_way_center(nodes: Array) -> Vector2:
 		center += local
 	return center / nodes.size()
 
-# Получение высоты террейна в точке
+# Получение высоты террейна в точке (локальные координаты в метрах)
 func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
 	if elev_data.is_empty() and _chunk_elevations.is_empty():
 		return 0.0
 
-	# Определяем chunk_key по локальным координатам точки
-	var chunk_x := int(floor(point.x / chunk_size))
-	var chunk_z := int(floor(point.y / chunk_size))
-	var point_chunk_key := "%d,%d" % [chunk_x, chunk_z]
+	# Определяем chunk по локальным координатам точки
+	var cx := int(floor(point.x / chunk_size))
+	var cz := int(floor(point.y / chunk_size))
+	var point_chunk_key := "%d,%d" % [cx, cz]
 
-	# Используем elev_data того чанка, где находится точка
-	var actual_elev: Dictionary = elev_data
-	if not elev_data.is_empty():
-		# Проверяем, попадает ли точка в переданный elev_data
-		var center_lat_check: float = elev_data.get("center_lat", start_lat)
-		var center_lon_check: float = elev_data.get("center_lon", start_lon)
-		var lon_check := start_lon + point.x / (111000.0 * cos(deg_to_rad(start_lat)))
-		var lat_check := start_lat - point.y / 111000.0
-		var lat_delta_check := chunk_size / 111000.0
-		var lon_delta_check := chunk_size / (111000.0 * cos(deg_to_rad(center_lat_check)))
-		var x_n := (lon_check - (center_lon_check - lon_delta_check / 2)) / lon_delta_check
-		var z_n := ((center_lat_check + lat_delta_check / 2) - lat_check) / lat_delta_check
-		if x_n < -0.01 or x_n > 1.01 or z_n < -0.01 or z_n > 1.01:
-			# Точка вне переданного чанка — ищем правильный
-			if _chunk_elevations.has(point_chunk_key):
-				actual_elev = _chunk_elevations[point_chunk_key]
-			# else: используем переданный с clamping (лучше чем ничего)
+	# Ищем elevation data по chunk_key точки
+	var actual_elev: Dictionary = {}
+	if _chunk_elevations.has(point_chunk_key):
+		actual_elev = _chunk_elevations[point_chunk_key]
+	elif not elev_data.is_empty():
+		# Fallback: точка вне своего чанка, используем переданный elev_data.
+		# Нормализуем по чанку elev_data (сохранённому в "_chunk_key"), а не по чанку точки.
+		actual_elev = elev_data
+		var fallback_key: String = elev_data.get("_chunk_key", "")
+		if fallback_key != "":
+			var parts: PackedStringArray = fallback_key.split(",")
+			cx = int(parts[0])
+			cz = int(parts[1])
 	else:
-		# elev_data пустой — пробуем найти по chunk_key
-		if _chunk_elevations.has(point_chunk_key):
-			actual_elev = _chunk_elevations[point_chunk_key]
-		else:
-			return 0.0
+		return 0.0
 
 	var grid: Array = actual_elev.get("grid", [])
 	var grid_size: int = actual_elev.get("grid_size", 0)
@@ -6721,26 +6755,14 @@ func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
 	if grid_size < 2 or grid.size() == 0:
 		return 0.0
 
-	var center_lat: float = actual_elev.get("center_lat", start_lat)
-	var center_lon: float = actual_elev.get("center_lon", start_lon)
+	# Нормализуем позицию внутри чанка к [0, 1]
+	# Grid покрывает ровно chunk bbox: [cx*chunk_size .. (cx+1)*chunk_size]
+	# Grid уже в world-z порядке (grid[0]=малый z, grid[N-1]=большой z)
+	var x_norm: float = clamp((point.x - float(cx) * chunk_size) / chunk_size, 0.0, 1.0)
+	var z_norm: float = clamp((point.y - float(cz) * chunk_size) / chunk_size, 0.0, 1.0)
 
-	# Преобразуем точку обратно в lat/lon
-	var lon := start_lon + point.x / (111000.0 * cos(deg_to_rad(start_lat)))
-	var lat := start_lat - point.y / 111000.0  # Y инвертирован
-
-	# Смещение от центра чанка
-	var lat_delta := chunk_size / 111000.0
-	var lon_delta := chunk_size / (111000.0 * cos(deg_to_rad(center_lat)))
-
-	# Нормализуем к [0, 1]
-	var x_norm := (lon - (center_lon - lon_delta / 2)) / lon_delta
-	var z_norm := ((center_lat + lat_delta / 2) - lat) / lat_delta
-
-	x_norm = clamp(x_norm, 0.0, 1.0)
-	z_norm = clamp(z_norm, 0.0, 1.0)
-
-	# Используем интерполяцию из ElevationLoader
-	var elevation := ElevationLoaderScript.interpolate_elevation(grid, grid_size, x_norm, z_norm)
+	# Билинейная интерполяция из сетки
+	var elevation: float = ElevationLoaderScript.interpolate_elevation(grid, grid_size, x_norm, z_norm)
 
 	# Возвращаем высоту относительно базовой
 	return (elevation - _base_elevation) * elevation_scale

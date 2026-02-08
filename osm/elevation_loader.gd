@@ -17,7 +17,32 @@ func _ready() -> void:
 	add_child(http_request)
 	http_request.request_completed.connect(_on_request_completed)
 
-# Загружает высоты для сетки точек вокруг центра
+# Загружает высоты для точного bbox чанка (границы совпадают у соседних чанков)
+func load_elevation_grid_bbox(min_lat: float, max_lat: float, min_lon: float, max_lon: float, grid_resolution: int = 10) -> void:
+	_center_lat = (min_lat + max_lat) / 2.0
+	_center_lon = (min_lon + max_lon) / 2.0
+	_grid_size = grid_resolution
+	_pending_locations.clear()
+
+	var locations: Array = []
+	for y in range(grid_resolution):
+		for x in range(grid_resolution):
+			var point_lat := min_lat + (max_lat - min_lat) * float(y) / (grid_resolution - 1)
+			var point_lon := min_lon + (max_lon - min_lon) * float(x) / (grid_resolution - 1)
+			locations.append({"latitude": point_lat, "longitude": point_lon})
+			_pending_locations.append({"lat": point_lat, "lon": point_lon})
+
+	var request_body := JSON.stringify({"locations": locations})
+	var headers := ["Content-Type: application/json", "Accept: application/json"]
+
+	print("Elevation: Requesting %d points (bbox)..." % locations.size())
+	var error := http_request.request(OPEN_ELEVATION_API, headers, HTTPClient.METHOD_POST, request_body)
+
+	if error != OK:
+		elevation_failed.emit("HTTP request failed: " + str(error))
+
+
+# Загружает высоты для сетки точек вокруг центра (legacy)
 func load_elevation_grid(lat: float, lon: float, radius: float, grid_resolution: int = 10) -> void:
 	_center_lat = lat
 	_center_lon = lon
