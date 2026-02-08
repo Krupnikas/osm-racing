@@ -61,13 +61,8 @@ func _ready() -> void:
 
 	# Провайдер данных — FakeOSM отдаёт данные в формате osm_loader
 	var tid := _track_id
-	if _track_id == "test_elevation":
-		# TEMP: отключаем дороги и здания, только terrain с elevation
-		_terrain.test_data_provider = func(_lat: float, _lon: float, _size: float) -> Dictionary:
-			return {"ways": [], "point_objects": [], "entrance_nodes": [], "poi_nodes": [], "bus_stops": []}
-	else:
-		_terrain.test_data_provider = func(lat: float, lon: float, size: float) -> Dictionary:
-			return FakeOSMData.get_data(tid, lat, lon, size)
+	_terrain.test_data_provider = func(lat: float, lon: float, size: float) -> Dictionary:
+		return FakeOSMData.get_data(tid, lat, lon, size)
 
 	# Elevation (если есть)
 	var elev: Dictionary = FakeOSMData.get_elevation(tid, "0,0", 0.0, 0.0)
@@ -79,6 +74,8 @@ func _ready() -> void:
 		_terrain.elevation_grid_resolution = 32
 
 	# Доп. настройки по треку
+	if _track_id == "test_elevation":
+		_terrain.enable_buildings = true
 	if _track_id == "test_npc":
 		_setup_traffic_manager()
 

@@ -2126,11 +2126,22 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			# (motorway, trunk, primary, secondary, tertiary, residential)
 			var major_road_count := 0
 			var max_width := 0.0
+			var max_height_offset := 0.096  # default (residential)
 			for t in road_types:
 				if t in ["motorway", "trunk", "primary", "secondary", "tertiary", "residential"]:
 					major_road_count += 1
 				var w: float = ROAD_WIDTHS.get(t, 6.0)
 				max_width = maxf(max_width, w)
+				# height_offset по типу дороги (совпадает с _create_road_immediate)
+				var ho := 0.096
+				match t:
+					"motorway", "trunk": ho = 0.102
+					"primary": ho = 0.100
+					"secondary": ho = 0.098
+					"tertiary": ho = 0.097
+					"residential", "unclassified": ho = 0.096
+					"service": ho = 0.094
+				max_height_offset = maxf(max_height_offset, ho)
 			# Ищем данные эллипса для этого перекрёстка
 			var intersection_idx := _find_nearest_intersection(pos, 2.0)
 
@@ -2155,11 +2166,11 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				if intersection_idx >= 0:
 					var radii: Vector2 = _intersection_radii[intersection_idx]
 					var angle: float = _intersection_angles[intersection_idx]
-					_create_intersection_patch(pos, elevation, target, radii.x, radii.y, angle)
+					_create_intersection_patch(pos, target, radii.x, radii.y, angle, elev_data, max_height_offset)
 				else:
 					# Fallback: круг с радиусом = половина макс ширины
 					var radius := max_width * 0.5
-					_create_intersection_patch(pos, elevation, target, radius, radius, 0.0)
+					_create_intersection_patch(pos, target, radius, radius, 0.0, elev_data, max_height_offset)
 
 			intersection_count += 1
 
@@ -4783,6 +4794,7 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 
 	# Высоты с учётом террейна
 	var floor_y := base_elev + 0.1  # Чуть выше террейна
+	var foundation_y := floor_y - 3.0  # Фундамент на 3м ниже — скрывает дыры на склонах
 	var roof_y := base_elev + building_height
 
 	# Крыша - используем триангуляцию для корректной работы с невыпуклыми полигонами
@@ -4802,8 +4814,8 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
-		var v1 := Vector3(p1.x, floor_y, p1.y)
-		var v2 := Vector3(p2.x, floor_y, p2.y)
+		var v1 := Vector3(p1.x, foundation_y, p1.y)
+		var v2 := Vector3(p2.x, foundation_y, p2.y)
 		var v3 := Vector3(p2.x, roof_y, p2.y)
 		var v4 := Vector3(p1.x, roof_y, p1.y)
 
@@ -4833,7 +4845,8 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
-		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev + building_height / 2, (p1.y + p2.y) / 2)
+		var total_wall_h := building_height + 3.0  # +3м фундамент вниз
+		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev - 2.4 + total_wall_h / 2, (p1.y + p2.y) / 2)
 		var wall_length := p1.distance_to(p2)
 
 		if wall_length < 0.5:  # Пропускаем слишком короткие стены
@@ -4843,7 +4856,7 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 
 		var collision := CollisionShape3D.new()
 		var box := BoxShape3D.new()
-		box.size = Vector3(wall_length, building_height, 0.3)  # Толщина стены 0.3м
+		box.size = Vector3(wall_length, total_wall_h, 0.3)  # Толщина стены 0.3м
 		collision.shape = box
 		collision.position = wall_center
 		collision.rotation.y = -wall_angle
@@ -4931,6 +4944,7 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 
 	# === ВЫЧИСЛЕНИЕ ГЕОМЕТРИИ СТЕН ===
 	var floor_y := base_elev + 0.1
+	var foundation_y := floor_y - 3.0  # Фундамент на 3м ниже
 	var roof_y := base_elev + building_height
 
 	var wall_vertices := PackedVector3Array()
@@ -4951,8 +4965,8 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		var p2 := points[(i + 1) % points.size()]
 		var wall_width := p1.distance_to(p2)
 
-		var v1 := Vector3(p1.x, floor_y, p1.y)
-		var v2 := Vector3(p2.x, floor_y, p2.y)
+		var v1 := Vector3(p1.x, foundation_y, p1.y)
+		var v2 := Vector3(p2.x, foundation_y, p2.y)
 		var v3 := Vector3(p2.x, roof_y, p2.y)
 		var v4 := Vector3(p1.x, roof_y, p1.y)
 
@@ -4962,7 +4976,7 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 
 		var u1 := accumulated_width * uv_scale_x
 		var u2 := (accumulated_width + wall_width) * uv_scale_x
-		var v_bottom := 0.0
+		var v_bottom := -3.0 * uv_scale_y  # 3м фундамента ниже пола
 		var v_top := building_height * uv_scale_y
 
 		var idx := wall_vertices.size()
@@ -6012,6 +6026,7 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 
 	# Высоты с учётом террейна
 	var floor_y := base_elev + 0.1  # Чуть выше террейна
+	var foundation_y := floor_y - 3.0  # Фундамент на 3м ниже — скрывает дыры на склонах
 	var roof_y := base_elev + building_height
 
 	# === СТЕНЫ с ArrayMesh для UV ===
@@ -6037,8 +6052,8 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 
 		var wall_width := p1.distance_to(p2)
 
-		var v1 := Vector3(p1.x, floor_y, p1.y)
-		var v2 := Vector3(p2.x, floor_y, p2.y)
+		var v1 := Vector3(p1.x, foundation_y, p1.y)
+		var v2 := Vector3(p2.x, foundation_y, p2.y)
 		var v3 := Vector3(p2.x, roof_y, p2.y)
 		var v4 := Vector3(p1.x, roof_y, p1.y)
 
@@ -6046,10 +6061,10 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 		var dir := (p2 - p1).normalized()
 		var normal := Vector3(-dir.y * normal_sign, 0, dir.x * normal_sign)
 
-		# UV координаты
+		# UV: фундамент ниже 0 (уходит под землю), видимая часть от 0 до building_height
 		var u1 := accumulated_width * uv_scale_x
 		var u2 := (accumulated_width + wall_width) * uv_scale_x
-		var v_bottom := 0.0
+		var v_bottom := -3.0 * uv_scale_y  # 3м фундамента ниже пола
 		var v_top := building_height * uv_scale_y
 
 		var idx := wall_vertices.size()
@@ -6243,6 +6258,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 	# Высоты с учётом террейна
 	var floor_y := base_elev + 0.1
+	var foundation_y := floor_y - 3.0  # Фундамент на 3м ниже
 	var roof_y := base_elev + building_height
 
 	# === СТЕНЫ с ArrayMesh для UV ===
@@ -6267,8 +6283,8 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 		var wall_width := p1.distance_to(p2)
 
-		var v1 := Vector3(p1.x, floor_y, p1.y)
-		var v2 := Vector3(p2.x, floor_y, p2.y)
+		var v1 := Vector3(p1.x, foundation_y, p1.y)
+		var v2 := Vector3(p2.x, foundation_y, p2.y)
 		var v3 := Vector3(p2.x, roof_y, p2.y)
 		var v4 := Vector3(p1.x, roof_y, p1.y)
 
@@ -6410,7 +6426,8 @@ func _create_building_collisions_deferred(body: StaticBody3D, points: PackedVect
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
-		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev + building_height / 2, (p1.y + p2.y) / 2)
+		var total_wall_h := building_height + 3.0  # +3м фундамент вниз
+		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev - 2.4 + total_wall_h / 2, (p1.y + p2.y) / 2)
 		var wall_length := p1.distance_to(p2)
 
 		if wall_length < 0.5:  # Пропускаем слишком короткие стены
@@ -6420,7 +6437,7 @@ func _create_building_collisions_deferred(body: StaticBody3D, points: PackedVect
 
 		var collision := CollisionShape3D.new()
 		var box := BoxShape3D.new()
-		box.size = Vector3(wall_length, building_height, 0.3)  # Толщина стены 0.3м
+		box.size = Vector3(wall_length, total_wall_h, 0.3)  # Толщина стены 0.3м
 		collision.shape = box
 		collision.position = wall_center
 		collision.rotation.y = -wall_angle
@@ -9470,40 +9487,49 @@ func _is_point_in_intersection_ellipse(pos: Vector2, scale: float = 1.0) -> int:
 
 ## Создаёт заплатку на перекрёстке (чистый асфальт без разметки)
 ## Эллипс с полуосями по ширинам пересекающихся дорог
-func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, radius_a: float = 6.0, radius_b: float = 6.0, rotation_angle: float = 0.0) -> void:
+## Каждая вершина следует за elevation terrain + наклон дороги
+func _create_intersection_patch(pos: Vector2, parent: Node3D, radius_a: float = 6.0, radius_b: float = 6.0, rotation_angle: float = 0.0, elev_data: Dictionary = {}, height_offset: float = 0.096) -> void:
 	if not _road_textures.has("intersection"):
 		return
 
-	# Создаём эллиптический меш (многоугольник с 16 сторонами)
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
 	var segments := 16
-	var center_y := elevation + 0.08  # Выше дороги
+	# Z-offset для предотвращения z-fighting (заплатка чуть выше дорог)
+	var z_off := 0.005
+
+	# Elevation в центре перекрёстка
+	var h_center := _get_elevation_at_point(pos, elev_data)
+	var center_y := h_center + height_offset + z_off
 
 	# Центральная вершина
 	st.set_uv(Vector2(0.5, 0.5))
 	st.set_normal(Vector3.UP)
 	st.add_vertex(Vector3(pos.x, center_y, pos.y))
 
-	# Вершины по эллипсу с поворотом
+	# Вершины по эллипсу с поворотом — каждая на своей высоте
 	var cos_rot := cos(rotation_angle)
 	var sin_rot := sin(rotation_angle)
 	for i in range(segments):
 		var angle := float(i) / segments * TAU
-		# Точка на эллипсе (до поворота)
 		var ex := cos(angle) * radius_a
 		var ey := sin(angle) * radius_b
-		# Поворот на угол дороги
 		var rx := ex * cos_rot - ey * sin_rot
 		var ry := ex * sin_rot + ey * cos_rot
 		var x := pos.x + rx
 		var z := pos.y + ry
+
+		# Elevation на краю эллипса — max(edge, center) как дорога
+		var edge_pos := Vector2(x, z)
+		var h_edge := maxf(_get_elevation_at_point(edge_pos, elev_data), h_center)
+		var vertex_y := h_edge + height_offset + z_off
+
 		var u := 0.5 + cos(angle) * 0.5
 		var v := 0.5 + sin(angle) * 0.5
 		st.set_uv(Vector2(u, v))
 		st.set_normal(Vector3.UP)
-		st.add_vertex(Vector3(x, center_y, z))
+		st.add_vertex(Vector3(x, vertex_y, z))
 
 	# Индексы (треугольники от центра к краям)
 	for i in range(segments):
@@ -9516,7 +9542,6 @@ func _create_intersection_patch(pos: Vector2, elevation: float, parent: Node3D, 
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.mesh = mesh
 
-	# Материал с текстурой перекрёстка (используем шейдер с noise вариацией)
 	var albedo_tex: Texture2D = _road_textures.get("intersection", null)
 	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
 	var material: Material = WetRoadMaterial.create_road_shader_material(
