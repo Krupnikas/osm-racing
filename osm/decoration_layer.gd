@@ -47,6 +47,7 @@ func _load_test_decorations() -> void:
 	var building_override = BuildingOverrideScript.new()
 	building_override.osm_way_id = 45836637
 	building_override.wall_texture_path = "res://textures/buildings/111-125.png"
+	building_override.wall_emissive_path = "res://textures/buildings/111-125_emissive_mask.png"
 	building_override.texture_repeat_y = 2.0
 	building_override.use_adaptive_repeat = true  # Адаптивный режим
 	building_override.texture_repeat_short = 1.0  # 1 повтор на коротких стенах
@@ -57,6 +58,7 @@ func _load_test_decorations() -> void:
 	var override_37 = BuildingOverrideScript.new()
 	override_37.osm_way_id = 45836638
 	override_37.wall_texture_path = "res://textures/buildings/111-125.png"
+	override_37.wall_emissive_path = "res://textures/buildings/111-125_emissive_mask.png"
 	override_37.texture_repeat_y = 2.0
 	override_37.use_adaptive_repeat = true
 	override_37.texture_repeat_short = 1.0
@@ -67,6 +69,7 @@ func _load_test_decorations() -> void:
 	var override_35 = BuildingOverrideScript.new()
 	override_35.osm_way_id = 45836639
 	override_35.wall_texture_path = "res://textures/buildings/111-125.png"
+	override_35.wall_emissive_path = "res://textures/buildings/111-125_emissive_mask.png"
 	override_35.texture_repeat_y = 2.0
 	override_35.use_adaptive_repeat = true
 	override_35.texture_repeat_short = 1.0
@@ -79,6 +82,13 @@ func _load_test_decorations() -> void:
 	okinina_override.wall_texture_path = "res://textures/buildings/111-126.jpg"
 	okinina_override.texture_repeat_y = 1.0
 	_building_overrides.append(okinina_override)
+
+	# Химико-технологический колледж (way 45747168)
+	var ptu_override = BuildingOverrideScript.new()
+	ptu_override.osm_way_id = 45747168
+	ptu_override.wall_texture_path = "res://textures/buildings/ptu.png"
+	ptu_override.texture_repeat_y = 1.0
+	_building_overrides.append(ptu_override)
 
 	print("DecorationLayer: Loaded %d billboards, %d building overrides" % [
 		_billboards.size(), _building_overrides.size()

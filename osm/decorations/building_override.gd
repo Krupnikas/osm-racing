@@ -14,6 +14,7 @@ extends Resource
 @export var wall_ao_path: String = ""  # Ambient Occlusion (авто: *_ambient.png)
 @export var wall_specular_path: String = ""  # Specular/Roughness (авто: *_specular.png)
 @export var wall_displacement_path: String = ""  # Displacement/Height (авто: *_displacement.png)
+@export var wall_emissive_path: String = ""  # Emissive mask для светящихся окон (авто: *_emissive_mask.png)
 @export var roof_texture_path: String = ""  # Кастомная текстура крыши
 @export var texture_repeat_x: float = 0.0  # Повторений по периметру (0 = авто)
 @export var texture_repeat_y: float = 2.0  # Сколько раз текстура повторяется по высоте

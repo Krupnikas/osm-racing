@@ -4,18 +4,15 @@
 
 ### Команда для запуска игры
 ```bash
-/Applications/Godot.app/Contents/MacOS/Godot --path /Users/alekseiaksenov/osm-racing res://main.tscn
+/Applications/Godot.app/Contents/MacOS/Godot --path /Users/alekseiaksenov/osm-racing
 ```
 
-### Описание параметров
-- `/Applications/Godot.app/Contents/MacOS/Godot` - путь к исполняемому файлу Godot
-- `--path /Users/alekseiaksenov/osm-racing` - путь к проекту
-- `res://main.tscn` - главная сцена игры для запуска
+Godot автоматически запустит главную сцену из `project.godot` (`res://ui/standalone_main_menu.tscn`).
 
 ### Запуск в фоне
 Для запуска в фоновом режиме:
 ```bash
-/Applications/Godot.app/Contents/MacOS/Godot --path /Users/alekseiaksenov/osm-racing res://main.tscn 2>&1 &
+/Applications/Godot.app/Contents/MacOS/Godot --path /Users/alekseiaksenov/osm-racing 2>&1 &
 ```
 
 ### Остановка игры
@@ -27,7 +24,7 @@ killall -9 Godot
 ### Перезапуск игры
 Для полного перезапуска (остановка + запуск):
 ```bash
-killall -9 Godot 2>/dev/null; sleep 1 && /Applications/Godot.app/Contents/MacOS/Godot --path /Users/alekseiaksenov/osm-racing res://main.tscn 2>&1 &
+killall -9 Godot 2>/dev/null; sleep 1 && /Applications/Godot.app/Contents/MacOS/Godot --path /Users/alekseiaksenov/osm-racing 2>&1 &
 ```
 
 ## Структура проекта
@@ -43,9 +40,9 @@ killall -9 Godot 2>/dev/null; sleep 1 && /Applications/Godot.app/Contents/MacOS/
 - Поддерживает несколько моделей автомобилей через enum CarModel
 - Автоматически определяет модель и настраивает позиции фар
 
-### Главная сцена
-- `main.tscn` - основная игровая сцена
-- Для смены модели автомобиля изменить path в `[ext_resource id="2_car"]`
+### Главные сцены
+- `ui/standalone_main_menu.tscn` - главное меню (точка входа)
+- `main.tscn` - игровая сцена (загружается из меню)
 
 ## Добавление новой модели автомобиля
 

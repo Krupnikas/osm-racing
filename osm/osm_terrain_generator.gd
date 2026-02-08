@@ -9,6 +9,7 @@ const OSMLoaderScript = preload("res://osm/osm_loader.gd")
 const ElevationLoaderScript = preload("res://osm/elevation_loader.gd")
 const TextureGeneratorScript = preload("res://textures/texture_generator.gd")
 const BuildingWallShader = preload("res://osm/building_wall.gdshader")
+const BuildingWallCustomShader = preload("res://osm/building_wall_custom.gdshader")
 const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
 const BIRCH_TREE_SCENE = preload("res://models/trees/birch/scene.gltf")
@@ -6208,6 +6209,11 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	var heightmap_scale: float = 0.05  # Увеличенная глубина для видимого эффекта
 	print("  Displacement map: ", displacement_path, " -> ", displacement_texture != null)
 
+	# Emissive mask (светящиеся окна)
+	var emissive_path := base_path + "_emissive_mask.png"
+	var emissive_texture: Texture2D = _load_texture_map(building_override.wall_emissive_path, emissive_path)
+	print("  Emissive mask: ", emissive_path, " -> ", emissive_texture != null)
+
 	# Высоты с учётом террейна
 	var floor_y := base_elev + 0.1
 	var roof_y := base_elev + building_height
@@ -6334,42 +6340,27 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	wall_mesh_instance.visibility_range_end = 400.0
 	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
-	# Материал стен с кастомной текстурой - используем StandardMaterial3D для правильного освещения
-	var wall_material := StandardMaterial3D.new()
-	wall_material.cull_mode = BaseMaterial3D.CULL_DISABLED  # Двусторонний рендеринг
+	# Материал стен с кастомной текстурой - используем ShaderMaterial для правильной работы emission
+	var wall_material := ShaderMaterial.new()
+	wall_material.shader = BuildingWallCustomShader
+
+	# Основные текстуры
 	if custom_texture:
-		wall_material.albedo_texture = custom_texture
-		wall_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-	else:
-		wall_material.albedo_color = Color(0.7, 0.6, 0.5)
-	wall_material.roughness = 0.5  # Гладче = ярче
-
-	# Normal map для объёма балконов и окон
+		wall_material.set_shader_parameter("albedo_texture", custom_texture)
 	if normal_texture:
-		wall_material.normal_enabled = true
-		wall_material.normal_texture = normal_texture
-		wall_material.normal_scale = normal_strength
-
-	# Ambient Occlusion для затенения углов и щелей
+		wall_material.set_shader_parameter("normal_texture", normal_texture)
+		wall_material.set_shader_parameter("normal_strength", normal_strength)
 	if ao_texture:
-		wall_material.ao_enabled = true
-		wall_material.ao_texture = ao_texture
-		wall_material.ao_light_affect = ao_strength
-
-	# Specular map как инверсия roughness (яркие области = гладкие = блестящие)
+		wall_material.set_shader_parameter("ao_texture", ao_texture)
+		wall_material.set_shader_parameter("ao_strength", ao_strength)
 	if specular_texture:
-		wall_material.roughness_texture = specular_texture
-		wall_material.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_GRAYSCALE
-		wall_material.roughness = 0.3  # Базовое значение, текстура модулирует
+		wall_material.set_shader_parameter("roughness_texture", specular_texture)
 
-	# Displacement/Parallax для иллюзии глубины
-	if displacement_texture:
-		wall_material.heightmap_enabled = true
-		wall_material.heightmap_texture = displacement_texture
-		wall_material.heightmap_scale = heightmap_scale
-		wall_material.heightmap_deep_parallax = true
-		wall_material.heightmap_min_layers = 4
-		wall_material.heightmap_max_layers = 16
+	# Emissive (светящиеся окна) — шейдер сам проверяет is_night_global
+	if emissive_texture:
+		wall_material.set_shader_parameter("emission_mask", emissive_texture)
+		wall_material.set_shader_parameter("has_emission_mask", true)
+		wall_material.set_shader_parameter("emission_energy", 1.0)
 
 	wall_mesh_instance.material_override = wall_material
 
