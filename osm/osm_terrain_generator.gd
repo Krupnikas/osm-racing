@@ -1597,21 +1597,6 @@ func _on_elevation_loaded(elev_data: Dictionary, chunk_key: String, loader: Node
 	_loading_elevations.erase(chunk_key)
 	_active_elevation_requests -= 1
 
-	# Устанавливаем базовую высоту по первому чанку
-	if _base_elevation == 0.0 and chunk_key == "0,0":
-		var grid: Array = elev_data.get("grid", [])
-		if grid.size() > 0:
-			var mid := grid.size() / 2
-			_base_elevation = grid[mid][mid]
-			print("Elevation: Base elevation set to %.1f m" % _base_elevation)
-
-			# Скрываем статичную землю, теперь используем террейн-меши
-			var static_ground := get_parent().get_node_or_null("StaticGround")
-			if static_ground:
-				static_ground.visible = false
-				# Отключаем коллизию статичной земли
-				static_ground.set_collision_layer_value(1, false)
-
 	# API возвращает grid в порядке lat (grid[0]=min_lat=south=большой world_z),
 	# но _create_terrain_mesh и _get_elevation_at_point ожидают world-z порядок
 	# (grid[0]=малый world_z=north). Переворачиваем строки.
@@ -1623,9 +1608,33 @@ func _on_elevation_loaded(elev_data: Dictionary, chunk_key: String, loader: Node
 	elev_data["_chunk_key"] = chunk_key
 	_chunk_elevations[chunk_key] = elev_data
 
-	# Создаём меш террейна для этого чанка
-	if _loaded_chunks.has(chunk_key):
-		_create_terrain_mesh(chunk_key, _loaded_chunks[chunk_key])
+	# Устанавливаем базовую высоту по chunk 0,0 (точка спавна)
+	var base_just_set := false
+	if _base_elevation == 0.0 and chunk_key == "0,0":
+		if grid.size() > 0:
+			var mid := grid.size() / 2
+			_base_elevation = grid[mid][mid]
+			base_just_set = true
+			print("Elevation: Base elevation set to %.1f m" % _base_elevation)
+
+			# Скрываем статичную землю
+			var static_ground := get_parent().get_node_or_null("StaticGround")
+			if static_ground:
+				static_ground.visible = false
+				static_ground.set_collision_layer_value(1, false)
+
+	# Если base только что установлен — обрабатываем все ранее загруженные чанки
+	if base_just_set:
+		for prev_key in _chunk_elevations:
+			if _loaded_chunks.has(prev_key):
+				_create_terrain_mesh(prev_key, _loaded_chunks[prev_key])
+				_update_chunk_heights(prev_key, _loaded_chunks[prev_key], _chunk_elevations[prev_key])
+	elif _base_elevation != 0.0:
+		# Base уже есть — обрабатываем текущий чанк
+		if _loaded_chunks.has(chunk_key):
+			_create_terrain_mesh(chunk_key, _loaded_chunks[chunk_key])
+			_update_chunk_heights(chunk_key, _loaded_chunks[chunk_key], elev_data)
+	# else: base ещё не установлен, чанк подождёт
 
 	loader.queue_free()
 
@@ -1706,6 +1715,14 @@ func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: 
 func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	if not _chunk_elevations.has(chunk_key):
 		return
+
+	# Удаляем существующий terrain mesh (если пересоздаём после получения base_elevation)
+	var old_terrain := parent.get_node_or_null("TerrainMesh")
+	if old_terrain:
+		old_terrain.queue_free()
+	var old_body := parent.get_node_or_null("TerrainBody")
+	if old_body:
+		old_body.queue_free()
 
 	var elev_data: Dictionary = _chunk_elevations[chunk_key]
 	var grid: Array = elev_data.get("grid", [])
@@ -3068,10 +3085,6 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 		# Для начальной загрузки (parent = root) используем "initial"
 		chunk_key = "initial"
 
-	# DEBUG: первый вызов для каждого чанка
-	if not _road_batch_data.has(chunk_key):
-		print("OSM: DEBUG _add_road_to_batch - first road for chunk '%s', parent.name='%s'" % [chunk_key, parent.name])
-
 	# Инициализируем batch data для этого чанка если ещё нет
 	if not _road_batch_data.has(chunk_key):
 		_road_batch_data[chunk_key] = {}
@@ -3095,6 +3108,22 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 
 	# Validate and fix points that create loops/flips
 	points = _validate_road_direction(points)
+
+	# Клиппинг дороги по границам чанка (с запасом на ширину дороги)
+	# Без этого дороги из Overpass API (загружены с +100м overlap) уходят далеко за чанк,
+	# и _update_chunk_heights применяет к ним elevation из чужого чанка → дороги взмывают в небо.
+	if chunk_key != "initial":
+		var ck_parts: PackedStringArray = chunk_key.split(",")
+		var ck_x := int(ck_parts[0])
+		var ck_z := int(ck_parts[1])
+		var margin := width + 5.0  # Запас на ширину дороги + бордюры
+		var clip_min_x := float(ck_x) * chunk_size - margin
+		var clip_max_x := float(ck_x + 1) * chunk_size + margin
+		var clip_min_z := float(ck_z) * chunk_size - margin
+		var clip_max_z := float(ck_z + 1) * chunk_size + margin
+		points = _clip_polyline_to_rect(points, clip_min_x, clip_max_x, clip_min_z, clip_max_z)
+		if points.size() < 2:
+			return
 
 	# Z-fighting offset
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
@@ -3273,6 +3302,84 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		if total_time_ms > 8.0:
 			print("⚠️ SLOW: road batch finalization took %.1f ms for chunk %s" % [total_time_ms, chunk_key])
 
+# Обновляет высоту всех объектов в чанке после загрузки elevation
+# Пересчитывает y-координаты вершин road/curb mesh и позиции прочих объектов
+func _update_chunk_heights(chunk_key: String, chunk_node: Node3D, elev_data: Dictionary) -> void:
+	if not is_instance_valid(chunk_node):
+		return
+
+	var updated_meshes := 0
+
+	# Рекурсивно ищем все MeshInstance3D в чанке
+	for child in chunk_node.get_children():
+		# Road batches: StaticBody3D > MeshInstance3D + CollisionShape3D
+		if child is StaticBody3D and child.name.begins_with("RoadBatch"):
+			for sub in child.get_children():
+				if sub is MeshInstance3D and sub.mesh is ArrayMesh:
+					_update_mesh_heights(sub, elev_data)
+					updated_meshes += 1
+				elif sub is CollisionShape3D and sub.shape is ConcavePolygonShape3D:
+					_update_collision_heights(sub, elev_data)
+
+		# Curb meshes, intersection patches, etc (skip TerrainBody — already correct)
+		elif child is StaticBody3D and not child.name.begins_with("Terrain"):
+			for sub in child.get_children():
+				if sub is MeshInstance3D and sub.mesh is ArrayMesh:
+					_update_mesh_heights(sub, elev_data)
+					updated_meshes += 1
+				elif sub is CollisionShape3D and sub.shape is ConcavePolygonShape3D:
+					_update_collision_heights(sub, elev_data)
+
+		# Direct MeshInstance3D (skip TerrainMesh — already correct)
+		elif child is MeshInstance3D and child.mesh is ArrayMesh:
+			if not child.name.begins_with("Terrain"):
+				if child.name.begins_with("Road") or child.name.begins_with("Curb") or child.name.begins_with("Intersection"):
+					_update_mesh_heights(child, elev_data)
+					updated_meshes += 1
+
+	if updated_meshes > 0:
+		print("Elevation: Updated %d meshes in chunk %s" % [updated_meshes, chunk_key])
+
+
+func _update_mesh_heights(mesh_instance: MeshInstance3D, elev_data: Dictionary) -> void:
+	var arr_mesh: ArrayMesh = mesh_instance.mesh
+	if arr_mesh.get_surface_count() == 0:
+		return
+
+	var arrays: Array = arr_mesh.surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var new_vertices := PackedVector3Array()
+	new_vertices.resize(vertices.size())
+
+	for i in range(vertices.size()):
+		var v := vertices[i]
+		var terrain_h: float = _get_elevation_at_point(Vector2(v.x, v.z), elev_data)
+		new_vertices[i] = Vector3(v.x, terrain_h + v.y, v.z)
+
+	arrays[Mesh.ARRAY_VERTEX] = new_vertices
+
+	# Пересоздаём surface с обновлёнными вершинами
+	var material: Material = arr_mesh.surface_get_material(0)
+	arr_mesh.clear_surfaces()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	if material:
+		arr_mesh.surface_set_material(0, material)
+
+
+func _update_collision_heights(col_shape_node: CollisionShape3D, elev_data: Dictionary) -> void:
+	var shape: ConcavePolygonShape3D = col_shape_node.shape
+	var faces: PackedVector3Array = shape.get_faces()
+	var new_faces := PackedVector3Array()
+	new_faces.resize(faces.size())
+
+	for i in range(faces.size()):
+		var v := faces[i]
+		var terrain_h: float = _get_elevation_at_point(Vector2(v.x, v.z), elev_data)
+		new_faces[i] = Vector3(v.x, terrain_h + v.y, v.z)
+
+	shape.set_faces(new_faces)
+
+
 # Финализирует window batches для чанка (создаёт ONE MultiMesh для всех окон в чанке)
 func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
 	if not _window_batch_data.has(chunk_key):
@@ -3395,6 +3502,21 @@ func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_hei
 
 	# Сглаживаем точки бордюров так же, как дороги
 	var points: PackedVector2Array = _smooth_road_corners(raw_points)
+
+	# Клиппинг по чанку (аналогично дорогам)
+	var chunk_key := _get_chunk_key_from_node(parent)
+	if chunk_key != "":
+		var ck_parts: PackedStringArray = chunk_key.split(",")
+		var ck_x := int(ck_parts[0])
+		var ck_z := int(ck_parts[1])
+		var margin := road_width + 5.0
+		var clip_min_x := float(ck_x) * chunk_size - margin
+		var clip_max_x := float(ck_x + 1) * chunk_size + margin
+		var clip_min_z := float(ck_z) * chunk_size - margin
+		var clip_max_z := float(ck_z + 1) * chunk_size + margin
+		points = _clip_polyline_to_rect(points, clip_min_x, clip_max_x, clip_min_z, clip_max_z)
+		if points.size() < 2:
+			return
 
 	_create_curbs_from_points(points, road_width, road_height, curb_height, parent, elev_data)
 
@@ -8994,6 +9116,68 @@ func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) 
 
 ## Smooths road geometry using Catmull-Rom spline interpolation
 ## This creates smooth curves through all points
+## Клиппинг полилинии по прямоугольнику.
+## Обрезает участки, полностью выходящие за rect. Вставляет точки пересечения на границе.
+func _clip_polyline_to_rect(points: PackedVector2Array, min_x: float, max_x: float, min_z: float, max_z: float) -> PackedVector2Array:
+	if points.size() < 2:
+		return points
+
+	var result := PackedVector2Array()
+	for i in range(points.size()):
+		var p := points[i]
+		var inside := p.x >= min_x and p.x <= max_x and p.y >= min_z and p.y <= max_z
+
+		if i > 0:
+			var prev := points[i - 1]
+			var prev_inside := prev.x >= min_x and prev.x <= max_x and prev.y >= min_z and prev.y <= max_z
+
+			if inside != prev_inside:
+				# Одна точка внутри, другая снаружи — добавляем пересечение
+				var clipped := _clip_segment_to_rect(prev, p, min_x, max_x, min_z, max_z)
+				if clipped != prev and clipped != p:
+					result.append(clipped)
+
+		if inside:
+			result.append(p)
+
+	return result
+
+
+## Находит точку пересечения отрезка (a→b) с границей прямоугольника (ближайшую к a).
+func _clip_segment_to_rect(a: Vector2, b: Vector2, min_x: float, max_x: float, min_z: float, max_z: float) -> Vector2:
+	var best_t := 1.0
+	var dx := b.x - a.x
+	var dy := b.y - a.y
+
+	# Проверяем вертикальные границы (min_x, max_x)
+	if abs(dx) > 0.001:
+		var t1: float = (min_x - a.x) / dx
+		if t1 > 0.0 and t1 < best_t:
+			var hz1: float = a.y + dy * t1
+			if hz1 >= min_z and hz1 <= max_z:
+				best_t = t1
+		var t2: float = (max_x - a.x) / dx
+		if t2 > 0.0 and t2 < best_t:
+			var hz2: float = a.y + dy * t2
+			if hz2 >= min_z and hz2 <= max_z:
+				best_t = t2
+
+	# Проверяем горизонтальные границы (min_z, max_z)
+	if abs(dy) > 0.001:
+		var t3: float = (min_z - a.y) / dy
+		if t3 > 0.0 and t3 < best_t:
+			var hx3: float = a.x + dx * t3
+			if hx3 >= min_x and hx3 <= max_x:
+				best_t = t3
+		var t4: float = (max_z - a.y) / dy
+		if t4 > 0.0 and t4 < best_t:
+			var hx4: float = a.x + dx * t4
+			if hx4 >= min_x and hx4 <= max_x:
+				best_t = t4
+
+	return Vector2(a.x + dx * best_t, a.y + dy * best_t)
+
+
 func _smooth_road_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
 	return _smooth_points(raw_points, 10.0, 3, 1.0)  # Оптимизация: реже точки, меньше subdivisions
 

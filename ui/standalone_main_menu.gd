@@ -30,6 +30,17 @@ func _ready() -> void:
 	# Добавляем кнопку "Тестовые трассы" в главное меню
 	_add_test_tracks_button()
 
+	# Автостарт через командную строку: --autostart [location_index]
+	var args := OS.get_cmdline_user_args()
+	for i in range(args.size()):
+		if args[i] == "--autostart" and i + 1 < args.size():
+			var idx := int(args[i + 1])
+			var locations := LOCATIONS.keys()
+			if idx >= 0 and idx < locations.size():
+				print("StandaloneMenu: Autostart location %d: %s" % [idx, locations[idx]])
+				_start_free_roam(locations[idx])
+				return
+
 
 func _populate_tracks(mode: String = "") -> void:
 	"""Создать кнопки для трасс указанного режима"""
