@@ -35,13 +35,16 @@ static func get_data(track_id: String, _chunk_lat: float, _chunk_lon: float, _ch
 		var nodes: Array = way.get("nodes", [])
 		if nodes.is_empty():
 			continue
-		# Для дорог: привязываем к чанку по первой точке (одна дорога → один чанк)
-		# Для зданий: привязываем к чанку по центру
 		var tags: Dictionary = way.get("tags", {})
 		if tags.has("highway"):
-			var first_node = nodes[0]
-			if first_node.lat >= min_lat and first_node.lat < max_lat and first_node.lon >= min_lon and first_node.lon < max_lon:
-				filtered_ways.append(way)
+			# Дороги: находим непрерывные группы точек внутри bbox
+			# Way может проходить через чанк несколько раз (напр. правая и левая прямые овала)
+			var segments := _clip_way_to_bbox(nodes, min_lat, max_lat, min_lon, max_lon)
+			for seg in segments:
+				filtered_ways.append({
+					"nodes": seg,
+					"tags": tags,
+				})
 		else:
 			# Здания и прочее — по центру
 			var cx := 0.0
@@ -85,35 +88,32 @@ static func get_height_at(track_id: String, x: float, z: float) -> float:
 # --- Дороги ---
 
 static func _make_oval_road() -> Array:
-	## Овальный трек: 2 прямые (300m) + 2 полукруга (radius=80m)
+	## Овальный трек: 2 прямые (1400m) + 2 полукруга (radius=100m) — ~10 чанков в длину
+	## Один замкнутый way — get_data() обрезает по bbox каждого чанка
 	var nodes := []
-	var straight_length := 300.0
-	var turn_radius := 80.0
+	var straight_length := 1400.0
+	var turn_radius := 100.0
 	var segments := 64
 	var half_straight := straight_length / 2.0
-	var straight_steps := 30
+	var straight_steps := 140
 
 	# Правая прямая
 	for i in range(straight_steps + 1):
 		var t := float(i) / straight_steps
 		var z := -half_straight + t * straight_length
 		nodes.append(_ll(turn_radius, z))
-
 	# Верхний полукруг
 	for i in range(1, segments + 1):
 		var angle := float(i) / segments * PI
 		nodes.append(_ll(turn_radius * cos(angle), half_straight + turn_radius * sin(angle)))
-
 	# Левая прямая
 	for i in range(1, straight_steps + 1):
 		var t := float(i) / straight_steps
 		nodes.append(_ll(-turn_radius, half_straight - t * straight_length))
-
 	# Нижний полукруг
 	for i in range(1, segments):
 		var angle := PI + float(i) / segments * PI
 		nodes.append(_ll(turn_radius * cos(angle), -half_straight + turn_radius * sin(angle)))
-
 	nodes.append(nodes[0])
 
 	return [{
@@ -151,24 +151,32 @@ static func _make_suspension_road() -> Array:
 
 static func _make_elevation_buildings() -> Array:
 	## Здания вокруг овальной трассы
-	## Овал: прямые X=±80, Z=-150..+150, повороты radius=80
-	return [
-		# Внутри овала — небольшие дома
-		_bldg(20, -80, 15, 10, "house", 2),
-		_bldg(-30, -60, 12, 12, "house", 1),
-		_bldg(10, 0, 18, 12, "residential", 5),
-		_bldg(-25, 40, 14, 10, "house", 2),
-		_bldg(30, 80, 16, 11, "detached", 2),
-		_bldg(-10, 120, 20, 14, "apartments", 9),
-		# Снаружи овала — крупнее
-		_bldg(120, -100, 25, 15, "apartments", 9),
-		_bldg(130, -40, 30, 12, "residential", 5),
-		_bldg(125, 50, 20, 20, "commercial", 3),
-		_bldg(135, 120, 22, 14, "residential", 5),
-		_bldg(-120, -80, 18, 12, "house", 2),
-		_bldg(-130, 0, 28, 16, "apartments", 7),
-		_bldg(-125, 90, 24, 14, "residential", 4),
-	]
+	## Овал: прямые X=±100, Z=-700..+700, повороты radius=100
+	var buildings := []
+	# Здания вдоль правой прямой (X=140..170) каждые ~120m
+	for i in range(12):
+		var z := -650.0 + i * 110.0
+		var x := 140.0 + randf_range(-5, 15)
+		var w := randf_range(15, 30)
+		var d := randf_range(10, 20)
+		var levels: int = [2, 3, 5, 7, 9][i % 5]
+		var types := ["house", "residential", "apartments", "commercial", "detached"]
+		buildings.append(_bldg(x, z, w, d, types[i % 5], levels))
+	# Здания вдоль левой прямой (X=-140..-170)
+	for i in range(12):
+		var z := -600.0 + i * 110.0
+		var x := -140.0 - randf_range(-5, 15)
+		var w := randf_range(12, 25)
+		var d := randf_range(10, 18)
+		var levels: int = [1, 2, 4, 6, 3][i % 5]
+		var types := ["house", "detached", "residential", "apartments", "house"]
+		buildings.append(_bldg(x, z, w, d, types[i % 5], levels))
+	# Внутри овала — редкие дома
+	for i in range(6):
+		var z := -500.0 + i * 200.0
+		var x := randf_range(-40, 40)
+		buildings.append(_bldg(x, z, randf_range(12, 18), randf_range(10, 14), "house", [1, 2, 2, 3, 1, 2][i]))
+	return buildings
 
 
 # --- Elevation ---
@@ -289,6 +297,35 @@ static func _suspension_height(z: float) -> float:
 	var blend := clampf(lz / 50.0, 0.0, 1.0)
 	var prev_h := sin((z - 450.0) * 0.3) * 0.5
 	return prev_h * (1.0 - blend)
+
+
+static func _clip_way_to_bbox(nodes: Array, min_lat: float, max_lat: float, min_lon: float, max_lon: float) -> Array:
+	## Разбивает way на непрерывные сегменты, где точки попадают в bbox.
+	## Каждый сегмент получает +1 точку до и после для плавного продолжения.
+	## Way может проходить через bbox несколько раз (напр. овал — правая и левая стороны).
+	var result := []
+	var current_start := -1
+
+	for i in range(nodes.size()):
+		var n = nodes[i]
+		var inside: bool = n.lat >= min_lat and n.lat < max_lat and n.lon >= min_lon and n.lon < max_lon
+		if inside:
+			if current_start < 0:
+				current_start = i
+		else:
+			if current_start >= 0:
+				# Закончилась непрерывная группа — вырезаем сегмент с +1 запасом на конце
+				var seg_start := maxi(current_start - 1, 0)
+				var seg_end := mini(i, nodes.size() - 1)  # i — первая точка ВНЕ bbox
+				result.append(nodes.slice(seg_start, seg_end + 1))
+				current_start = -1
+
+	# Последняя группа (если way заканчивается внутри bbox)
+	if current_start >= 0:
+		var seg_start := maxi(current_start - 1, 0)
+		result.append(nodes.slice(seg_start, nodes.size()))
+
+	return result
 
 
 # --- Хелперы ---

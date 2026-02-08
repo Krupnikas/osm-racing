@@ -76,6 +76,7 @@ func _ready() -> void:
 	# Доп. настройки по треку
 	if _track_id == "test_elevation":
 		_terrain.enable_buildings = true
+		_terrain.enable_street_lamps = true
 	if _track_id == "test_npc":
 		_setup_traffic_manager()
 
