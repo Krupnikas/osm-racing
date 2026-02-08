@@ -46,9 +46,32 @@ func _load_test_decorations() -> void:
 	# Тестовое переопределение здания: way 45836637 (39 Северное шоссе) - кастомная текстура
 	var building_override = BuildingOverrideScript.new()
 	building_override.osm_way_id = 45836637
-	building_override.wall_texture_path = "res://textures/buildings/111-125.jpg"
-	building_override.texture_repeat_y = 4.0
+	building_override.wall_texture_path = "res://textures/buildings/111-125.png"
+	building_override.texture_repeat_y = 2.0
+	building_override.use_adaptive_repeat = true  # Адаптивный режим
+	building_override.texture_repeat_short = 1.0  # 1 повтор на коротких стенах
+	building_override.texture_repeat_long = 3.0   # 3 повтора на длинных стенах
 	_building_overrides.append(building_override)
+
+	# 37 Северное шоссе (way 45836638)
+	var override_37 = BuildingOverrideScript.new()
+	override_37.osm_way_id = 45836638
+	override_37.wall_texture_path = "res://textures/buildings/111-125.png"
+	override_37.texture_repeat_y = 2.0
+	override_37.use_adaptive_repeat = true
+	override_37.texture_repeat_short = 1.0
+	override_37.texture_repeat_long = 3.0
+	_building_overrides.append(override_37)
+
+	# 35 Северное шоссе (way 45836639)
+	var override_35 = BuildingOverrideScript.new()
+	override_35.osm_way_id = 45836639
+	override_35.wall_texture_path = "res://textures/buildings/111-125.png"
+	override_35.texture_repeat_y = 2.0
+	override_35.use_adaptive_repeat = true
+	override_35.texture_repeat_short = 1.0
+	override_35.texture_repeat_long = 3.0
+	_building_overrides.append(override_35)
 
 	# Окинина 8 (way 1408400824) - кастомная текстура, 1 повтор
 	var okinina_override = BuildingOverrideScript.new()

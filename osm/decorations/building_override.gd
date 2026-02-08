@@ -10,8 +10,21 @@ extends Resource
 
 # Переопределения текстур
 @export var wall_texture_path: String = ""  # Кастомная текстура стен
+@export var wall_normal_path: String = ""  # Normal map (авто: *_normal.png)
+@export var wall_ao_path: String = ""  # Ambient Occlusion (авто: *_ambient.png)
+@export var wall_specular_path: String = ""  # Specular/Roughness (авто: *_specular.png)
+@export var wall_displacement_path: String = ""  # Displacement/Height (авто: *_displacement.png)
 @export var roof_texture_path: String = ""  # Кастомная текстура крыши
+@export var texture_repeat_x: float = 0.0  # Повторений по периметру (0 = авто)
 @export var texture_repeat_y: float = 2.0  # Сколько раз текстура повторяется по высоте
+
+# Адаптивное повторение (отдельно для коротких/длинных стен)
+@export var use_adaptive_repeat: bool = false  # Включить адаптивный режим
+@export var texture_repeat_short: float = 1.0  # Повторов на короткой стене
+@export var texture_repeat_long: float = 3.0  # Повторов на длинной стене
+@export var normal_strength: float = 1.0  # Сила normal map (0.0-2.0)
+@export var ao_strength: float = 1.0  # Сила ambient occlusion (0.0-1.0)
+@export var heightmap_scale: float = 0.02  # Глубина parallax (0.0-0.1)
 
 # Переопределение цвета (применяется поверх текстуры)
 @export var color_tint: Color = Color.WHITE  # Оттенок (WHITE = без изменений)
