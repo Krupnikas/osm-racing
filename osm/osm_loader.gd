@@ -13,7 +13,7 @@ const OVERPASS_SERVERS := [
 
 # Кеширование
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 4  # Увеличить при изменении формата запроса (v4: добавлены bus_station)
+const CACHE_VERSION := 5  # Увеличить при изменении формата запроса (v5: добавлен way id для decoration layer)
 var use_cache := true
 
 var http_request: HTTPRequest
@@ -260,6 +260,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 
 			if way_nodes.size() > 1:
 				var way_data := {
+					"id": element.id,  # OSM way ID для decoration layer
 					"nodes": way_nodes,
 					"tags": element.get("tags", {})
 				}

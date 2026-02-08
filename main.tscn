@@ -1,6 +1,6 @@
-[gd_scene load_steps=21 format=3 uid="uid://bmain123"]
+[gd_scene load_steps=22 format=3 uid="uid://bmain123"]
 
-[ext_resource type="PackedScene" path="res://addons/gevp/scenes/beetle_car.tscn" id="2_car"]
+[ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://race/race_manager.gd" id="20_race_mgr"]
 [ext_resource type="PackedScene" uid="uid://race_hud_001" path="res://ui/race_hud.tscn" id="21_race_hud"]
 [ext_resource type="PackedScene" uid="uid://race_menu_001" path="res://ui/race_menu.tscn" id="22_race_menu"]
@@ -26,6 +26,7 @@
 [ext_resource type="Script" path="res://debug/collision_visualizer.gd" id="18_collision_vis"]
 [ext_resource type="Script" path="res://debug/performance_profiler.gd" id="19_profiler"]
 [ext_resource type="Script" path="res://settings/color_grading.gd" id="20_color_grading"]
+[ext_resource type="Script" path="res://car/lane_assist.gd" id="30_lane_assist"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -97,6 +98,9 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)
 [node name="VehicleController" type="Node3D" parent="Car" node_paths=PackedStringArray("vehicle_node")]
 script = ExtResource("2_controller")
 vehicle_node = NodePath("..")
+
+[node name="LaneAssist" type="Node" parent="Car"]
+script = ExtResource("30_lane_assist")
 
 [node name="TrafficManager" type="Node" parent="."]
 script = ExtResource("11_traffic")

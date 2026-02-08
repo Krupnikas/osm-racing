@@ -11,6 +11,7 @@ class Waypoint:
 	var width: float  # Ширина дороги в метрах
 	var lanes_count: int  # Количество полос В ОДНОМ направлении (1 или 2)
 	var next_waypoints: Array[Waypoint] = []  # Связи с следующими точками
+	var prev_waypoints: Array[Waypoint] = []  # Обратные связи (для навигации в обоих направлениях)
 	var chunk_key: String  # Ключ чанка для cleanup
 	var road_id: int  # Уникальный ID дороги (для предотвращения связи forward/reverse)
 
@@ -85,11 +86,30 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_k
 	# Создаём waypoints в обратном направлении
 	var reverse_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, true, road_id, bridge_info)
 
+	# Замыкаем кольцевые дороги (последняя точка совпадает с первой)
+	if points.size() >= 3:
+		var first_2d := points[0]
+		var last_2d := points[points.size() - 1]
+		if first_2d.distance_to(last_2d) < 1.0:
+			_close_loop(forward_waypoints)
+			_close_loop(reverse_waypoints)
+
 	# OPTIMIZATION: НЕ соединяем пересечения при добавлении дороги
 	# Это занимает до 400ms и вызывает лаги при подгрузке чанков
 	# NPC машины и так будут следовать только по своей дороге
 	# _connect_intersections_fast(forward_waypoints)
 	# _connect_intersections_fast(reverse_waypoints)
+
+
+func _close_loop(waypoints: Array) -> void:
+	"""Замыкает кольцевую дорогу: последний waypoint <-> первый"""
+	if waypoints.size() < 3:
+		return
+	var last_wp: Waypoint = waypoints[waypoints.size() - 1]
+	var first_wp: Waypoint = waypoints[0]
+	if not last_wp.next_waypoints.has(first_wp):
+		last_wp.next_waypoints.append(first_wp)
+		first_wp.prev_waypoints.append(last_wp)
 
 
 func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictionary, speed_limit: float, width: float, lanes: int, reverse: bool, road_id: int = 0, bridge_info: Dictionary = {}) -> Array[Waypoint]:
@@ -183,10 +203,12 @@ func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictio
 		# Связываем waypoints внутри сегмента
 		for j in range(segment_waypoints.size() - 1):
 			segment_waypoints[j].next_waypoints.append(segment_waypoints[j + 1])
+			segment_waypoints[j + 1].prev_waypoints.append(segment_waypoints[j])
 
 		# Связываем с предыдущим сегментом
 		if prev_segment_last != null and segment_waypoints.size() > 0:
 			prev_segment_last.next_waypoints.append(segment_waypoints[0])
+			segment_waypoints[0].prev_waypoints.append(prev_segment_last)
 
 		# Запоминаем последний waypoint для связи со следующим сегментом
 		if segment_waypoints.size() > 0:
@@ -299,9 +321,11 @@ func _connect_intersections_fast(new_waypoints: Array) -> void:
 			if _can_connect_waypoints(new_wp, existing_wp):
 				if not new_wp.next_waypoints.has(existing_wp):
 					new_wp.next_waypoints.append(existing_wp)
+					existing_wp.prev_waypoints.append(new_wp)
 			if _can_connect_waypoints(existing_wp, new_wp):
 				if not existing_wp.next_waypoints.has(new_wp):
 					existing_wp.next_waypoints.append(new_wp)
+					new_wp.prev_waypoints.append(existing_wp)
 
 	# 2. Проверяем ВСЕ waypoints новой дороги против "тупиков" (waypoints без next)
 	#    Это нужно для T-образных перекрёстков где старая дорога заканчивается
@@ -325,6 +349,7 @@ func _connect_intersections_fast(new_waypoints: Array) -> void:
 			if _can_connect_waypoints(existing_wp, new_wp):
 				if not existing_wp.next_waypoints.has(new_wp):
 					existing_wp.next_waypoints.append(new_wp)
+					new_wp.prev_waypoints.append(existing_wp)
 
 
 ## Проверяет можно ли создать связь from_wp -> to_wp для правостороннего движения
@@ -433,6 +458,7 @@ func clear_chunk(chunk_key: String) -> void:
 		# Удаляем связи от других waypoints к удаляемым
 		for other_wp in all_waypoints:
 			other_wp.next_waypoints.erase(wp)
+			other_wp.prev_waypoints.erase(wp)
 
 	waypoints_by_chunk.erase(chunk_key)
 
