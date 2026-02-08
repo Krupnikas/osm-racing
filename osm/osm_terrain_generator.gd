@@ -3356,7 +3356,7 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 	# Добавляем небольшое случайное смещение по высоте для предотвращения z-fighting
 	# на пересечениях (используем хэш от первой точки дороги)
 	var hash_val := int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-	var z_offset := hash_val * 0.0002  # 0-2 см случайное смещение
+	var z_offset := hash_val * 0.0003  # Совпадает с z_offset дороги
 
 	# Создаём меш для бордюров
 	var arrays := []
@@ -3422,16 +3422,9 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 			var dir := (p2 - p1).normalized()
 			var perp := Vector2(-dir.y, dir.x)
 
-			var h1 := _get_elevation_at_point(p1, elev_data)
-			var h2 := _get_elevation_at_point(p2, elev_data)
-
-			# Высоты: поверхность дороги, верх бордюра, низ наружной стенки (1м вниз)
-			var road_y1 := h1 + road_height + z_offset
-			var road_y2 := h2 + road_height + z_offset
-			var curb_y1 := h1 + road_height + curb_height + z_offset
-			var curb_y2 := h2 + road_height + curb_height + z_offset
-			var bottom_y1 := curb_y1 - 1.0
-			var bottom_y2 := curb_y2 - 1.0
+			# Elevation в центре и на краях — max(edge, center) как дорога
+			var h_center1 := _get_elevation_at_point(p1, elev_data)
+			var h_center2 := _get_elevation_at_point(p2, elev_data)
 
 			# Левый бордюр
 			var left_inner1 := p1 + perp * (road_width * 0.5)
@@ -3445,6 +3438,28 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 			var right_inner2 := p2 - perp * (road_width * 0.5)
 			var right_outer2 := p2 - perp * (road_width * 0.5 + curb_width)
 
+			# Высота края = max(elevation_edge, elevation_center) — повторяет логику дороги
+			var h_left1 := maxf(_get_elevation_at_point(left_inner1, elev_data), h_center1)
+			var h_left2 := maxf(_get_elevation_at_point(left_inner2, elev_data), h_center2)
+			var h_right1 := maxf(_get_elevation_at_point(right_inner1, elev_data), h_center1)
+			var h_right2 := maxf(_get_elevation_at_point(right_inner2, elev_data), h_center2)
+
+			# Высоты для левого бордюра
+			var left_road_y1 := h_left1 + road_height + z_offset
+			var left_road_y2 := h_left2 + road_height + z_offset
+			var left_curb_y1 := h_left1 + road_height + curb_height + z_offset
+			var left_curb_y2 := h_left2 + road_height + curb_height + z_offset
+			var left_bottom_y1 := left_curb_y1 - 1.0
+			var left_bottom_y2 := left_curb_y2 - 1.0
+
+			# Высоты для правого бордюра
+			var right_road_y1 := h_right1 + road_height + z_offset
+			var right_road_y2 := h_right2 + road_height + z_offset
+			var right_curb_y1 := h_right1 + road_height + curb_height + z_offset
+			var right_curb_y2 := h_right2 + road_height + curb_height + z_offset
+			var right_bottom_y1 := right_curb_y1 - 1.0
+			var right_bottom_y2 := right_curb_y2 - 1.0
+
 			var idx := vertices.size()
 			var norm_left_in := Vector3(-perp.x, 0, -perp.y)
 			var norm_left_out := Vector3(perp.x, 0, perp.y)
@@ -3455,30 +3470,30 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 
 			# === Левый бордюр ===
 			# Внутренняя стенка (от дороги до верха бордюра)
-			vertices.append(Vector3(left_inner1.x, road_y1, left_inner1.y))
-			vertices.append(Vector3(left_inner2.x, road_y2, left_inner2.y))
-			vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
-			vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
+			vertices.append(Vector3(left_inner1.x, left_road_y1, left_inner1.y))
+			vertices.append(Vector3(left_inner2.x, left_road_y2, left_inner2.y))
+			vertices.append(Vector3(left_inner2.x, left_curb_y2, left_inner2.y))
+			vertices.append(Vector3(left_inner1.x, left_curb_y1, left_inner1.y))
 			for _j in 4: normals.append(norm_left_in)
 			indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
 			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
 			idx = vertices.size()
 
 			# Верхняя грань
-			vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
-			vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
-			vertices.append(Vector3(left_outer2.x, curb_y2, left_outer2.y))
-			vertices.append(Vector3(left_outer1.x, curb_y1, left_outer1.y))
+			vertices.append(Vector3(left_inner1.x, left_curb_y1, left_inner1.y))
+			vertices.append(Vector3(left_inner2.x, left_curb_y2, left_inner2.y))
+			vertices.append(Vector3(left_outer2.x, left_curb_y2, left_outer2.y))
+			vertices.append(Vector3(left_outer1.x, left_curb_y1, left_outer1.y))
 			for _j in 4: normals.append(Vector3.UP)
 			indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
 			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
 			idx = vertices.size()
 
 			# Наружная стенка (от земли до верха бордюра)
-			vertices.append(Vector3(left_outer1.x, bottom_y1, left_outer1.y))
-			vertices.append(Vector3(left_outer2.x, bottom_y2, left_outer2.y))
-			vertices.append(Vector3(left_outer2.x, curb_y2, left_outer2.y))
-			vertices.append(Vector3(left_outer1.x, curb_y1, left_outer1.y))
+			vertices.append(Vector3(left_outer1.x, left_bottom_y1, left_outer1.y))
+			vertices.append(Vector3(left_outer2.x, left_bottom_y2, left_outer2.y))
+			vertices.append(Vector3(left_outer2.x, left_curb_y2, left_outer2.y))
+			vertices.append(Vector3(left_outer1.x, left_curb_y1, left_outer1.y))
 			for _j in 4: normals.append(norm_left_out)
 			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
 			indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
@@ -3486,10 +3501,10 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 
 			# Торец левого бордюра в начале группы
 			if is_first_in_group:
-				vertices.append(Vector3(left_inner1.x, road_y1, left_inner1.y))
-				vertices.append(Vector3(left_outer1.x, bottom_y1, left_outer1.y))
-				vertices.append(Vector3(left_outer1.x, curb_y1, left_outer1.y))
-				vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
+				vertices.append(Vector3(left_inner1.x, left_road_y1, left_inner1.y))
+				vertices.append(Vector3(left_outer1.x, left_bottom_y1, left_outer1.y))
+				vertices.append(Vector3(left_outer1.x, left_curb_y1, left_outer1.y))
+				vertices.append(Vector3(left_inner1.x, left_curb_y1, left_inner1.y))
 				for _j in 4: normals.append(norm_back)
 				indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
 				indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
@@ -3497,10 +3512,10 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 
 			# Торец левого бордюра в конце группы
 			if is_last_in_group:
-				vertices.append(Vector3(left_inner2.x, road_y2, left_inner2.y))
-				vertices.append(Vector3(left_outer2.x, bottom_y2, left_outer2.y))
-				vertices.append(Vector3(left_outer2.x, curb_y2, left_outer2.y))
-				vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
+				vertices.append(Vector3(left_inner2.x, left_road_y2, left_inner2.y))
+				vertices.append(Vector3(left_outer2.x, left_bottom_y2, left_outer2.y))
+				vertices.append(Vector3(left_outer2.x, left_curb_y2, left_outer2.y))
+				vertices.append(Vector3(left_inner2.x, left_curb_y2, left_inner2.y))
 				for _j in 4: normals.append(norm_fwd)
 				indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
 				indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
@@ -3508,30 +3523,30 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 
 			# === Правый бордюр ===
 			# Внутренняя стенка (от дороги до верха бордюра)
-			vertices.append(Vector3(right_inner1.x, road_y1, right_inner1.y))
-			vertices.append(Vector3(right_inner2.x, road_y2, right_inner2.y))
-			vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
-			vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
+			vertices.append(Vector3(right_inner1.x, right_road_y1, right_inner1.y))
+			vertices.append(Vector3(right_inner2.x, right_road_y2, right_inner2.y))
+			vertices.append(Vector3(right_inner2.x, right_curb_y2, right_inner2.y))
+			vertices.append(Vector3(right_inner1.x, right_curb_y1, right_inner1.y))
 			for _j in 4: normals.append(norm_right_in)
 			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
 			indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
 			idx = vertices.size()
 
 			# Верхняя грань
-			vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
-			vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
-			vertices.append(Vector3(right_outer2.x, curb_y2, right_outer2.y))
-			vertices.append(Vector3(right_outer1.x, curb_y1, right_outer1.y))
+			vertices.append(Vector3(right_inner1.x, right_curb_y1, right_inner1.y))
+			vertices.append(Vector3(right_inner2.x, right_curb_y2, right_inner2.y))
+			vertices.append(Vector3(right_outer2.x, right_curb_y2, right_outer2.y))
+			vertices.append(Vector3(right_outer1.x, right_curb_y1, right_outer1.y))
 			for _j in 4: normals.append(Vector3.UP)
 			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
 			indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
 			idx = vertices.size()
 
 			# Наружная стенка (от земли до верха бордюра)
-			vertices.append(Vector3(right_outer1.x, bottom_y1, right_outer1.y))
-			vertices.append(Vector3(right_outer2.x, bottom_y2, right_outer2.y))
-			vertices.append(Vector3(right_outer2.x, curb_y2, right_outer2.y))
-			vertices.append(Vector3(right_outer1.x, curb_y1, right_outer1.y))
+			vertices.append(Vector3(right_outer1.x, right_bottom_y1, right_outer1.y))
+			vertices.append(Vector3(right_outer2.x, right_bottom_y2, right_outer2.y))
+			vertices.append(Vector3(right_outer2.x, right_curb_y2, right_outer2.y))
+			vertices.append(Vector3(right_outer1.x, right_curb_y1, right_outer1.y))
 			for _j in 4: normals.append(norm_right_out)
 			indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
 			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
@@ -3539,10 +3554,10 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 
 			# Торец правого бордюра в начале группы
 			if is_first_in_group:
-				vertices.append(Vector3(right_inner1.x, road_y1, right_inner1.y))
-				vertices.append(Vector3(right_outer1.x, bottom_y1, right_outer1.y))
-				vertices.append(Vector3(right_outer1.x, curb_y1, right_outer1.y))
-				vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
+				vertices.append(Vector3(right_inner1.x, right_road_y1, right_inner1.y))
+				vertices.append(Vector3(right_outer1.x, right_bottom_y1, right_outer1.y))
+				vertices.append(Vector3(right_outer1.x, right_curb_y1, right_outer1.y))
+				vertices.append(Vector3(right_inner1.x, right_curb_y1, right_inner1.y))
 				for _j in 4: normals.append(norm_back)
 				indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
 				indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
@@ -3550,10 +3565,10 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 
 			# Торец правого бордюра в конце группы
 			if is_last_in_group:
-				vertices.append(Vector3(right_inner2.x, road_y2, right_inner2.y))
-				vertices.append(Vector3(right_outer2.x, bottom_y2, right_outer2.y))
-				vertices.append(Vector3(right_outer2.x, curb_y2, right_outer2.y))
-				vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
+				vertices.append(Vector3(right_inner2.x, right_road_y2, right_inner2.y))
+				vertices.append(Vector3(right_outer2.x, right_bottom_y2, right_outer2.y))
+				vertices.append(Vector3(right_outer2.x, right_curb_y2, right_outer2.y))
+				vertices.append(Vector3(right_inner2.x, right_curb_y2, right_inner2.y))
 				for _j in 4: normals.append(norm_fwd)
 				indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
 				indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
@@ -3624,37 +3639,47 @@ func _compute_curb_collisions_thread(task: Dictionary) -> void:
 			var dir := (p2 - p1).normalized()
 			var perp := Vector2(-dir.y, dir.x)
 
-			var h1 := _get_elevation_at_point(p1, elev_data)
-			var h2 := _get_elevation_at_point(p2, elev_data)
-			var curb_top1 := h1 + road_height + curb_height + z_offset
-			var curb_top2 := h2 + road_height + curb_height + z_offset
-			var curb_top_y := (curb_top1 + curb_top2) / 2.0
+			var h_center1 := _get_elevation_at_point(p1, elev_data)
+			var h_center2 := _get_elevation_at_point(p2, elev_data)
 			var slab_thickness := 0.02  # 2 см толщина
-
-			# Наклон коллизии вдоль дороги (pitch) чтобы следовать за рельефом
-			var dh := curb_top2 - curb_top1
-			var pitch := atan2(dh, segment_length)
-			# 3D длина сегмента для корректного размера бокса
-			var seg_len_3d := sqrt(segment_length * segment_length + dh * dh)
-
 			var wall_angle := atan2(p2.y - p1.y, p2.x - p1.x)
 
-			# Левый бордюр
+			# Левый бордюр — elevation на краю дороги, max с центром
+			var left_edge1 := p1 + perp * (road_width * 0.5)
+			var left_edge2 := p2 + perp * (road_width * 0.5)
+			var h_left1 := maxf(_get_elevation_at_point(left_edge1, elev_data), h_center1)
+			var h_left2 := maxf(_get_elevation_at_point(left_edge2, elev_data), h_center2)
+			var left_top1 := h_left1 + road_height + curb_height + z_offset
+			var left_top2 := h_left2 + road_height + curb_height + z_offset
+			var left_top_y := (left_top1 + left_top2) / 2.0
+			var left_dh := left_top2 - left_top1
+			var left_pitch := atan2(left_dh, segment_length)
+			var left_len_3d := sqrt(segment_length * segment_length + left_dh * left_dh)
 			var left_center := (p1 + p2) / 2 + perp * (road_width * 0.5 + curb_width * 0.5)
 			collision_boxes.append({
-				"position": Vector3(left_center.x, curb_top_y, left_center.y),
-				"size": Vector3(seg_len_3d, slab_thickness, curb_width),
+				"position": Vector3(left_center.x, left_top_y, left_center.y),
+				"size": Vector3(left_len_3d, slab_thickness, curb_width),
 				"rotation_y": -wall_angle,
-				"rotation_z": pitch
+				"rotation_z": left_pitch
 			})
 
-			# Правый бордюр
+			# Правый бордюр — elevation на краю дороги, max с центром
+			var right_edge1 := p1 - perp * (road_width * 0.5)
+			var right_edge2 := p2 - perp * (road_width * 0.5)
+			var h_right1 := maxf(_get_elevation_at_point(right_edge1, elev_data), h_center1)
+			var h_right2 := maxf(_get_elevation_at_point(right_edge2, elev_data), h_center2)
+			var right_top1 := h_right1 + road_height + curb_height + z_offset
+			var right_top2 := h_right2 + road_height + curb_height + z_offset
+			var right_top_y := (right_top1 + right_top2) / 2.0
+			var right_dh := right_top2 - right_top1
+			var right_pitch := atan2(right_dh, segment_length)
+			var right_len_3d := sqrt(segment_length * segment_length + right_dh * right_dh)
 			var right_center := (p1 + p2) / 2 - perp * (road_width * 0.5 + curb_width * 0.5)
 			collision_boxes.append({
-				"position": Vector3(right_center.x, curb_top_y, right_center.y),
-				"size": Vector3(seg_len_3d, slab_thickness, curb_width),
+				"position": Vector3(right_center.x, right_top_y, right_center.y),
+				"size": Vector3(right_len_3d, slab_thickness, curb_width),
 				"rotation_y": -wall_angle,
-				"rotation_z": pitch
+				"rotation_z": right_pitch
 			})
 
 			g_idx += step
@@ -5447,7 +5472,7 @@ func _init_curb_mesh_state(item: Dictionary) -> void:
 
 	var curb_width := 0.15
 	var hash_val := int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-	var z_offset := hash_val * 0.0002
+	var z_offset := hash_val * 0.0003  # Совпадает с z_offset дороги
 	var curb_ellipse_scale := 1.41
 
 	# Предварительно вычисляем валидные сегменты
@@ -5534,16 +5559,9 @@ func _process_curb_segments(max_count: int) -> int:
 		var dir := (p2 - p1).normalized()
 		var perp := Vector2(-dir.y, dir.x)
 
-		var h1 := _get_elevation_at_point(p1, elev_data)
-		var h2 := _get_elevation_at_point(p2, elev_data)
-
-		# Высоты: поверхность дороги, верх бордюра, низ наружной стенки (1м вниз)
-		var road_y1 := h1 + road_height + z_offset
-		var road_y2 := h2 + road_height + z_offset
-		var curb_y1 := h1 + road_height + curb_height + z_offset
-		var curb_y2 := h2 + road_height + curb_height + z_offset
-		var bottom_y1 := curb_y1 - 1.0  # 1м вниз от верха — уходит под землю
-		var bottom_y2 := curb_y2 - 1.0
+		# Elevation в центре и на краях — как дорога использует maxf(edge, center)
+		var h_center1 := _get_elevation_at_point(p1, elev_data)
+		var h_center2 := _get_elevation_at_point(p2, elev_data)
 
 		var left_inner1 := p1 + perp * (road_width * 0.5)
 		var left_outer1 := p1 + perp * (road_width * 0.5 + curb_width)
@@ -5553,6 +5571,28 @@ func _process_curb_segments(max_count: int) -> int:
 		var right_outer1 := p1 - perp * (road_width * 0.5 + curb_width)
 		var right_inner2 := p2 - perp * (road_width * 0.5)
 		var right_outer2 := p2 - perp * (road_width * 0.5 + curb_width)
+
+		# Высота края дороги = max(elevation_edge, elevation_center) — повторяет логику дороги
+		var h_left1 := maxf(_get_elevation_at_point(left_inner1, elev_data), h_center1)
+		var h_left2 := maxf(_get_elevation_at_point(left_inner2, elev_data), h_center2)
+		var h_right1 := maxf(_get_elevation_at_point(right_inner1, elev_data), h_center1)
+		var h_right2 := maxf(_get_elevation_at_point(right_inner2, elev_data), h_center2)
+
+		# Высоты для левого бордюра
+		var left_road_y1 := h_left1 + road_height + z_offset
+		var left_road_y2 := h_left2 + road_height + z_offset
+		var left_curb_y1 := h_left1 + road_height + curb_height + z_offset
+		var left_curb_y2 := h_left2 + road_height + curb_height + z_offset
+		var left_bottom_y1 := left_curb_y1 - 1.0
+		var left_bottom_y2 := left_curb_y2 - 1.0
+
+		# Высоты для правого бордюра
+		var right_road_y1 := h_right1 + road_height + z_offset
+		var right_road_y2 := h_right2 + road_height + z_offset
+		var right_curb_y1 := h_right1 + road_height + curb_height + z_offset
+		var right_curb_y2 := h_right2 + road_height + curb_height + z_offset
+		var right_bottom_y1 := right_curb_y1 - 1.0
+		var right_bottom_y2 := right_curb_y2 - 1.0
 
 		var idx := vertices.size()
 		var norm_left_in := Vector3(-perp.x, 0, -perp.y)
@@ -5565,30 +5605,30 @@ func _process_curb_segments(max_count: int) -> int:
 		# === ЛЕВЫЙ БОРДЮР ===
 
 		# Внутренняя стенка (от уровня дороги до верха бордюра)
-		vertices.append(Vector3(left_inner1.x, road_y1, left_inner1.y))
-		vertices.append(Vector3(left_inner2.x, road_y2, left_inner2.y))
-		vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
-		vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
+		vertices.append(Vector3(left_inner1.x, left_road_y1, left_inner1.y))
+		vertices.append(Vector3(left_inner2.x, left_road_y2, left_inner2.y))
+		vertices.append(Vector3(left_inner2.x, left_curb_y2, left_inner2.y))
+		vertices.append(Vector3(left_inner1.x, left_curb_y1, left_inner1.y))
 		for _j in 4: normals.append(norm_left_in)
 		indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
 		indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
 		idx = vertices.size()
 
 		# Верхняя грань
-		vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
-		vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
-		vertices.append(Vector3(left_outer2.x, curb_y2, left_outer2.y))
-		vertices.append(Vector3(left_outer1.x, curb_y1, left_outer1.y))
+		vertices.append(Vector3(left_inner1.x, left_curb_y1, left_inner1.y))
+		vertices.append(Vector3(left_inner2.x, left_curb_y2, left_inner2.y))
+		vertices.append(Vector3(left_outer2.x, left_curb_y2, left_outer2.y))
+		vertices.append(Vector3(left_outer1.x, left_curb_y1, left_outer1.y))
 		for _j in 4: normals.append(Vector3.UP)
 		indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
 		indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
 		idx = vertices.size()
 
 		# Наружная стенка (1м вниз от верха — уходит под землю)
-		vertices.append(Vector3(left_outer1.x, bottom_y1, left_outer1.y))
-		vertices.append(Vector3(left_outer2.x, bottom_y2, left_outer2.y))
-		vertices.append(Vector3(left_outer2.x, curb_y2, left_outer2.y))
-		vertices.append(Vector3(left_outer1.x, curb_y1, left_outer1.y))
+		vertices.append(Vector3(left_outer1.x, left_bottom_y1, left_outer1.y))
+		vertices.append(Vector3(left_outer2.x, left_bottom_y2, left_outer2.y))
+		vertices.append(Vector3(left_outer2.x, left_curb_y2, left_outer2.y))
+		vertices.append(Vector3(left_outer1.x, left_curb_y1, left_outer1.y))
 		for _j in 4: normals.append(norm_left_out)
 		indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
 		indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
@@ -5596,19 +5636,19 @@ func _process_curb_segments(max_count: int) -> int:
 
 		# Торцы левого бордюра
 		if is_first:
-			vertices.append(Vector3(left_inner1.x, road_y1, left_inner1.y))
-			vertices.append(Vector3(left_outer1.x, bottom_y1, left_outer1.y))
-			vertices.append(Vector3(left_outer1.x, curb_y1, left_outer1.y))
-			vertices.append(Vector3(left_inner1.x, curb_y1, left_inner1.y))
+			vertices.append(Vector3(left_inner1.x, left_road_y1, left_inner1.y))
+			vertices.append(Vector3(left_outer1.x, left_bottom_y1, left_outer1.y))
+			vertices.append(Vector3(left_outer1.x, left_curb_y1, left_outer1.y))
+			vertices.append(Vector3(left_inner1.x, left_curb_y1, left_inner1.y))
 			for _j in 4: normals.append(norm_back)
 			indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
 			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
 			idx = vertices.size()
 		if is_last:
-			vertices.append(Vector3(left_inner2.x, road_y2, left_inner2.y))
-			vertices.append(Vector3(left_outer2.x, bottom_y2, left_outer2.y))
-			vertices.append(Vector3(left_outer2.x, curb_y2, left_outer2.y))
-			vertices.append(Vector3(left_inner2.x, curb_y2, left_inner2.y))
+			vertices.append(Vector3(left_inner2.x, left_road_y2, left_inner2.y))
+			vertices.append(Vector3(left_outer2.x, left_bottom_y2, left_outer2.y))
+			vertices.append(Vector3(left_outer2.x, left_curb_y2, left_outer2.y))
+			vertices.append(Vector3(left_inner2.x, left_curb_y2, left_inner2.y))
 			for _j in 4: normals.append(norm_fwd)
 			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
 			indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
@@ -5617,30 +5657,30 @@ func _process_curb_segments(max_count: int) -> int:
 		# === ПРАВЫЙ БОРДЮР ===
 
 		# Внутренняя стенка (от уровня дороги до верха бордюра)
-		vertices.append(Vector3(right_inner1.x, road_y1, right_inner1.y))
-		vertices.append(Vector3(right_inner2.x, road_y2, right_inner2.y))
-		vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
-		vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
+		vertices.append(Vector3(right_inner1.x, right_road_y1, right_inner1.y))
+		vertices.append(Vector3(right_inner2.x, right_road_y2, right_inner2.y))
+		vertices.append(Vector3(right_inner2.x, right_curb_y2, right_inner2.y))
+		vertices.append(Vector3(right_inner1.x, right_curb_y1, right_inner1.y))
 		for _j in 4: normals.append(norm_right_in)
 		indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
 		indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
 		idx = vertices.size()
 
 		# Верхняя грань
-		vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
-		vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
-		vertices.append(Vector3(right_outer2.x, curb_y2, right_outer2.y))
-		vertices.append(Vector3(right_outer1.x, curb_y1, right_outer1.y))
+		vertices.append(Vector3(right_inner1.x, right_curb_y1, right_inner1.y))
+		vertices.append(Vector3(right_inner2.x, right_curb_y2, right_inner2.y))
+		vertices.append(Vector3(right_outer2.x, right_curb_y2, right_outer2.y))
+		vertices.append(Vector3(right_outer1.x, right_curb_y1, right_outer1.y))
 		for _j in 4: normals.append(Vector3.UP)
 		indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
 		indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
 		idx = vertices.size()
 
 		# Наружная стенка (1м вниз от верха — уходит под землю)
-		vertices.append(Vector3(right_outer1.x, bottom_y1, right_outer1.y))
-		vertices.append(Vector3(right_outer2.x, bottom_y2, right_outer2.y))
-		vertices.append(Vector3(right_outer2.x, curb_y2, right_outer2.y))
-		vertices.append(Vector3(right_outer1.x, curb_y1, right_outer1.y))
+		vertices.append(Vector3(right_outer1.x, right_bottom_y1, right_outer1.y))
+		vertices.append(Vector3(right_outer2.x, right_bottom_y2, right_outer2.y))
+		vertices.append(Vector3(right_outer2.x, right_curb_y2, right_outer2.y))
+		vertices.append(Vector3(right_outer1.x, right_curb_y1, right_outer1.y))
 		for _j in 4: normals.append(norm_right_out)
 		indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
 		indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
@@ -5648,19 +5688,19 @@ func _process_curb_segments(max_count: int) -> int:
 
 		# Торцы правого бордюра
 		if is_first:
-			vertices.append(Vector3(right_inner1.x, road_y1, right_inner1.y))
-			vertices.append(Vector3(right_outer1.x, bottom_y1, right_outer1.y))
-			vertices.append(Vector3(right_outer1.x, curb_y1, right_outer1.y))
-			vertices.append(Vector3(right_inner1.x, curb_y1, right_inner1.y))
+			vertices.append(Vector3(right_inner1.x, right_road_y1, right_inner1.y))
+			vertices.append(Vector3(right_outer1.x, right_bottom_y1, right_outer1.y))
+			vertices.append(Vector3(right_outer1.x, right_curb_y1, right_outer1.y))
+			vertices.append(Vector3(right_inner1.x, right_curb_y1, right_inner1.y))
 			for _j in 4: normals.append(norm_back)
 			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 1)
 			indices.append(idx + 0); indices.append(idx + 3); indices.append(idx + 2)
 			idx = vertices.size()
 		if is_last:
-			vertices.append(Vector3(right_inner2.x, road_y2, right_inner2.y))
-			vertices.append(Vector3(right_outer2.x, bottom_y2, right_outer2.y))
-			vertices.append(Vector3(right_outer2.x, curb_y2, right_outer2.y))
-			vertices.append(Vector3(right_inner2.x, curb_y2, right_inner2.y))
+			vertices.append(Vector3(right_inner2.x, right_road_y2, right_inner2.y))
+			vertices.append(Vector3(right_outer2.x, right_bottom_y2, right_outer2.y))
+			vertices.append(Vector3(right_outer2.x, right_curb_y2, right_outer2.y))
+			vertices.append(Vector3(right_inner2.x, right_curb_y2, right_inner2.y))
 			for _j in 4: normals.append(norm_fwd)
 			indices.append(idx + 0); indices.append(idx + 1); indices.append(idx + 2)
 			indices.append(idx + 0); indices.append(idx + 2); indices.append(idx + 3)
