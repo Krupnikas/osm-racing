@@ -2392,39 +2392,39 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 	var height_offset: float
 	var curb_height: float
 	# Высота дорог по приоритету (большие дороги выше малых для правильного отображения на перекрёстках)
-	# Offset'ы: 0.05m базовый подъём над террейном + z-order между типами дорог
+	# Offset'ы: 0.1m базовый подъём над террейном + z-order между типами дорог
 	match highway_type:
 		"motorway", "trunk":
 			texture_key = "highway"
-			height_offset = 0.070  # Самые высокие
+			height_offset = 0.102  # Самые высокие
 			curb_height = 0.020
 		"primary":
 			texture_key = "primary"
-			height_offset = 0.068
+			height_offset = 0.100
 			curb_height = 0.018
 		"secondary":
 			texture_key = "primary"
-			height_offset = 0.066
+			height_offset = 0.098
 			curb_height = 0.014
 		"tertiary":
 			texture_key = "residential"  # 2 полосы для узкой дороги (8м)
-			height_offset = 0.065
+			height_offset = 0.097
 			curb_height = 0.012
 		"residential", "unclassified":
 			texture_key = "residential"
-			height_offset = 0.064
+			height_offset = 0.096
 			curb_height = 0.010
 		"service":
 			texture_key = "residential"
-			height_offset = 0.062  # Самые низкие дороги
+			height_offset = 0.094  # Самые низкие дороги
 			curb_height = 0.006
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
-			height_offset = 0.055  # Пешеходные значительно ниже
+			height_offset = 0.087  # Пешеходные значительно ниже
 			curb_height = 0.0
 		_:
 			texture_key = "residential"
-			height_offset = 0.064
+			height_offset = 0.096
 			curb_height = 0.008
 
 	# Создаём дорогу - обычную или мост
@@ -2928,11 +2928,12 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 			accumulated_length += points[i - 1].distance_to(p)
 		var uv_y: float = accumulated_length * uv_scale
 
-		# Sample elevation at each edge to tilt road on slopes
+		# Sample elevation at left, center, right — use max(center, edge) to prevent grass mid-road
 		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
-		var h_left: float = _get_elevation_at_point(left_pos, elev_data) + height_offset + z_offset
-		var h_right: float = _get_elevation_at_point(right_pos, elev_data) + height_offset + z_offset
+		var h_center: float = _get_elevation_at_point(p, elev_data) + height_offset + z_offset
+		var h_left: float = maxf(_get_elevation_at_point(left_pos, elev_data) + height_offset + z_offset, h_center)
+		var h_right: float = maxf(_get_elevation_at_point(right_pos, elev_data) + height_offset + z_offset, h_center)
 
 		# Left vertex
 		vertices.append(Vector3(left_pos.x, h_left, left_pos.y))
@@ -3079,11 +3080,12 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 			accumulated_length += points[i - 1].distance_to(p)
 		var uv_y: float = accumulated_length * uv_scale
 
-		# Sample elevation at each edge to tilt road on slopes
+		# Sample elevation at left, center, right — use max(center, edge) to prevent grass mid-road
 		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
-		var h_left: float = _get_elevation_at_point(left_pos, elev_data) + height_offset + z_offset
-		var h_right: float = _get_elevation_at_point(right_pos, elev_data) + height_offset + z_offset
+		var h_center: float = _get_elevation_at_point(p, elev_data) + height_offset + z_offset
+		var h_left: float = maxf(_get_elevation_at_point(left_pos, elev_data) + height_offset + z_offset, h_center)
+		var h_right: float = maxf(_get_elevation_at_point(right_pos, elev_data) + height_offset + z_offset, h_center)
 
 		# Left vertex
 		batch["vertices"].append(Vector3(left_pos.x, h_left, left_pos.y))
