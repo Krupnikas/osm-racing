@@ -215,7 +215,9 @@ static func _make_suspension_elevation(chunk_key: String, _chunk_lat: float, _ch
 
 
 static func _make_terrain_elevation(chunk_key: String, _chunk_lat: float, _chunk_lon: float) -> Dictionary:
-	var grid_size := 32
+	# Эмулируем raw данные из Open Elevation API: 8x8 grid, как в реальной игре.
+	# Данные пройдут через полный пайплайн предобработки (reverse → upscale 8→32 → smooth).
+	var grid_size := 8
 	var chunk_size := 300.0
 
 	var parts := chunk_key.split(",")
@@ -226,7 +228,9 @@ static func _make_terrain_elevation(chunk_key: String, _chunk_lat: float, _chunk
 	var min_elev := 0.0
 	var max_elev := 0.0
 
-	for gz in range(grid_size):
+	# Генерируем grid в том же порядке, что и API (grid[0]=min_lat=max_world_z).
+	# _on_elevation_loaded сделает grid.reverse() чтобы получить world-z порядок.
+	for gz in range(grid_size - 1, -1, -1):
 		var row := []
 		for gx in range(grid_size):
 			var world_x := chunk_origin_x + float(gx) / (grid_size - 1) * chunk_size

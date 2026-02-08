@@ -91,7 +91,7 @@ chunk_size = 300.0
 load_distance = 500.0
 unload_distance = 700.0
 car_path = NodePath("../Car")
-enable_elevation = true
+enable_elevation = false
 
 [node name="Car" parent="." groups=["car", "player"] instance=ExtResource("2_car")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)

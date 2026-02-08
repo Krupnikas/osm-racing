@@ -15,10 +15,10 @@ var _track_id: String = ""
 
 ## Позиции спавна для каждого трека (в локальных метрах)
 const SPAWN_POSITIONS := {
-	"test_flat": Vector3(80, 1.0, 0),
+	"test_flat": Vector3(100, 1.0, 0),
 	"test_suspension": Vector3(0, 1.0, 5),
-	"test_npc": Vector3(80, 1.0, 0),
-	"test_elevation": Vector3(80, 1.0, 0),
+	"test_npc": Vector3(100, 1.0, 0),
+	"test_elevation": Vector3(100, 1.0, 0),
 }
 
 ## Повороты спавна (Y rotation в радианах)
@@ -64,14 +64,14 @@ func _ready() -> void:
 	_terrain.test_data_provider = func(lat: float, lon: float, size: float) -> Dictionary:
 		return FakeOSMData.get_data(tid, lat, lon, size)
 
-	# Elevation (если есть)
+	# Elevation (если есть) — данные приходят асинхронно через _on_elevation_loaded,
+	# проходят полный пайплайн: reverse → preprocess (upscale 8→32, smooth) → apply.
 	var elev: Dictionary = FakeOSMData.get_elevation(tid, "0,0", 0.0, 0.0)
 	if not elev.is_empty():
 		_terrain.test_elevation_provider = func(key: String, lat: float, lon: float) -> Dictionary:
 			return FakeOSMData.get_elevation(tid, key, lat, lon)
 		_terrain.enable_elevation = true
 		_terrain.elevation_scale = 1.0
-		_terrain.elevation_grid_resolution = 32
 
 	# Доп. настройки по треку
 	if _track_id == "test_elevation":

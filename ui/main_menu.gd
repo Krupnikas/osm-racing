@@ -86,10 +86,19 @@ func _ready() -> void:
 
 	# Проверяем есть ли --autostart в пользовательских аргументах
 	var autostart_idx := -1
+	var terrain_only := false
 	for i in range(args.size()):
 		if args[i] == "--autostart":
 			autostart_idx = i
-			break
+		elif args[i] == "--terrain-only":
+			terrain_only = true
+
+	# --terrain-only: отключаем здания, деревья, фонари (для тестирования elevation)
+	if terrain_only and _terrain_generator:
+		_terrain_generator.enable_buildings = false
+		_terrain_generator.enable_vegetation = false
+		_terrain_generator.enable_street_lamps = false
+		print("MainMenu: --terrain-only mode: buildings/vegetation/lamps disabled")
 
 	# Проверяем загрузку свободной езды из standalone меню
 	if RaceState.free_roam_location != "":
