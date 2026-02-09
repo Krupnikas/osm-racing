@@ -10399,7 +10399,7 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, radius_a: float = 
 	st.set_normal(Vector3.UP)
 	st.add_vertex(Vector3(pos.x, center_y, pos.y))
 
-	# Вершины по эллипсу с поворотом — каждая на своей высоте
+	# Вершины по эллипсу с поворотом — каждая на своей высоте terrain'а
 	var cos_rot := cos(rotation_angle)
 	var sin_rot := sin(rotation_angle)
 	for i in range(segments):
@@ -10411,9 +10411,9 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, radius_a: float = 
 		var x := pos.x + rx
 		var z := pos.y + ry
 
-		# Elevation на краю эллипса — max(edge, center) как дорога
+		# Elevation на краю эллипса — реальная высота terrain в этой точке
 		var edge_pos := Vector2(x, z)
-		var h_edge := maxf(_get_elevation_at_point(edge_pos, elev_data), h_center)
+		var h_edge := _get_elevation_at_point(edge_pos, elev_data)
 		var vertex_y := h_edge + height_offset + z_off
 
 		var u := 0.5 + cos(angle) * 0.5
