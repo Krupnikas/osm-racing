@@ -1293,11 +1293,10 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 
 	# Тестовый режим — данные без HTTP, но тот же async flow что и в игре
 	if test_data_provider.is_valid():
-		# Elevation: отправляем через _on_elevation_loaded асинхронно (через 1-2 кадра),
+		# Elevation: отправляем через _deliver_test_elevation асинхронно (через 2 кадра),
 		# чтобы воспроизвести реальный flow — elevation приходит ПОСЛЕ начала генерации OSM.
-		# Данные пройдут через _preprocess_elevation_grid как и реальные API данные.
+		# Данные пройдут через _on_elevation_loaded → _preprocess_elevation_grid как реальные.
 		if test_elevation_provider.is_valid():
-			# Основной чанк + 8 соседей (для билинейного сглаживания в _rebuild_elevation_grid)
 			var cos_lat := cos(deg_to_rad(start_lat))
 			for dz in range(-1, 2):
 				for dx in range(-1, 2):
@@ -1410,6 +1409,7 @@ func _unload_chunk(chunk_key: String) -> void:
 		chunk_node.queue_free()
 		_loaded_chunks.erase(chunk_key)
 		_chunk_elevations.erase(chunk_key)
+		_elevation_finalized.erase(chunk_key)
 
 		# Очищаем позиции фонарей и знаков в выгруженном чанке
 		_clear_chunk_objects_positions(chunk_key)
