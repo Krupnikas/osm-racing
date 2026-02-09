@@ -262,8 +262,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 				var way_data := {
 					"id": element.id,  # OSM way ID для decoration layer
 					"nodes": way_nodes,
-					"tags": element.get("tags", {}),
-					"id": element.id
+					"tags": element.get("tags", {})
 				}
 				ways.append(way_data)
 				way_by_id[element.id] = way_nodes
