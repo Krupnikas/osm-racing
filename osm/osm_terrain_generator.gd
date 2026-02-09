@@ -4881,6 +4881,10 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
+	# Grass полигоны не нужны — terrain mesh уже покрывает чанк травой
+	if texture_key == "grass":
+		return
+
 	# Natural объекты ниже дорог чтобы не было z-fighting
 	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
@@ -4922,6 +4926,10 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 		_:
 			texture_key = "grass"
 
+	# Grass полигоны не нужны — terrain mesh уже покрывает чанк травой
+	if texture_key == "grass":
+		return
+
 	# Landuse ниже дорог чтобы не было z-fighting
 	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
@@ -4953,12 +4961,16 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	# Парки и зоны отдыха ниже дорог чтобы не было z-fighting
-	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
-
 	# Добавляем коллизию с группой Park для высокого сопротивления качению
 	if leisure_type in ["park", "garden", "pitch"]:
 		_create_park_collision(points, elev_data, parent)
+
+	# Grass полигоны не нужны — terrain mesh уже покрывает чанк травой
+	if texture_key == "grass":
+		return
+
+	# Leisure объекты ниже дорог чтобы не было z-fighting
+	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
 func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
 	if nodes.size() < 3:
