@@ -28,6 +28,11 @@ var _ground_textures: Dictionary = {}
 var _normal_textures: Dictionary = {}  # Normal maps
 var _textures_initialized := false
 
+# Текстуры люков
+var _manhole_albedo: Texture2D
+var _manhole_normal: Texture2D
+var _manhole_opacity: Texture2D
+
 @export var start_lat := 59.150066
 @export var start_lon := 37.949370
 @export var chunk_size := 300.0  # Размер чанка в метрах
@@ -54,6 +59,8 @@ var _textures_initialized := false
 @export var enable_traffic_lights := true  # Включить светофоры
 @export var enable_night_mode_windows := true  # Включить подсветку окон ночью
 @export var enable_frustum_culling := true  # Включить frustum culling чанков
+@export var enable_manholes := true  # Включить люки на дорогах
+@export var manhole_spacing := 100.0  # Расстояние между люками (метры)
 
 ## Тестовый режим: провайдер данных вместо HTTP (Callable(lat, lon, size) -> Dictionary)
 var test_data_provider: Callable = Callable()
@@ -387,6 +394,11 @@ func _init_textures() -> void:
 	_road_textures["residential"] = TextureGeneratorScript.create_road_texture(256, 2, true, false)
 	_road_textures["path"] = TextureGeneratorScript.create_sidewalk_texture(256)
 	_road_textures["intersection"] = TextureGeneratorScript.create_intersection_texture(256)  # Чистый асфальт
+
+	# Текстуры люков
+	_manhole_albedo = load("res://textures/road/manhole/color_alpha.png")
+	_manhole_normal = load("res://textures/road/manhole/normal.png")
+	print("OSM Manholes: textures loaded - albedo=%s, normal=%s" % [_manhole_albedo != null, _manhole_normal != null])
 
 	# Текстуры зданий (без окон - окна добавляются как 3D объекты)
 	# Уменьшено до 256 для performance (было 512)
@@ -2439,6 +2451,11 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 	# Процедурная генерация фонарей вдоль дорог (позиции сохраняются для отложенного создания)
 	if highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary"]:
 		_generate_street_lamps_along_road(nodes, width, elev_data, parent)
+
+	# Генерация люков вдоль дорог
+	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
+		print("OSM Manholes: calling for highway_type=%s, nodes=%d" % [highway_type, nodes.size()])
+		_generate_manholes_along_road(nodes, width, elev_data, parent)
 
 	# Извлекаем данные для RoadNetwork (для навигации NPC)
 	_extract_road_for_traffic(nodes, tags, elev_data, elevation_info)
@@ -7705,6 +7722,71 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 			pos_along += lamp_spacing / 4  # Проверяем чаще для точности
 
 		accumulated_distance += segment_length
+
+
+func _generate_manholes_along_road(nodes: Array, road_width: float, elev_data: Dictionary, parent: Node3D) -> void:
+	"""Генерирует люки вдоль дороги каждые manhole_spacing метров"""
+	if not enable_manholes or nodes.size() < 2:
+		print("OSM Manholes: skipped - enable=%s, nodes=%d" % [enable_manholes, nodes.size()])
+		return
+
+	if not _manhole_albedo or not _manhole_normal:
+		print("OSM Manholes: skipped - textures not loaded (albedo=%s, normal=%s)" % [_manhole_albedo != null, _manhole_normal != null])
+		return
+
+	var accumulated := 0.0
+	var last_manhole := 0.0
+	var offset := road_width / 2.0 - 0.5  # 0.5м от правого края
+
+	for i in range(nodes.size() - 1):
+		var p1 := _latlon_to_local(nodes[i].lat, nodes[i].lon)
+		var p2 := _latlon_to_local(nodes[i + 1].lat, nodes[i + 1].lon)
+		var segment_len := p1.distance_to(p2)
+		var dir := (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)  # Перпендикуляр (влево)
+
+		var pos_along := 0.0
+		while pos_along < segment_len:
+			if accumulated + pos_along - last_manhole >= manhole_spacing:
+				var t := pos_along / segment_len
+				var road_pos := p1.lerp(p2, t)
+				var manhole_pos := road_pos - perp * offset  # Вправо от центра
+
+				var elev := _get_elevation_at_point(manhole_pos, elev_data)
+				_create_manhole_decal(manhole_pos, elev, randf() * TAU, parent)
+				last_manhole = accumulated + pos_along
+
+			pos_along += 50.0  # Шаг проверки
+
+		accumulated += segment_len
+
+
+var _manhole_count := 0  # Debug counter
+var _manhole_positions := {}  # Трекинг позиций для дедупликации
+
+func _create_manhole_decal(pos: Vector2, elevation: float, rotation: float, parent: Node3D) -> void:
+	"""Создаёт Decal люка в указанной позиции"""
+	# Дедупликация: округляем позицию до 1м и проверяем
+	var key := "%d_%d" % [int(pos.x), int(pos.y)]
+	if _manhole_positions.has(key):
+		return
+	_manhole_positions[key] = true
+	var decal := Decal.new()
+	decal.position = Vector3(pos.x, elevation + 0.5, pos.y)
+	decal.rotation.y = rotation
+	decal.size = Vector3(0.93, 1.0, 0.93)
+
+	decal.texture_albedo = _manhole_albedo
+	decal.texture_normal = _manhole_normal
+
+	decal.distance_fade_enabled = true
+	decal.distance_fade_begin = 80.0
+	decal.distance_fade_length = 20.0
+
+	parent.add_child(decal)
+	_manhole_count += 1
+	if _manhole_count <= 5 or _manhole_count % 50 == 0:
+		print("OSM Manholes: created #%d at (%.1f, %.1f)" % [_manhole_count, pos.x, pos.y])
 
 
 func _create_pending_lamps() -> void:
