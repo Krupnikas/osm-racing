@@ -10616,8 +10616,8 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, radius_a: float = 
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
 	var segments := 16
-	# Z-offset для предотвращения z-fighting (заплатка чуть выше дорог)
-	var z_off := 0.005
+	# Z-offset: дороги имеют hash-based z_offset до 0.03, заплатка должна быть выше всех
+	var z_off := 0.035
 
 	# Elevation в центре перекрёстка
 	var h_center := _get_elevation_at_point(pos, elev_data)
