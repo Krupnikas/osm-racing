@@ -5883,6 +5883,8 @@ func _process_curb_queue() -> void:
 	_record_perf("curb_mesh", Time.get_ticks_usec() - t0)
 
 	# Этап 3: Финализация merged mesh когда все бордюры обработаны
+	# Бордюры создаются плоскими; если elevation финализирован — _finalize_curb_geo_batch
+	# применит высоты, иначе _try_finalize_elevation → _update_chunk_heights обновит позже.
 	if _curb_queue.is_empty() and _curb_smoothed_queue.is_empty() and _curb_mesh_state.is_empty():
 		if not _curb_geo_batch.is_empty():
 			var keys := _curb_geo_batch.keys()
@@ -6333,6 +6335,7 @@ func _process_terrain_objects_queue() -> void:
 	const TERRAIN_TIME_BUDGET_USEC := 3000
 	var start_time := Time.get_ticks_usec()
 	var processed := 0
+	var deferred: Array = []
 
 	while not _terrain_objects_queue.is_empty():
 		# Проверяем бюджет ПОСЛЕ первого объекта
@@ -6345,10 +6348,18 @@ func _process_terrain_objects_queue() -> void:
 		if not is_instance_valid(item.get("parent")):
 			continue
 
+		# Ждём финализации elevation — иначе объект создастся плоским
+		# и не будет обновлён (update_chunk_heights уже вызван или ещё нет).
+		if enable_elevation:
+			var ck: String = _get_chunk_key_from_node(item.parent)
+			if ck != "" and not _elevation_finalized.has(ck):
+				deferred.append(item)
+				continue
+
 		var obj_type: String = item.get("type", "")
 		var t0 := Time.get_ticks_usec()
 
-		# Используем финализированные elevation данные (32x32 grid после preprocessing)
+		# Elevation финализирован — берём данные
 		var elev_data: Dictionary = item.elev_data
 		if elev_data.is_empty():
 			var ck: String = _get_chunk_key_from_node(item.parent)
@@ -6367,6 +6378,11 @@ func _process_terrain_objects_queue() -> void:
 				_record_perf("terrain_leisure", Time.get_ticks_usec() - t0)
 
 		processed += 1
+
+	# Возвращаем отложенные элементы обратно в начало очереди
+	if not deferred.is_empty():
+		for i in range(deferred.size() - 1, -1, -1):
+			_terrain_objects_queue.push_front(deferred[i])
 
 
 ## Обрабатывает очередь инфраструктуры (1 объект за кадр)
@@ -6412,14 +6428,33 @@ func _process_vegetation_queue() -> void:
 	if _vegetation_queue.is_empty():
 		return
 
-	var item: Dictionary = _vegetation_queue.pop_front()
+	# Ищем первый элемент с финализированным elevation
+	var item: Dictionary = {}
+	var item_idx := -1
+	for qi in range(_vegetation_queue.size()):
+		var candidate: Dictionary = _vegetation_queue[qi]
+		if not is_instance_valid(candidate.get("parent")):
+			_vegetation_queue.remove_at(qi)
+			return  # Удалили невалидный — выходим, попробуем в следующем кадре
+		if enable_elevation:
+			var ck: String = _get_chunk_key_from_node(candidate.get("parent"))
+			if ck == "":
+				ck = candidate.get("chunk_key", "")
+			if ck != "" and not _elevation_finalized.has(ck):
+				continue  # Elevation не готов — пропускаем
+		item = candidate
+		item_idx = qi
+		break
+
+	if item_idx < 0:
+		return  # Все элементы ждут elevation
+
+	_vegetation_queue.remove_at(item_idx)
+
 	var veg_type: String = item.get("type", "")
 	var t0 := Time.get_ticks_usec()
 
-	if not is_instance_valid(item.get("parent")):
-		return
-
-	# Используем финализированные elevation данные (32x32 grid после preprocessing)
+	# Elevation финализирован — берём данные
 	var elev_data: Dictionary = item.get("elev_data", {})
 	if elev_data.is_empty():
 		var ck: String = _get_chunk_key_from_node(item.get("parent"))
