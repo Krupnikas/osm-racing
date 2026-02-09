@@ -5889,11 +5889,11 @@ func _process_curb_queue() -> void:
 				var ck_parts: PackedStringArray = ck.split(",")
 				var ck_x := int(ck_parts[0])
 				var ck_z := int(ck_parts[1])
-				var margin := item.width + 5.0
-				var clip_min_x := float(ck_x) * chunk_size - margin
-				var clip_max_x := float(ck_x + 1) * chunk_size + margin
-				var clip_min_z := float(ck_z) * chunk_size - margin
-				var clip_max_z := float(ck_z + 1) * chunk_size + margin
+				var margin: float = item.width + 5.0
+				var clip_min_x: float = float(ck_x) * chunk_size - margin
+				var clip_max_x: float = float(ck_x + 1) * chunk_size + margin
+				var clip_min_z: float = float(ck_z) * chunk_size - margin
+				var clip_max_z: float = float(ck_z + 1) * chunk_size + margin
 				smoothed_points = _clip_polyline_to_rect(smoothed_points, clip_min_x, clip_max_x, clip_min_z, clip_max_z)
 				if smoothed_points.size() < 2:
 					continue
