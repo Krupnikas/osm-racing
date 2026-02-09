@@ -5,17 +5,63 @@ signal elevation_loaded(elevation_data: Dictionary)
 signal elevation_failed(error: String)
 
 const OPEN_ELEVATION_API := "https://api.open-elevation.com/api/v1/lookup"
+const CACHE_DIR := "user://osm_cache/"
+const CACHE_VERSION := 1
 
 var http_request: HTTPRequest
 var _pending_locations: Array = []
 var _grid_size: int = 0
 var _center_lat: float = 0.0
 var _center_lon: float = 0.0
+var use_cache := true
+var _current_cache_key: String = ""
 
 func _ready() -> void:
 	http_request = HTTPRequest.new()
 	add_child(http_request)
 	http_request.request_completed.connect(_on_request_completed)
+
+
+static func _get_cache_key(min_lat: float, max_lat: float, min_lon: float, max_lon: float, grid_resolution: int) -> String:
+	return "elev_v%d_%.4f_%.4f_%.4f_%.4f_%d.json" % [
+		CACHE_VERSION, min_lat, max_lat, min_lon, max_lon, grid_resolution
+	]
+
+
+func _load_from_cache(cache_key: String) -> Dictionary:
+	var cache_path := CACHE_DIR + cache_key
+	if not FileAccess.file_exists(cache_path):
+		return {}
+
+	var file := FileAccess.open(cache_path, FileAccess.READ)
+	if not file:
+		return {}
+
+	var json_string := file.get_as_text()
+	file.close()
+
+	var json := JSON.new()
+	if json.parse(json_string) != OK:
+		return {}
+
+	return json.data
+
+
+func _save_to_cache(cache_key: String, data: Dictionary) -> void:
+	# Убеждаемся что каталог существует
+	if not DirAccess.dir_exists_absolute(CACHE_DIR):
+		DirAccess.make_dir_recursive_absolute(CACHE_DIR)
+
+	var cache_path := CACHE_DIR + cache_key
+	var file := FileAccess.open(cache_path, FileAccess.WRITE)
+	if not file:
+		push_warning("Elevation: Failed to write cache: " + cache_path)
+		return
+
+	file.store_string(JSON.stringify(data))
+	file.close()
+	print("Elevation: Cached data to " + cache_key)
+
 
 # Загружает высоты для точного bbox чанка (границы совпадают у соседних чанков)
 func load_elevation_grid_bbox(min_lat: float, max_lat: float, min_lon: float, max_lon: float, grid_resolution: int = 10) -> void:
@@ -23,6 +69,15 @@ func load_elevation_grid_bbox(min_lat: float, max_lat: float, min_lon: float, ma
 	_center_lon = (min_lon + max_lon) / 2.0
 	_grid_size = grid_resolution
 	_pending_locations.clear()
+
+	# Проверяем кеш
+	_current_cache_key = _get_cache_key(min_lat, max_lat, min_lon, max_lon, grid_resolution)
+	if use_cache:
+		var cached := _load_from_cache(_current_cache_key)
+		if not cached.is_empty():
+			print("Elevation: Cache hit for %s" % _current_cache_key)
+			call_deferred("_emit_cached_data", cached)
+			return
 
 	var locations: Array = []
 	for y in range(grid_resolution):
@@ -40,6 +95,10 @@ func load_elevation_grid_bbox(min_lat: float, max_lat: float, min_lon: float, ma
 
 	if error != OK:
 		elevation_failed.emit("HTTP request failed: " + str(error))
+
+
+func _emit_cached_data(data: Dictionary) -> void:
+	elevation_loaded.emit(data)
 
 
 # Загружает высоты для сетки точек вокруг центра (legacy)
@@ -119,14 +178,20 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 
 	print("Elevation: Loaded grid %dx%d, range %.1f - %.1f m" % [_grid_size, _grid_size, min_elev, max_elev])
 
-	elevation_loaded.emit({
+	var elev_data := {
 		"grid": elevation_grid,
 		"grid_size": _grid_size,
 		"center_lat": _center_lat,
 		"center_lon": _center_lon,
 		"min_elevation": min_elev,
 		"max_elevation": max_elev
-	})
+	}
+
+	# Сохраняем в кеш
+	if use_cache and _current_cache_key != "":
+		_save_to_cache(_current_cache_key, elev_data)
+
+	elevation_loaded.emit(elev_data)
 
 # Интерполирует высоту для произвольной точки на основе сетки
 static func interpolate_elevation(grid: Array, grid_size: int, x_norm: float, z_norm: float) -> float:
