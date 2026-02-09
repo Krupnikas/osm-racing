@@ -3632,6 +3632,10 @@ func _update_building_batch_heights(mesh_instance: MeshInstance3D, elev_data: Di
 	var expected_wall_key := mesh_name.substr(14) + "_walls" if not is_roof else ""
 
 	for r in ranges:
+		# Пропускаем здания, которые уже получили elevation при bake
+		if r.get("elev_baked", false):
+			continue
+
 		# Определяем start/count для этого mesh
 		var start: int
 		var count: int
@@ -5689,6 +5693,7 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 		"roof_start": roof_start,
 		"roof_count": roof_count,
 		"points": points,
+		"elev_baked": elev_baked,
 	})
 
 	if elev_baked:
