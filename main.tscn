@@ -27,6 +27,7 @@
 [ext_resource type="Script" path="res://debug/collision_visualizer.gd" id="18_collision_vis"]
 [ext_resource type="Script" path="res://debug/performance_profiler.gd" id="19_profiler"]
 [ext_resource type="Script" path="res://settings/color_grading.gd" id="20_color_grading"]
+[ext_resource type="Script" path="res://car/lane_assist.gd" id="30_lane_assist"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)

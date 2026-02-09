@@ -363,6 +363,7 @@ func _connect_intersections_fast(new_waypoints: Array) -> void:
 			if _can_connect_waypoints(existing_wp, new_wp):
 				if not existing_wp.next_waypoints.has(new_wp):
 					existing_wp.next_waypoints.append(new_wp)
+					new_wp.prev_waypoints.append(existing_wp)
 
 
 ## Проверяет являются ли два wp дубликатами (одна дорога загружена несколькими чанками)

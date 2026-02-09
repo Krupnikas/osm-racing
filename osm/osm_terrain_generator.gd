@@ -9,6 +9,7 @@ const OSMLoaderScript = preload("res://osm/osm_loader.gd")
 const ElevationLoaderScript = preload("res://osm/elevation_loader.gd")
 const TextureGeneratorScript = preload("res://textures/texture_generator.gd")
 const BuildingWallShader = preload("res://osm/building_wall.gdshader")
+const BuildingWallCustomShader = preload("res://osm/building_wall_custom.gdshader")
 const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
 const BIRCH_TREE_SCENE = preload("res://models/trees/birch/scene.gltf")
@@ -26,6 +27,11 @@ var _window_shader: Shader = null  # Кэш шейдера окон (созда�
 var _ground_textures: Dictionary = {}
 var _normal_textures: Dictionary = {}  # Normal maps
 var _textures_initialized := false
+
+# Текстуры люков
+var _manhole_albedo: Texture2D
+var _manhole_normal: Texture2D
+var _manhole_opacity: Texture2D
 
 @export var start_lat := 59.150066
 @export var start_lon := 37.949370
@@ -53,6 +59,8 @@ var _textures_initialized := false
 @export var enable_traffic_lights := true  # Включить светофоры
 @export var enable_night_mode_windows := true  # Включить подсветку окон ночью
 @export var enable_frustum_culling := true  # Включить frustum culling чанков
+@export var enable_manholes := true  # Включить люки на дорогах
+@export var manhole_spacing := 100.0  # Расстояние между люками (метры)
 
 ## Тестовый режим: провайдер данных вместо HTTP (Callable(lat, lon, size) -> Dictionary)
 var test_data_provider: Callable = Callable()
@@ -388,6 +396,11 @@ func _init_textures() -> void:
 	_road_textures["residential"] = TextureGeneratorScript.create_road_texture(256, 2, true, false)
 	_road_textures["path"] = TextureGeneratorScript.create_sidewalk_texture(256)
 	_road_textures["intersection"] = TextureGeneratorScript.create_intersection_texture(256)  # Чистый асфальт
+
+	# Текстуры люков
+	_manhole_albedo = load("res://textures/road/manhole/color_alpha.png")
+	_manhole_normal = load("res://textures/road/manhole/normal.png")
+	print("OSM Manholes: textures loaded - albedo=%s, normal=%s" % [_manhole_albedo != null, _manhole_normal != null])
 
 	# Текстуры зданий (без окон - окна добавляются как 3D объекты)
 	# Уменьшено до 256 для performance (было 512)
@@ -2745,6 +2758,11 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 	if highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary"]:
 		_generate_street_lamps_along_road(nodes, width, elev_data, parent)
 
+	# Генерация люков вдоль дорог
+	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
+		print("OSM Manholes: calling for highway_type=%s, nodes=%d" % [highway_type, nodes.size()])
+		_generate_manholes_along_road(nodes, width, elev_data, parent)
+
 	# Извлекаем данные для RoadNetwork (для навигации NPC)
 	_extract_road_for_traffic(nodes, tags, elev_data, elevation_info)
 
@@ -4543,10 +4561,9 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 
 	# Если есть override с текстурой или цветом, используем прямой рендеринг вместо батчинга
 	if building_override and building_override.wall_texture_path != "":
-		# Кастомная текстура
-		var repeat_y: float = building_override.texture_repeat_y if building_override.texture_repeat_y > 0 else 2.0
-		_create_3d_building_with_custom_texture(points, building_height, building_override.wall_texture_path, repeat_y, parent, base_elev, debug_name)
-		print("OSM: Building override applied for way %d with texture %s (repeat: %s)" % [way_id, building_override.wall_texture_path, repeat_y])
+		# Кастомная текстура с опциональным normal map
+		_create_3d_building_with_custom_texture(points, building_height, building_override, parent, base_elev, debug_name)
+		print("OSM: Building override applied for way %d with texture %s" % [way_id, building_override.wall_texture_path])
 	elif building_override and building_override.use_color_tint:
 		var override_color: Color = building_override.color_tint
 		_create_3d_building(points, override_color, building_height, parent, base_elev, debug_name)
@@ -6971,10 +6988,42 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 
 # Кэш кастомных текстур зданий (загружаются по пути)
 var _custom_building_textures: Dictionary = {}
+var _custom_building_maps: Dictionary = {}  # Кэш всех дополнительных карт (normal, ao, specular, displacement)
 
 
-func _create_3d_building_with_custom_texture(points: PackedVector2Array, building_height: float, texture_path: String, texture_repeat_y: float, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
-	"""Создаёт здание с кастомной текстурой из файла"""
+func _load_texture_map(explicit_path: String, auto_path: String) -> Texture2D:
+	"""Загружает текстурную карту с кэшированием. Приоритет: explicit_path > auto_path
+	Поддерживает как импортированные ресурсы, так и raw PNG/JPG файлы"""
+	var path := explicit_path if explicit_path != "" else auto_path
+	if path == "":
+		return null
+	if _custom_building_maps.has(path):
+		return _custom_building_maps[path]
+
+	var tex: Texture2D = null
+
+	# Сначала пробуем загрузить как импортированный ресурс
+	if ResourceLoader.exists(path):
+		tex = load(path)
+	else:
+		# Пробуем загрузить напрямую как Image (для неимпортированных файлов)
+		var img := Image.new()
+		var global_path := ProjectSettings.globalize_path(path)
+		if FileAccess.file_exists(global_path):
+			var err := img.load(global_path)
+			if err == OK:
+				tex = ImageTexture.create_from_image(img)
+				print("OSM: Loaded raw image: ", path, " (", img.get_width(), "x", img.get_height(), ")")
+
+	if tex:
+		_custom_building_maps[path] = tex
+	return tex
+
+
+func _create_3d_building_with_custom_texture(points: PackedVector2Array, building_height: float, building_override, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
+	"""Создаёт здание с кастомной текстурой и normal map из файла"""
+	var texture_path: String = building_override.wall_texture_path
+	var texture_repeat_y: float = building_override.texture_repeat_y if building_override.texture_repeat_y > 0 else 2.0
 	# Минимум 4 точки для нормального здания
 	if points.size() < 4:
 		return
@@ -7025,6 +7074,38 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		custom_texture = load(texture_path)
 		_custom_building_textures[texture_path] = custom_texture
 
+	# Загружаем дополнительные карты текстур (с кэшированием)
+	var base_path := texture_path.get_basename()  # путь без расширения
+	print("OSM: Loading PBR maps for base_path: ", base_path)
+
+	# Normal map
+	var normal_path := base_path + "_normal.png"
+	var normal_texture: Texture2D = _load_texture_map(building_override.wall_normal_path, normal_path)
+	var normal_strength: float = 2.0  # Максимальная сила для видимого эффекта
+	print("  Normal map: ", normal_path, " -> ", normal_texture != null)
+
+	# Ambient Occlusion
+	var ao_path := base_path + "_ambient.png"
+	var ao_texture: Texture2D = _load_texture_map(building_override.wall_ao_path, ao_path)
+	var ao_strength: float = 1.0  # Полная сила AO
+	print("  AO map: ", ao_path, " -> ", ao_texture != null)
+
+	# Specular (используется как инверсия roughness)
+	var specular_path := base_path + "_specular.png"
+	var specular_texture: Texture2D = _load_texture_map(building_override.wall_specular_path, specular_path)
+	print("  Specular map: ", specular_path, " -> ", specular_texture != null)
+
+	# Displacement/Height (для parallax mapping)
+	var displacement_path := base_path + "_displacement.png"
+	var displacement_texture: Texture2D = _load_texture_map(building_override.wall_displacement_path, displacement_path)
+	var heightmap_scale: float = 0.05  # Увеличенная глубина для видимого эффекта
+	print("  Displacement map: ", displacement_path, " -> ", displacement_texture != null)
+
+	# Emissive mask (светящиеся окна)
+	var emissive_path := base_path + "_emissive_mask.png"
+	var emissive_texture: Texture2D = _load_texture_map(building_override.wall_emissive_path, emissive_path)
+	print("  Emissive mask: ", emissive_path, " -> ", emissive_texture != null)
+
 	# Высоты с учётом террейна
 	var floor_y := base_elev + 0.1
 	var foundation_y := floor_y - 3.0  # Фундамент на 3м ниже
@@ -7039,8 +7120,28 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	var wall_normals := PackedVector3Array()
 	var wall_indices := PackedInt32Array()
 
-	var uv_scale_x := 0.1
-	var uv_scale_y := 0.1
+	# Вычисляем длины всех стен
+	var wall_widths: Array[float] = []
+	var perimeter := 0.0
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
+		var w := p1.distance_to(p2)
+		wall_widths.append(w)
+		perimeter += w
+
+	# Адаптивное повторение: определяем медиану для разделения коротких/длинных стен
+	var use_adaptive: bool = building_override.use_adaptive_repeat
+	var median_width := 0.0
+	if use_adaptive:
+		var sorted_widths := wall_widths.duplicate()
+		sorted_widths.sort()
+		var mid := sorted_widths.size() / 2
+		median_width = sorted_widths[mid]
+
+	# UV масштаб: texture_repeat_x повторов на весь периметр (0 = авто ~10м на повтор)
+	var texture_repeat_x: float = building_override.texture_repeat_x if building_override.texture_repeat_x > 0 else 0.0
+	var uv_scale_x := texture_repeat_x / perimeter if texture_repeat_x > 0 else 0.1
 
 	var is_ccw := _is_polygon_ccw(points)
 	var normal_sign := 1.0 if is_ccw else -1.0
@@ -7050,7 +7151,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
-		var wall_width := p1.distance_to(p2)
+		var wall_width: float = wall_widths[i]
 
 		var v1 := Vector3(p1.x, foundation_y, p1.y)
 		var v2 := Vector3(p2.x, foundation_y, p2.y)
@@ -7060,8 +7161,20 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		var dir := (p2 - p1).normalized()
 		var normal := Vector3(-dir.y * normal_sign, 0, dir.x * normal_sign)
 
-		var u1 := accumulated_width * uv_scale_x
-		var u2 := (accumulated_width + wall_width) * uv_scale_x
+		# UV координаты по горизонтали
+		var u1: float
+		var u2: float
+		if use_adaptive:
+			# Адаптивный режим: каждая стена начинается с 0, свой масштаб
+			var is_short: bool = wall_width < median_width
+			var repeats: float = building_override.texture_repeat_short if is_short else building_override.texture_repeat_long
+			u1 = 0.0
+			u2 = repeats
+		else:
+			# Стандартный режим: накапливаемый UV по периметру
+			u1 = accumulated_width * uv_scale_x
+			u2 = (accumulated_width + wall_width) * uv_scale_x
+
 		# Для фото текстуры: N повторов по высоте, UV.y=0 вверху
 		var v_bottom := texture_repeat_y
 		var v_top := 0.0
@@ -7120,15 +7233,28 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	wall_mesh_instance.visibility_range_end = 400.0
 	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
-	# Материал стен с кастомной текстурой - используем StandardMaterial3D для правильного освещения
-	var wall_material := StandardMaterial3D.new()
-	wall_material.cull_mode = BaseMaterial3D.CULL_DISABLED  # Двусторонний рендеринг
+	# Материал стен с кастомной текстурой - используем ShaderMaterial для правильной работы emission
+	var wall_material := ShaderMaterial.new()
+	wall_material.shader = BuildingWallCustomShader
+
+	# Основные текстуры
 	if custom_texture:
-		wall_material.albedo_texture = custom_texture
-		wall_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-	else:
-		wall_material.albedo_color = Color(0.7, 0.6, 0.5)
-	wall_material.roughness = 0.5  # Гладче = ярче
+		wall_material.set_shader_parameter("albedo_texture", custom_texture)
+	if normal_texture:
+		wall_material.set_shader_parameter("normal_texture", normal_texture)
+		wall_material.set_shader_parameter("normal_strength", normal_strength)
+	if ao_texture:
+		wall_material.set_shader_parameter("ao_texture", ao_texture)
+		wall_material.set_shader_parameter("ao_strength", ao_strength)
+	if specular_texture:
+		wall_material.set_shader_parameter("roughness_texture", specular_texture)
+
+	# Emissive (светящиеся окна) — шейдер сам проверяет is_night_global
+	if emissive_texture:
+		wall_material.set_shader_parameter("emission_mask", emissive_texture)
+		wall_material.set_shader_parameter("has_emission_mask", true)
+		wall_material.set_shader_parameter("emission_energy", 1.0)
+
 	wall_mesh_instance.material_override = wall_material
 
 	# === КРЫША ===
@@ -8538,6 +8664,71 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 			pos_along += lamp_spacing / 4  # Проверяем чаще для точности
 
 		accumulated_distance += segment_length
+
+
+func _generate_manholes_along_road(nodes: Array, road_width: float, elev_data: Dictionary, parent: Node3D) -> void:
+	"""Генерирует люки вдоль дороги каждые manhole_spacing метров"""
+	if not enable_manholes or nodes.size() < 2:
+		print("OSM Manholes: skipped - enable=%s, nodes=%d" % [enable_manholes, nodes.size()])
+		return
+
+	if not _manhole_albedo or not _manhole_normal:
+		print("OSM Manholes: skipped - textures not loaded (albedo=%s, normal=%s)" % [_manhole_albedo != null, _manhole_normal != null])
+		return
+
+	var accumulated := 0.0
+	var last_manhole := 0.0
+	var offset := road_width / 2.0 - 0.5  # 0.5м от правого края
+
+	for i in range(nodes.size() - 1):
+		var p1 := _latlon_to_local(nodes[i].lat, nodes[i].lon)
+		var p2 := _latlon_to_local(nodes[i + 1].lat, nodes[i + 1].lon)
+		var segment_len := p1.distance_to(p2)
+		var dir := (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)  # Перпендикуляр (влево)
+
+		var pos_along := 0.0
+		while pos_along < segment_len:
+			if accumulated + pos_along - last_manhole >= manhole_spacing:
+				var t := pos_along / segment_len
+				var road_pos := p1.lerp(p2, t)
+				var manhole_pos := road_pos - perp * offset  # Вправо от центра
+
+				var elev := _get_elevation_at_point(manhole_pos, elev_data)
+				_create_manhole_decal(manhole_pos, elev, randf() * TAU, parent)
+				last_manhole = accumulated + pos_along
+
+			pos_along += 50.0  # Шаг проверки
+
+		accumulated += segment_len
+
+
+var _manhole_count := 0  # Debug counter
+var _manhole_positions := {}  # Трекинг позиций для дедупликации
+
+func _create_manhole_decal(pos: Vector2, elevation: float, rotation: float, parent: Node3D) -> void:
+	"""Создаёт Decal люка в указанной позиции"""
+	# Дедупликация: округляем позицию до 1м и проверяем
+	var key := "%d_%d" % [int(pos.x), int(pos.y)]
+	if _manhole_positions.has(key):
+		return
+	_manhole_positions[key] = true
+	var decal := Decal.new()
+	decal.position = Vector3(pos.x, elevation + 0.5, pos.y)
+	decal.rotation.y = rotation
+	decal.size = Vector3(0.93, 1.0, 0.93)
+
+	decal.texture_albedo = _manhole_albedo
+	decal.texture_normal = _manhole_normal
+
+	decal.distance_fade_enabled = true
+	decal.distance_fade_begin = 80.0
+	decal.distance_fade_length = 20.0
+
+	parent.add_child(decal)
+	_manhole_count += 1
+	if _manhole_count <= 5 or _manhole_count % 50 == 0:
+		print("OSM Manholes: created #%d at (%.1f, %.1f)" % [_manhole_count, pos.x, pos.y])
 
 
 func _create_pending_lamps() -> void:

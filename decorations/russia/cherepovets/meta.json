@@ -1,0 +1,15 @@
+{
+  "name": "Череповец",
+  "region": "Вологодская область",
+  "country": "Россия",
+  "center": [59.13, 37.93],
+  "files": [
+    "billboards.json",
+    "building_overrides.json"
+  ],
+  "generators": [],
+  "settings": {
+    "billboard_density": 1.0,
+    "default_lamp_color": "#FFE4B5"
+  }
+}

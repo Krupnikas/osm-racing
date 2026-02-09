@@ -16,7 +16,8 @@ extends Resource
 
 # Контент
 @export var text: String = ""  # Текст на билборде (если нет текстуры)
-@export var texture_path: String = ""  # Путь к текстуре (приоритетнее текста)
+@export var texture_path: String = ""  # Путь к текстуре передней стороны
+@export var texture_path_back: String = ""  # Путь к текстуре задней стороны (если отличается)
 @export var background_color: Color = Color.WHITE
 @export var text_color: Color = Color.BLACK
 

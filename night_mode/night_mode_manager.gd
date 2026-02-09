@@ -58,6 +58,10 @@ var _transition_tween: Tween
 
 
 func _ready() -> void:
+	# Регистрируем глобальный параметр шейдера для ночного режима
+	# Используется в building_wall_custom.gdshader для emission mask
+	RenderingServer.global_shader_parameter_add("is_night_global", RenderingServer.GLOBAL_VAR_TYPE_BOOL, false)
+
 	# Ищем компоненты сцены
 	await get_tree().process_frame
 	_find_scene_components()
@@ -364,6 +368,9 @@ func enable_night_mode() -> void:
 
 	is_night = true
 
+	# Обновляем глобальный параметр шейдера для emission mask
+	RenderingServer.global_shader_parameter_set("is_night_global", true)
+
 	# Переключаем небо СРАЗУ
 	_switch_to_night_sky()
 
@@ -419,6 +426,9 @@ func disable_night_mode() -> void:
 		return
 
 	is_night = false
+
+	# Обновляем глобальный параметр шейдера для emission mask
+	RenderingServer.global_shader_parameter_set("is_night_global", false)
 
 	# Переключаем небо обратно
 	_switch_to_day_sky()

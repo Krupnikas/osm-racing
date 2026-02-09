@@ -1,0 +1,18 @@
+{
+  "version": "1.0",
+  "texture_base_path": "res://textures/",
+  "sources": [
+    {
+      "id": "cherepovets",
+      "name": "Череповец",
+      "path": "russia/cherepovets/",
+      "bounds": {
+        "min_lat": 59.10,
+        "max_lat": 59.18,
+        "min_lon": 37.85,
+        "max_lon": 38.05
+      },
+      "enabled": true
+    }
+  ]
+}
