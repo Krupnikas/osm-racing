@@ -64,6 +64,9 @@ func _ready() -> void:
 		push_error("TrafficManager: OSMTerrain not found!")
 		return
 
+	# Передаём terrain generator в road_network для корректных высот waypoints
+	road_network.terrain_generator = terrain_generator
+
 	# Ищем player car
 	player_car = get_tree().get_first_node_in_group("car")
 	if not player_car:

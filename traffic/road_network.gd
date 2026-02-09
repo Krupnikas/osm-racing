@@ -28,6 +28,9 @@ class Waypoint:
 var waypoints_by_chunk: Dictionary = {}  # "x,z" -> Array[Waypoint]
 var all_waypoints: Array[Waypoint] = []
 
+# Ссылка на terrain generator для получения высот
+var terrain_generator: Node = null
+
 # Пространственный индекс для быстрого поиска пересечений
 var _spatial_grid: Dictionary = {}  # "gx,gz" -> Array[Waypoint]
 const GRID_CELL_SIZE := 20.0  # Размер ячейки сетки в метрах
@@ -156,9 +159,9 @@ func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictio
 		var start_2d := points[i]
 		var end_2d := points[i + step]
 
-		# Получаем базовые высоты из elevation data
-		var start_height := _get_elevation_at_point(start_2d, elev_data)
-		var end_height := _get_elevation_at_point(end_2d, elev_data)
+		# Получаем базовые высоты из terrain generator (точнее чем elev_data)
+		var start_height := _get_height_at(start_2d, elev_data)
+		var end_height := _get_height_at(end_2d, elev_data)
 
 		var start_pos := Vector3(start_2d.x, start_height, start_2d.y)
 		var end_pos := Vector3(end_2d.x, end_height, end_2d.y)
@@ -616,6 +619,16 @@ func _get_lanes_per_direction(highway_type: String) -> int:
 			return 2  # 2 полосы в каждом направлении (4 всего)
 		_:
 			return 1  # 1 полоса в каждом направлении (2 всего)
+
+
+## Получает высоту: предпочитает terrain_generator (точные финализированные данные),
+## fallback на локальный _get_elevation_at_point (raw elev_data).
+func _get_height_at(point: Vector2, elev_data: Dictionary) -> float:
+	if terrain_generator and terrain_generator.has_method("get_terrain_height_at"):
+		var h: float = terrain_generator.get_terrain_height_at(point.x, point.y)
+		if h != 0.0 or elev_data.is_empty():
+			return h
+	return _get_elevation_at_point(point, elev_data)
 
 
 func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
