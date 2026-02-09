@@ -2267,13 +2267,10 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 						dominated_by_chunk = true
 						break
 			elif tags.has("building") or tags.has("amenity"):
-				# Здания - рисуем если хотя бы одна точка в чанке
-				# Это гарантирует что здание отрисуется хотя бы в одном чанке
-				for node in nodes:
-					var local: Vector2 = _latlon_to_local(node.lat, node.lon)
-					if local.x >= chunk_min_x and local.x < chunk_max_x and local.y >= chunk_min_z and local.y < chunk_max_z:
-						dominated_by_chunk = true
-						break
+				# Здания - рисуем только если ЦЕНТР здания в чанке (по центру, не по точкам).
+				# Иначе здания на границе чанков дублируются из-за OSM overlap.
+				var center := _get_way_center(nodes)
+				dominated_by_chunk = center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z
 			else:
 				# Для остальных полигонов (landuse, natural, leisure) проверяем центр
 				var center := _get_way_center(nodes)
@@ -5794,12 +5791,24 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 			_draw_call_stats["buildings"] += 1
 
 	# === КОЛЛИЗИИ (per-building, нельзя объединить) ===
+	# Для не-baked зданий: если elevation уже доступен — вычисляем здесь
+	var has_elev: bool = _elevation_finalized.has(chunk_key) and _base_elevation != 0.0
+	var chunk_elev: Dictionary = _chunk_elevations[chunk_key] if has_elev else {}
 	for coll_data in batch["collisions"]:
+		var coll_elev: float = coll_data["base_elev"]
+		if coll_elev == 0.0 and has_elev:
+			# Вычисляем max elevation по footprint
+			var max_h := -999999.0
+			for p in coll_data["points"]:
+				var h: float = _get_elevation_at_point(p, chunk_elev)
+				if h > max_h:
+					max_h = h
+			coll_elev = max_h
 		var body := StaticBody3D.new()
 		body.collision_layer = 2
 		body.collision_mask = 0
 		parent.add_child(body)
-		_create_building_collisions_deferred.call_deferred(body, coll_data["points"], coll_data["base_elev"], coll_data["building_height"])
+		_create_building_collisions_deferred.call_deferred(body, coll_data["points"], coll_elev, coll_data["building_height"])
 
 	# Сохраняем building ranges на parent для deferred elevation
 	if not all_baked:
