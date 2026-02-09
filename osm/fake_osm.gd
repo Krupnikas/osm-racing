@@ -217,6 +217,7 @@ static func _make_suspension_elevation(chunk_key: String, _chunk_lat: float, _ch
 static func _make_terrain_elevation(chunk_key: String, _chunk_lat: float, _chunk_lon: float) -> Dictionary:
 	# Эмулируем raw данные из Open Elevation API: 8x8 grid, как в реальной игре.
 	# Данные пройдут через полный пайплайн предобработки (reverse → upscale 8→32 → smooth).
+	# Высоты ~480м с перепадами 20-40м между чанками — имитируют Тбилиси.
 	var grid_size := 8
 	var chunk_size := 300.0
 
@@ -225,8 +226,8 @@ static func _make_terrain_elevation(chunk_key: String, _chunk_lat: float, _chunk
 	var chunk_origin_z := int(parts[1]) * chunk_size
 
 	var grid := []
-	var min_elev := 0.0
-	var max_elev := 0.0
+	var min_elev := 99999.0
+	var max_elev := -99999.0
 
 	# Генерируем grid в том же порядке, что и API (grid[0]=min_lat=max_world_z).
 	# _on_elevation_loaded сделает grid.reverse() чтобы получить world-z порядок.
@@ -252,12 +253,19 @@ static func _make_terrain_elevation(chunk_key: String, _chunk_lat: float, _chunk
 
 
 static func _terrain_height(x: float, z: float) -> float:
-	## Холмистый рельеф
-	# Холмы из суммы синусов разных частот
-	var h := sin(x * 0.02) * sin(z * 0.015) * 8.0
-	h += sin(x * 0.04 + 1.0) * sin(z * 0.03 + 2.0) * 4.0
-	h += sin(x * 0.01 + z * 0.008) * 12.0
-	return h
+	## Холмистый рельеф, имитирующий реальный город (Тбилиси ~480м).
+	## Базовая высота + крупные холмы (перепады 20-40м между чанками) + мелкие.
+	var base := 480.0
+	# Крупные холмы: период ~600м (2 чанка), амплитуда 25м
+	var h := sin(x * 0.0105) * 25.0
+	h += sin(z * 0.008) * 20.0
+	# Средние холмы: период ~200м, амплитуда 10м — создают разницу внутри чанка
+	h += sin(x * 0.031 + 1.0) * sin(z * 0.025 + 2.0) * 10.0
+	# Диагональный наклон: 15м на 1000м — имитирует склон города
+	h += (x + z) * 0.015
+	# Мелкий рельеф
+	h += sin(x * 0.07 + z * 0.05) * 3.0
+	return base + h
 
 
 static func _dist_to_oval(x: float, z: float, radius: float, half_straight: float) -> float:
