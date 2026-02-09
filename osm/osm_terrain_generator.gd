@@ -1641,19 +1641,11 @@ func _on_elevation_loaded(elev_data: Dictionary, chunk_key: String, loader: Node
 	# Шаг 1: извлекаем медиану из raw grid
 	_extract_chunk_median(elev_data)
 
-	# Шаг 2: строим 32x32 грид для этого чанка и пересчитываем соседей
-	# (у соседей мог быть fallback на свою медиану вместо нашей)
-	var coords := chunk_key.split(",")
-	var cx: int = int(coords[0])
-	var cz: int = int(coords[1])
+	# Шаг 2: строим 32x32 грид для этого чанка из медиан (своя + доступные соседи).
+	# НЕ перестраиваем grid соседей — их terrain mesh и roads уже созданы с текущим grid.
+	# Мутация grid соседа привела бы к рассинхрону: terrain patches/roads на новом grid,
+	# а terrain mesh и помеченные _elevation_applied roads — на старом.
 	_rebuild_elevation_grid(chunk_key)
-	for dz in range(-1, 2):
-		for dx in range(-1, 2):
-			if dz == 0 and dx == 0:
-				continue
-			var nk := "%d,%d" % [cx + dx, cz + dz]
-			if _chunk_elevations.has(nk):
-				_rebuild_elevation_grid(nk)
 
 	grid = elev_data.get("grid", [])
 
@@ -1683,14 +1675,9 @@ func _on_elevation_loaded(elev_data: Dictionary, chunk_key: String, loader: Node
 		if _loaded_chunks.has(chunk_key):
 			_create_terrain_mesh(chunk_key, _loaded_chunks[chunk_key])
 			_update_chunk_heights(chunk_key, _loaded_chunks[chunk_key], elev_data)
-		# Пересоздаём terrain mesh для соседей (их grid обновился)
-		for dz in range(-1, 2):
-			for dx in range(-1, 2):
-				if dz == 0 and dx == 0:
-					continue
-				var nk := "%d,%d" % [cx + dx, cz + dz]
-				if _loaded_chunks.has(nk) and _chunk_elevations.has(nk):
-					_create_terrain_mesh(nk, _loaded_chunks[nk])
+		# НЕ пересоздаём terrain mesh соседей — их roads уже получили elevation
+		# с текущей версией grid (помечены _elevation_applied). Пересоздание terrain
+		# привело бы к рассинхрону: terrain на grid v2, roads на grid v1.
 	# else: base ещё не установлен, чанк подождёт
 
 	loader.queue_free()
