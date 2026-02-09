@@ -68,6 +68,7 @@ var _loading_chunks: Dictionary = {}  # key: "x,z" -> value: timestamp (start ti
 const CHUNK_LOAD_TIMEOUT := 30.0  # Таймаут загрузки чанка (секунд)
 var _chunk_elevations: Dictionary = {}  # key: "x,z" -> value: elevation data
 var _chunk_median_elevations: Dictionary = {}  # key: "x,z" -> value: float (median height from raw API grid)
+var _elevation_finalized: Dictionary = {}  # key: "x,z" -> true — grid built, terrain mesh created
 var _loading_elevations: Dictionary = {}  # Чанки с загружающимися высотами
 var _elevation_queue: Array = []  # Очередь чанков для загрузки высот
 var _active_elevation_requests: int = 0  # Количество активных запросов
@@ -1482,6 +1483,7 @@ func reset_terrain() -> void:
 	_loading_chunks.clear()
 	_chunk_elevations.clear()
 	_chunk_median_elevations.clear()
+	_elevation_finalized.clear()
 	_loading_elevations.clear()
 	_elevation_queue.clear()
 	_active_elevation_requests = 0
@@ -1641,13 +1643,65 @@ func _on_elevation_loaded(elev_data: Dictionary, chunk_key: String, loader: Node
 	# Шаг 1: извлекаем медиану из raw grid
 	_extract_chunk_median(elev_data)
 
-	# Шаг 2: строим 32x32 грид для этого чанка из медиан (своя + доступные соседи).
-	# НЕ перестраиваем grid соседей — их terrain mesh и roads уже созданы с текущим grid.
-	# Мутация grid соседа привела бы к рассинхрону: terrain patches/roads на новом grid,
-	# а terrain mesh и помеченные _elevation_applied roads — на старом.
-	_rebuild_elevation_grid(chunk_key)
+	# Шаг 2: пробуем финализировать этот чанк и соседей (которые могли ждать нашу медиану).
+	# _try_finalize_elevation строит 32x32 grid ТОЛЬКО когда ВСЕ 8 медиан соседей доступны.
+	# Каждый чанк финализируется ровно один раз — grid не мутируется после создания.
+	var coords := chunk_key.split(",")
+	var cx: int = int(coords[0])
+	var cz: int = int(coords[1])
+	_try_finalize_elevation(chunk_key)
+	for dz in range(-1, 2):
+		for dx in range(-1, 2):
+			if dz == 0 and dx == 0:
+				continue
+			var nk := "%d,%d" % [cx + dx, cz + dz]
+			_try_finalize_elevation(nk)
 
-	grid = elev_data.get("grid", [])
+	loader.queue_free()
+
+	# Продолжаем обработку очереди
+	_process_elevation_queue()
+
+	# Проверяем завершение начальной загрузки (elevation мог быть последним)
+	_check_initial_load_complete()
+
+## Пробует финализировать elevation для чанка: строит 32x32 grid, создаёт terrain mesh.
+## Финализация происходит ТОЛЬКО когда все 8 медиан соседей доступны (или сосед не будет загружен).
+## Каждый чанк финализируется ровно один раз — после этого grid не мутируется.
+func _try_finalize_elevation(chunk_key: String) -> void:
+	# Уже финализирован — не трогаем
+	if _elevation_finalized.has(chunk_key):
+		return
+	# Нет raw elevation data — ещё не загружен
+	if not _chunk_elevations.has(chunk_key):
+		return
+
+	var elev_data: Dictionary = _chunk_elevations[chunk_key]
+	var src_size: int = elev_data.get("grid_size", 0)
+
+	# Данные >= 32x32 (тестовые suspension и т.п.) — уже чистые, финализируем сразу
+	if src_size >= 32:
+		_elevation_finalized[chunk_key] = true
+	else:
+		# Данные < 32 (8x8 raw API) — нужна медиана и медианы ВСЕХ 8 соседей
+		if not _chunk_median_elevations.has(chunk_key):
+			return
+		var coords := chunk_key.split(",")
+		var cx: int = int(coords[0])
+		var cz: int = int(coords[1])
+		for dz in range(-1, 2):
+			for dx in range(-1, 2):
+				if dz == 0 and dx == 0:
+					continue
+				var nk := "%d,%d" % [cx + dx, cz + dz]
+				if not _chunk_median_elevations.has(nk):
+					# Сосед ещё не загружен — ждём
+					return
+		# Все 8 медиан доступны — строим 32x32 grid из медиан
+		_elevation_finalized[chunk_key] = true
+		_rebuild_elevation_grid(chunk_key)
+
+	var grid: Array = elev_data.get("grid", [])
 
 	# Устанавливаем базовую высоту по chunk 0,0 (точка спавна)
 	var base_just_set := false
@@ -1658,35 +1712,23 @@ func _on_elevation_loaded(elev_data: Dictionary, chunk_key: String, loader: Node
 			base_just_set = true
 			print("Elevation: Base elevation set to %.1f m" % _base_elevation)
 
-			# Скрываем статичную землю
 			var static_ground := get_parent().get_node_or_null("StaticGround")
 			if static_ground:
 				static_ground.visible = false
 				static_ground.set_collision_layer_value(1, false)
 
-	# Если base только что установлен — обрабатываем все ранее загруженные чанки
+	# Создаём terrain mesh и обновляем высоты объектов
 	if base_just_set:
-		for prev_key in _chunk_elevations:
+		# Base только что установлен — обрабатываем ВСЕ ранее финализированные чанки
+		for prev_key in _elevation_finalized:
 			if _loaded_chunks.has(prev_key):
 				_create_terrain_mesh(prev_key, _loaded_chunks[prev_key])
 				_update_chunk_heights(prev_key, _loaded_chunks[prev_key], _chunk_elevations[prev_key])
 	elif _base_elevation != 0.0:
-		# Base уже есть — обрабатываем текущий чанк
 		if _loaded_chunks.has(chunk_key):
 			_create_terrain_mesh(chunk_key, _loaded_chunks[chunk_key])
 			_update_chunk_heights(chunk_key, _loaded_chunks[chunk_key], elev_data)
-		# НЕ пересоздаём terrain mesh соседей — их roads уже получили elevation
-		# с текущей версией grid (помечены _elevation_applied). Пересоздание terrain
-		# привело бы к рассинхрону: terrain на grid v2, roads на grid v1.
-	# else: base ещё не установлен, чанк подождёт
 
-	loader.queue_free()
-
-	# Продолжаем обработку очереди
-	_process_elevation_queue()
-
-	# Проверяем завершение начальной загрузки (elevation мог быть последним)
-	_check_initial_load_complete()
 
 ## Извлекает медиану из raw API grid и сохраняет в _chunk_median_elevations.
 ## Тестовые данные (grid_size >= 32) пропускаются.
@@ -1823,8 +1865,8 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	add_child(chunk_node)
 	_loaded_chunks[chunk_key] = chunk_node
 
-	# Если высоты уже загружены, создаём террейн
-	if _chunk_elevations.has(chunk_key):
+	# Если elevation финализирован (32x32 grid готов), создаём terrain mesh
+	if _elevation_finalized.has(chunk_key):
 		_create_terrain_mesh(chunk_key, chunk_node)
 
 	# Генерируем объекты асинхронно (с frame budgeting)
@@ -1862,7 +1904,7 @@ func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: 
 
 # Создаёт меш террейна с высотами
 func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
-	if not _chunk_elevations.has(chunk_key):
+	if not _elevation_finalized.has(chunk_key) or not _chunk_elevations.has(chunk_key):
 		return
 
 	# Удаляем существующий terrain body (содержит TerrainMesh + collision).
@@ -3447,11 +3489,11 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	# Очищаем batch data для этого чанка
 	_road_batch_data.erase(chunk_key)
 
-	# Если elevation уже загружен — применяем высоты к только что созданным road batches.
+	# Если elevation финализирован (32x32 grid готов) — применяем высоты.
 	# Все объекты создаются плоскими (elev_data={}), elevation применяется здесь или
-	# в _on_elevation_loaded (если elevation придёт позже).
+	# в _try_finalize_elevation (если elevation финализируется позже).
 	# Per-mesh meta `_elevation_applied` защищает от повторного применения.
-	if _chunk_elevations.has(chunk_key) and _base_elevation != 0.0:
+	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
 		var parent_node: Node3D = _loaded_chunks.get(chunk_key, null)
 		if parent_node and is_instance_valid(parent_node):
 			_update_chunk_heights(chunk_key, parent_node, _chunk_elevations[chunk_key])
@@ -4177,10 +4219,10 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	if not enable_buildings or nodes.size() < 3:
 		return
 
-	# Используем актуальные elevation данные (могли обновиться после начала генерации чанка)
+	# Используем финализированные elevation данные (32x32 grid после preprocessing)
 	if elev_data.is_empty():
 		var ck: String = _get_chunk_key_from_node(parent)
-		if ck != "" and _chunk_elevations.has(ck):
+		if ck != "" and _elevation_finalized.has(ck):
 			elev_data = _chunk_elevations[ck]
 
 	var points: PackedVector2Array = []
@@ -4918,10 +4960,10 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 	if nodes.size() < 3:
 		return
 
-	# Используем актуальные elevation данные
+	# Используем финализированные elevation данные
 	if elev_data.is_empty():
 		var ck: String = _get_chunk_key_from_node(parent)
-		if ck != "" and _chunk_elevations.has(ck):
+		if ck != "" and _elevation_finalized.has(ck):
 			elev_data = _chunk_elevations[ck]
 
 	var points: PackedVector2Array = []
@@ -5599,7 +5641,7 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 	_building_geo_batch.erase(chunk_key)
 
 	# Здания создаются плоскими (base_elev=0), elevation через _update_chunk_heights.
-	if _chunk_elevations.has(chunk_key) and _base_elevation != 0.0:
+	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
 		if is_instance_valid(parent):
 			_update_chunk_heights(chunk_key, parent, _chunk_elevations[chunk_key])
 
@@ -6209,9 +6251,9 @@ func _finalize_curb_geo_batch(chunk_key: String) -> void:
 	parent.add_child(mesh)
 	_curb_geo_batch.erase(chunk_key)
 
-	# Если elevation уже загружен — применяем высоты к только что созданным бордюрам.
+	# Если elevation финализирован — применяем высоты к только что созданным бордюрам.
 	# Per-mesh meta защищает от повторного применения.
-	if _chunk_elevations.has(chunk_key) and _base_elevation != 0.0:
+	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
 		if is_instance_valid(parent):
 			# Обновляем только CurbsMerged (не трогаем уже обработанные road batches)
 			if mesh.mesh is ArrayMesh:
@@ -6306,11 +6348,11 @@ func _process_terrain_objects_queue() -> void:
 		var obj_type: String = item.get("type", "")
 		var t0 := Time.get_ticks_usec()
 
-		# Используем актуальные elevation данные (могли обновиться после постановки в очередь)
+		# Используем финализированные elevation данные (32x32 grid после preprocessing)
 		var elev_data: Dictionary = item.elev_data
 		if elev_data.is_empty():
 			var ck: String = _get_chunk_key_from_node(item.parent)
-			if ck != "" and _chunk_elevations.has(ck):
+			if ck != "" and _elevation_finalized.has(ck):
 				elev_data = _chunk_elevations[ck]
 
 		match obj_type:
@@ -6377,13 +6419,13 @@ func _process_vegetation_queue() -> void:
 	if not is_instance_valid(item.get("parent")):
 		return
 
-	# Используем актуальные elevation данные (могли обновиться после постановки в очередь)
+	# Используем финализированные elevation данные (32x32 grid после preprocessing)
 	var elev_data: Dictionary = item.get("elev_data", {})
 	if elev_data.is_empty():
 		var ck: String = _get_chunk_key_from_node(item.get("parent"))
 		if ck == "":
 			ck = item.get("chunk_key", "")
-		if ck != "" and _chunk_elevations.has(ck):
+		if ck != "" and _elevation_finalized.has(ck):
 			elev_data = _chunk_elevations[ck]
 
 	match veg_type:
@@ -7118,9 +7160,9 @@ func _get_way_center(nodes: Array) -> Vector2:
 	return center / nodes.size()
 
 ## Возвращает актуальные elevation данные для чанка (после preprocessing).
-## Всегда использовать вместо кэшированной переменной — elevation может прийти позже.
+## Возвращает данные ТОЛЬКО если elevation финализирован (32x32 grid построен).
 func _get_chunk_elev_data(chunk_key: String) -> Dictionary:
-	if chunk_key != "" and _chunk_elevations.has(chunk_key):
+	if chunk_key != "" and _elevation_finalized.has(chunk_key):
 		return _chunk_elevations[chunk_key]
 	return {}
 
@@ -7136,9 +7178,9 @@ func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
 	var cz := int(floor(point.y / chunk_size))
 	var point_chunk_key := "%d,%d" % [cx, cz]
 
-	# Ищем elevation data: сначала глобальный кэш по чанку точки, затем fallback на переданный
+	# Ищем elevation data: сначала финализированный кэш по чанку точки, затем fallback
 	var actual_elev: Dictionary = {}
-	if _chunk_elevations.has(point_chunk_key):
+	if _elevation_finalized.has(point_chunk_key) and _chunk_elevations.has(point_chunk_key):
 		actual_elev = _chunk_elevations[point_chunk_key]
 	else:
 		# Fallback: точка вне своего чанка, используем переданный elev_data.
@@ -7515,9 +7557,9 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 	_tree_batch_data.erase(chunk_key)
 
 	# Деревья создаются с elevation из _chunk_elevations (если доступен через vegetation queue).
-	# Помечаем ТОЛЬКО если elevation действительно baked in (vegetation queue подставляет актуальные данные).
+	# Помечаем ТОЛЬКО если elevation финализирован (32x32 grid, vegetation queue подставляет актуальные данные).
 	# Без метки _update_chunk_heights задвоит высоты.
-	if _chunk_elevations.has(chunk_key):
+	if _elevation_finalized.has(chunk_key):
 		mm_inst.set_meta("_elevation_applied", true)
 
 
