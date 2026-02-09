@@ -1,12 +1,13 @@
 extends Node
 
 # Automatic performance test for OSM Racing Game
-# Test: Drive straight in Cherepovets at night for 30 seconds
+# Test: Drive straight from Pionerskaya sprint start toward finish
 
 @export var test_duration: float = 60.0  # Увеличено до 1 минуты для better statistics
 @export var test_speed: float = 20.0  # m/s (~72 km/h)
 @export var enable_night_mode: bool = false
-@export var test_location: Vector2 = Vector2(59.1167, 37.9000)  # Cherepovets coordinates
+@export var test_location: Vector2 = Vector2(59.149827, 37.948859)  # Pionerskaya sprint start
+@export var finish_location: Vector2 = Vector2(59.142110, 37.943897)  # Pionerskaya sprint finish
 @export var auto_quit_after_test: bool = true
 
 var logger: PerformanceLogger
@@ -23,7 +24,7 @@ func _ready() -> void:
 	seed(12345)
 	print("\n========== Starting Performance Test ==========")
 	print("Random seed: 12345 (fixed for reproducibility)")
-	print("Location: Cherepovets (%.4f, %.4f)" % [test_location.x, test_location.y])
+	print("Location: Pionerskaya sprint start (%.4f, %.4f)" % [test_location.x, test_location.y])
 	print("Duration: %.1f seconds" % test_duration)
 	print("Night mode: %s" % ("ON" if enable_night_mode else "OFF"))
 	print("==============================================\n")
@@ -103,7 +104,7 @@ func _setup_test() -> void:
 
 		if osm_terrain.has_method("set_initial_position"):
 			osm_terrain.set_initial_position(test_location)
-			print("[PerformanceTest] Set initial position to Cherepovets: %.4f, %.4f" % [test_location.x, test_location.y])
+			print("[PerformanceTest] Set initial position to Pionerskaya: %.4f, %.4f" % [test_location.x, test_location.y])
 
 		# Start terrain loading
 		if osm_terrain.has_method("start_loading"):
@@ -135,9 +136,9 @@ func _setup_test() -> void:
 		ui.visible = false
 
 func _on_terrain_loaded() -> void:
-	print("\n[PerformanceTest] ✓ Terrain loaded! Positioning car on road...")
+	print("\n[PerformanceTest] Terrain loaded! Positioning car on road...")
 
-	# Position car on nearest road
+	# Position car like sprint race: on nearest road, facing finish direction
 	_position_car_on_road()
 
 	await get_tree().create_timer(2.0).timeout
@@ -146,70 +147,58 @@ func _on_terrain_loaded() -> void:
 	if enable_night_mode and night_mode_manager:
 		if night_mode_manager.has_method("enable_night_mode"):
 			night_mode_manager.enable_night_mode()
-		# Disable input processing to prevent KEY_N from toggling night mode
 		night_mode_manager.set_process_input(false)
 		print("[PerformanceTest] Night mode re-enabled and locked (input disabled)")
 
 	_start_test()
 
-# Позиционирует машину на ближайшей дороге, в центре полосы, по направлению дороги
+# Position car like sprint race: at start location, facing toward finish
 func _position_car_on_road() -> void:
 	if not car or not osm_terrain:
 		print("[PerformanceTest] Cannot position car: car or terrain missing")
 		return
 
-	# Получаем road segments из OSMTerrain
-	var road_segments: Array = []
-	if osm_terrain.has("_road_segments"):
-		road_segments = osm_terrain._road_segments
+	# Convert start/finish lat/lon to local coordinates (same as RaceManager)
+	var start_lat: float = osm_terrain.start_lat
+	var start_lon: float = osm_terrain.start_lon
+	var cos_lat := cos(deg_to_rad(start_lat))
 
-	if road_segments.is_empty():
-		print("[PerformanceTest] No road segments found, using default position")
-		return
+	var start_local := Vector3(
+		(test_location.y - start_lon) * cos_lat * 111000.0,
+		1.0,
+		-(test_location.x - start_lat) * 111000.0
+	)
+	var finish_local := Vector3(
+		(finish_location.y - start_lon) * cos_lat * 111000.0,
+		1.0,
+		-(finish_location.x - start_lat) * 111000.0
+	)
 
-	# Найти ближайший road segment к origin
-	var closest_segment = null
-	var closest_distance := INF
-	var closest_point := Vector3.ZERO
-	var road_direction := Vector3.FORWARD
+	# Find nearest road waypoint via TrafficManager (like sprint race)
+	var traffic_manager = get_tree().current_scene.find_child("TrafficManager", true, false)
+	if traffic_manager and traffic_manager.has_method("get_road_network"):
+		var road_network = traffic_manager.get_road_network()
+		if road_network and not road_network.all_waypoints.is_empty():
+			var nearest_wp = road_network.get_nearest_waypoint(start_local)
+			if nearest_wp:
+				start_local = Vector3(nearest_wp.position.x, 1.0, nearest_wp.position.z)
+				print("[PerformanceTest] Found road waypoint near start")
 
-	for segment in road_segments:
-		if not segment.has("start") or not segment.has("end"):
-			continue
+	# Face car toward finish (like sprint race: atan2 + PI)
+	var dir := finish_local - start_local
+	dir.y = 0
+	var yaw := 0.0
+	if dir.length_squared() > 0.01:
+		yaw = atan2(dir.x, dir.z) + PI
 
-		var start: Vector2 = segment.start
-		var end: Vector2 = segment.end
+	var new_transform := Transform3D()
+	new_transform.origin = start_local
+	new_transform.basis = Basis(Vector3.UP, yaw)
+	car.global_transform = new_transform
 
-		# Найти ближайшую точку на сегменте к origin (0, 0)
-		var segment_vec: Vector2 = end - start
-		var to_origin: Vector2 = Vector2.ZERO - start
-		var t: float = clamp(to_origin.dot(segment_vec) / segment_vec.length_squared(), 0.0, 1.0)
-		var closest_2d: Vector2 = start + segment_vec * t
-		var distance: float = closest_2d.length()
-
-		if distance < closest_distance:
-			closest_distance = distance
-			closest_segment = segment
-			closest_point = Vector3(closest_2d.x, 1.0, closest_2d.y)  # Y=1.0 для высоты машины
-
-			# Направление дороги (от start к end)
-			var dir_2d := (end - start).normalized()
-			road_direction = Vector3(dir_2d.x, 0, dir_2d.y)
-
-	if closest_segment:
-		# Позиционируем машину
-		car.global_position = closest_point
-
-		# Поворачиваем машину по направлению дороги
-		var target_rotation := Vector3.ZERO
-		target_rotation.y = atan2(road_direction.x, road_direction.z)
-		car.rotation = target_rotation
-
-		print("[PerformanceTest] Car positioned on road at %s, direction: %.2f°" % [
-			closest_point, rad_to_deg(target_rotation.y)
-		])
-	else:
-		print("[PerformanceTest] Could not find suitable road segment")
+	print("[PerformanceTest] Car positioned at (%.1f, %.1f, %.1f), facing %.1f deg (toward finish)" % [
+		start_local.x, start_local.y, start_local.z, rad_to_deg(yaw)
+	])
 
 func _start_test() -> void:
 	print("\n========== TEST STARTED ==========")
