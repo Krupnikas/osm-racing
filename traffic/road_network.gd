@@ -546,6 +546,23 @@ func get_waypoints_in_chunk(chunk_key: String) -> Array:
 	return waypoints_by_chunk.get(chunk_key, [])
 
 
+func update_waypoint_heights_for_chunk(chunk_key: String) -> void:
+	"""Обновляет Y позиции waypoints в чанке из terrain generator"""
+	if not terrain_generator or not terrain_generator.has_method("get_terrain_height_at"):
+		return
+	var wps: Array = waypoints_by_chunk.get(chunk_key, [])
+	if wps.is_empty():
+		return
+	var updated := 0
+	for wp in wps:
+		var h: float = terrain_generator.get_terrain_height_at(wp.position.x, wp.position.z)
+		if absf(wp.position.y - h) > 0.1:
+			wp.position.y = h
+			updated += 1
+	if updated > 0:
+		print("RoadNetwork: Updated %d waypoint heights in chunk %s" % [updated, chunk_key])
+
+
 func clear_chunk(chunk_key: String) -> void:
 	"""Удаляет все waypoints из чанка"""
 	if not waypoints_by_chunk.has(chunk_key):

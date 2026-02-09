@@ -1724,10 +1724,12 @@ func _try_finalize_elevation(chunk_key: String) -> void:
 			if _loaded_chunks.has(prev_key):
 				_create_terrain_mesh(prev_key, _loaded_chunks[prev_key])
 				_update_chunk_heights(prev_key, _loaded_chunks[prev_key], _chunk_elevations[prev_key])
+			_update_waypoint_heights(prev_key)
 	elif _base_elevation != 0.0:
 		if _loaded_chunks.has(chunk_key):
 			_create_terrain_mesh(chunk_key, _loaded_chunks[chunk_key])
 			_update_chunk_heights(chunk_key, _loaded_chunks[chunk_key], elev_data)
+		_update_waypoint_heights(chunk_key)
 
 
 ## Извлекает медиану из raw API grid и сохраняет в _chunk_median_elevations.
@@ -8839,6 +8841,16 @@ func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D
 	parent.add_child(body)
 
 # Извлечение данных дороги для навигации NPC
+## Обновляет высоты waypoints в RoadNetwork после финализации elevation.
+func _update_waypoint_heights(chunk_key: String) -> void:
+	var traffic_mgr = get_parent().get_node_or_null("TrafficManager")
+	if not traffic_mgr:
+		return
+	var rn = traffic_mgr.get_road_network() if traffic_mgr.has_method("get_road_network") else null
+	if rn and rn.has_method("update_waypoint_heights_for_chunk"):
+		rn.update_waypoint_heights_for_chunk(chunk_key)
+
+
 func _extract_road_for_traffic(nodes: Array, tags: Dictionary, elev_data: Dictionary, bridge_info: Dictionary = {}) -> void:
 	"""Извлекает данные дороги в RoadNetwork для навигации NPC"""
 	# Проверяем наличие TrafficManager
