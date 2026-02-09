@@ -1865,8 +1865,9 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	add_child(chunk_node)
 	_loaded_chunks[chunk_key] = chunk_node
 
-	# Если elevation финализирован (32x32 grid готов), создаём terrain mesh
-	if _elevation_finalized.has(chunk_key):
+	# Если elevation финализирован (32x32 grid готов) И base_elevation установлен — создаём terrain mesh.
+	# Без base_elevation terrain будет на абсолютной высоте (480м для Тбилиси).
+	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
 		_create_terrain_mesh(chunk_key, chunk_node)
 
 	# Генерируем объекты асинхронно (с frame budgeting)
@@ -1905,6 +1906,9 @@ func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: 
 # Создаёт меш террейна с высотами
 func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
 	if not _elevation_finalized.has(chunk_key) or not _chunk_elevations.has(chunk_key):
+		return
+	# Без base_elevation все высоты будут абсолютными (480м для Тбилиси)
+	if _base_elevation == 0.0:
 		return
 
 	# Удаляем существующий terrain body (содержит TerrainMesh + collision).
@@ -6348,9 +6352,12 @@ func _process_terrain_objects_queue() -> void:
 		if not is_instance_valid(item.get("parent")):
 			continue
 
-		# Ждём финализации elevation — иначе объект создастся плоским
-		# и не будет обновлён (update_chunk_heights уже вызван или ещё нет).
+		# Ждём финализации elevation И установки base_elevation — иначе объект создастся
+		# плоским или с абсолютной высотой (до вычитания base_elevation).
 		if enable_elevation:
+			if _base_elevation == 0.0:
+				deferred.append(item)
+				continue
 			var ck: String = _get_chunk_key_from_node(item.parent)
 			if ck != "" and not _elevation_finalized.has(ck):
 				deferred.append(item)
@@ -6426,6 +6433,10 @@ func _process_infrastructure_queue() -> void:
 ## Обрабатывает очередь растительности (1 за кадр, низкий приоритет)
 func _process_vegetation_queue() -> void:
 	if _vegetation_queue.is_empty():
+		return
+
+	# Ждём base_elevation (без него _get_elevation_at_point вернёт абсолютную высоту)
+	if enable_elevation and _base_elevation == 0.0:
 		return
 
 	# Ищем первый элемент с финализированным elevation
