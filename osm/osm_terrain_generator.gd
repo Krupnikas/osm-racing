@@ -3679,18 +3679,18 @@ func _update_building_batch_heights(mesh_instance: MeshInstance3D, elev_data: Di
 		if start < 0 or count <= 0:
 			continue
 
-		# Max elevation по footprint
+		# Min elevation по footprint — нижняя точка земли = основание здания
 		var footprint: PackedVector2Array = r["points"]
-		var max_h := -999999.0
+		var min_h := 999999.0
 		for p in footprint:
 			var h: float = _get_elevation_at_point(p, elev_data)
-			if h > max_h:
-				max_h = h
+			if h < min_h:
+				min_h = h
 
 		# Применяем uniform elevation ко всем вершинам здания
 		var end_idx: int = mini(start + count, new_vertices.size())
 		for i in range(start, end_idx):
-			new_vertices[i].y += max_h
+			new_vertices[i].y += min_h
 
 	arrays[Mesh.ARRAY_VERTEX] = new_vertices
 	var material: Material = arr_mesh.surface_get_material(0)
@@ -5663,17 +5663,17 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 
 	# === BAKE ELEVATION (uniform per building) ===
 	# Здание должно стоять вертикально: одна высота для всех вершин.
-	# Берём max elevation по углам footprint — здание стоит на самой высокой точке.
+	# Берём min elevation по углам footprint — нижняя точка земли = основание здания.
 	var building_elev := 0.0
 	var elev_baked := false
 	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
 		var elev_data: Dictionary = _chunk_elevations[chunk_key]
-		var max_h := -999999.0
+		var min_h := 999999.0
 		for p in points:
 			var h: float = _get_elevation_at_point(p, elev_data)
-			if h > max_h:
-				max_h = h
-		building_elev = max_h
+			if h < min_h:
+				min_h = h
+		building_elev = min_h
 		elev_baked = true
 
 	var wall_verts: PackedVector3Array = result.wall_vertices
@@ -5832,13 +5832,13 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 	for coll_data in batch["collisions"]:
 		var coll_elev: float = coll_data["base_elev"]
 		if coll_elev == 0.0 and has_elev:
-			# Вычисляем max elevation по footprint
-			var max_h := -999999.0
+			# Вычисляем min elevation по footprint — основание здания на нижней точке
+			var min_h := 999999.0
 			for p in coll_data["points"]:
 				var h: float = _get_elevation_at_point(p, chunk_elev)
-				if h > max_h:
-					max_h = h
-			coll_elev = max_h
+				if h < min_h:
+					min_h = h
+			coll_elev = min_h
 		var body := StaticBody3D.new()
 		body.collision_layer = 2
 		body.collision_mask = 0
