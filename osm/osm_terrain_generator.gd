@@ -910,13 +910,33 @@ func _check_initial_load_complete() -> void:
 
 	# Все начальные чанки загружены?
 	if loaded_count >= total_chunks:
-		# Ждём завершения загрузки elevation (если включен)
-		if enable_elevation and (not _loading_elevations.is_empty() or not _elevation_queue.is_empty()):
-			initial_load_progress.emit(chunk_progress * 0.6 + 0.3, "Загрузка рельефа: %d/%d..." % [
-				_chunk_elevations.size(),
-				_chunk_elevations.size() + _loading_elevations.size() + _elevation_queue.size()
-			])
-			return
+		# Ждём завершения загрузки и финализации elevation (если включен)
+		if enable_elevation:
+			var elev_downloaded := 0
+			var elev_finalized := 0
+			var elev_total := 0
+			for ck in _initial_chunks_needed:
+				elev_total += 1
+				if _chunk_elevations.has(ck):
+					elev_downloaded += 1
+				if _elevation_finalized.has(ck):
+					elev_finalized += 1
+
+			var elev_pending: bool = elev_downloaded < elev_total or elev_finalized < elev_total
+			if elev_pending:
+				# Прогресс: 60% чанки + 20% скачивание elevation + 20% финализация
+				var dl_progress: float = float(elev_downloaded) / float(max(1, elev_total))
+				var fin_progress: float = float(elev_finalized) / float(max(1, elev_total))
+				var elev_progress: float = 0.6 + dl_progress * 0.2 + fin_progress * 0.2
+				elev_progress = clampf(elev_progress, 0.6, 0.99)
+
+				var elev_status: String
+				if elev_downloaded < elev_total:
+					elev_status = "Загрузка рельефа: %d/%d..." % [elev_downloaded, elev_total]
+				else:
+					elev_status = "Построение рельефа: %d/%d..." % [elev_finalized, elev_total]
+				initial_load_progress.emit(elev_progress, elev_status)
+				return
 
 		# Проверяем что все очереди обработаны (для плавности старта)
 		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks == 0
