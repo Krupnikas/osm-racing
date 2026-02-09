@@ -4690,6 +4690,8 @@ func _create_parking_surface(points: PackedVector2Array, elev_data: Dictionary, 
 			st.add_vertex(Vector3(p.x, h, p.y))
 
 	mesh.mesh = st.commit()
+	if not elev_data.is_empty():
+		mesh.set_meta("_elevation_applied", true)
 	parent.add_child(mesh)
 
 
@@ -5214,8 +5216,6 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 	var fence_offset := 0.3  # Отступ забора от контура здания для предотвращения z-fighting
 
 	var mesh := MeshInstance3D.new()
-	var im := ImmediateMesh.new()
-	mesh.mesh = im
 	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
 	# Используем шейдер для правильного двустороннего освещения
@@ -5223,9 +5223,10 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 	material.shader = BuildingWallShader
 	material.set_shader_parameter("albedo_color", fence_color)
 	material.set_shader_parameter("use_texture", false)
-	mesh.material_override = material
 
-	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_material(material)
 
 	# Рисуем забор как стены по периметру с небольшим отступом наружу
 	for i in range(points.size()):
@@ -5248,18 +5249,26 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 
 		# Нормаль стены (наружу)
 		var wall_normal := Vector3(-dir.y, 0, dir.x)
-		im.surface_set_normal(wall_normal)
 
-		# Внешняя сторона
-		im.surface_add_vertex(v1)
-		im.surface_add_vertex(v2)
-		im.surface_add_vertex(v3)
+		# Внешняя сторона (два треугольника)
+		st.set_normal(wall_normal)
+		st.add_vertex(v1)
+		st.set_normal(wall_normal)
+		st.add_vertex(v2)
+		st.set_normal(wall_normal)
+		st.add_vertex(v3)
 
-		im.surface_add_vertex(v1)
-		im.surface_add_vertex(v3)
-		im.surface_add_vertex(v4)
+		st.set_normal(wall_normal)
+		st.add_vertex(v1)
+		st.set_normal(wall_normal)
+		st.add_vertex(v3)
+		st.set_normal(wall_normal)
+		st.add_vertex(v4)
 
-	im.surface_end()
+	mesh.mesh = st.commit()
+	mesh.material_override = material
+	if not elev_data.is_empty():
+		mesh.set_meta("_elevation_applied", true)
 
 	# Добавляем коллизию для забора
 	var body := StaticBody3D.new()
