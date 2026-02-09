@@ -215,6 +215,8 @@ func _start_loading() -> void:
 		var coords: Array = LOCATIONS[_selected_location]
 		_terrain_generator.start_lat = coords[0]
 		_terrain_generator.start_lon = coords[1]
+		_terrain_generator.enable_elevation = true
+		_terrain_generator.elevation_scale = 1.0
 		print("MainMenu: Calling terrain_generator.start_loading()...")
 		_terrain_generator.start_loading()
 		print("MainMenu: terrain_generator.start_loading() returned")
