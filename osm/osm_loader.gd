@@ -261,7 +261,8 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 			if way_nodes.size() > 1:
 				var way_data := {
 					"nodes": way_nodes,
-					"tags": element.get("tags", {})
+					"tags": element.get("tags", {}),
+					"id": element.id
 				}
 				ways.append(way_data)
 				way_by_id[element.id] = way_nodes
@@ -270,14 +271,21 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	# С out geom геометрия включена напрямую в members
 	var relations_found := 0
 	var relations_with_nodes := 0
+	var relation_member_way_ids: Dictionary = {}  # way_id → true (member ways of building relations)
 	for element in data.get("elements", []):
 		if element.get("type") == "relation":
 			relations_found += 1
 			var tags: Dictionary = element.get("tags", {})
 			# Берём только outer members для построения контура
 			var outer_nodes := []
+			var is_building_relation: bool = tags.has("building") or tags.has("amenity")
 			for member in element.get("members", []):
 				if member.get("type") == "way" and member.get("role", "outer") == "outer":
+					# Запоминаем member way IDs чтобы не дублировать building из relation
+					if is_building_relation:
+						var ref_id: int = member.get("ref", 0)
+						if ref_id > 0:
+							relation_member_way_ids[ref_id] = true
 					# С out geom геометрия включена в member.geometry
 					var geometry: Array = member.get("geometry", [])
 					if geometry.size() > 0:
@@ -299,6 +307,21 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 					"nodes": outer_nodes,
 					"tags": tags
 				})
+
+	# Убираем building/amenity теги у ways которые являются members building-relations
+	# (relation уже добавлен как целый building, individual way не нужен)
+	if not relation_member_way_ids.is_empty():
+		var deduped := 0
+		for way_data in ways:
+			var wid: int = int(way_data.get("id", 0))
+			if wid > 0 and relation_member_way_ids.has(wid):
+				var wtags: Dictionary = way_data.get("tags", {})
+				if wtags.has("building") or wtags.has("amenity"):
+					wtags.erase("building")
+					wtags.erase("amenity")
+					deduped += 1
+		if deduped > 0:
+			print("OSM: Deduped %d ways that are members of building/amenity relations" % deduped)
 
 	if relations_found > 0:
 		print("OSM: Found %d relations, %d with valid geometry" % [relations_found, relations_with_nodes])
