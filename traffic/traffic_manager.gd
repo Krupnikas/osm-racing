@@ -214,6 +214,11 @@ func _attempt_spawn_in_chunk(chunk_key: String, player_pos: Vector3) -> bool:
 		_return_npc_to_pool(npc)
 		return false
 
+	# Корректируем Y по terrain elevation
+	if terrain_generator and terrain_generator.has_method("get_terrain_height_at"):
+		var terrain_y: float = terrain_generator.get_terrain_height_at(spawn_pos.x, spawn_pos.z)
+		spawn_pos.y = terrain_y + 0.5  # Чуть выше террейна
+
 	# Позиция на полосе и ориентация
 	npc.global_position = spawn_pos
 	# VehicleBody3D "вперёд" = -Z axis, direction(x,z) -> rotation_y

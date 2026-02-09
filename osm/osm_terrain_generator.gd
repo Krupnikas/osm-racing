@@ -7385,6 +7385,20 @@ func _get_way_center(nodes: Array) -> Vector2:
 
 ## Возвращает актуальные elevation данные для чанка (после preprocessing).
 ## Возвращает данные ТОЛЬКО если elevation финализирован (32x32 grid построен).
+## Публичный API: возвращает terrain height в world координатах.
+## Учитывает base_elevation. Возвращает 0 если elevation не финализирован.
+func get_terrain_height_at(world_x: float, world_z: float) -> float:
+	if _base_elevation == 0.0:
+		return 0.0
+	var point := Vector2(world_x, world_z)
+	var cx := int(floor(world_x / chunk_size))
+	var cz := int(floor(world_z / chunk_size))
+	var ck := "%d,%d" % [cx, cz]
+	if _elevation_finalized.has(ck) and _chunk_elevations.has(ck):
+		return _get_elevation_at_point(point, _chunk_elevations[ck])
+	return 0.0
+
+
 func _get_chunk_elev_data(chunk_key: String) -> Dictionary:
 	if chunk_key != "" and _elevation_finalized.has(chunk_key):
 		return _chunk_elevations[chunk_key]
