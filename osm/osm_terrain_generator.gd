@@ -3589,6 +3589,14 @@ func _update_chunk_heights(chunk_key: String, chunk_node: Node3D, elev_data: Dic
 						mm.set_instance_transform(i, t)
 				updated_meshes += 1
 
+		# Инфраструктура (светофоры, знаки): обновляем position.y если были созданы без elevation
+		elif child.name == "TrafficLight" or child.name.begins_with("YieldSign") or child.name.begins_with("ParkingSign"):
+			if not child.has_meta("_elevation_applied"):
+				child.set_meta("_elevation_applied", true)
+				var pos_2d := Vector2(child.position.x, child.position.z)
+				child.position.y = _get_elevation_at_point(pos_2d, elev_data)
+				updated_meshes += 1
+
 	if updated_meshes > 0:
 		print("Elevation: Updated %d meshes in chunk %s" % [updated_meshes, chunk_key])
 
@@ -4863,6 +4871,8 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	var body := RigidBody3D.new()
 	body.name = "ParkingSign"
 	body.position = Vector3(pos.x, elevation, pos.y)
+	if elevation != 0.0:
+		body.set_meta("_elevation_applied", true)
 	body.rotation.y = rotation_y
 	body.collision_layer = 4  # Слой 4 - разрушаемые знаки (отдельный от статики)
 	body.collision_mask = 7  # Машины(1) + статика(2) + другие знаки(4)
@@ -6627,20 +6637,31 @@ func _process_infrastructure_queue() -> void:
 	if parent == null or not is_instance_valid(parent):
 		return
 
+	# Пересчитываем elevation из актуальных данных чанка (при постановке в очередь
+	# elev_data мог быть пуст → elevation=0). К моменту обработки очереди данные обычно есть.
+	var elevation: float = item.get("elevation", 0.0)
+	var pos: Vector2 = item.get("pos", Vector2.ZERO)
+	if enable_elevation and _base_elevation != 0.0:
+		var cx := int(floor(pos.x / chunk_size))
+		var cz := int(floor(pos.y / chunk_size))
+		var ck := "%d,%d" % [cx, cz]
+		if _elevation_finalized.has(ck) and _chunk_elevations.has(ck):
+			elevation = _get_elevation_at_point(pos, _chunk_elevations[ck])
+
 	var t0 := Time.get_ticks_usec()
 
 	match item_type:
 		"lamp":
-			_create_street_lamp_immediate(item.pos, item.elevation, item.parent, item.get("direction", Vector2.ZERO))
+			_create_street_lamp_immediate(item.pos, elevation, item.parent, item.get("direction", Vector2.ZERO))
 			_record_perf("infra_lamp", Time.get_ticks_usec() - t0)
 		"traffic_light":
-			_create_traffic_light_immediate(item.pos, item.elevation, item.parent)
+			_create_traffic_light_immediate(item.pos, elevation, item.parent)
 			_record_perf("infra_traffic_light", Time.get_ticks_usec() - t0)
 		"yield_sign":
-			_create_yield_sign_immediate(item.pos, item.elevation, item.parent)
+			_create_yield_sign_immediate(item.pos, elevation, item.parent)
 			_record_perf("infra_yield_sign", Time.get_ticks_usec() - t0)
 		"parking_sign":
-			_create_parking_sign_immediate(item.pos, item.elevation, item.rotation, item.parent)
+			_create_parking_sign_immediate(item.pos, elevation, item.rotation, item.parent)
 			_record_perf("infra_parking_sign", Time.get_ticks_usec() - t0)
 
 
@@ -7804,7 +7825,22 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 	mm.instance_count = transforms.size()
 	for i in range(transforms.size()):
 		mm.set_instance_transform(i, transforms[i])
+	# Если elevation финализирован — пересчитываем Y для ВСЕХ деревьев.
+	# Часть деревьев (из OSM point objects) могла быть добавлена с Y=0 до прихода elevation.
+	# Пересчёт гарантирует корректную высоту и позволяет пометить _elevation_applied.
+	var elev_applied := false
+	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0 and _chunk_elevations.has(chunk_key):
+		var elev_data: Dictionary = _chunk_elevations[chunk_key]
+		for i in range(transforms.size()):
+			var t: Transform3D = transforms[i]
+			var pos_2d := Vector2(t.origin.x, t.origin.z)
+			t.origin.y = _get_elevation_at_point(pos_2d, elev_data)
+			transforms[i] = t
+		elev_applied = true
+
 	mm_inst.multimesh = mm
+	for i in range(transforms.size()):
+		mm.set_instance_transform(i, transforms[i])
 	parent.add_child(mm_inst)
 
 	if _draw_call_logging_enabled:
@@ -7815,7 +7851,11 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		var body := StaticBody3D.new()
 		body.collision_layer = 2
 		body.collision_mask = 0
-		body.position = collision_data["position"]
+		var coll_pos: Vector3 = collision_data["position"]
+		if elev_applied:
+			var coll_2d := Vector2(coll_pos.x, coll_pos.z)
+			coll_pos.y = _get_elevation_at_point(coll_2d, _chunk_elevations[chunk_key])
+		body.position = coll_pos
 
 		var collision := CollisionShape3D.new()
 		var shape := CylinderShape3D.new()
@@ -7830,10 +7870,7 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 
 	_tree_batch_data.erase(chunk_key)
 
-	# Деревья создаются с elevation из _chunk_elevations (если доступен через vegetation queue).
-	# Помечаем ТОЛЬКО если elevation финализирован (32x32 grid, vegetation queue подставляет актуальные данные).
-	# Без метки _update_chunk_heights задвоит высоты.
-	if _elevation_finalized.has(chunk_key):
+	if elev_applied:
 		mm_inst.set_meta("_elevation_applied", true)
 
 
@@ -8683,7 +8720,10 @@ func _create_traffic_light_immediate(pos: Vector2, elevation: float, parent: Nod
 		return
 
 	var traffic_light := Node3D.new()
+	traffic_light.name = "TrafficLight"
 	traffic_light.position = Vector3(pos.x, elevation, pos.y)
+	if elevation != 0.0:
+		traffic_light.set_meta("_elevation_applied", true)
 
 	# Столб - тёмно-серый
 	var pole := MeshInstance3D.new()
@@ -8823,6 +8863,8 @@ func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D
 	var body := RigidBody3D.new()
 	body.name = "YieldSign"
 	body.position = Vector3(pos.x, elevation, pos.y)
+	if elevation != 0.0:
+		body.set_meta("_elevation_applied", true)
 	body.collision_layer = 4  # Слой 4 - разрушаемые знаки
 	body.collision_mask = 7  # Машины(1) + статика(2) + другие знаки(4)
 	body.mass = 12.0
