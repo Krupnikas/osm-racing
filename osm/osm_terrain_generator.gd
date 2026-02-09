@@ -677,29 +677,38 @@ func _process(delta: float) -> void:
 	var t_building := Time.get_ticks_usec() - t0
 	_record_perf("building_results", t_building)
 
-	# Обрабатываем очередь дорог (3 дороги за кадр)
+	# Общий бюджет на все очереди — 7ms (90fps = 11ms, оставляем 4ms на рендер/физику)
+	const FRAME_BUDGET_USEC := 7000
+
+	# Обрабатываем очередь дорог
 	t0 = Time.get_ticks_usec()
 	_process_road_queue()
 	var t_road := Time.get_ticks_usec() - t0
 	_record_perf("road_queue", t_road)
 
-	# Обрабатываем очередь terrain объектов (2 за кадр)
-	t0 = Time.get_ticks_usec()
-	_process_terrain_objects_queue()
-	var t_terrain := Time.get_ticks_usec() - t0
-	_record_perf("terrain_queue", t_terrain)
+	# Обрабатываем очередь terrain объектов
+	var t_terrain := 0
+	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
+		t0 = Time.get_ticks_usec()
+		_process_terrain_objects_queue()
+		t_terrain = Time.get_ticks_usec() - t0
+		_record_perf("terrain_queue", t_terrain)
 
-	# Обрабатываем очередь инфраструктуры (1 объект за кадр)
-	t0 = Time.get_ticks_usec()
-	_process_infrastructure_queue()
-	var t_infra := Time.get_ticks_usec() - t0
-	_record_perf("infra_queue", t_infra)
+	# Обрабатываем очередь инфраструктуры
+	var t_infra := 0
+	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
+		t0 = Time.get_ticks_usec()
+		_process_infrastructure_queue()
+		t_infra = Time.get_ticks_usec() - t0
+		_record_perf("infra_queue", t_infra)
 
-	# Обрабатываем очередь растительности (1 за кадр, низкий приоритет)
-	t0 = Time.get_ticks_usec()
-	_process_vegetation_queue()
-	var t_veg := Time.get_ticks_usec() - t0
-	_record_perf("vegetation_queue", t_veg)
+	# Обрабатываем очередь растительности
+	var t_veg := 0
+	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
+		t0 = Time.get_ticks_usec()
+		_process_vegetation_queue()
+		t_veg = Time.get_ticks_usec() - t0
+		_record_perf("vegetation_queue", t_veg)
 
 	# Применяем коллизии бордюров из worker threads
 	t0 = Time.get_ticks_usec()
@@ -6005,75 +6014,87 @@ Chunks: %d loaded""" % [fps, avg_fps, fps_1pct, min_fps, road_q, terrain_q, infr
 ## Обрабатывает очередь дорог (3 дороги за кадр)
 func _process_road_queue() -> void:
 	if _road_queue.is_empty():
-		# OPTIMIZATION: Финализируем road batches ПО ОДНОМУ ЧАНКУ ЗА КАДР
-		if not _pending_batch_chunks.is_empty():
+		# Time budget для финализации — несколько чанков за кадр (90fps = 11ms total)
+		const FINALIZE_BUDGET_USEC := 4000  # 4ms
+		var finalize_start := Time.get_ticks_usec()
+
+		# 1. Road batches
+		while not _pending_batch_chunks.is_empty():
 			var t_batch := Time.get_ticks_usec()
 			var chunk_key: String = _pending_batch_chunks.pop_front()
 			_finalize_road_batches_for_chunk(chunk_key)
 			if Time.get_ticks_usec() - t_batch > 100:
 				_record_perf("road_batch_finalize", Time.get_ticks_usec() - t_batch)
-			return  # Один чанк за кадр
+			if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+				return
 
-		# Порядок финализации: roads → curbs → lamps → buildings → trees → billboards → windows
-		# (terrain mesh создаётся сразу при получении elevation в _on_elevation_loaded)
-
-		# 2. Curbs (сразу после дорог)
+		# 2. Curbs (не блокируют остальные этапы — обрабатываются параллельно)
 		if not _curb_queue.is_empty() or not _curb_smoothed_queue.is_empty() or not _curb_mesh_state.is_empty() or not _curb_geo_batch.is_empty():
 			_process_curb_queue()
-			return
+			# НЕ return — продолжаем финализировать lamps/buildings/trees в том же кадре
 
 		# 3. Lamps
-		if not _lamp_batches_to_finalize.is_empty():
+		while not _lamp_batches_to_finalize.is_empty():
 			var t_lamp := Time.get_ticks_usec()
 			var chunk_key: String = _lamp_batches_to_finalize[0]
 			_lamp_batches_to_finalize.remove_at(0)
 			_finalize_lamp_batches_for_chunk(chunk_key)
 			if Time.get_ticks_usec() - t_lamp > 100:
 				_record_perf("lamp_batch_finalize", Time.get_ticks_usec() - t_lamp)
-			return  # Один чанк за кадр
+			if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+				return
 
-		# 4. Buildings (ждут завершения ВСЕХ building tasks)
+		# 4. Buildings + Windows (здания и окна одного чанка — в одном кадре)
 		if _pending_building_tasks == 0 and _building_results.is_empty():
 			if not _building_geo_batch.is_empty():
 				for key in _building_geo_batch.keys():
 					if not _building_geo_finalize_queue.has(key):
 						_building_geo_finalize_queue.append(key)
 
-			if not _building_geo_finalize_queue.is_empty():
+			while not _building_geo_finalize_queue.is_empty():
 				var t_geo := Time.get_ticks_usec()
 				var chunk_key: String = _building_geo_finalize_queue[0]
 				_building_geo_finalize_queue.remove_at(0)
 				_finalize_building_geo_batch(chunk_key)
 				if Time.get_ticks_usec() - t_geo > 100:
 					_record_perf("building_geo_finalize", Time.get_ticks_usec() - t_geo)
-				return
+				# Финализируем окна этого же чанка сразу после зданий
+				if _window_batch_data.has(chunk_key):
+					var t_window := Time.get_ticks_usec()
+					_finalize_window_batches_for_chunk(chunk_key)
+					if Time.get_ticks_usec() - t_window > 100:
+						_record_perf("window_batch_finalize", Time.get_ticks_usec() - t_window)
+				if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+					return
 
-			# Windows (MultiMesh per chunk)
+			# Оставшиеся окна (чанки без зданий в очереди)
 			var window_chunks := _window_batch_data.keys()
-			if not window_chunks.is_empty():
+			for chunk_key in window_chunks:
 				var t_window := Time.get_ticks_usec()
-				var chunk_key: String = window_chunks[0]
 				_finalize_window_batches_for_chunk(chunk_key)
 				if Time.get_ticks_usec() - t_window > 100:
 					_record_perf("window_batch_finalize", Time.get_ticks_usec() - t_window)
-				return
+				if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+					return
 
 		# 5. Trees
-		if not _tree_batches_to_finalize.is_empty():
+		while not _tree_batches_to_finalize.is_empty():
 			var t_tree := Time.get_ticks_usec()
 			var chunk_key: String = _tree_batches_to_finalize[0]
 			_tree_batches_to_finalize.remove_at(0)
 			_finalize_tree_batches_for_chunk(chunk_key)
 			if Time.get_ticks_usec() - t_tree > 100:
 				_record_perf("tree_batch_finalize", Time.get_ticks_usec() - t_tree)
-			return  # Один чанк за кадр
+			if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+				return
 
 		# 6. Billboards (DecorationLayer)
-		if not _billboard_batches_to_finalize.is_empty():
+		while not _billboard_batches_to_finalize.is_empty():
 			var chunk_key: String = _billboard_batches_to_finalize[0]
 			_billboard_batches_to_finalize.remove_at(0)
 			_finalize_billboard_batch_for_chunk(chunk_key)
-			return  # Один чанк за кадр
+			if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+				return
 
 		return
 
@@ -6084,8 +6105,8 @@ func _process_road_queue() -> void:
 		_record_perf("road_sort", Time.get_ticks_usec() - t0)
 
 	# OPTIMIZATION: Time budget вместо фиксированного количества
-	# Бюджет 5ms на обработку дорог, но минимум 1 дорога за кадр
-	const ROAD_TIME_BUDGET_USEC := 5000  # 5ms
+	# Бюджет 3ms на обработку дорог, но минимум 1 дорога за кадр (90fps = 11ms total)
+	const ROAD_TIME_BUDGET_USEC := 3000  # 3ms
 	var start_time := Time.get_ticks_usec()
 	var processed := 0
 
@@ -6105,9 +6126,9 @@ func _process_road_queue() -> void:
 
 ## Обрабатывает очередь бордюров (после того как все перекрёстки определены)
 func _process_curb_queue() -> void:
-	# Этап 1: Сглаживание точек — 2 бордюра за кадр
+	# Этап 1: Сглаживание точек — 8 бордюров за кадр
 	var smoothed_count := 0
-	while not _curb_queue.is_empty() and smoothed_count < 2:
+	while not _curb_queue.is_empty() and smoothed_count < 8:
 		var item: Dictionary = _curb_queue.pop_front()
 		if is_instance_valid(item.parent) and item.nodes.size() >= 2:
 			var t0 := Time.get_ticks_usec()
@@ -6149,9 +6170,9 @@ func _process_curb_queue() -> void:
 			})
 			smoothed_count += 1
 
-	# Этап 2: Инкрементальная генерация меша — обрабатываем до 50 сегментов за кадр
+	# Этап 2: Инкрементальная генерация меша — обрабатываем до 200 сегментов за кадр
 	var t0 := Time.get_ticks_usec()
-	_process_curb_mesh_incremental(50)
+	_process_curb_mesh_incremental(200)
 	_record_perf("curb_mesh", Time.get_ticks_usec() - t0)
 
 	# Этап 3: Финализация merged mesh когда все бордюры обработаны
@@ -6603,8 +6624,8 @@ func _process_terrain_objects_queue() -> void:
 		_sort_queue_by_distance(_terrain_objects_queue, _car.global_position)
 		_record_perf("terrain_sort", Time.get_ticks_usec() - t0)
 
-	# Time budget: максимум 3ms на terrain объекты, минимум 1 за кадр
-	const TERRAIN_TIME_BUDGET_USEC := 3000
+	# Time budget: максимум 2ms на terrain объекты, минимум 1 за кадр
+	const TERRAIN_TIME_BUDGET_USEC := 2000
 	var start_time := Time.get_ticks_usec()
 	var processed := 0
 	var deferred: Array = []
@@ -6663,8 +6684,6 @@ func _process_terrain_objects_queue() -> void:
 ## Обрабатывает очередь инфраструктуры (1 объект за кадр)
 func _process_infrastructure_queue() -> void:
 	if _infrastructure_queue.is_empty():
-		# PHASE 2: Батчинг фонарей теперь происходит БЕЗ очереди (сразу в _create_pending_lamps)
-		# Эта очередь используется только для других объектов (traffic lights, etc)
 		return
 
 	# Сортируем по расстоянию до игрока
@@ -6673,43 +6692,52 @@ func _process_infrastructure_queue() -> void:
 		_sort_infrastructure_by_distance(_infrastructure_queue, _car.global_position)
 		_record_perf("infra_sort", Time.get_ticks_usec() - t0)
 
-	var item: Dictionary = _infrastructure_queue.pop_front()
-	var item_type: String = item.get("type", "")
+	# Time budget: до 2ms на инфраструктуру, минимум 1 за кадр
+	const INFRA_TIME_BUDGET_USEC := 2000
+	var start_time := Time.get_ticks_usec()
+	var processed := 0
 
-	# Проверяем что parent ещё существует (мог быть удалён при reset_terrain)
-	var parent = item.get("parent")
-	if parent == null or not is_instance_valid(parent):
-		return
+	while not _infrastructure_queue.is_empty():
+		if processed > 0 and (Time.get_ticks_usec() - start_time) > INFRA_TIME_BUDGET_USEC:
+			break
 
-	# Пересчитываем elevation из актуальных данных чанка (при постановке в очередь
-	# elev_data мог быть пуст → elevation=0). К моменту обработки очереди данные обычно есть.
-	var elevation: float = item.get("elevation", 0.0)
-	var pos: Vector2 = item.get("pos", Vector2.ZERO)
-	if enable_elevation and _base_elevation != 0.0:
-		var cx := int(floor(pos.x / chunk_size))
-		var cz := int(floor(pos.y / chunk_size))
-		var ck := "%d,%d" % [cx, cz]
-		if _elevation_finalized.has(ck) and _chunk_elevations.has(ck):
-			elevation = _get_elevation_at_point(pos, _chunk_elevations[ck])
+		var item: Dictionary = _infrastructure_queue.pop_front()
+		var item_type: String = item.get("type", "")
 
-	var t0 := Time.get_ticks_usec()
+		# Проверяем что parent ещё существует (мог быть удалён при reset_terrain)
+		var parent = item.get("parent")
+		if parent == null or not is_instance_valid(parent):
+			continue
 
-	match item_type:
-		"lamp":
-			_create_street_lamp_immediate(item.pos, elevation, item.parent, item.get("direction", Vector2.ZERO))
-			_record_perf("infra_lamp", Time.get_ticks_usec() - t0)
-		"traffic_light":
-			_create_traffic_light_immediate(item.pos, elevation, item.parent)
-			_record_perf("infra_traffic_light", Time.get_ticks_usec() - t0)
-		"yield_sign":
-			_create_yield_sign_immediate(item.pos, elevation, item.parent)
-			_record_perf("infra_yield_sign", Time.get_ticks_usec() - t0)
-		"parking_sign":
-			_create_parking_sign_immediate(item.pos, elevation, item.rotation, item.parent)
-			_record_perf("infra_parking_sign", Time.get_ticks_usec() - t0)
+		# Пересчитываем elevation из актуальных данных чанка
+		var elevation: float = item.get("elevation", 0.0)
+		var pos: Vector2 = item.get("pos", Vector2.ZERO)
+		if enable_elevation and _base_elevation != 0.0:
+			var cx := int(floor(pos.x / chunk_size))
+			var cz := int(floor(pos.y / chunk_size))
+			var ck := "%d,%d" % [cx, cz]
+			if _elevation_finalized.has(ck) and _chunk_elevations.has(ck):
+				elevation = _get_elevation_at_point(pos, _chunk_elevations[ck])
+
+		var t0 := Time.get_ticks_usec()
+
+		match item_type:
+			"lamp":
+				_create_street_lamp_immediate(item.pos, elevation, item.parent, item.get("direction", Vector2.ZERO))
+				_record_perf("infra_lamp", Time.get_ticks_usec() - t0)
+			"traffic_light":
+				_create_traffic_light_immediate(item.pos, elevation, item.parent)
+				_record_perf("infra_traffic_light", Time.get_ticks_usec() - t0)
+			"yield_sign":
+				_create_yield_sign_immediate(item.pos, elevation, item.parent)
+				_record_perf("infra_yield_sign", Time.get_ticks_usec() - t0)
+			"parking_sign":
+				_create_parking_sign_immediate(item.pos, elevation, item.rotation, item.parent)
+				_record_perf("infra_parking_sign", Time.get_ticks_usec() - t0)
+		processed += 1
 
 
-## Обрабатывает очередь растительности (1 за кадр, низкий приоритет)
+## Обрабатывает очередь растительности (time budget, не блокирует)
 func _process_vegetation_queue() -> void:
 	if _vegetation_queue.is_empty():
 		return
@@ -6718,48 +6746,58 @@ func _process_vegetation_queue() -> void:
 	if enable_elevation and _base_elevation == 0.0:
 		return
 
-	# Ищем первый элемент с финализированным elevation
-	var item: Dictionary = {}
-	var item_idx := -1
-	for qi in range(_vegetation_queue.size()):
-		var candidate: Dictionary = _vegetation_queue[qi]
-		if not is_instance_valid(candidate.get("parent")):
-			_vegetation_queue.remove_at(qi)
-			return  # Удалили невалидный — выходим, попробуем в следующем кадре
-		if enable_elevation:
-			var ck: String = _get_chunk_key_from_node(candidate.get("parent"))
+	# Time budget: до 2ms на растительность
+	const VEG_TIME_BUDGET_USEC := 2000
+	var start_time := Time.get_ticks_usec()
+	var processed := 0
+
+	while not _vegetation_queue.is_empty():
+		if processed > 0 and (Time.get_ticks_usec() - start_time) > VEG_TIME_BUDGET_USEC:
+			break
+
+		# Ищем первый элемент с финализированным elevation
+		var item: Dictionary = {}
+		var item_idx := -1
+		for qi in range(_vegetation_queue.size()):
+			var candidate: Dictionary = _vegetation_queue[qi]
+			if not is_instance_valid(candidate.get("parent")):
+				_vegetation_queue.remove_at(qi)
+				break  # Удалили невалидный — попробуем следующий
+			if enable_elevation:
+				var ck: String = _get_chunk_key_from_node(candidate.get("parent"))
+				if ck == "":
+					ck = candidate.get("chunk_key", "")
+				if ck != "" and not _elevation_finalized.has(ck):
+					continue  # Elevation не готов — пропускаем
+			item = candidate
+			item_idx = qi
+			break
+
+		if item_idx < 0:
+			break  # Все элементы ждут elevation
+
+		_vegetation_queue.remove_at(item_idx)
+
+		var veg_type: String = item.get("type", "")
+		var t0 := Time.get_ticks_usec()
+
+		# Elevation финализирован — берём данные
+		var elev_data: Dictionary = item.get("elev_data", {})
+		if elev_data.is_empty():
+			var ck: String = _get_chunk_key_from_node(item.get("parent"))
 			if ck == "":
-				ck = candidate.get("chunk_key", "")
-			if ck != "" and not _elevation_finalized.has(ck):
-				continue  # Elevation не готов — пропускаем
-		item = candidate
-		item_idx = qi
-		break
+				ck = item.get("chunk_key", "")
+			if ck != "" and _elevation_finalized.has(ck):
+				elev_data = _chunk_elevations[ck]
 
-	if item_idx < 0:
-		return  # Все элементы ждут elevation
-
-	_vegetation_queue.remove_at(item_idx)
-
-	var veg_type: String = item.get("type", "")
-	var t0 := Time.get_ticks_usec()
-
-	# Elevation финализирован — берём данные
-	var elev_data: Dictionary = item.get("elev_data", {})
-	if elev_data.is_empty():
-		var ck: String = _get_chunk_key_from_node(item.get("parent"))
-		if ck == "":
-			ck = item.get("chunk_key", "")
-		if ck != "" and _elevation_finalized.has(ck):
-			elev_data = _chunk_elevations[ck]
-
-	match veg_type:
-		"trees":
-			_create_trees_immediate(item.points, elev_data, item.parent, item.dense)
-			_record_perf("veg_trees", Time.get_ticks_usec() - t0)
-		"chunk_trees":
-			_create_chunk_trees_immediate(item.chunk_key, elev_data, item.parent)
-			_record_perf("veg_chunk_trees", Time.get_ticks_usec() - t0)
+		match veg_type:
+			"trees":
+				_create_trees_immediate(item.points, elev_data, item.parent, item.dense)
+				_record_perf("veg_trees", Time.get_ticks_usec() - t0)
+			"chunk_trees":
+				_create_chunk_trees_immediate(item.chunk_key, elev_data, item.parent)
+				_record_perf("veg_chunk_trees", Time.get_ticks_usec() - t0)
+		processed += 1
 
 
 func _create_3d_building_with_texture(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:

@@ -31,7 +31,7 @@ func _ready() -> void:
 	_add_test_tracks_button()
 
 	# Автостарт через командную строку: --autostart [location_index]
-	var args := OS.get_cmdline_user_args()
+	var args := OS.get_cmdline_args()
 	for i in range(args.size()):
 		if args[i] == "--autostart" and i + 1 < args.size():
 			var idx := int(args[i + 1])

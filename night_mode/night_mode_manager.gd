@@ -7,7 +7,7 @@ signal night_mode_changed(enabled: bool)
 signal rain_changed(enabled: bool)
 
 # Настройки
-@export var start_night := true  ## Включить ночной режим при старте
+@export var start_night := false  ## Включить ночной режим при старте
 
 # Состояние
 var is_night := false

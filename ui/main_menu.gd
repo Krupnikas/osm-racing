@@ -81,8 +81,8 @@ func _ready() -> void:
 	# Автостарт через командную строку: --autostart [location_index]
 	# В Godot пользовательские аргументы идут после '--'
 	# Пример: godot -- --autostart 0
-	var args := OS.get_cmdline_user_args()
-	print("MainMenu: User args: ", args)
+	var args := OS.get_cmdline_args()
+	print("MainMenu: Args: ", args)
 
 	# Проверяем есть ли --autostart в пользовательских аргументах
 	var autostart_idx := -1
