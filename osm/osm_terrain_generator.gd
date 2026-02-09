@@ -3589,8 +3589,22 @@ func _update_chunk_heights(chunk_key: String, chunk_node: Node3D, elev_data: Dic
 						mm.set_instance_transform(i, t)
 				updated_meshes += 1
 
-		# Инфраструктура (светофоры, знаки): обновляем position.y если были созданы без elevation
-		elif child.name == "TrafficLight" or child.name.begins_with("YieldSign") or child.name.begins_with("ParkingSign"):
+		# Окна (WindowBatch): MultiMeshInstance3D с per-instance elevation
+		elif child is MultiMeshInstance3D and child.name == "WindowBatch":
+			if not child.has_meta("_elevation_applied"):
+				child.set_meta("_elevation_applied", true)
+				var mm: MultiMesh = child.multimesh
+				if mm:
+					for i in range(mm.instance_count):
+						var t: Transform3D = mm.get_instance_transform(i)
+						var pos_2d := Vector2(t.origin.x, t.origin.z)
+						var terrain_h: float = _get_elevation_at_point(pos_2d, elev_data)
+						t.origin.y += terrain_h
+						mm.set_instance_transform(i, t)
+				updated_meshes += 1
+
+		# Инфраструктура (светофоры, знаки, неоновые вывески): обновляем position.y если были созданы без elevation
+		elif child.name == "TrafficLight" or child.name.begins_with("YieldSign") or child.name.begins_with("ParkingSign") or child.name.begins_with("NeonSign_"):
 			if not child.has_meta("_elevation_applied"):
 				child.set_meta("_elevation_applied", true)
 				var pos_2d := Vector2(child.position.x, child.position.z)
@@ -3833,6 +3847,10 @@ func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
 	mm_instance.material_override = mat
 	mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	mm_instance.name = "WindowBatch"
+
+	# Если elevation уже финализирован — окна уже получили building_elev в трансформах
+	if _elevation_finalized.has(chunk_key):
+		mm_instance.set_meta("_elevation_applied", true)
 
 	# Track draw calls (MultiMesh = 1 draw call for all windows)
 	if _draw_call_logging_enabled:
@@ -5739,7 +5757,7 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 	})
 
 	# === ОКНА — вызываем сразу (они сами накапливаются в _window_batch_data) ===
-	_add_building_night_decorations.call_deferred(null, points, building_height, parent)
+	_add_building_night_decorations.call_deferred(null, points, building_height, parent, building_elev)
 
 
 ## Создаёт merged ArrayMesh для всех зданий чанка (вызывается при финализации)
@@ -6939,7 +6957,7 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 
 	# Создаём коллизии и декорации отложенно (deferred) чтобы не блокировать кадр
 	_create_building_collisions_deferred.call_deferred(body, points, base_elev, building_height)
-	_add_building_night_decorations.call_deferred(wall_mesh_instance, points, building_height, parent)
+	_add_building_night_decorations.call_deferred(wall_mesh_instance, points, building_height, parent, base_elev)
 
 
 # Кэш кастомных текстур зданий (загружаются по пути)
@@ -9163,7 +9181,7 @@ const NEON_COLORS := [
 
 var _neon_signs_created := 0
 
-func _add_building_night_decorations(building_mesh: MeshInstance3D, points: PackedVector2Array, building_height: float, parent: Node3D) -> void:
+func _add_building_night_decorations(building_mesh: MeshInstance3D, points: PackedVector2Array, building_height: float, parent: Node3D, building_elev: float = 0.0) -> void:
 	"""Добавляет неоновые вывески и освещённые окна к зданию"""
 	# Проверка на дублирование - ищем уже существующие окна по позиции
 	var center := _get_polygon_center(points)
@@ -9198,15 +9216,15 @@ func _add_building_night_decorations(building_mesh: MeshInstance3D, points: Pack
 
 	# 35% шанс на неоновую вывеску
 	if rng.randf() < 0.35 and building_width > 5.0:
-		_add_neon_sign(center, building_height, building_width, rng, parent, building_depth)
+		_add_neon_sign(center, building_height, building_width, rng, parent, building_depth, building_elev)
 		_neon_signs_created += 1
 
 	# Добавляем светящиеся окна для зданий выше 1 этажа
 	if building_height > 3.5:
-		_add_building_windows(points, building_height, rng, parent)
+		_add_building_windows(points, building_height, rng, parent, building_elev)
 
 
-func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNumberGenerator, parent: Node3D, depth: float = 0.0) -> void:
+func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNumberGenerator, parent: Node3D, depth: float = 0.0, building_elev: float = 0.0) -> void:
 	"""Добавляет неоновую вывеску на здание - видимую издалека"""
 	var sign_container := Node3D.new()
 	sign_container.name = "NeonSign_%d" % rng.randi()
@@ -9276,8 +9294,10 @@ func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNum
 	light.light_bake_mode = Light3D.BAKE_DISABLED
 	sign_container.add_child(light)
 
-	# Позиция контейнера
-	sign_container.position = Vector3(center.x, 0, center.y)
+	# Позиция контейнера (building_elev сдвигает вывеску вместе со зданием)
+	sign_container.position = Vector3(center.x, building_elev, center.y)
+	if building_elev != 0.0:
+		sign_container.set_meta("_elevation_applied", true)
 	sign_container.visible = false  # Включается ночью
 
 	parent.add_child(sign_container)
@@ -9286,7 +9306,7 @@ func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNum
 		_draw_call_stats["neon_signs"] += 1
 
 
-func _add_building_windows(points: PackedVector2Array, height: float, rng: RandomNumberGenerator, parent: Node3D) -> void:
+func _add_building_windows(points: PackedVector2Array, height: float, rng: RandomNumberGenerator, parent: Node3D, building_elev: float = 0.0) -> void:
 	"""Добавляет светящиеся окна по периметру здания используя MultiMesh"""
 	if points.size() < 3:
 		return
@@ -9385,8 +9405,8 @@ func _add_building_windows(points: PackedVector2Array, height: float, rng: Rando
 				# Смещение наружу от стены
 				var final_pos := wall_pos + wall_normal * wall_offset
 
-				# Высота окна
-				var y_pos := floor_height * 0.5 + floor_idx * floor_height
+				# Высота окна (building_elev сдвигает окна вместе со зданием)
+				var y_pos := building_elev + floor_height * 0.5 + floor_idx * floor_height
 
 				var pos := Vector3(final_pos.x, y_pos, final_pos.y)
 				var transform := Transform3D(Basis.from_euler(Vector3(0, rot, 0)), pos)
