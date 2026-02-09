@@ -5882,6 +5882,22 @@ func _process_curb_queue() -> void:
 			var smoothed_points: PackedVector2Array = _smooth_road_corners(raw_points)
 			_record_perf("curb_smooth", Time.get_ticks_usec() - t0)
 
+			# Клиппинг по chunk bbox (OSM данные загружаются с +100м overlap →
+			# без клиппинга один бордюр создаётся в нескольких чанках)
+			var ck := _get_chunk_key_from_node(item.parent)
+			if ck != "":
+				var ck_parts: PackedStringArray = ck.split(",")
+				var ck_x := int(ck_parts[0])
+				var ck_z := int(ck_parts[1])
+				var margin := item.width + 5.0
+				var clip_min_x := float(ck_x) * chunk_size - margin
+				var clip_max_x := float(ck_x + 1) * chunk_size + margin
+				var clip_min_z := float(ck_z) * chunk_size - margin
+				var clip_max_z := float(ck_z + 1) * chunk_size + margin
+				smoothed_points = _clip_polyline_to_rect(smoothed_points, clip_min_x, clip_max_x, clip_min_z, clip_max_z)
+				if smoothed_points.size() < 2:
+					continue
+
 			# Добавляем в очередь для генерации меша
 			_curb_smoothed_queue.append({
 				"points": smoothed_points,
