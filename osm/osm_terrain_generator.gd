@@ -3538,9 +3538,14 @@ func _update_chunk_heights(chunk_key: String, chunk_node: Node3D, elev_data: Dic
 				elif sub is CollisionShape3D and sub.shape is ConcavePolygonShape3D:
 					_update_collision_heights(sub, elev_data)
 
-		# Direct MeshInstance3D: roads, curbs, intersections, buildings
+		# Building batches: uniform elevation per building (не per-vertex)
+		elif child is MeshInstance3D and child.mesh is ArrayMesh and (child.name.begins_with("BuildingWalls") or child.name == "BuildingRoofs"):
+			if _update_building_batch_heights(child, elev_data):
+				updated_meshes += 1
+
+		# Direct MeshInstance3D: roads, curbs, intersections
 		elif child is MeshInstance3D and child.mesh is ArrayMesh:
-			if not child.name.begins_with("Terrain"):
+			if not child.name.begins_with("Terrain") and not child.name.begins_with("Building"):
 				if _update_mesh_heights(child, elev_data):
 					updated_meshes += 1
 
@@ -3592,6 +3597,93 @@ func _update_mesh_heights(mesh_instance: MeshInstance3D, elev_data: Dictionary) 
 	arrays[Mesh.ARRAY_VERTEX] = new_vertices
 
 	# Пересоздаём surface с обновлёнными вершинами
+	var material: Material = arr_mesh.surface_get_material(0)
+	arr_mesh.clear_surfaces()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	if material:
+		arr_mesh.surface_set_material(0, material)
+	return true
+
+
+## Обновляет высоты building batch mesh (uniform elevation per building).
+## Использует _building_ranges meta с parent node для определения границ зданий.
+func _update_building_batch_heights(mesh_instance: MeshInstance3D, elev_data: Dictionary) -> bool:
+	if mesh_instance.has_meta("_elevation_applied"):
+		return false
+	mesh_instance.set_meta("_elevation_applied", true)
+
+	var parent_node: Node3D = mesh_instance.get_parent()
+	if not parent_node or not parent_node.has_meta("_building_ranges"):
+		# Нет range данных — fallback на per-vertex (лучше чем ничего)
+		return _update_mesh_heights_force(mesh_instance, elev_data)
+
+	var ranges: Array = parent_node.get_meta("_building_ranges")
+	var mesh_name: String = mesh_instance.name
+	var is_roof: bool = mesh_name == "BuildingRoofs"
+
+	var arr_mesh: ArrayMesh = mesh_instance.mesh
+	if arr_mesh.get_surface_count() == 0:
+		return false
+
+	var arrays: Array = arr_mesh.surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var new_vertices: PackedVector3Array = vertices.duplicate()
+
+	# BuildingWalls_panel → "panel_walls", BuildingRoofs → roof
+	var expected_wall_key := mesh_name.substr(14) + "_walls" if not is_roof else ""
+
+	for r in ranges:
+		# Определяем start/count для этого mesh
+		var start: int
+		var count: int
+		if is_roof:
+			start = r["roof_start"]
+			count = r["roof_count"]
+		else:
+			if r["wall_key"] != expected_wall_key:
+				continue
+			start = r["wall_start"]
+			count = r["wall_count"]
+
+		if start < 0 or count <= 0:
+			continue
+
+		# Max elevation по footprint
+		var footprint: PackedVector2Array = r["points"]
+		var max_h := -999999.0
+		for p in footprint:
+			var h: float = _get_elevation_at_point(p, elev_data)
+			if h > max_h:
+				max_h = h
+
+		# Применяем uniform elevation ко всем вершинам здания
+		var end_idx: int = mini(start + count, new_vertices.size())
+		for i in range(start, end_idx):
+			new_vertices[i].y += max_h
+
+	arrays[Mesh.ARRAY_VERTEX] = new_vertices
+	var material: Material = arr_mesh.surface_get_material(0)
+	arr_mesh.clear_surfaces()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	if material:
+		arr_mesh.surface_set_material(0, material)
+	return true
+
+
+## Force variant of _update_mesh_heights (skips _elevation_applied check, used as fallback).
+func _update_mesh_heights_force(mesh_instance: MeshInstance3D, elev_data: Dictionary) -> bool:
+	var arr_mesh: ArrayMesh = mesh_instance.mesh
+	if arr_mesh.get_surface_count() == 0:
+		return false
+	var arrays: Array = arr_mesh.surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var new_vertices := PackedVector3Array()
+	new_vertices.resize(vertices.size())
+	for i in range(vertices.size()):
+		var v := vertices[i]
+		var terrain_h: float = _get_elevation_at_point(Vector2(v.x, v.z), elev_data)
+		new_vertices[i] = Vector3(v.x, terrain_h + v.y, v.z)
+	arrays[Mesh.ARRAY_VERTEX] = new_vertices
 	var material: Material = arr_mesh.surface_get_material(0)
 	arr_mesh.clear_surfaces()
 	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
@@ -5531,9 +5623,37 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 			"wall_walls": _make_empty_geo_batch(),
 			"roofs": _make_empty_geo_batch(),
 			"collisions": [],
+			"_building_ranges": [],  # [{wall_key, wall_start, wall_count, roof_start, roof_count, points}]
 		}
 
 	var batch: Dictionary = _building_geo_batch[chunk_key]
+
+	# === BAKE ELEVATION (uniform per building) ===
+	# Здание должно стоять вертикально: одна высота для всех вершин.
+	# Берём max elevation по углам footprint — здание стоит на самой высокой точке.
+	var building_elev := 0.0
+	var elev_baked := false
+	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
+		var elev_data: Dictionary = _chunk_elevations[chunk_key]
+		var max_h := -999999.0
+		for p in points:
+			var h: float = _get_elevation_at_point(p, elev_data)
+			if h > max_h:
+				max_h = h
+		building_elev = max_h
+		elev_baked = true
+
+	var wall_verts: PackedVector3Array = result.wall_vertices
+	var roof_verts: PackedVector3Array = result.roof_vertices
+	if elev_baked:
+		# Сдвигаем все вершины на uniform elevation
+		wall_verts = wall_verts.duplicate()
+		for i in range(wall_verts.size()):
+			wall_verts[i].y += building_elev
+		if roof_verts.size() > 0:
+			roof_verts = roof_verts.duplicate()
+			for i in range(roof_verts.size()):
+				roof_verts[i].y += building_elev
 
 	# === НАКАПЛИВАЕМ СТЕНЫ ===
 	var wall_key: String = texture_type + "_walls"
@@ -5541,28 +5661,46 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 		wall_key = "brick_walls"
 
 	var wall_batch: Dictionary = batch[wall_key]
-	var base_idx: int = wall_batch["vertices"].size()
-	wall_batch["vertices"].append_array(result.wall_vertices)
+	var wall_start: int = wall_batch["vertices"].size()
+	wall_batch["vertices"].append_array(wall_verts)
 	wall_batch["uvs"].append_array(result.wall_uvs)
 	wall_batch["normals"].append_array(result.wall_normals)
-	# Сдвигаем индексы на base_idx
+	# Сдвигаем индексы на wall_start
 	for i in range(result.wall_indices.size()):
-		wall_batch["indices"].append(result.wall_indices[i] + base_idx)
+		wall_batch["indices"].append(result.wall_indices[i] + wall_start)
 
 	# === НАКАПЛИВАЕМ КРЫШУ ===
+	var roof_start: int = -1
+	var roof_count: int = 0
 	if result.roof_indices.size() >= 3:
 		var roof_batch: Dictionary = batch["roofs"]
-		var roof_base_idx: int = roof_batch["vertices"].size()
-		roof_batch["vertices"].append_array(result.roof_vertices)
+		roof_start = roof_batch["vertices"].size()
+		roof_batch["vertices"].append_array(roof_verts)
 		roof_batch["uvs"].append_array(result.roof_uvs)
 		roof_batch["normals"].append_array(result.roof_normals)
 		for i in range(result.roof_indices.size()):
-			roof_batch["indices"].append(result.roof_indices[i] + roof_base_idx)
+			roof_batch["indices"].append(result.roof_indices[i] + roof_start)
+		roof_count = roof_verts.size()
+
+	# Сохраняем ranges для deferred elevation
+	batch["_building_ranges"].append({
+		"wall_key": wall_key,
+		"wall_start": wall_start,
+		"wall_count": wall_verts.size(),
+		"roof_start": roof_start,
+		"roof_count": roof_count,
+		"points": points,
+	})
+
+	if elev_baked:
+		batch["_all_baked"] = batch.get("_all_baked", true) and true
+	else:
+		batch["_all_baked"] = false
 
 	# === СОХРАНЯЕМ ДАННЫЕ КОЛЛИЗИЙ ===
 	batch["collisions"].append({
 		"points": points,
-		"base_elev": base_elev,
+		"base_elev": building_elev if elev_baked else base_elev,
 		"building_height": building_height,
 	})
 
@@ -5593,6 +5731,9 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 			if _car.global_position.distance_to(chunk_center) < _building_shadow_lod_distance:
 				shadow_setting = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
+	# Elevation уже baked per-building (uniform) — помечаем mesh'и
+	var all_baked: bool = batch.get("_all_baked", false)
+
 	# === MERGED СТЕНЫ (по типу текстуры) ===
 	for tex_type in ["panel", "brick", "wall"]:
 		var geo: Dictionary = batch[tex_type + "_walls"]
@@ -5616,6 +5757,8 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		mesh_inst.cast_shadow = shadow_setting
 		mesh_inst.visibility_range_end = 400.0
 		mesh_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+		if all_baked:
+			mesh_inst.set_meta("_elevation_applied", true)
 		parent.add_child(mesh_inst)
 
 		if _draw_call_logging_enabled:
@@ -5641,6 +5784,8 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		roof_inst.cast_shadow = shadow_setting
 		roof_inst.visibility_range_end = 400.0
 		roof_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+		if all_baked:
+			roof_inst.set_meta("_elevation_applied", true)
 		parent.add_child(roof_inst)
 
 		if _draw_call_logging_enabled:
@@ -5654,10 +5799,15 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		parent.add_child(body)
 		_create_building_collisions_deferred.call_deferred(body, coll_data["points"], coll_data["base_elev"], coll_data["building_height"])
 
+	# Сохраняем building ranges на parent для deferred elevation
+	if not all_baked:
+		parent.set_meta("_building_ranges", batch["_building_ranges"])
+
 	_building_geo_batch.erase(chunk_key)
 
-	# Здания создаются плоскими (base_elev=0), elevation через _update_chunk_heights.
-	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
+	# Здания с baked elevation уже не нужны в _update_chunk_heights.
+	# Для остальных (elevation ещё не готов) — _update_chunk_heights обработает позже.
+	if not all_baked and _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
 		if is_instance_valid(parent):
 			_update_chunk_heights(chunk_key, parent, _chunk_elevations[chunk_key])
 
