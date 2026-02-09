@@ -7,6 +7,9 @@ extends Node
 const BillboardDecorationScript = preload("res://osm/decorations/billboard_decoration.gd")
 const BuildingOverrideScript = preload("res://osm/decorations/building_override.gd")
 
+const DECORATIONS_PATH := "res://decorations/"
+const INDEX_FILE := "index.json"
+
 # Ссылка на terrain generator для доступа к start_lat/lon
 var _terrain_generator: Node = null
 
@@ -19,94 +22,165 @@ var _billboard_spatial_hash: Dictionary = {}  # cell_key -> Array[int] (инде
 var _building_override_by_way_id: Dictionary = {}  # way_id -> BuildingOverride
 const CELL_SIZE := 100.0  # Размер ячейки пространственного индекса
 
+# Настройки из index.json
+var _texture_base_path: String = "res://textures/"
+
 
 func _ready() -> void:
-	# Загружаем тестовые декорации
-	_load_test_decorations()
+	_load_decorations_from_json()
 	_build_spatial_index()
 
 
-func _load_test_decorations() -> void:
-	"""Загружает тестовые декорации (позже заменим на .tres файлы)"""
+func _load_decorations_from_json() -> void:
+	"""Загружает декорации из JSON файлов"""
+	var index_path := DECORATIONS_PATH + INDEX_FILE
 
-	# Тестовый билборд "РЕКЛАМА" на точке 59.149878, 37.948709
-	var billboard = BillboardDecorationScript.new()
-	billboard.lat = 59.149878
-	billboard.lon = 37.948709
-	billboard.use_latlon = true
-	billboard.text = "РЕКЛАМА"
-	billboard.size = Vector2(5.0, 2.5)
-	billboard.pole_height = 4.0
-	billboard.background_color = Color(0.1, 0.3, 0.7)  # Синий фон
-	billboard.text_color = Color.WHITE
-	billboard.has_backlight = true
-	billboard.rotation_y = 0.0  # Повернём позже к дороге
-	_billboards.append(billboard)
+	if not FileAccess.file_exists(index_path):
+		push_warning("DecorationLayer: index.json not found at " + index_path)
+		return
 
-	# Билборд МВидео / Лада на 59.14986, 37.952547
-	var billboard_mvideo = BillboardDecorationScript.new()
-	billboard_mvideo.lat = 59.14986
-	billboard_mvideo.lon = 37.952547
-	billboard_mvideo.use_latlon = true
-	billboard_mvideo.texture_path = "res://textures/billboards/mvideo-banner.jpg"
-	billboard_mvideo.texture_path_back = "res://textures/billboards/lada-banner.jpg"
-	billboard_mvideo.size = Vector2(6.0, 3.35)  # Среднее от пропорций обоих баннеров
-	billboard_mvideo.pole_height = 4.0
-	billboard_mvideo.has_backlight = true
-	billboard_mvideo.emission_strength = 0.3
-	billboard_mvideo.rotation_y = -PI / 2.0  # 90° по часовой
-	_billboards.append(billboard_mvideo)
+	var index_data := _load_json(index_path)
+	if index_data.is_empty():
+		return
 
-	# Тестовое переопределение здания: way 45836637 (39 Северное шоссе) - кастомная текстура
-	var building_override = BuildingOverrideScript.new()
-	building_override.osm_way_id = 45836637
-	building_override.wall_texture_path = "res://textures/buildings/111-125.png"
-	building_override.wall_emissive_path = "res://textures/buildings/111-125_emissive_mask.png"
-	building_override.texture_repeat_y = 2.0
-	building_override.use_adaptive_repeat = true  # Адаптивный режим
-	building_override.texture_repeat_short = 1.0  # 1 повтор на коротких стенах
-	building_override.texture_repeat_long = 3.0   # 3 повтора на длинных стенах
-	_building_overrides.append(building_override)
+	# Сохраняем базовый путь для текстур
+	if index_data.has("texture_base_path"):
+		_texture_base_path = index_data["texture_base_path"]
 
-	# 37 Северное шоссе (way 45836638)
-	var override_37 = BuildingOverrideScript.new()
-	override_37.osm_way_id = 45836638
-	override_37.wall_texture_path = "res://textures/buildings/111-125.png"
-	override_37.wall_emissive_path = "res://textures/buildings/111-125_emissive_mask.png"
-	override_37.texture_repeat_y = 2.0
-	override_37.use_adaptive_repeat = true
-	override_37.texture_repeat_short = 1.0
-	override_37.texture_repeat_long = 3.0
-	_building_overrides.append(override_37)
+	# Загружаем каждый включённый источник
+	var sources: Array = index_data.get("sources", [])
+	for source in sources:
+		if not source.get("enabled", true):
+			continue
 
-	# 35 Северное шоссе (way 45836639)
-	var override_35 = BuildingOverrideScript.new()
-	override_35.osm_way_id = 45836639
-	override_35.wall_texture_path = "res://textures/buildings/111-125.png"
-	override_35.wall_emissive_path = "res://textures/buildings/111-125_emissive_mask.png"
-	override_35.texture_repeat_y = 2.0
-	override_35.use_adaptive_repeat = true
-	override_35.texture_repeat_short = 1.0
-	override_35.texture_repeat_long = 3.0
-	_building_overrides.append(override_35)
+		var source_path: String = DECORATIONS_PATH + source.get("path", "")
+		_load_city_decorations(source_path, source.get("id", "unknown"))
 
-	# Окинина 8 (way 1408400824) - кастомная текстура, 1 повтор
-	var okinina_override = BuildingOverrideScript.new()
-	okinina_override.osm_way_id = 1408400824
-	okinina_override.wall_texture_path = "res://textures/buildings/111-126.jpg"
-	okinina_override.texture_repeat_y = 1.0
-	_building_overrides.append(okinina_override)
-
-	# Химико-технологический колледж (way 45747168)
-	var ptu_override = BuildingOverrideScript.new()
-	ptu_override.osm_way_id = 45747168
-	ptu_override.wall_texture_path = "res://textures/buildings/ptu.png"
-	ptu_override.texture_repeat_y = 1.0
-	_building_overrides.append(ptu_override)
-
-	print("DecorationLayer: Loaded %d billboards, %d building overrides" % [
+	print("DecorationLayer: Loaded %d billboards, %d building overrides from JSON" % [
 		_billboards.size(), _building_overrides.size()
 	])
+
+
+func _load_city_decorations(city_path: String, city_id: String) -> void:
+	"""Загружает декорации для конкретного города"""
+	var meta_path := city_path + "meta.json"
+
+	if not FileAccess.file_exists(meta_path):
+		push_warning("DecorationLayer: meta.json not found for " + city_id)
+		return
+
+	var meta := _load_json(meta_path)
+	if meta.is_empty():
+		return
+
+	# Загружаем файлы, указанные в meta.json
+	var files: Array = meta.get("files", [])
+	for file_name in files:
+		var file_path: String = city_path + file_name
+		if file_name.ends_with("billboards.json"):
+			_load_billboards_json(file_path)
+		elif file_name.ends_with("building_overrides.json"):
+			_load_building_overrides_json(file_path)
+
+
+func _load_billboards_json(path: String) -> void:
+	"""Загружает билборды из JSON файла"""
+	var data := _load_json(path)
+	if data.is_empty():
+		return
+
+	var billboards_data: Array = data.get("billboards", [])
+	for bd in billboards_data:
+		var billboard = BillboardDecorationScript.new()
+
+		billboard.lat = bd.get("lat", 0.0)
+		billboard.lon = bd.get("lon", 0.0)
+		billboard.use_latlon = true
+
+		# Размеры
+		var size_arr: Array = bd.get("size", [4.0, 3.0])
+		billboard.size = Vector2(size_arr[0], size_arr[1])
+		billboard.pole_height = bd.get("pole_height", 3.0)
+
+		# Поворот (градусы -> радианы)
+		billboard.rotation_y = deg_to_rad(bd.get("rotation_deg", 0.0))
+
+		# Текстуры
+		if bd.has("texture"):
+			billboard.texture_path = _texture_base_path + bd["texture"]
+		if bd.has("texture_back"):
+			billboard.texture_path_back = _texture_base_path + bd["texture_back"]
+
+		# Текст
+		billboard.text = bd.get("text", "")
+
+		# Цвета (из hex строки)
+		if bd.has("background"):
+			billboard.background_color = Color.html(bd["background"])
+		if bd.has("text_color"):
+			billboard.text_color = Color.html(bd["text_color"])
+
+		# Освещение
+		billboard.has_backlight = bd.get("backlight", true)
+		billboard.emission_strength = bd.get("emission", 0.5)
+
+		_billboards.append(billboard)
+
+
+func _load_building_overrides_json(path: String) -> void:
+	"""Загружает переопределения зданий из JSON файла"""
+	var data := _load_json(path)
+	if data.is_empty():
+		return
+
+	var overrides_data: Array = data.get("building_overrides", [])
+	for od in overrides_data:
+		var override = BuildingOverrideScript.new()
+
+		override.osm_way_id = od.get("osm_way_id", 0)
+
+		# Текстуры
+		if od.has("wall_texture"):
+			override.wall_texture_path = _texture_base_path + od["wall_texture"]
+		if od.has("wall_emissive"):
+			override.wall_emissive_path = _texture_base_path + od["wall_emissive"]
+
+		# Повторение текстуры
+		override.texture_repeat_y = od.get("repeat_y", 1.0)
+
+		# Адаптивное повторение
+		if od.has("adaptive_repeat"):
+			var ar: Dictionary = od["adaptive_repeat"]
+			override.use_adaptive_repeat = ar.get("enabled", false)
+			override.texture_repeat_short = ar.get("short", 1.0)
+			override.texture_repeat_long = ar.get("long", 3.0)
+
+		_building_overrides.append(override)
+
+
+func _load_json(path: String) -> Dictionary:
+	"""Загружает и парсит JSON файл"""
+	if not FileAccess.file_exists(path):
+		push_warning("DecorationLayer: File not found: " + path)
+		return {}
+
+	var file := FileAccess.open(path, FileAccess.READ)
+	if not file:
+		push_error("DecorationLayer: Cannot open file: " + path)
+		return {}
+
+	var json_text := file.get_as_text()
+	file.close()
+
+	var json := JSON.new()
+	var error := json.parse(json_text)
+	if error != OK:
+		push_error("DecorationLayer: JSON parse error in %s at line %d: %s" % [
+			path, json.get_error_line(), json.get_error_message()
+		])
+		return {}
+
+	return json.data
 
 
 func _build_spatial_index() -> void:

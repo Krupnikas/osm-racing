@@ -1,0 +1,31 @@
+{
+  "billboards": [
+    {
+      "id": "reklama_test",
+      "comment": "Тестовый билборд с текстом",
+      "lat": 59.149878,
+      "lon": 37.948709,
+      "rotation_deg": 0,
+      "size": [5.0, 2.5],
+      "pole_height": 4.0,
+      "text": "РЕКЛАМА",
+      "background": "#1A4DB3",
+      "text_color": "#FFFFFF",
+      "backlight": true,
+      "emission": 0.5
+    },
+    {
+      "id": "mvideo_severnoe",
+      "comment": "МВидео / Лада у Северного шоссе",
+      "lat": 59.14986,
+      "lon": 37.952547,
+      "rotation_deg": -90,
+      "size": [6.0, 3.35],
+      "pole_height": 4.0,
+      "texture": "billboards/mvideo-banner.jpg",
+      "texture_back": "billboards/lada-banner.jpg",
+      "backlight": true,
+      "emission": 0.3
+    }
+  ]
+}
