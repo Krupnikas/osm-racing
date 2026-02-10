@@ -3970,6 +3970,8 @@ func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
 	mm_instance.multimesh = mm
 	mm_instance.material_override = mat
 	mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mm_instance.visibility_range_end = render_distance
+	mm_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 	mm_instance.name = "WindowBatch"
 
 	if _elevation_finalized.has(chunk_key):
@@ -6040,7 +6042,7 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		mesh_inst.name = "BuildingWalls_" + tex_type
 		mesh_inst.material_override = _building_wall_materials[tex_type]
 		mesh_inst.cast_shadow = shadow_setting
-		mesh_inst.visibility_range_end = 400.0
+		mesh_inst.visibility_range_end = render_distance
 		mesh_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 		if all_baked:
 			mesh_inst.set_meta("_elevation_applied", true)
@@ -6067,7 +6069,7 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		roof_inst.name = "BuildingRoofs"
 		roof_inst.material_override = _building_roof_material
 		roof_inst.cast_shadow = shadow_setting
-		roof_inst.visibility_range_end = 400.0
+		roof_inst.visibility_range_end = render_distance
 		roof_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 		if all_baked:
 			roof_inst.set_meta("_elevation_applied", true)
@@ -7163,7 +7165,7 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # LOD optimization
 
 	# Visibility range для автоматического скрытия далёких зданий
-	wall_mesh_instance.visibility_range_end = 400.0
+	wall_mesh_instance.visibility_range_end = render_distance
 	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
 	# Материал стен с шейдером для правильного двустороннего освещения
@@ -7490,7 +7492,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	else:
 		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
-	wall_mesh_instance.visibility_range_end = 400.0
+	wall_mesh_instance.visibility_range_end = render_distance
 	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
 	# Материал стен с кастомной текстурой - используем ShaderMaterial для правильной работы emission
