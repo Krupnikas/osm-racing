@@ -9993,46 +9993,45 @@ func _add_building_night_decorations(building_mesh: MeshInstance3D, points: Pack
 
 
 func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNumberGenerator, parent: Node3D, depth: float = 0.0, building_elev: float = 0.0) -> void:
-	"""Добавляет неоновую вывеску на здание - видимую издалека"""
+	"""Добавляет неоновую вывеску на здание.
+	Оптимизация: QuadMesh вместо BoxMesh, плоская структура без промежуточного Node3D,
+	cast_shadow OFF, уменьшенный range OmniLight."""
 	var sign_container := Node3D.new()
 	sign_container.name = "NeonSign_%d" % rng.randi()
 
-	# Выбираем случайный цвет
 	var color: Color = NEON_COLORS[rng.randi() % NEON_COLORS.size()]
 
-	# Размер вывески - увеличен для видимости издалека
+	# Размер вывески
 	var sign_width := minf(width * 0.6, 5.0)
 	var sign_height := rng.randf_range(1.0, 1.5)
-
-	# Позиция - на фасаде здания
 	var sign_y := minf(height * 0.35, 5.0)
 
-	# Создаём светящийся mesh
+	# QuadMesh вместо BoxMesh (12 вершин → 4, не отбрасывает тень)
 	var sign_mesh := MeshInstance3D.new()
 	sign_mesh.name = "SignMesh"
-	var box := BoxMesh.new()
-	box.size = Vector3(sign_width, sign_height, 0.15)
-	sign_mesh.mesh = box
+	var quad := QuadMesh.new()
+	quad.size = Vector2(sign_width, sign_height)
+	sign_mesh.mesh = quad
+	sign_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
-	# Материал с emission - очень яркий для видимости издалека
+	# Материал с emission — unshaded, видимый и ночью и издалека
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = color
 	mat.emission_enabled = true
 	mat.emission = color
-	mat.emission_energy_multiplier = 20.0  # Очень яркий
+	mat.emission_energy_multiplier = 20.0
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	sign_mesh.material_override = mat
 
-	# Выбираем случайную сторону для вывески
+	# Выбираем случайную сторону
 	var side := rng.randi() % 4
 	var sign_offset: Vector3
 	var sign_rotation := 0.0
-
-	# Используем depth если передан, иначе берём width (квадратное здание)
 	var actual_depth := depth if depth > 0 else width
 
 	match side:
-		0:  # Z+ (фасад)
+		0:  # Z+
 			sign_offset = Vector3(0, sign_y, actual_depth / 2 + 0.15)
 			sign_rotation = 0.0
 		1:  # Z-
@@ -10049,20 +10048,18 @@ func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNum
 	sign_mesh.rotation.y = sign_rotation
 	sign_container.add_child(sign_mesh)
 
-	# Источник света - увеличен для видимости издалека
+	# OmniLight с уменьшенным range (10m вместо 25m — достаточно для подсветки фасада)
 	var light := OmniLight3D.new()
 	light.name = "SignLight"
-	# Свет чуть впереди вывески
-	var light_offset := Vector3(0, 0, 2.0).rotated(Vector3.UP, sign_rotation)
+	var light_offset := Vector3(0, 0, 1.5).rotated(Vector3.UP, sign_rotation)
 	light.position = sign_offset + light_offset
-	light.omni_range = 25.0  # Большой радиус
-	light.light_energy = 3.0  # Яркий свет
+	light.omni_range = 10.0
+	light.light_energy = 3.0
 	light.light_color = color
 	light.shadow_enabled = false
 	light.light_bake_mode = Light3D.BAKE_DISABLED
 	sign_container.add_child(light)
 
-	# Позиция контейнера (building_elev сдвигает вывеску вместе со зданием)
 	sign_container.position = Vector3(center.x, building_elev, center.y)
 	if building_elev != 0.0:
 		sign_container.set_meta("_elevation_applied", true)
