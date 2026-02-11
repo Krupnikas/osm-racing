@@ -7,21 +7,12 @@ uniform sampler2D normal_texture : hint_normal, filter_linear_mipmap;
 uniform sampler2D ao_texture : hint_default_white, filter_linear_mipmap;
 uniform sampler2D roughness_texture : hint_default_white, filter_linear_mipmap;
 
-// Emissive mask - RGB цвета окон, чёрный = нет свечения
-uniform sampler2D emission_mask : source_color, filter_linear_mipmap;
-uniform float emission_energy : hint_range(0.0, 5.0) = 1.0;
-uniform bool has_emission_mask = false;
-
-// Глобальный параметр ночного режима - обновляется автоматически
-global uniform bool is_night_global;
-
 // Параметры
 uniform float normal_strength : hint_range(0.0, 2.0) = 1.0;
 uniform float ao_strength : hint_range(0.0, 1.0) = 1.0;
 uniform float roughness_base : hint_range(0.0, 1.0) = 0.5;
 
 void fragment() {
-	// Albedo
 	ALBEDO = texture(albedo_texture, UV).rgb;
 
 	// Normal map
@@ -46,10 +37,4 @@ void fragment() {
 	ROUGHNESS = mix(roughness_base, 1.0 - roughness_tex, 0.5);
 
 	METALLIC = 0.0;
-
-	// Emission - только ночью и только если есть маска
-	if (has_emission_mask && is_night_global) {
-		vec3 emission_color = texture(emission_mask, UV).rgb;
-		EMISSION = emission_color * emission_energy;
-	}
 }

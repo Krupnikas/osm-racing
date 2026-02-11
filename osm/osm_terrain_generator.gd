@@ -196,7 +196,7 @@ var _lamp_lights_by_chunk: Dictionary = {}  # chunk_key -> Array[OmniLight3D]
 var _billboard_batches_to_finalize: Array[String] = []  # Chunk keys ready for billboard finalization
 
 # Building shadow LOD - only cast shadows for close buildings
-var _building_shadow_lod_distance: float = 150.0  # Buildings > 150m don't cast shadows
+var _building_shadow_lod_distance: float = 300.0  # Chunk center distance for shadow LOD
 
 var _curb_collision_results: Array = []  # Результаты расчёта коллизий из worker threads
 var _curb_collision_mutex: Mutex  # Для синхронизации доступа к результатам коллизий
@@ -591,6 +591,27 @@ func _init_tree_meshes_model() -> void:
 			var arrays := mesh.surface_get_arrays(surf_idx)
 			var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 			var norms = arrays[Mesh.ARRAY_NORMAL]
+			var indices = arrays[Mesh.ARRAY_INDEX]
+
+			# Decimate high-poly surfaces (leaves/branches): keep every Nth triangle
+			if verts.size() > 1000 and indices != null and indices is PackedInt32Array:
+				var src_indices: PackedInt32Array = indices
+				var tri_count: int = src_indices.size() / 3
+				var keep_step := 4  # Keep 1 out of 4 triangles (~75% reduction)
+				var new_indices := PackedInt32Array()
+				new_indices.resize(src_indices.size() / keep_step + 3)
+				var write_pos := 0
+				var tri_idx := 0
+				while tri_idx < tri_count:
+					var base: int = tri_idx * 3
+					new_indices[write_pos] = src_indices[base]
+					new_indices[write_pos + 1] = src_indices[base + 1]
+					new_indices[write_pos + 2] = src_indices[base + 2]
+					write_pos += 3
+					tri_idx += keep_step
+				new_indices.resize(write_pos)
+				arrays[Mesh.ARRAY_INDEX] = new_indices
+				print("OSM: Decimated tree surface: %d -> %d triangles" % [tri_count, write_pos / 3])
 
 			# Трансформируем вершины и нормали
 			var transformed_verts := PackedVector3Array()
@@ -788,6 +809,9 @@ func _process(delta: float) -> void:
 
 	# Проверяем нужны ли новые чанки
 	_update_chunks(player_pos)
+
+	# Обновляем тени зданий по расстоянию до игрока
+	_update_building_shadows(player_pos)
 
 # Начать загрузку карты
 func start_loading() -> void:
@@ -6007,16 +6031,8 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		_building_geo_batch.erase(chunk_key)
 		return
 
-	# Shadow LOD по расстоянию чанка до игрока
-	var shadow_setting: int = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	if _car:
-		var coords := chunk_key.split(",")
-		if coords.size() == 2:
-			var cx := int(coords[0])
-			var cz := int(coords[1])
-			var chunk_center := Vector3(cx * chunk_size + chunk_size * 0.5, 0.0, cz * chunk_size + chunk_size * 0.5)
-			if _car.global_position.distance_to(chunk_center) < _building_shadow_lod_distance:
-				shadow_setting = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	# Shadow LOD — начальное значение ON; _update_building_shadows переключает по расстоянию каждые 0.5с
+	var shadow_setting: int = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
 	# Elevation уже baked per-building (uniform) — помечаем mesh'и
 	var all_baked: bool = batch.get("_all_baked", false)
@@ -7151,18 +7167,7 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	var wall_mesh_instance := MeshInstance3D.new()
 	wall_mesh_instance.mesh = wall_mesh
 
-	# Shadow LOD: только близкие здания отбрасывают тени (< 150m)
-	# Default to 0.0 (shadows ON) when car unknown - safer for visual quality
-	var distance: float = 0.0
-	if _car:
-		var center := _get_polygon_center(points)
-		var building_pos_3d := Vector3(center.x, base_elev, center.y)
-		distance = _car.global_position.distance_to(building_pos_3d)
-
-	if distance < _building_shadow_lod_distance:
-		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	else:
-		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # LOD optimization
+	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
 	# Visibility range для автоматического скрытия далёких зданий
 	wall_mesh_instance.visibility_range_end = render_distance
@@ -7212,11 +7217,7 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 		var roof_mesh_instance := MeshInstance3D.new()
 		roof_mesh_instance.mesh = roof_mesh
 
-		# Shadow LOD for roof (same distance check as walls)
-		if distance < _building_shadow_lod_distance:
-			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		else:
-			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
 		# Материал крыши с текстурой
 		var roof_material := StandardMaterial3D.new()
@@ -7360,10 +7361,6 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	var heightmap_scale: float = 0.05  # Увеличенная глубина для видимого эффекта
 	print("  Displacement map: ", displacement_path, " -> ", displacement_texture != null)
 
-	# Emissive mask (светящиеся окна)
-	var emissive_path := base_path + "_emissive_mask.png"
-	var emissive_texture: Texture2D = _load_texture_map(building_override.wall_emissive_path, emissive_path)
-	print("  Emissive mask: ", emissive_path, " -> ", emissive_texture != null)
 
 	# Высоты с учётом террейна
 	var floor_y := base_elev + 0.1
@@ -7480,18 +7477,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	var wall_mesh_instance := MeshInstance3D.new()
 	wall_mesh_instance.mesh = wall_mesh
 
-	# Shadow LOD
-	var distance: float = 0.0
-	if _car:
-		var center := _get_polygon_center(points)
-		var building_pos_3d := Vector3(center.x, base_elev, center.y)
-		distance = _car.global_position.distance_to(building_pos_3d)
-
-	if distance < _building_shadow_lod_distance:
-		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	else:
-		wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-
+	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	wall_mesh_instance.visibility_range_end = render_distance
 	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
@@ -7510,12 +7496,6 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		wall_material.set_shader_parameter("ao_strength", ao_strength)
 	if specular_texture:
 		wall_material.set_shader_parameter("roughness_texture", specular_texture)
-
-	# Emissive (светящиеся окна) — шейдер сам проверяет is_night_global
-	if emissive_texture:
-		wall_material.set_shader_parameter("emission_mask", emissive_texture)
-		wall_material.set_shader_parameter("has_emission_mask", true)
-		wall_material.set_shader_parameter("emission_energy", 1.0)
 
 	wall_mesh_instance.material_override = wall_material
 
@@ -7545,10 +7525,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		var roof_mesh_instance := MeshInstance3D.new()
 		roof_mesh_instance.mesh = roof_mesh
 
-		if distance < _building_shadow_lod_distance:
-			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		else:
-			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
 		var roof_material := StandardMaterial3D.new()
 		roof_material.cull_mode = BaseMaterial3D.CULL_BACK
@@ -9823,6 +9800,32 @@ func _connect_to_night_mode() -> void:
 			_on_night_mode_changed(true)
 
 
+func _update_building_shadows(player_pos: Vector3) -> void:
+	var shadow_dist_sq: float = _building_shadow_lod_distance * _building_shadow_lod_distance
+	for chunk_key: String in _loaded_chunks:
+		var chunk_node: Node3D = _loaded_chunks[chunk_key]
+		if not is_instance_valid(chunk_node):
+			continue
+		var parts: PackedStringArray = chunk_key.split(",")
+		var cx: float = float(parts[0]) * chunk_size + chunk_size * 0.5
+		var cz: float = float(parts[1]) * chunk_size + chunk_size * 0.5
+		var dx: float = player_pos.x - cx
+		var dz: float = player_pos.z - cz
+		var dist_sq: float = dx * dx + dz * dz
+		var want_shadow: int
+		if dist_sq < shadow_dist_sq:
+			want_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		else:
+			want_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		for child in chunk_node.get_children():
+			if child is GeometryInstance3D:
+				var cname: String = child.name
+				if cname.begins_with("BuildingWalls_") or cname == "BuildingRoofs":
+					var gi: GeometryInstance3D = child as GeometryInstance3D
+					if gi.cast_shadow != want_shadow:
+						gi.cast_shadow = want_shadow
+
+
 func _setup_render_distance() -> void:
 	"""Настраивает дальность прорисовки камеры, туман и дистанции чанков"""
 	# Настраиваем дистанции загрузки чанков
@@ -9835,6 +9838,15 @@ func _setup_render_distance() -> void:
 	if _camera:
 		_camera.far = render_distance * 1.5  # Немного дальше тумана
 		print("OSM: Camera far plane set to %.0f" % _camera.far)
+
+	# Настраиваем тени DirectionalLight — 2 каскада PSSM, max distance = render_distance
+	var dir_light := get_tree().current_scene.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
+	if dir_light:
+		dir_light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+		dir_light.directional_shadow_max_distance = render_distance
+		dir_light.directional_shadow_split_1 = 0.3
+		dir_light.shadow_normal_bias = 2.0
+		print("OSM: Shadow: 2 cascades, max distance %.0f, bias %.1f" % [render_distance, dir_light.shadow_normal_bias])
 
 	# Настраиваем туман (Godot 4 использует экспоненциальный туман)
 	if fog_enabled:
