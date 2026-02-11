@@ -33,6 +33,10 @@ func _ready() -> void:
 	# Автостарт через командную строку: --autostart [location_index]
 	var args := OS.get_cmdline_args()
 	for i in range(args.size()):
+		if args[i] == "--perftest":
+			print("StandaloneMenu: Starting performance test")
+			get_tree().change_scene_to_file("res://tests/performance_test.tscn")
+			return
 		if args[i] == "--autostart" and i + 1 < args.size():
 			var idx := int(args[i + 1])
 			var locations := LOCATIONS.keys()

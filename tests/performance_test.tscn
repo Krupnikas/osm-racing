@@ -56,10 +56,11 @@ albedo_color = Color(0.4, 0.5, 0.4, 1)
 
 [node name="PerformanceTest" type="Node3D"]
 script = ExtResource("test_script")
-test_duration = 60.0
+test_duration = 30.0
 test_speed = 20.0
 enable_night_mode = false
-test_location = Vector2(59.1167, 37.9)
+test_location = Vector2(59.149827, 37.948859)
+finish_location = Vector2(59.142110, 37.943897)
 auto_quit_after_test = true
 
 [node name="StaticGround" type="StaticBody3D" parent="." groups=["Grass"]]
@@ -74,8 +75,8 @@ surface_material_override/0 = SubResource("ground_mat")
 
 [node name="OSMTerrain" type="Node3D" parent="." groups=["osm_terrain"]]
 script = ExtResource("osm")
-start_lat = 59.1167
-start_lon = 37.9
+start_lat = 59.149827
+start_lon = 37.948859
 chunk_size = 300.0
 load_distance = 500.0
 unload_distance = 700.0
@@ -105,7 +106,7 @@ osm_terrain_path = NodePath("../OSMTerrain")
 
 [node name="NightModeManager" type="Node" parent="." groups=["night_mode_manager"]]
 script = ExtResource("night")
-is_night = true
+is_night = false
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 0.5, 0.866025, 0, -0.866025, 0.5, 0, 10, 0)

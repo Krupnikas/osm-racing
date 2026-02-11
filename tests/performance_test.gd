@@ -3,7 +3,7 @@ extends Node
 # Automatic performance test for OSM Racing Game
 # Test: Drive straight from Pionerskaya sprint start toward finish
 
-@export var test_duration: float = 60.0  # Увеличено до 1 минуты для better statistics
+@export var test_duration: float = 30.0  # 30 секунд после загрузки
 @export var test_speed: float = 20.0  # m/s (~72 km/h)
 @export var enable_night_mode: bool = false
 @export var test_location: Vector2 = Vector2(59.149827, 37.948859)  # Pionerskaya sprint start
@@ -184,7 +184,7 @@ func _position_car_on_road() -> void:
 				start_local = Vector3(nearest_wp.position.x, 1.0, nearest_wp.position.z)
 				print("[PerformanceTest] Found road waypoint near start")
 
-	# Face car toward finish (like sprint race: atan2 + PI)
+	# Face car toward finish (south along Pionerskaya)
 	var dir := finish_local - start_local
 	dir.y = 0
 	var yaw := 0.0
@@ -206,8 +206,17 @@ func _start_test() -> void:
 	print("==================================\n")
 	test_running = true
 	test_time = 0.0
+	# Отключаем ручной ввод чтобы тест контролировал машину
+	if vehicle_input:
+		vehicle_input.set_physics_process(false)
+		vehicle_input.set_process_input(false)
+	# Включаем 1-ю передачу и автомат
+	if car and car.get("current_gear") != null:
+		car.current_gear = 1
+		car.automatic_transmission = true
+		print("[PerformanceTest] Set gear 1, automatic transmission")
 	if logger:
-		logger.start_logging("cherepovets_night_30s")
+		logger.start_logging("pionerskaya_perftest")
 
 func _process(delta: float) -> void:
 	if not test_running:
@@ -229,34 +238,26 @@ func _physics_process(_delta: float) -> void:
 		return
 
 	# Apply constant throttle to maintain speed
-	if car and "throttle_input" in car:
-		# Set full throttle to maintain test_speed (~72 km/h = 20 m/s)
+	if car:
 		car.throttle_input = 1.0
 		car.brake_input = 0.0
-		car.steering_input = 0.0  # Go straight
+		car.steering_input = 0.0
 		car.handbrake_input = 0.0
-	elif vehicle_input:
-		# Disable normal input and control directly
-		vehicle_input.set_physics_process(false)
-		if car and "throttle_input" in car:
-			car.throttle_input = 1.0
-			car.brake_input = 0.0
-			car.steering_input = 0.0
-			car.handbrake_input = 0.0
 
 func _end_test() -> void:
+	if not test_running:
+		return
 	test_running = false
+	print("\n[PerformanceTest] Test complete! Duration: %.1f s" % test_time)
+
+	# Stop the car
+	if car:
+		car.throttle_input = 0.0
+		car.brake_input = 1.0
 
 	# Re-enable normal vehicle input
 	if vehicle_input:
 		vehicle_input.set_physics_process(true)
-
-	# Stop the car
-	if car and car.has("throttle_input"):
-		car.throttle_input = 0.0
-		car.brake_input = 1.0
-
-	print("\n[PerformanceTest] Test complete!")
 
 	if logger:
 		# Stop logging and get summary
