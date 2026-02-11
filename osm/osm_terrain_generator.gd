@@ -154,6 +154,11 @@ var _window_finalize_progress: Dictionary = {}  # chunk_key -> {buf, offset, mm,
 var _building_wall_materials: Dictionary = {}  # texture_type -> ShaderMaterial (shared)
 var _building_roof_material: StandardMaterial3D = null  # shared
 
+# ENTRANCE GEOMETRY MERGE: объединяем все подъезды чанка в один ArrayMesh
+var _entrance_batch: Dictionary = {}  # chunk_key -> {parent, concrete: {vertices,normals,indices}, red_metal, ...}
+var _entrance_lights: Array[OmniLight3D] = []  # Светильники подъездов (для ночного режима)
+const ResidentialEntranceScript = preload("res://osm/residential_entrance_generator.gd")
+
 # Lamp lights - для управления ночным режимом
 var _lamp_batch_lights: Array[OmniLight3D] = []  # Все OmniLight3D (теперь без батчинга, по одному фонарю за раз)
 
@@ -4079,9 +4084,16 @@ func update_window_night_mode(is_night: bool) -> void:
 			valid_mats.append(m)
 	_window_batch_materials = valid_mats
 
+	# Переключаем светильники подъездов
+	var light_count := 0
+	for light in _entrance_lights:
+		if is_instance_valid(light):
+			light.light_energy = 2.0 if is_night else 0.0
+			light_count += 1
+
 	var icon := "🌙" if is_night else "☀️"
-	print("OSM: %s Updated %d window batch materials: is_night=%s (pruned %d stale)" % [
-		icon, updated_count, is_night, before_size - _window_batch_materials.size()
+	print("OSM: %s Updated %d window batch materials, %d entrance lights: is_night=%s (pruned %d stale)" % [
+		icon, updated_count, light_count, is_night, before_size - _window_batch_materials.size()
 	])
 
 
@@ -4770,6 +4782,10 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
 	_add_business_signs_simple(points, tags, parent, building_height, base_elev, loader)
+
+	# Добавляем подъезды жилых домов (из building_overrides JSON)
+	if way_id > 0 and _decoration_layer:
+		_add_residential_entrances(points, parent, base_elev, way_id, elev_data)
 
 
 func _create_parking(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
@@ -6238,6 +6254,7 @@ func _process_road_queue() -> void:
 				var chunk_key: String = _building_geo_finalize_queue[0]
 				_building_geo_finalize_queue.remove_at(0)
 				_finalize_building_geo_batch(chunk_key)
+				_finalize_entrance_batch(chunk_key)
 				if Time.get_ticks_usec() - t_geo > 100:
 					_record_perf("building_geo_finalize", Time.get_ticks_usec() - t_geo)
 				# Enqueue windows for progressive fill (fast - just sets up state)
@@ -6245,6 +6262,12 @@ func _process_road_queue() -> void:
 					_finalize_window_batches_for_chunk(chunk_key)
 				if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
 					return
+
+			# Финализируем подъезды (могут быть добавлены позже building_geo)
+			if not _entrance_batch.is_empty():
+				var ent_key: String = _entrance_batch.keys()[0]
+				_finalize_entrance_batch(ent_key)
+				return
 
 			# Enqueue remaining windows (chunks without buildings in queue)
 			var window_chunks := _window_batch_data.keys()
@@ -9055,6 +9078,181 @@ func _create_manhole_decal(pos: Vector2, elevation: float, rotation: float, pare
 	_manhole_count += 1
 	if _manhole_count <= 5 or _manhole_count % 50 == 0:
 		print("OSM Manholes: created #%d at (%.1f, %.1f)" % [_manhole_count, pos.x, pos.y])
+
+
+# === RESIDENTIAL ENTRANCES BATCH SYSTEM ===
+
+func _add_residential_entrances(points: PackedVector2Array, parent: Node3D, base_elev: float, way_id: int, elev_data: Dictionary) -> void:
+	"""Добавляет подъезды для здания если они есть в building_overrides"""
+	var override = _decoration_layer.get_building_override_for_way(way_id)
+	if not override or override.entrances.is_empty():
+		return
+
+	var chunk_key := _get_chunk_key_from_node(parent)
+	if chunk_key.is_empty():
+		var center := _get_polygon_center(points)
+		var cx := int(floor(center.x / chunk_size))
+		var cz := int(floor(center.y / chunk_size))
+		chunk_key = "%d,%d" % [cx, cz]
+
+	# Инициализируем batch
+	if not _entrance_batch.has(chunk_key):
+		_entrance_batch[chunk_key] = {"parent": parent, "collisions": [], "lights": []}
+		for key in ResidentialEntranceScript.MATERIAL_KEYS:
+			_entrance_batch[chunk_key][key] = {
+				"vertices": PackedVector3Array(),
+				"normals": PackedVector3Array(),
+				"indices": PackedInt32Array()
+			}
+
+	for entrance_data in override.entrances:
+		var lat: float = entrance_data.get("lat", 0.0)
+		var lon: float = entrance_data.get("lon", 0.0)
+		if lat == 0.0 or lon == 0.0:
+			continue
+
+		var entrance_pos := _latlon_to_local(lat, lon)
+		var wall := _find_closest_wall_to_point(points, entrance_pos, 3.0)
+		if wall.is_empty():
+			print("OSM Entrances: no wall found for entrance at (%.6f, %.6f)" % [lat, lon])
+			continue
+
+		var elev := _get_elevation_at_point(wall.closest_point, elev_data)
+		var world_pos := Vector3(wall.closest_point.x, elev, wall.closest_point.y)
+		var rotation_y: float = atan2(wall.normal.x, wall.normal.z)
+
+		# Генерируем геометрию
+		var geo := ResidentialEntranceScript.generate_entrance_geometry(world_pos, rotation_y)
+
+		# Мержим в batch
+		var batch: Dictionary = _entrance_batch[chunk_key]
+		for key in ResidentialEntranceScript.MATERIAL_KEYS:
+			var src: Dictionary = geo[key]
+			var dst: Dictionary = batch[key]
+			if src["vertices"].size() == 0:
+				continue
+			var offset: int = dst["vertices"].size()
+			dst["vertices"].append_array(src["vertices"])
+			dst["normals"].append_array(src["normals"])
+			# Смещаем индексы
+			for idx in src["indices"]:
+				dst["indices"].append(idx + offset)
+
+		# Коллизии
+		batch["collisions"].append_array(geo["collisions"])
+
+		# Позиции светильников
+		if geo.has("lights"):
+			batch["lights"].append_array(geo["lights"])
+
+		print("OSM Entrances: added entrance at (%.1f, %.1f) for way %d, chunk_key=%s" % [wall.closest_point.x, wall.closest_point.y, way_id, chunk_key])
+
+
+func _finalize_entrance_batch(chunk_key: String) -> void:
+	"""Финализирует batch подъездов для чанка — один ArrayMesh с 5 surfaces"""
+	if not _entrance_batch.has(chunk_key):
+		return
+
+	var batch: Dictionary = _entrance_batch[chunk_key]
+	var parent: Node3D = batch.get("parent")
+
+	if not parent or not is_instance_valid(parent):
+		_entrance_batch.erase(chunk_key)
+		return
+
+	var materials := ResidentialEntranceScript.get_materials()
+	var arr_mesh := ArrayMesh.new()
+	var has_geometry := false
+
+	for key in ResidentialEntranceScript.MATERIAL_KEYS:
+		var geo: Dictionary = batch[key]
+		if geo["vertices"].size() == 0:
+			continue
+
+		# Генерируем tangent массив из нормалей (нужен для корректного освещения)
+		var norms_arr: PackedVector3Array = geo["normals"]
+		var tangent_data := PackedFloat32Array()
+		tangent_data.resize(norms_arr.size() * 4)
+		for i in range(norms_arr.size()):
+			var n: Vector3 = norms_arr[i]
+			var tangent: Vector3
+			if abs(n.y) < 0.9:
+				tangent = n.cross(Vector3.UP).normalized()
+			else:
+				tangent = n.cross(Vector3.RIGHT).normalized()
+			tangent_data[i * 4] = tangent.x
+			tangent_data[i * 4 + 1] = tangent.y
+			tangent_data[i * 4 + 2] = tangent.z
+			tangent_data[i * 4 + 3] = 1.0
+
+		# Dummy UV — StandardMaterial3D требует UV для корректного TBN-освещения
+		var vert_count: int = geo["vertices"].size()
+		var dummy_uv := PackedVector2Array()
+		dummy_uv.resize(vert_count)
+		for i in range(vert_count):
+			dummy_uv[i] = Vector2.ZERO
+
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = geo["vertices"]
+		arrays[Mesh.ARRAY_NORMAL] = geo["normals"]
+		arrays[Mesh.ARRAY_INDEX] = geo["indices"]
+		arrays[Mesh.ARRAY_TANGENT] = tangent_data
+		arrays[Mesh.ARRAY_TEX_UV] = dummy_uv
+
+		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		arr_mesh.surface_set_material(arr_mesh.get_surface_count() - 1, materials[key])
+		has_geometry = true
+
+	if has_geometry:
+		var mesh_inst := MeshInstance3D.new()
+		mesh_inst.mesh = arr_mesh
+		mesh_inst.name = "ResidentialEntrances"
+		mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mesh_inst.visibility_range_end = 200.0
+		mesh_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+		parent.add_child(mesh_inst)
+
+		# Коллизии
+		var collisions: Array = batch["collisions"]
+		if not collisions.is_empty():
+			var body := StaticBody3D.new()
+			body.collision_layer = 2
+			body.collision_mask = 0
+			body.name = "EntranceCollisions"
+			parent.add_child(body)
+
+			for coll in collisions:
+				var shape := CollisionShape3D.new()
+				var box := BoxShape3D.new()
+				box.size = coll["size"]
+				shape.shape = box
+				shape.position = coll["center"]
+				shape.rotation.y = -coll["rotation_y"]
+				body.add_child(shape)
+
+		# Светильники (OmniLight3D)
+		var lights: Array = batch.get("lights", [])
+		var is_night: bool = _night_mode_manager.is_night if _night_mode_manager else true
+		for light_data in lights:
+			var light := OmniLight3D.new()
+			light.name = "EntranceLamp"
+			light.position = light_data["position"]
+			light.light_color = Color(1.0, 0.85, 0.6)
+			light.light_energy = 2.0 if is_night else 0.0
+			light.omni_range = 5.0
+			light.omni_attenuation = 1.2
+			light.shadow_enabled = false
+			light.distance_fade_enabled = true
+			light.distance_fade_begin = 100.0
+			light.distance_fade_length = 20.0
+			parent.add_child(light)
+			_entrance_lights.append(light)
+
+		print("OSM Entrances: finalized batch %s — %d surfaces, %d collisions, %d lights" % [
+			chunk_key, arr_mesh.get_surface_count(), collisions.size(), lights.size()])
+
+	_entrance_batch.erase(chunk_key)
 
 
 func _create_pending_lamps() -> void:

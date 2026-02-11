@@ -39,6 +39,9 @@ extends Resource
 @export var custom_sign_text: String = ""  # Вывеска на здании
 @export var add_entrance: bool = false  # Добавить входную группу
 
+# Входные группы подъездов [{lat: float, lon: float, type: String (optional)}]
+var entrances: Array = []
+
 
 func matches_way_id(way_id: int) -> bool:
 	"""Проверяет совпадение по OSM way ID"""

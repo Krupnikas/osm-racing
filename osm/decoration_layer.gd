@@ -155,6 +155,10 @@ func _load_building_overrides_json(path: String) -> void:
 			override.texture_repeat_short = ar.get("short", 1.0)
 			override.texture_repeat_long = ar.get("long", 3.0)
 
+		# Входные группы подъездов
+		if od.has("entrances"):
+			override.entrances = od["entrances"]
+
 		_building_overrides.append(override)
 
 
