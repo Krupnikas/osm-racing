@@ -10699,6 +10699,8 @@ func _smooth_points_adaptive(raw_points: PackedVector2Array, min_dist: float) ->
 		var p3: Vector2 = raw_points[mini(raw_points.size() - 1, i + 2)]
 
 		var seg_length: float = p1.distance_to(p2)
+		if seg_length < 0.01:
+			continue  # Skip degenerate zero-length segments
 
 		# Measure angle sharpness at both ends of the segment
 		var sharpness_at_p1: float = 0.0
