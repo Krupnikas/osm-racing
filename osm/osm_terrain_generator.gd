@@ -4754,6 +4754,10 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	if _decoration_layer and way_id > 0:
 		building_override = _decoration_layer.get_building_override_for_way(way_id)
 
+	# Применяем height_override если задан
+	if building_override and building_override.height_override > 0:
+		building_height = building_override.height_override
+
 	# Если есть override с текстурой или цветом, используем прямой рендеринг вместо батчинга
 	if building_override and building_override.wall_texture_path != "":
 		# Кастомная текстура с опциональным normal map
@@ -4786,6 +4790,10 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	# Добавляем подъезды жилых домов (из building_overrides JSON)
 	if way_id > 0 and _decoration_layer:
 		_add_residential_entrances(points, parent, base_elev, way_id, elev_data)
+
+	# Добавляем входные группы магазинов (из building_overrides JSON)
+	if way_id > 0 and _decoration_layer:
+		_add_shop_entrances_from_override(points, parent, building_height, base_elev, way_id)
 
 
 func _create_parking(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
@@ -7425,7 +7433,10 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 			u2 = (accumulated_width + wall_width) * uv_scale_x
 
 		# Для фото текстуры: N повторов по высоте, UV.y=0 вверху
-		var v_bottom := texture_repeat_y
+		# UV масштаб по видимой высоте (floor_y → roof_y), фундамент получает дополнительный UV
+		var visible_height := roof_y - floor_y
+		var total_height := roof_y - foundation_y
+		var v_bottom := texture_repeat_y * total_height / visible_height if visible_height > 0.1 else texture_repeat_y
 		var v_top := 0.0
 
 		var idx := wall_vertices.size()
@@ -10297,6 +10308,67 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 			parent.add_child(entrance_group)
 
 		parent.add_child(sign)
+
+
+func _add_shop_entrances_from_override(points: PackedVector2Array, parent: Node3D, building_height: float, base_elev: float, way_id: int) -> void:
+	"""Добавляет входные группы магазинов из building_overrides (с кастомным логотипом)"""
+	if not _decoration_layer or way_id <= 0:
+		return
+	var override = _decoration_layer.get_building_override_for_way(way_id)
+	if not override or override.shop_entrances.is_empty():
+		return
+
+	for shop_data in override.shop_entrances:
+		var lat: float = shop_data.get("lat", 0.0)
+		var lon: float = shop_data.get("lon", 0.0)
+		if lat == 0.0 or lon == 0.0:
+			continue
+
+		var entrance_pos := _latlon_to_local(lat, lon)
+		var wall := _find_closest_wall_to_point(points, entrance_pos, 2.0)
+		if wall.is_empty():
+			print("ShopEntrance: no wall found for entrance at (%.6f, %.6f)" % [lat, lon])
+			continue
+
+		var sign_position_2d: Vector2 = wall.closest_point
+		var wall_normal: Vector3 = wall.normal
+
+		# Входная группа (крыльцо + двери + козырёк)
+		var entrance_group = EntranceGroupGenerator.create_entrance_group(2)
+		entrance_group.position = Vector3(sign_position_2d.x, base_elev, sign_position_2d.y)
+		entrance_group.rotation.y = atan2(wall_normal.x, wall_normal.z)
+		entrance_group.name = "ShopEntrance_%d" % way_id
+		parent.add_child(entrance_group)
+
+		# Вывеска с логотипом
+		var sign_logo: String = shop_data.get("sign_logo", "")
+		var logo_path := ""
+		if sign_logo != "":
+			logo_path = BusinessSignGenerator.BRAND_LOGOS_PATH + sign_logo
+		var sign_root := Node3D.new()
+		sign_root.name = "ShopSign_%d" % way_id
+		sign_root.scale = Vector3(1.65, 1.65, 1.65)
+		if logo_path != "" and ResourceLoader.exists(logo_path):
+			BusinessSignGenerator._create_logo_sign(sign_root, logo_path, Color(0.6, 0.4, 0.2), 4.0)
+		else:
+			# Fallback: текстовая вывеска
+			BusinessSignGenerator._create_text_sign(sign_root, "МАГАЗИН", Color(0.2, 0.5, 0.8), 4.0, "shop")
+		# Подсветка
+		var light := OmniLight3D.new()
+		light.light_energy = 1.5
+		light.light_color = Color(0.6, 0.4, 0.2).lightened(0.3)
+		light.omni_range = 8.0
+		light.position.y = -0.2
+		sign_root.add_child(light)
+
+		var half_sign_height := 0.4
+		var sign_height: float = base_elev + EntranceGroupGenerator.get_canopy_top_height() + half_sign_height
+		sign_root.position = Vector3(sign_position_2d.x, sign_height, sign_position_2d.y)
+		sign_root.position += wall_normal * 0.75
+		sign_root.rotation.y = atan2(wall_normal.x, wall_normal.z)
+		parent.add_child(sign_root)
+
+		print("ShopEntrance: added at (%.1f, %.1f) for way %d" % [sign_position_2d.x, sign_position_2d.y, way_id])
 
 
 func _calculate_sign_width(text: String) -> float:

@@ -42,6 +42,9 @@ extends Resource
 # Входные группы подъездов [{lat: float, lon: float, type: String (optional)}]
 var entrances: Array = []
 
+# Входные группы магазинов [{lat: float, lon: float, sign_logo: String (optional)}]
+var shop_entrances: Array = []
+
 
 func matches_way_id(way_id: int) -> bool:
 	"""Проверяет совпадение по OSM way ID"""

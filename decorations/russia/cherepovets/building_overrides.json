@@ -59,6 +59,16 @@
       "comment": "Химико-технологический колледж",
       "wall_texture": "buildings/ptu.png",
       "repeat_y": 1.0
+    },
+    {
+      "osm_way_id": 694466403,
+      "comment": "Сытый пряный (пекарня)",
+      "height_override": 3.5,
+      "wall_texture": "buildings/sytyi-pryany-texture.png",
+      "repeat_y": 1.0,
+      "shop_entrances": [
+        {"lat": 59.148141, "lon": 37.947518, "sign_logo": "sytyi-pryany.png"}
+      ]
     }
   ]
 }

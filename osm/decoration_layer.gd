@@ -145,6 +145,9 @@ func _load_building_overrides_json(path: String) -> void:
 		if od.has("wall_emissive"):
 			override.wall_emissive_path = _texture_base_path + od["wall_emissive"]
 
+		# Высота здания
+		override.height_override = od.get("height_override", -1.0)
+
 		# Повторение текстуры
 		override.texture_repeat_y = od.get("repeat_y", 1.0)
 
@@ -158,6 +161,10 @@ func _load_building_overrides_json(path: String) -> void:
 		# Входные группы подъездов
 		if od.has("entrances"):
 			override.entrances = od["entrances"]
+
+		# Входные группы магазинов
+		if od.has("shop_entrances"):
+			override.shop_entrances = od["shop_entrances"]
 
 		_building_overrides.append(override)
 
