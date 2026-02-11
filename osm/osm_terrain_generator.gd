@@ -94,6 +94,9 @@ var _load_generation := 0  # Инкрементируется при reset дл�
 var _entrance_nodes: Array = []  # Входы в здания/заведения из OSM
 var _poi_nodes: Array = []  # Точечные заведения (shop/amenity как node)
 var _parking_polygons: Array[PackedVector2Array] = []  # Полигоны парковок для исключения фонарей
+var _parking_bounds: Array = []  # Cached {center: Vector2, radius: float} per parking polygon
+var _parking_spatial_hash: Dictionary = {}  # Spatial hash: Vector2i → Array of {polygon_idx: int, p1: Vector2, p2: Vector2}
+const PARKING_CELL_SIZE := 30.0
 var _road_segments: Array = []  # Сегменты дорог для позиционирования знаков парковки
 var _road_spatial_hash: Dictionary = {}  # Spatial hash для быстрого поиска дорог
 const ROAD_CELL_SIZE := 20.0  # Размер ячейки spatial hash для дорог
@@ -112,6 +115,9 @@ var _created_bus_stop_positions: Dictionary = {}  # Позиции создан�
 var _pending_lamps: Array = []  # Отложенные фонари (создаются после загрузки всех парковок)
 var _lamps_created := false  # Флаг что фонари уже созданы
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
+var _deferred_lamp_queue: Array = []  # Deferred lamp generation from road apply
+var _deferred_manhole_queue: Array = []  # Deferred manhole generation from road apply
+var _deferred_traffic_queue: Array = []  # Deferred traffic network extraction
 var _finalization_state := 0  # 0=not started, 1=lamps, 2=signs, 3=done
 
 # Многопоточная генерация зданий
@@ -134,9 +140,14 @@ const CULLING_UPDATE_INTERVAL := 0.2  # Обновлять каждые 200ms (5
 var _culling_debug_counter := 0
 
 # Отложенная генерация дорог и других тяжёлых объектов
-var _road_queue: Array = []  # Очередь {nodes, tags, parent, elev_data}
+var _road_queue: Array = []  # Очередь {nodes, tags, parent}
 var _road_queue_sorted := false
 var _curb_queue: Array = []  # Очередь бордюров (создаются после детекции перекрёстков)
+
+# Threaded road processing — smoothing + geometry in worker threads
+var _road_mutex: Mutex
+var _road_results: Array = []  # Готовые результаты из worker threads
+var _pending_road_tasks: int = 0  # Счётчик активных задач
 
 # Road batching system - накопление geometry данных для mesh merging
 var _road_batch_data: Dictionary = {}  # key: chunk_key -> { "highway": {vertices, uvs, normals, indices}, "primary": {...}, ...}
@@ -321,6 +332,7 @@ func _ready() -> void:
 	# Инициализируем mutex для многопоточности
 	_building_mutex = Mutex.new()
 	_curb_collision_mutex = Mutex.new()
+	_road_mutex = Mutex.new()
 
 	osm_loader = OSMLoaderScript.new()
 	add_child(osm_loader)
@@ -830,10 +842,15 @@ func start_loading() -> void:
 	_initial_loading = true
 	_initial_chunks_loaded = 0
 	_parking_polygons.clear()  # Очищаем парковки при новой загрузке
+	_parking_bounds.clear()
+	_parking_spatial_hash.clear()
 	_created_lamp_positions.clear()  # Очищаем позиции фонарей
 	_created_bus_stop_positions.clear()  # Очищаем позиции остановок
 	_pending_lamps.clear()  # Очищаем отложенные фонари
 	_pending_parking_signs.clear()  # Очищаем отложенные знаки парковки
+	_deferred_lamp_queue.clear()
+	_deferred_manhole_queue.clear()
+	_deferred_traffic_queue.clear()
 	_lamps_created = false  # Сбрасываем флаг
 	_intersection_positions.clear()  # Очищаем перекрёстки
 	_intersection_radii.clear()
@@ -908,13 +925,13 @@ func _check_initial_load_complete() -> void:
 	var chunk_progress: float = float(loaded_count) / float(max(1, total_chunks))  # 0.0-1.0
 
 	# Считаем размер всех очередей
-	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks
+	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + _pending_road_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size()
 
 	# DEBUG: Детальное логирование очередей
 	if loaded_count >= total_chunks and total_queued > 0:
 		print("OSM DEBUG: Chunks loaded %d/%d, but queues not empty:" % [loaded_count, total_chunks])
 		print("  - _building_results: %d" % _building_results.size())
-		print("  - _road_queue: %d" % _road_queue.size())
+		print("  - _road_queue: %d (threads: %d)" % [_road_queue.size(), _pending_road_tasks])
 		print("  - _terrain_objects_queue: %d" % _terrain_objects_queue.size())
 		print("  - _infrastructure_queue: %d" % _infrastructure_queue.size())
 		print("  - _pending_building_tasks: %d" % _pending_building_tasks)
@@ -997,7 +1014,7 @@ func _check_initial_load_complete() -> void:
 				return
 
 		# Проверяем что все очереди обработаны (для плавности старта)
-		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0
+		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and _pending_road_tasks <= 0
 		if not queues_empty:
 			# Отслеживаем зависание очереди
 			if total_queued == _last_queue_size:
@@ -1006,6 +1023,7 @@ func _check_initial_load_complete() -> void:
 					# Очередь зависла - принудительно сбрасываем pending tasks и переходим к финализации
 					print("OSM: Queue stuck at %d items for %.1fs, forcing completion..." % [total_queued, _queue_stuck_time])
 					_pending_building_tasks = 0
+					_pending_road_tasks = 0
 					_queue_stuck_time = 0.0
 					# НЕ делаем return - продолжаем к финализации ниже
 				else:
@@ -1596,6 +1614,10 @@ func reset_terrain() -> void:
 	_curb_collision_results.clear()
 	_curb_collision_mutex.unlock()
 	_road_queue.clear()
+	_road_mutex.lock()
+	_road_results.clear()
+	_pending_road_tasks = 0
+	_road_mutex.unlock()
 	_terrain_objects_queue.clear()
 	_infrastructure_queue.clear()
 	_vegetation_queue.clear()
@@ -1615,6 +1637,11 @@ func reset_terrain() -> void:
 	_building_segments.clear()
 	_building_spatial_hash.clear()
 	_parking_polygons.clear()
+	_parking_bounds.clear()
+	_parking_spatial_hash.clear()
+	_deferred_lamp_queue.clear()
+	_deferred_manhole_queue.clear()
+	_deferred_traffic_queue.clear()
 
 	# Clear ALL batching data on reset
 	_lamp_batch_data.clear()
@@ -2203,6 +2230,36 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 				points.append(local)
 			_parking_polygons.append(points)
+			# Cache bounds for fast rejection
+			var center := Vector2.ZERO
+			for p in points:
+				center += p
+			center /= points.size()
+			var max_r := 0.0
+			for p in points:
+				var d: float = center.distance_to(p)
+				if d > max_r:
+					max_r = d
+			_parking_bounds.append({"center": center, "radius": max_r})
+			# Add parking edges to spatial hash
+			var pidx: int = _parking_polygons.size() - 1
+			for ei in range(points.size()):
+				var ep1: Vector2 = points[ei]
+				var ep2: Vector2 = points[(ei + 1) % points.size()]
+				var emin_x: float = minf(ep1.x, ep2.x)
+				var emax_x: float = maxf(ep1.x, ep2.x)
+				var emin_y: float = minf(ep1.y, ep2.y)
+				var emax_y: float = maxf(ep1.y, ep2.y)
+				var cx0: int = int(floor(emin_x / PARKING_CELL_SIZE))
+				var cx1: int = int(floor(emax_x / PARKING_CELL_SIZE))
+				var cy0: int = int(floor(emin_y / PARKING_CELL_SIZE))
+				var cy1: int = int(floor(emax_y / PARKING_CELL_SIZE))
+				for cx in range(cx0, cx1 + 1):
+					for cy in range(cy0, cy1 + 1):
+						var cell_key := Vector2i(cx, cy)
+						if not _parking_spatial_hash.has(cell_key):
+							_parking_spatial_hash[cell_key] = []
+						_parking_spatial_hash[cell_key].append({"idx": pidx, "p1": ep1, "p2": ep2})
 
 		# Все дороги из OSM данных -> spatial hash (для проверки расстояний при генерации деревьев/фонарей)
 		if tags.has("highway") and nodes.size() >= 2:
@@ -2696,7 +2753,7 @@ func _compute_averaged_perpendiculars(points: PackedVector2Array) -> Array[Vecto
 	return perpendiculars
 
 
-func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
+func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node, _elev_data: Dictionary = {}) -> void:
 	if not enable_roads:
 		return
 	# Добавляем в очередь для отложенного создания
@@ -2704,7 +2761,6 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, 
 		"nodes": nodes,
 		"tags": tags,
 		"parent": parent,
-		"elev_data": elev_data
 	})
 
 	# Сегменты дорог сохраняем сразу (нужны для знаков парковки и проверки фонарей)
@@ -2725,7 +2781,7 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, 
 
 
 ## Немедленное создание дороги (вызывается из очереди)
-func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
+func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> void:
 	if not is_instance_valid(parent):
 		return
 
@@ -2789,14 +2845,14 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 
 	# Создаём дорогу - обычную или мост
 	if is_bridge:
-		_create_bridge_road(nodes, width, texture_key, height_offset, elevation_info, parent, elev_data)
+		_create_bridge_road(nodes, width, texture_key, height_offset, elevation_info, parent)
 		var b_height: float = elevation_info.get("bridge_height", 0.0)
 		var b_ramp: float = elevation_info.get("ramp_length", 0.0)
 		var b_layer: int = elevation_info.get("layer", 0)
 		if b_height > 0:
 			print("OSM: Bridge created: height=%.1fm, ramp=%.1fm, layer=%d" % [b_height, b_ramp, b_layer])
 	else:
-		_add_road_to_batch_fast(smoothed_points, width, texture_key, height_offset, parent, elev_data)
+		_add_road_to_batch_fast(smoothed_points, width, texture_key, height_offset, parent)
 
 	if curb_height > 0.0:
 		_curb_queue.append({
@@ -2805,25 +2861,265 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 			"height_offset": height_offset,
 			"curb_height": curb_height,
 			"parent": parent,
-			"elev_data": elev_data,
+			"elev_data": {},
 			"is_bridge": is_bridge,
 			"bridge_info": elevation_info
 		})
 
 	# Фонари (только крупные дороги)
 	if highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary"]:
-		_generate_street_lamps_fast(smoothed_points, width, elev_data, parent)
+		_generate_street_lamps_fast(smoothed_points, width, {}, parent)
 
 	# Люки
 	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
-		_generate_manholes_fast(smoothed_points, width, elev_data, parent)
+		_generate_manholes_fast(smoothed_points, width, {}, parent)
 
 	# RoadNetwork для NPC
-	_extract_road_for_traffic_fast(smoothed_points, tags, elev_data, elevation_info)
+	_extract_road_for_traffic_fast(smoothed_points, tags, {}, elevation_info)
+
+
+## Вычисляет геометрию дороги в worker thread (чистая математика, thread-safe)
+func _compute_road_geometry_thread(task_data: Dictionary) -> void:
+	var nodes: Array = task_data.nodes
+	var tags: Dictionary = task_data.tags
+	var t_chunk_size: float = task_data.chunk_size
+	var t_start_lat: float = task_data.start_lat
+	var t_start_lon: float = task_data.start_lon
+	var t_lon_scale: float = task_data.lon_scale
+	var chunk_key: String = task_data.chunk_key
+
+	var highway_type: String = tags.get("highway", "residential")
+	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
+
+	# lat/lon → local (thread-safe: uses only passed constants)
+	var local_points := PackedVector2Array()
+	local_points.resize(nodes.size())
+	for i in range(nodes.size()):
+		var dx: float = (nodes[i].lon - t_start_lon) * t_lon_scale
+		var dz: float = (nodes[i].lat - t_start_lat) * 111000.0
+		local_points[i] = Vector2(dx, -dz)
+
+	# Road length
+	var road_length := 0.0
+	for i in range(local_points.size() - 1):
+		road_length += local_points[i].distance_to(local_points[i + 1])
+
+	# Bridge check
+	var elevation_info := _calculate_road_elevation(tags, 0.0, road_length)
+	var is_bridge: bool = elevation_info.get("is_bridge", false)
+
+	# Road parameters
+	var texture_key: String
+	var height_offset: float
+	var curb_height: float
+	match highway_type:
+		"motorway", "trunk":
+			texture_key = "highway"
+			height_offset = 0.102
+			curb_height = 0.05
+		"primary":
+			texture_key = "primary"
+			height_offset = 0.100
+			curb_height = 0.05
+		"secondary":
+			texture_key = "primary"
+			height_offset = 0.098
+			curb_height = 0.05
+		"tertiary":
+			texture_key = "residential"
+			height_offset = 0.097
+			curb_height = 0.05
+		"residential", "unclassified":
+			texture_key = "residential"
+			height_offset = 0.096
+			curb_height = 0.05
+		"service":
+			texture_key = "residential"
+			height_offset = 0.094
+			curb_height = 0.05
+		"footway", "path", "cycleway", "track":
+			texture_key = "path"
+			height_offset = 0.087
+			curb_height = 0.0
+		_:
+			texture_key = "residential"
+			height_offset = 0.096
+			curb_height = 0.05
+
+	# Smoothing (thread-safe: pure math)
+	var smoothed_points: PackedVector2Array = _smooth_road_corners(local_points)
+
+	# Build geometry if not bridge
+	var vertices := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var normals := PackedVector3Array()
+	var indices := PackedInt32Array()
+
+	if not is_bridge:
+		# Validate + clip (thread-safe: pure math)
+		var points: PackedVector2Array = _validate_road_direction(smoothed_points)
+		if chunk_key != "initial" and chunk_key != "":
+			var ck_parts: PackedStringArray = chunk_key.split(",")
+			var ck_x := int(ck_parts[0])
+			var ck_z := int(ck_parts[1])
+			var margin := width + 5.0
+			points = _clip_polyline_to_rect(points,
+				float(ck_x) * t_chunk_size - margin,
+				float(ck_x + 1) * t_chunk_size + margin,
+				float(ck_z) * t_chunk_size - margin,
+				float(ck_z + 1) * t_chunk_size + margin)
+
+		if points.size() >= 2:
+			var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
+			var z_offset: float = hash_val * 0.0003
+			var half_w: float = width * 0.5
+			var h: float = height_offset + z_offset
+			var n_points: int = points.size()
+
+			# Perpendiculars
+			var perpendiculars := PackedVector2Array()
+			perpendiculars.resize(n_points)
+			for i in range(n_points):
+				var perp: Vector2
+				if i == 0:
+					var dir: Vector2 = (points[1] - points[0]).normalized()
+					perp = Vector2(-dir.y, dir.x)
+				elif i == n_points - 1:
+					var dir: Vector2 = (points[i] - points[i - 1]).normalized()
+					perp = Vector2(-dir.y, dir.x)
+				else:
+					var dir_out: Vector2 = (points[i + 1] - points[i]).normalized()
+					perp = Vector2(-dir_out.y, dir_out.x)
+				perpendiculars[i] = perp
+
+			# Vertices
+			var accumulated_length: float = 0.0
+			var uv_scale: float = 0.1
+			for i in range(n_points):
+				var p: Vector2 = points[i]
+				var perp: Vector2 = perpendiculars[i]
+				if i > 0:
+					accumulated_length += points[i - 1].distance_to(p)
+				var uv_y: float = accumulated_length * uv_scale
+				var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
+				var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
+				vertices.append(Vector3(left_pos.x, h, left_pos.y))
+				uvs.append(Vector2(0.0, uv_y))
+				normals.append(Vector3.UP)
+				vertices.append(Vector3(right_pos.x, h, right_pos.y))
+				uvs.append(Vector2(1.0, uv_y))
+				normals.append(Vector3.UP)
+
+			# Indices
+			for i in range(n_points - 1):
+				var idx: int = i * 2
+				indices.append(idx)
+				indices.append(idx + 3)
+				indices.append(idx + 1)
+				indices.append(idx)
+				indices.append(idx + 2)
+				indices.append(idx + 3)
+
+	# Store result via mutex
+	var result := {
+		"smoothed_points": smoothed_points,
+		"vertices": vertices,
+		"uvs": uvs,
+		"normals": normals,
+		"indices": indices,
+		"texture_key": texture_key,
+		"width": width,
+		"height_offset": height_offset,
+		"curb_height": curb_height,
+		"highway_type": highway_type,
+		"chunk_key": chunk_key,
+		"parent": task_data.parent,
+		"tags": tags,
+		"nodes": nodes,
+		"is_bridge": is_bridge,
+		"elevation_info": elevation_info,
+	}
+	_road_mutex.lock()
+	_road_results.append(result)
+	_pending_road_tasks -= 1
+	_road_mutex.unlock()
+
+
+## Применяет результат road geometry из worker thread (main thread only)
+func _apply_road_result(result: Dictionary) -> void:
+	var parent: Node3D = result.parent
+	if not is_instance_valid(parent):
+		return
+
+	var chunk_key: String = result.chunk_key
+	var texture_key: String = result.texture_key
+	var smoothed_points: PackedVector2Array = result.smoothed_points
+	var width: float = result.width
+	var height_offset: float = result.height_offset
+	var curb_height: float = result.curb_height
+	var highway_type: String = result.highway_type
+	var is_bridge: bool = result.is_bridge
+	var elevation_info: Dictionary = result.elevation_info
+
+	if is_bridge:
+		_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent)
+	else:
+		# Merge geometry into batch data
+		var verts: PackedVector3Array = result.vertices
+		if verts.size() >= 4:
+			if not _road_batch_data.has(chunk_key):
+				_road_batch_data[chunk_key] = {}
+			if not _road_batch_data[chunk_key].has(texture_key):
+				_road_batch_data[chunk_key][texture_key] = {
+					"vertices": PackedVector3Array(),
+					"uvs": PackedVector2Array(),
+					"normals": PackedVector3Array(),
+					"indices": PackedInt32Array(),
+					"parent": parent
+				}
+			var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
+			var vertex_offset: int = batch["vertices"].size()
+			batch["vertices"].append_array(verts)
+			batch["uvs"].append_array(result.uvs)
+			batch["normals"].append_array(result.normals)
+			# Offset indices — pre-offset in bulk instead of per-element append
+			var src_indices: PackedInt32Array = result.indices
+			if vertex_offset > 0:
+				var offset_indices := PackedInt32Array()
+				offset_indices.resize(src_indices.size())
+				for k in range(src_indices.size()):
+					offset_indices[k] = src_indices[k] + vertex_offset
+				batch["indices"].append_array(offset_indices)
+			else:
+				batch["indices"].append_array(src_indices)
+
+	# Curbs
+	if curb_height > 0.0:
+		_curb_queue.append({
+			"local_points": smoothed_points,
+			"width": width,
+			"height_offset": height_offset,
+			"curb_height": curb_height,
+			"parent": parent,
+			"elev_data": {},
+			"is_bridge": is_bridge,
+			"bridge_info": elevation_info
+		})
+
+	# Lamps (major roads only) - deferred to avoid blocking apply
+	if highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary"]:
+		_deferred_lamp_queue.append({"points": smoothed_points, "width": width, "parent": parent})
+
+	# Manholes - deferred
+	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
+		_deferred_manhole_queue.append({"points": smoothed_points, "width": width, "parent": parent})
+
+	# Road network for NPC - deferred
+	_deferred_traffic_queue.append({"points": smoothed_points, "tags": result.tags, "elevation_info": elevation_info})
 
 
 ## Создаёт дорогу-мост с рампами подъёма/спуска и опорами
-func _create_bridge_road(nodes: Array, width: float, texture_key: String, height_offset: float, bridge_info: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
+func _create_bridge_road(nodes: Array, width: float, texture_key: String, height_offset: float, bridge_info: Dictionary, parent: Node3D) -> void:
 	if nodes.size() < 2:
 		return
 
@@ -2878,8 +3174,8 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 		var p: Vector2 = points[i]
 		var perp: Vector2 = perpendiculars[i]
 
-		# Базовая высота из elevation data
-		var base_elev: float = _get_elevation_at_point(p, elev_data) + height_offset
+		# Базовая высота (flat — elevation applied later)
+		var base_elev: float = height_offset
 
 		# Вычисляем высоту моста в этой точке с учётом рамп
 		var point_height := base_elev
@@ -2963,10 +3259,10 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 	_create_bridge_collision(vertices, indices, parent)
 
 	# Создаём опоры моста
-	_create_bridge_pillars(points, bridge_height, ramp_length, total_length, elev_data, parent)
+	_create_bridge_pillars(points, bridge_height, ramp_length, total_length, {}, parent)
 
 	# Создаём отбойники по краям моста
-	_create_bridge_barriers(points, width, bridge_height, ramp_length, total_length, elev_data, height_offset, parent)
+	_create_bridge_barriers(points, width, bridge_height, ramp_length, total_length, {}, height_offset, parent)
 
 
 ## Создаёт коллизию для моста
@@ -3482,7 +3778,7 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 		batch["indices"].append(idx + 3)
 
 # Fast variant: accepts pre-computed local_points (avoids redundant _latlon_to_local)
-func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, texture_key: String, height_offset: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
+func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, texture_key: String, height_offset: float, parent: Node3D) -> void:
 	if raw_points.size() < 2:
 		return
 
@@ -3546,7 +3842,8 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 			perp = Vector2(-dir_out.y, dir_out.x)
 		perpendiculars[i] = perp
 
-	# Generate vertices
+	# Generate vertices (flat — elevation applied later via _update_chunk_heights)
+	var h: float = height_offset + z_offset
 	for i in range(n_points):
 		var p: Vector2 = points[i]
 		var perp: Vector2 = perpendiculars[i]
@@ -3557,15 +3854,12 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 
 		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
-		var h_center: float = _get_elevation_at_point(p, elev_data) + height_offset + z_offset
-		var h_left: float = maxf(_get_elevation_at_point(left_pos, elev_data) + height_offset + z_offset, h_center)
-		var h_right: float = maxf(_get_elevation_at_point(right_pos, elev_data) + height_offset + z_offset, h_center)
 
-		batch["vertices"].append(Vector3(left_pos.x, h_left, left_pos.y))
+		batch["vertices"].append(Vector3(left_pos.x, h, left_pos.y))
 		batch["uvs"].append(Vector2(0.0, uv_y))
 		batch["normals"].append(Vector3.UP)
 
-		batch["vertices"].append(Vector3(right_pos.x, h_right, right_pos.y))
+		batch["vertices"].append(Vector3(right_pos.x, h, right_pos.y))
 		batch["uvs"].append(Vector2(1.0, uv_y))
 		batch["normals"].append(Vector3.UP)
 
@@ -6238,10 +6532,61 @@ Chunks: %d loaded""" % [fps, avg_fps, fps_1pct, min_fps, road_q, terrain_q, infr
 
 ## Обрабатывает очередь дорог (3 дороги за кадр)
 func _process_road_queue() -> void:
-	if _road_queue.is_empty():
-		# Time budget для финализации — несколько чанков за кадр
-		const FINALIZE_BUDGET_USEC := 3000  # 3ms (90fps = 11ms, рендер+физика ~6ms)
+	var queue_start := Time.get_ticks_usec()
+	const TOTAL_BUDGET_USEC := 4000  # 4ms total budget for entire function
+
+	# Phase 0: Apply ready road results from worker threads (main thread, time-budgeted)
+	_road_mutex.lock()
+	var n_ready := _road_results.size()
+	_road_mutex.unlock()
+
+	var applied := 0
+	while applied < n_ready:
+		if applied > 0 and (Time.get_ticks_usec() - queue_start) > 2000:
+			break
+		_road_mutex.lock()
+		if _road_results.is_empty():
+			_road_mutex.unlock()
+			break
+		var result: Dictionary = _road_results.pop_front()
+		_road_mutex.unlock()
+		_apply_road_result(result)
+		applied += 1
+
+	# Process deferred lamp/manhole generation with time budget
+	while not _deferred_lamp_queue.is_empty():
+		if (Time.get_ticks_usec() - queue_start) > 3000:
+			break
+		var item: Dictionary = _deferred_lamp_queue[0]
+		# Process incrementally — only process a portion of the road per frame
+		var start_idx: int = item.get("_lamp_seg_idx", 0)
+		var processed: int = _generate_street_lamps_incremental(item.points, item.width, item.parent, start_idx, queue_start, 3000)
+		if processed >= item.points.size() - 1:
+			_deferred_lamp_queue.pop_front()  # Fully processed
+		else:
+			item["_lamp_seg_idx"] = processed  # Resume next frame
+	while not _deferred_manhole_queue.is_empty():
+		if (Time.get_ticks_usec() - queue_start) > 3000:
+			break
+		var item: Dictionary = _deferred_manhole_queue.pop_front()
+		_generate_manholes_fast(item.points, item.width, {}, item.parent)
+	while not _deferred_traffic_queue.is_empty():
+		if (Time.get_ticks_usec() - queue_start) > 3500:
+			break
+		var item: Dictionary = _deferred_traffic_queue.pop_front()
+		_extract_road_for_traffic_fast(item.points, item.tags, {}, item.elevation_info)
+
+	if _road_queue.is_empty() and _pending_road_tasks <= 0:
+		# Time budget для финализации — use remaining budget from queue_start
 		var finalize_start := Time.get_ticks_usec()
+		var finalize_budget: int = maxi(1000, TOTAL_BUDGET_USEC - int(finalize_start - queue_start))
+
+		# Check if there are still unapplied results or deferred work
+		_road_mutex.lock()
+		var has_pending := not _road_results.is_empty()
+		_road_mutex.unlock()
+		if has_pending or not _deferred_lamp_queue.is_empty() or not _deferred_manhole_queue.is_empty() or not _deferred_traffic_queue.is_empty():
+			return  # Wait for results/deferred to be processed first
 
 		# 1. Road batches
 		while not _pending_batch_chunks.is_empty():
@@ -6250,13 +6595,13 @@ func _process_road_queue() -> void:
 			_finalize_road_batches_for_chunk(chunk_key)
 			if Time.get_ticks_usec() - t_batch > 100:
 				_record_perf("road_batch_finalize", Time.get_ticks_usec() - t_batch)
-			if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+			if Time.get_ticks_usec() - finalize_start > finalize_budget:
 				return
 
 		# 2. Curbs (с проверкой бюджета)
 		if not _curb_queue.is_empty() or not _curb_smoothed_queue.is_empty() or not _curb_mesh_state.is_empty() or not _curb_geo_batch.is_empty():
 			_process_curb_queue()
-			if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+			if Time.get_ticks_usec() - finalize_start > finalize_budget:
 				return
 
 		# 3. Lamps
@@ -6267,7 +6612,7 @@ func _process_road_queue() -> void:
 			_finalize_lamp_batches_for_chunk(chunk_key)
 			if Time.get_ticks_usec() - t_lamp > 100:
 				_record_perf("lamp_batch_finalize", Time.get_ticks_usec() - t_lamp)
-			if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+			if Time.get_ticks_usec() - finalize_start > finalize_budget:
 				return
 
 		# 4. Buildings (enqueue building geo + window batches)
@@ -6278,7 +6623,7 @@ func _process_road_queue() -> void:
 						_building_geo_finalize_queue.append(key)
 
 			while not _building_geo_finalize_queue.is_empty():
-				if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+				if Time.get_ticks_usec() - finalize_start > finalize_budget:
 					return
 				var t_geo := Time.get_ticks_usec()
 				var chunk_key: String = _building_geo_finalize_queue[0]
@@ -6290,7 +6635,7 @@ func _process_road_queue() -> void:
 				# Enqueue windows for progressive fill (fast - just sets up state)
 				if _window_batch_data.has(chunk_key):
 					_finalize_window_batches_for_chunk(chunk_key)
-				if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+				if Time.get_ticks_usec() - finalize_start > finalize_budget:
 					return
 
 			# Финализируем подъезды (могут быть добавлены позже building_geo)
@@ -6307,11 +6652,11 @@ func _process_road_queue() -> void:
 		# 4b. Progressive window buffer fill (time-budgeted, spreads across frames)
 		if not _window_finalize_queue.is_empty():
 			var t_window := Time.get_ticks_usec()
-			var budget_end: int = finalize_start + FINALIZE_BUDGET_USEC
+			var budget_end: int = finalize_start + finalize_budget
 			_progress_window_finalize(budget_end)
 			if Time.get_ticks_usec() - t_window > 100:
 				_record_perf("window_progressive_fill", Time.get_ticks_usec() - t_window)
-			if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+			if Time.get_ticks_usec() - finalize_start > finalize_budget:
 				return
 
 		# 5. Trees
@@ -6322,7 +6667,7 @@ func _process_road_queue() -> void:
 			_finalize_tree_batches_for_chunk(chunk_key)
 			if Time.get_ticks_usec() - t_tree > 100:
 				_record_perf("tree_batch_finalize", Time.get_ticks_usec() - t_tree)
-			if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+			if Time.get_ticks_usec() - finalize_start > finalize_budget:
 				return
 
 		# 6. Billboards (DecorationLayer)
@@ -6330,35 +6675,45 @@ func _process_road_queue() -> void:
 			var chunk_key: String = _billboard_batches_to_finalize[0]
 			_billboard_batches_to_finalize.remove_at(0)
 			_finalize_billboard_batch_for_chunk(chunk_key)
-			if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+			if Time.get_ticks_usec() - finalize_start > finalize_budget:
 				return
 
 		return
 
-	# Сортируем очередь по расстоянию до игрока (только при первой загрузке, один раз)
-	if _road_queue.size() > 100 and _car and not _road_queue_sorted:
-		_road_queue_sorted = true
-		var t0 := Time.get_ticks_usec()
-		_sort_queue_by_distance(_road_queue, _car.global_position)
-		_record_perf("road_sort", Time.get_ticks_usec() - t0)
+	# Dispatch roads to worker threads — no time budget needed on main thread!
+	# Limit concurrent tasks to avoid overwhelming thread pool
+	const MAX_CONCURRENT_ROAD_TASKS := 8
+	var dispatched := 0
 
-	# Time budget: 3ms на обработку дорог (90fps = 11ms, рендер+физика ~6ms, финализация ~3ms)
-	const ROAD_TIME_BUDGET_USEC := 3000
-	var start_time := Time.get_ticks_usec()
-	var processed := 0
+	# Ensure lon_scale is initialized
+	if _lon_scale == 0.0:
+		_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
 
-	while not _road_queue.is_empty():
-		# Бюджет проверяется ПЕРЕД каждой дорогой (кроме первой — минимум 1 за кадр)
-		if processed > 0 and (Time.get_ticks_usec() - start_time) > ROAD_TIME_BUDGET_USEC:
-			break
-
+	while not _road_queue.is_empty() and _pending_road_tasks < MAX_CONCURRENT_ROAD_TASKS:
 		var item: Dictionary = _road_queue.pop_front()
 		if not is_instance_valid(item.get("parent")):
 			continue
-		var t0 := Time.get_ticks_usec()
-		_create_road_immediate(item.nodes, item.tags, item.parent, item.elev_data)
-		_record_perf("road_create", Time.get_ticks_usec() - t0)
-		processed += 1
+
+		var parent: Node3D = item.parent
+		var chunk_key := ""
+		if parent.name.begins_with("Chunk_"):
+			chunk_key = parent.name.substr(6)
+		else:
+			chunk_key = "initial"
+
+		var task_data := {
+			"nodes": item.nodes,
+			"tags": item.tags,
+			"parent": parent,
+			"chunk_key": chunk_key,
+			"chunk_size": chunk_size,
+			"start_lat": start_lat,
+			"start_lon": start_lon,
+			"lon_scale": _lon_scale,
+		}
+		_pending_road_tasks += 1
+		WorkerThreadPool.add_task(_compute_road_geometry_thread.bind(task_data))
+		dispatched += 1
 
 
 ## Обрабатывает очередь бордюров (после того как все перекрёстки определены)
@@ -8904,70 +9259,141 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 		accumulated_distance += segment_length
 
 
+## Incremental lamp generation: processes segments from start_seg_idx, returns last processed segment index.
+## Respects time budget (budget_usec from budget_start).
+func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_width: float, parent: Node3D, start_seg_idx: int, budget_start: int, budget_usec: int) -> int:
+	if not enable_street_lamps or local_points.size() < 2:
+		return local_points.size()
+
+	var lamp_spacing := 25.0
+	var lamp_offset := road_width / 2 + 1.5
+	var n_pts: int = local_points.size()
+
+	# Pre-compute cumulative distances (fast, needed for correct spacing)
+	var cumulative := PackedFloat64Array()
+	cumulative.resize(n_pts)
+	cumulative[0] = 0.0
+	for i in range(1, n_pts):
+		cumulative[i] = cumulative[i - 1] + local_points[i - 1].distance_to(local_points[i])
+	var total_length: float = cumulative[n_pts - 1]
+
+	# Calculate starting lamp distance based on start_seg_idx
+	var start_dist: float = cumulative[start_seg_idx]
+	var next_lamp_dist: float = start_dist
+	if next_lamp_dist < lamp_spacing:
+		next_lamp_dist = lamp_spacing
+	else:
+		next_lamp_dist = ceil(start_dist / lamp_spacing) * lamp_spacing
+
+	var seg_idx: int = start_seg_idx
+	var last_processed_seg: int = start_seg_idx
+
+	while next_lamp_dist < total_length:
+		# Budget check every few lamps
+		if (Time.get_ticks_usec() - budget_start) > budget_usec:
+			return last_processed_seg
+
+		# Find which segment this distance falls on
+		while seg_idx < n_pts - 2 and cumulative[seg_idx + 1] < next_lamp_dist:
+			seg_idx += 1
+
+		last_processed_seg = seg_idx
+		var seg_start_dist: float = cumulative[seg_idx]
+		var seg_end_dist: float = cumulative[seg_idx + 1]
+		var seg_length: float = seg_end_dist - seg_start_dist
+		if seg_length < 0.001:
+			next_lamp_dist += lamp_spacing
+			continue
+
+		var t: float = (next_lamp_dist - seg_start_dist) / seg_length
+		var p1: Vector2 = local_points[seg_idx]
+		var p2: Vector2 = local_points[seg_idx + 1]
+		var road_pos: Vector2 = p1.lerp(p2, t)
+		var dir: Vector2 = (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)
+
+		var lamp_pos_left := road_pos + perp * lamp_offset
+		var lamp_pos_right := road_pos - perp * lamp_offset
+
+		if not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road_fast(lamp_pos_left, 0.0):
+			var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
+			var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
+			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
+			if _loaded_chunks.has(chunk_key):
+				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_left.x, 0.0, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[chunk_key])
+
+		if not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road_fast(lamp_pos_right, 0.0):
+			var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
+			var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
+			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
+			if _loaded_chunks.has(chunk_key):
+				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_right.x, 0.0, lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[chunk_key])
+
+		next_lamp_dist += lamp_spacing
+
+	return n_pts  # Fully processed
+
+
 # Fast variant: accepts pre-computed local_points
-func _generate_street_lamps_fast(local_points: PackedVector2Array, road_width: float, elev_data: Dictionary, parent: Node3D) -> void:
+func _generate_street_lamps_fast(local_points: PackedVector2Array, road_width: float, _elev_data: Dictionary, parent: Node3D) -> void:
 	if not enable_street_lamps or local_points.size() < 2:
 		return
 
 	var lamp_spacing := 25.0
 	var lamp_offset := road_width / 2 + 1.5
 
-	var accumulated_distance := 0.0
-	var last_lamp_distance := 0.0
+	# Pre-compute total road length and cumulative distances
+	var n_pts: int = local_points.size()
+	var cumulative := PackedFloat64Array()
+	cumulative.resize(n_pts)
+	cumulative[0] = 0.0
+	for i in range(1, n_pts):
+		cumulative[i] = cumulative[i - 1] + local_points[i - 1].distance_to(local_points[i])
+	var total_length: float = cumulative[n_pts - 1]
 
-	for i in range(local_points.size() - 1):
-		var p1: Vector2 = local_points[i]
-		var p2: Vector2 = local_points[i + 1]
+	# Place lamps at exact spacing intervals along the polyline
+	var next_lamp_dist := lamp_spacing  # Skip first point
+	var seg_idx := 0
 
-		var segment_length := p1.distance_to(p2)
-		var dir := (p2 - p1).normalized()
+	while next_lamp_dist < total_length:
+		# Find which segment this distance falls on
+		while seg_idx < n_pts - 2 and cumulative[seg_idx + 1] < next_lamp_dist:
+			seg_idx += 1
+
+		var seg_start_dist: float = cumulative[seg_idx]
+		var seg_end_dist: float = cumulative[seg_idx + 1]
+		var seg_length: float = seg_end_dist - seg_start_dist
+		if seg_length < 0.001:
+			next_lamp_dist += lamp_spacing
+			continue
+
+		var t: float = (next_lamp_dist - seg_start_dist) / seg_length
+		var p1: Vector2 = local_points[seg_idx]
+		var p2: Vector2 = local_points[seg_idx + 1]
+		var road_pos: Vector2 = p1.lerp(p2, t)
+		var dir: Vector2 = (p2 - p1).normalized()
 		var perp := Vector2(-dir.y, dir.x)
 
-		var pos_along := 0.0
-		while pos_along < segment_length:
-			var distance_from_last := accumulated_distance + pos_along - last_lamp_distance
+		var lamp_pos_left := road_pos + perp * lamp_offset
+		var lamp_pos_right := road_pos - perp * lamp_offset
 
-			if distance_from_last >= lamp_spacing:
-				var t := pos_along / segment_length
-				var road_pos := p1.lerp(p2, t)
+		# Check left side
+		if not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road_fast(lamp_pos_left, 0.0):
+			var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
+			var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
+			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
+			if _loaded_chunks.has(chunk_key):
+				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_left.x, 0.0, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[chunk_key])
 
-				var lamp_pos_left := road_pos + perp * lamp_offset
-				var lamp_pos_right := road_pos - perp * lamp_offset
+		# Check right side
+		if not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road_fast(lamp_pos_right, 0.0):
+			var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
+			var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
+			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
+			if _loaded_chunks.has(chunk_key):
+				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_right.x, 0.0, lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[chunk_key])
 
-				var left_on_parking := _is_point_in_any_parking(lamp_pos_left)
-				var right_on_parking := _is_point_in_any_parking(lamp_pos_right)
-				var left_on_road := _is_point_near_road_fast(lamp_pos_left, 0.0)
-				var right_on_road := _is_point_near_road_fast(lamp_pos_right, 0.0)
-
-				var elev_left := _get_elevation_at_point(lamp_pos_left, elev_data)
-				var elev_right := _get_elevation_at_point(lamp_pos_right, elev_data)
-
-				var dir_to_road_left := -perp
-				var dir_to_road_right := perp
-
-				if not left_on_parking and not left_on_road:
-					var lamp_3d_left := Vector3(lamp_pos_left.x, elev_left, lamp_pos_left.y)
-					var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
-					var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
-					var chunk_key := "%d,%d" % [chunk_x, chunk_z]
-					if _loaded_chunks.has(chunk_key):
-						var chunk_parent: Node3D = _loaded_chunks[chunk_key]
-						_add_lamp_to_batch(chunk_key, lamp_3d_left, Vector3(dir_to_road_left.x, 0, dir_to_road_left.y), chunk_parent)
-
-				if not right_on_parking and not right_on_road:
-					var lamp_3d_right := Vector3(lamp_pos_right.x, elev_right, lamp_pos_right.y)
-					var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
-					var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
-					var chunk_key := "%d,%d" % [chunk_x, chunk_z]
-					if _loaded_chunks.has(chunk_key):
-						var chunk_parent: Node3D = _loaded_chunks[chunk_key]
-						_add_lamp_to_batch(chunk_key, lamp_3d_right, Vector3(dir_to_road_right.x, 0, dir_to_road_right.y), chunk_parent)
-
-				last_lamp_distance = accumulated_distance + pos_along
-
-			pos_along += lamp_spacing / 4
-
-		accumulated_distance += segment_length
+		next_lamp_dist += lamp_spacing
 
 
 func _generate_manholes_along_road(nodes: Array, road_width: float, elev_data: Dictionary, parent: Node3D) -> void:
@@ -9006,7 +9432,7 @@ func _generate_manholes_along_road(nodes: Array, road_width: float, elev_data: D
 
 
 # Fast variant: accepts pre-computed local_points
-func _generate_manholes_fast(local_points: PackedVector2Array, road_width: float, elev_data: Dictionary, parent: Node3D) -> void:
+func _generate_manholes_fast(local_points: PackedVector2Array, road_width: float, _elev_data: Dictionary, parent: Node3D) -> void:
 	if not enable_manholes or local_points.size() < 2:
 		return
 	if not _manhole_albedo or not _manhole_normal:
@@ -9030,8 +9456,7 @@ func _generate_manholes_fast(local_points: PackedVector2Array, road_width: float
 				var road_pos := p1.lerp(p2, t)
 				var manhole_pos := road_pos - perp * offset
 
-				var elev := _get_elevation_at_point(manhole_pos, elev_data)
-				_create_manhole_decal(manhole_pos, elev, randf() * TAU, parent)
+				_create_manhole_decal(manhole_pos, 0.0, randf() * TAU, parent)
 				last_manhole = accumulated + pos_along
 
 			pos_along += 50.0
@@ -9316,49 +9741,30 @@ func _create_pending_parking_signs() -> void:
 
 
 func _is_point_in_any_parking(point: Vector2) -> bool:
-	"""Проверяет, находится ли точка внутри или рядом с любой парковкой"""
-	const PARKING_BUFFER := 10.0  # Буфер вокруг парковки (метры) - увеличен
+	const PARKING_BUFFER := 10.0
+	var cell_x := int(floor(point.x / PARKING_CELL_SIZE))
+	var cell_y := int(floor(point.y / PARKING_CELL_SIZE))
 
-	for parking in _parking_polygons:
-		if parking.size() < 3:
-			continue
-
-		# Вычисляем центр и максимальный радиус парковки для быстрой отсечки
-		var center := Vector2.ZERO
-		for p in parking:
-			center += p
-		center /= parking.size()
-
-		var max_radius := 0.0
-		for p in parking:
-			max_radius = max(max_radius, center.distance_to(p))
-
-		# Быстрая отсечка - если точка слишком далеко от центра
-		if point.distance_to(center) > max_radius + PARKING_BUFFER + 5.0:
-			continue
-
-		# 1. Проверка - внутри полигона
-		if Geometry2D.is_point_in_polygon(point, parking):
-			return true
-
-		# 2. Проверяем расстояние до ближайшего ребра парковки
-		for i in range(parking.size()):
-			var p1: Vector2 = parking[i]
-			var p2: Vector2 = parking[(i + 1) % parking.size()]
-
-			# Ближайшая точка на отрезке к нашей точке
-			var edge: Vector2 = p2 - p1
-			var edge_len_sq: float = edge.length_squared()
-			if edge_len_sq < 0.0001:
+	# Collect nearby parking polygon indices via spatial hash
+	var checked_polygons: Dictionary = {}  # idx → true
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not _parking_spatial_hash.has(key):
 				continue
-
-			var t: float = clamp((point - p1).dot(edge) / edge_len_sq, 0.0, 1.0)
-			var closest: Vector2 = p1 + edge * t
-			var dist: float = point.distance_to(closest)
-
-			if dist < PARKING_BUFFER:
-				return true
-
+			for entry in _parking_spatial_hash[key]:
+				var pidx: int = entry.idx
+				# Check edge distance
+				var closest := Geometry2D.get_closest_point_to_segment(point, entry.p1, entry.p2)
+				if point.distance_to(closest) < PARKING_BUFFER:
+					return true
+				# Also check if point is inside the polygon (only once per polygon)
+				if not checked_polygons.has(pidx):
+					checked_polygons[pidx] = true
+					if pidx < _parking_polygons.size():
+						var parking: PackedVector2Array = _parking_polygons[pidx]
+						if parking.size() >= 3 and Geometry2D.is_point_in_polygon(point, parking):
+							return true
 	return false
 
 
