@@ -710,8 +710,8 @@ func _process(delta: float) -> void:
 	var t_building := Time.get_ticks_usec() - t0
 	_record_perf("building_results", t_building)
 
-	# Общий бюджет на все очереди — 7ms (90fps = 11ms, оставляем 4ms на рендер/физику)
-	const FRAME_BUDGET_USEC := 7000
+	# Общий бюджет на все очереди — 5ms (90fps = 11ms, рендер ~4ms, физика ~2ms)
+	const FRAME_BUDGET_USEC := 5000
 
 	# Обрабатываем очередь дорог
 	t0 = Time.get_ticks_usec()
@@ -6236,8 +6236,8 @@ Chunks: %d loaded""" % [fps, avg_fps, fps_1pct, min_fps, road_q, terrain_q, infr
 ## Обрабатывает очередь дорог (3 дороги за кадр)
 func _process_road_queue() -> void:
 	if _road_queue.is_empty():
-		# Time budget для финализации — несколько чанков за кадр (90fps = 11ms total)
-		const FINALIZE_BUDGET_USEC := 4000  # 4ms
+		# Time budget для финализации — несколько чанков за кадр
+		const FINALIZE_BUDGET_USEC := 3000  # 3ms (90fps = 11ms, рендер+физика ~6ms)
 		var finalize_start := Time.get_ticks_usec()
 
 		# 1. Road batches
@@ -6250,10 +6250,11 @@ func _process_road_queue() -> void:
 			if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
 				return
 
-		# 2. Curbs (не блокируют остальные этапы — обрабатываются параллельно)
+		# 2. Curbs (с проверкой бюджета)
 		if not _curb_queue.is_empty() or not _curb_smoothed_queue.is_empty() or not _curb_mesh_state.is_empty() or not _curb_geo_batch.is_empty():
 			_process_curb_queue()
-			# НЕ return — продолжаем финализировать lamps/buildings/trees в том же кадре
+			if Time.get_ticks_usec() - finalize_start > FINALIZE_BUDGET_USEC:
+				return
 
 		# 3. Lamps
 		while not _lamp_batches_to_finalize.is_empty():
@@ -6338,8 +6339,8 @@ func _process_road_queue() -> void:
 		_sort_queue_by_distance(_road_queue, _car.global_position)
 		_record_perf("road_sort", Time.get_ticks_usec() - t0)
 
-	# Time budget: 5ms на обработку дорог (90fps = 11ms total, 6ms на остальное)
-	const ROAD_TIME_BUDGET_USEC := 5000
+	# Time budget: 3ms на обработку дорог (90fps = 11ms, рендер+физика ~6ms, финализация ~3ms)
+	const ROAD_TIME_BUDGET_USEC := 3000
 	var start_time := Time.get_ticks_usec()
 	var processed := 0
 

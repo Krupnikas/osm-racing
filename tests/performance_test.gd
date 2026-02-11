@@ -18,6 +18,9 @@ var night_mode_manager: Node
 var test_running: bool = false
 var test_time: float = 0.0
 var output_filename: String = ""
+var _gpu_cpu_timer: float = 0.0
+var _gpu_times: Array[float] = []
+var _cpu_render_times: Array[float] = []
 
 func _ready() -> void:
 	# Fix random seed for reproducible tests
@@ -226,6 +229,18 @@ func _process(delta: float) -> void:
 	if logger:
 		logger.log_frame()
 
+	# Measure GPU vs CPU render time
+	var vp_rid: RID = get_viewport().get_viewport_rid()
+	var gpu_ms: float = RenderingServer.viewport_get_measured_render_time_gpu(vp_rid)
+	var cpu_ms: float = RenderingServer.viewport_get_measured_render_time_cpu(vp_rid)
+	_gpu_times.append(gpu_ms)
+	_cpu_render_times.append(cpu_ms)
+
+	_gpu_cpu_timer += delta
+	if _gpu_cpu_timer >= 5.0:
+		_gpu_cpu_timer = 0.0
+		_print_gpu_cpu_stats(delta)
+
 	# Update test time
 	test_time += delta
 
@@ -275,6 +290,9 @@ func _end_test() -> void:
 	else:
 		print("\n[PerformanceTest] No logger available, skipping CSV export")
 
+	# Final GPU/CPU stats
+	_print_gpu_cpu_stats()
+
 	# Quit if requested
 	if auto_quit_after_test:
 		print("\nQuitting application...")
@@ -282,6 +300,70 @@ func _end_test() -> void:
 		get_tree().quit()
 	else:
 		print("\nTest finished. You can continue playing or close the game.")
+
+func _print_gpu_cpu_stats(_delta: float = 0.0) -> void:
+	# GPU/CPU render times (may be 0 on macOS Metal)
+	var gpu_avg := 0.0
+	var gpu_max := 0.0
+	var gpu_valid := 0
+	for v in _gpu_times:
+		if v > 0.0:
+			gpu_avg += v
+			gpu_max = maxf(gpu_max, v)
+			gpu_valid += 1
+	if gpu_valid > 0:
+		gpu_avg /= gpu_valid
+
+	var cpu_render_avg := 0.0
+	var cpu_render_max := 0.0
+	var cpu_valid := 0
+	for v in _cpu_render_times:
+		if v > 0.0:
+			cpu_render_avg += v
+			cpu_render_max = maxf(cpu_render_max, v)
+			cpu_valid += 1
+	if cpu_valid > 0:
+		cpu_render_avg /= cpu_valid
+
+	# Process/physics times from Performance monitors
+	var process_ms: float = Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+	var physics_ms: float = Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+	var fps: float = Engine.get_frames_per_second()
+	var frame_ms: float = 1000.0 / maxf(fps, 1.0)
+
+	# Infer bottleneck: if process_ms << frame_ms, CPU finishes fast → GPU-bound
+	var bottleneck: String
+	if gpu_valid > 0:
+		if gpu_avg > cpu_render_avg * 1.2:
+			bottleneck = "GPU-BOUND"
+		elif cpu_render_avg > gpu_avg * 1.2:
+			bottleneck = "CPU-BOUND"
+		else:
+			bottleneck = "BALANCED"
+	else:
+		# No GPU timing available — infer from process vs frame time
+		# CPU process < frame → CPU waits for GPU → GPU-bound
+		if process_ms < frame_ms * 0.6:
+			bottleneck = "GPU-BOUND (inferred)"
+		elif process_ms > frame_ms * 0.9:
+			bottleneck = "CPU-BOUND (inferred)"
+		else:
+			bottleneck = "BALANCED (inferred)"
+
+	var draw_calls: int = int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
+	var objects: int = int(Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME))
+	var vram_mb: float = Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0
+
+	print("[BOTTLENECK] %s | FPS: %.0f | Frame: %.1f ms | Process: %.1f ms | Physics: %.1f ms" % [
+		bottleneck, fps, frame_ms, process_ms, physics_ms])
+	if gpu_valid > 0:
+		print("  GPU render: %.2f ms avg (%.2f max) | CPU render: %.2f ms avg (%.2f max)" % [
+			gpu_avg, gpu_max, cpu_render_avg, cpu_render_max])
+	print("  Draw calls: %d | Objects: %d | VRAM: %.0f MB" % [draw_calls, objects, vram_mb])
+
+	_gpu_times.clear()
+	_cpu_render_times.clear()
+
 
 func _input(event: InputEvent) -> void:
 	# Allow manual test abort with Escape
