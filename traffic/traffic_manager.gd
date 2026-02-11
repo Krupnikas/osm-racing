@@ -80,7 +80,28 @@ func _ready() -> void:
 		add_child(_profiler)
 		print("[TrafficManager] Profiler created for diagnostics")
 
+	# Прогреваем кэш mesh merge — инстанцируем по 1 NPC каждого типа,
+	# чтобы _merge_meshes() отработал до начала езды (иначе фриз при первом спавне)
+	_warmup_mesh_cache()
+
 	print("TrafficManager: Initialized (max %d NPCs)" % max_npcs)
+
+
+func _warmup_mesh_cache() -> void:
+	var t0 := Time.get_ticks_msec()
+	var scenes: Array[PackedScene] = []
+	if npc_car_scene: scenes.append(npc_car_scene)
+	if npc_paz_scene: scenes.append(npc_paz_scene)
+	if npc_lada_scene: scenes.append(npc_lada_scene)
+	if npc_taxi_scene: scenes.append(npc_taxi_scene)
+	if npc_vaz2107_scene: scenes.append(npc_vaz2107_scene)
+	if npc_polo_scene: scenes.append(npc_polo_scene)
+	for scene in scenes:
+		var instance := scene.instantiate() as Node3D
+		instance.visible = false
+		add_child(instance)  # triggers _ready() → _merge_meshes() → кэш заполнится
+		instance.queue_free()
+	print("TrafficManager: Mesh cache warmed up (%d types, %d ms)" % [scenes.size(), Time.get_ticks_msec() - t0])
 
 
 func _process(delta: float) -> void:
