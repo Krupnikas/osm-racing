@@ -42,6 +42,9 @@ signal request_despawn
 var _lights: Node3D
 var _lights_enabled := false
 
+# Static cache for merged meshes (по типу NPC сцены)
+static var _merged_mesh_cache: Dictionary = {}  # scene_path → ArrayMesh
+
 # Colors for randomization
 const NPC_COLORS := [
 	Color(0.8, 0.1, 0.1),  # Красный
@@ -61,6 +64,9 @@ func _ready() -> void:
 
 	# ОПТИМИЗАЦИЯ: Отключаем физику колес у ВСЕХ NPC (1 body вместо 5)
 	_disable_wheel_physics()
+
+	# ОПТИМИЗАЦИЯ: Объединяем mesh NPC в один для уменьшения draw calls
+	_merge_meshes()
 
 	# Настраиваем привод (AWD) - не используется, но оставляем для совместимости
 	for wheel in wheels_front:
@@ -632,3 +638,152 @@ func _disable_wheel_physics() -> void:
 			for child in wheel.get_children():
 				if child is MeshInstance3D:
 					child.visible = false
+
+
+func _merge_meshes() -> void:
+	"""Объединяет все mesh NPC модели в один ArrayMesh для минимизации draw calls.
+	GLTF модели типа polo имеют 200+ mesh = 200+ draw calls.
+	После merge: 1 mesh с несколькими surfaces (по числу уникальных материалов).
+	Использует кеш по scene path — merge вычисляется один раз для каждого типа NPC."""
+	# Определяем ключ кеша по scene file
+	var cache_key: String = scene_file_path
+	if cache_key.is_empty():
+		cache_key = name  # Fallback
+
+	# Собираем все MeshInstance3D рекурсивно
+	var mesh_instances: Array[MeshInstance3D] = []
+	_collect_mesh_instances(self, mesh_instances)
+
+	if mesh_instances.size() < 2:
+		return  # Нечего объединять (простые box NPC)
+
+	var merged_mesh: ArrayMesh
+
+	if _merged_mesh_cache.has(cache_key):
+		# Используем кешированный mesh (мгновенно)
+		merged_mesh = _merged_mesh_cache[cache_key].duplicate() as ArrayMesh
+	else:
+		# Первый NPC этого типа — делаем полный merge
+		merged_mesh = _build_merged_mesh(mesh_instances)
+		if merged_mesh and merged_mesh.get_surface_count() > 0:
+			_merged_mesh_cache[cache_key] = merged_mesh
+
+	if not merged_mesh or merged_mesh.get_surface_count() == 0:
+		return
+
+	# Скрываем оригинальные mesh
+	for mi in mesh_instances:
+		mi.visible = false
+
+	# Создаём один MeshInstance3D с объединённым mesh
+	var merged_instance := MeshInstance3D.new()
+	merged_instance.name = "MergedMesh"
+	merged_instance.mesh = merged_mesh
+	merged_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	add_child(merged_instance)
+
+
+func _build_merged_mesh(mesh_instances: Array[MeshInstance3D]) -> ArrayMesh:
+	"""Строит объединённый ArrayMesh из всех видимых mesh instances."""
+	# Группируем surfaces по материалу
+	var material_groups: Dictionary = {}  # mat_key → {material, surfaces}
+	for mi in mesh_instances:
+		if not mi.visible:
+			continue
+		var mesh: Mesh = mi.mesh
+		if not mesh:
+			continue
+		var local_xform: Transform3D = mi.global_transform
+		for surf_idx in mesh.get_surface_count():
+			var mat: Material = mi.get_active_material(surf_idx)
+			var mat_key: int = mat.get_instance_id() if mat else 0
+			if not material_groups.has(mat_key):
+				material_groups[mat_key] = {"material": mat, "surfaces": []}
+			material_groups[mat_key]["surfaces"].append({
+				"mesh": mesh,
+				"surface_idx": surf_idx,
+				"transform": local_xform
+			})
+
+	if material_groups.is_empty():
+		return null
+
+	var merged_mesh := ArrayMesh.new()
+	var inv_self: Transform3D = global_transform.affine_inverse()
+
+	for mat_key in material_groups:
+		var group: Dictionary = material_groups[mat_key]
+		var mat: Material = group["material"]
+		var surfaces: Array = group["surfaces"]
+
+		var all_verts := PackedVector3Array()
+		var all_normals := PackedVector3Array()
+		var all_uvs := PackedVector2Array()
+		var all_indices := PackedInt32Array()
+
+		for surf_data in surfaces:
+			var mesh: Mesh = surf_data["mesh"]
+			var surf_idx: int = surf_data["surface_idx"]
+			var xform: Transform3D = inv_self * surf_data["transform"]
+
+			var arrays: Array = mesh.surface_get_arrays(surf_idx)
+			if arrays.is_empty() or arrays[Mesh.ARRAY_VERTEX] == null:
+				continue
+
+			var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+			var normals: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL] if arrays[Mesh.ARRAY_NORMAL] != null else PackedVector3Array()
+			var uvs = arrays[Mesh.ARRAY_TEX_UV]
+			var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX] if arrays[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+
+			var base_vertex: int = all_verts.size()
+
+			# Трансформируем вершины в локальное пространство NPC
+			for v in verts:
+				all_verts.append(xform * v)
+
+			# Трансформируем нормали
+			var normal_xform: Basis = xform.basis
+			if normals.size() == verts.size():
+				for n in normals:
+					all_normals.append((normal_xform * n).normalized())
+			else:
+				for _i in verts.size():
+					all_normals.append(Vector3.UP)
+
+			# UV
+			if uvs != null and uvs.size() == verts.size():
+				for uv in uvs:
+					all_uvs.append(uv)
+			else:
+				for _i in verts.size():
+					all_uvs.append(Vector2.ZERO)
+
+			# Индексы со смещением
+			if indices.size() > 0:
+				for idx in indices:
+					all_indices.append(idx + base_vertex)
+			else:
+				for i in verts.size():
+					all_indices.append(base_vertex + i)
+
+		if all_verts.is_empty():
+			continue
+
+		var surface_arrays: Array = []
+		surface_arrays.resize(Mesh.ARRAY_MAX)
+		surface_arrays[Mesh.ARRAY_VERTEX] = all_verts
+		surface_arrays[Mesh.ARRAY_NORMAL] = all_normals
+		surface_arrays[Mesh.ARRAY_TEX_UV] = all_uvs
+		surface_arrays[Mesh.ARRAY_INDEX] = all_indices
+
+		merged_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, surface_arrays)
+		merged_mesh.surface_set_material(merged_mesh.get_surface_count() - 1, mat)
+
+	return merged_mesh
+
+
+func _collect_mesh_instances(node: Node, result: Array[MeshInstance3D]) -> void:
+	if node is MeshInstance3D:
+		result.append(node as MeshInstance3D)
+	for child in node.get_children():
+		_collect_mesh_instances(child, result)
