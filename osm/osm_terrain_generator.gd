@@ -2784,6 +2784,9 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 			height_offset = 0.096
 			curb_height = 0.05
 
+	# Сглаживаем точки один раз — используются и для дороги, и для бордюров
+	var smoothed_points: PackedVector2Array = _smooth_road_corners(local_points)
+
 	# Создаём дорогу - обычную или мост
 	if is_bridge:
 		_create_bridge_road(nodes, width, texture_key, height_offset, elevation_info, parent, elev_data)
@@ -2793,11 +2796,11 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 		if b_height > 0:
 			print("OSM: Bridge created: height=%.1fm, ramp=%.1fm, layer=%d" % [b_height, b_ramp, b_layer])
 	else:
-		_add_road_to_batch_fast(local_points, width, texture_key, height_offset, parent, elev_data)
+		_add_road_to_batch_fast(smoothed_points, width, texture_key, height_offset, parent, elev_data)
 
 	if curb_height > 0.0:
 		_curb_queue.append({
-			"nodes": nodes,
+			"local_points": smoothed_points,
 			"width": width,
 			"height_offset": height_offset,
 			"curb_height": curb_height,
@@ -2807,16 +2810,16 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev
 			"bridge_info": elevation_info
 		})
 
-	# Фонари (только крупные дороги, используют pre-computed points)
+	# Фонари (только крупные дороги)
 	if highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary"]:
-		_generate_street_lamps_fast(local_points, width, elev_data, parent)
+		_generate_street_lamps_fast(smoothed_points, width, elev_data, parent)
 
 	# Люки
 	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
-		_generate_manholes_fast(local_points, width, elev_data, parent)
+		_generate_manholes_fast(smoothed_points, width, elev_data, parent)
 
 	# RoadNetwork для NPC
-	_extract_road_for_traffic_fast(local_points, tags, elev_data, elevation_info)
+	_extract_road_for_traffic_fast(smoothed_points, tags, elev_data, elevation_info)
 
 
 ## Создаёт дорогу-мост с рампами подъёма/спуска и опорами
@@ -3501,8 +3504,8 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 			"parent": parent
 		}
 
-	var points: PackedVector2Array = _smooth_road_corners(raw_points)
-	points = _validate_road_direction(points)
+	# Точки уже сглажены вызывающей стороной — только validate
+	var points: PackedVector2Array = _validate_road_direction(raw_points)
 
 	if chunk_key != "initial":
 		var ck_parts: PackedStringArray = chunk_key.split(",")
@@ -6368,18 +6371,11 @@ func _process_curb_queue() -> void:
 		if smoothed_count > 0 and (Time.get_ticks_usec() - curb_smooth_start) > CURB_SMOOTH_BUDGET_USEC:
 			break
 		var item: Dictionary = _curb_queue.pop_front()
-		if is_instance_valid(item.parent) and item.nodes.size() >= 2:
-			var t0 := Time.get_ticks_usec()
-			var raw_points: PackedVector2Array = []
-			for node in item.nodes:
-				var local: Vector2 = _latlon_to_local(node.lat, node.lon)
-				raw_points.append(local)
-			_record_perf("curb_latlon", Time.get_ticks_usec() - t0)
-
-			# Сглаживаем точки (полное сглаживание как для дорог)
-			t0 = Time.get_ticks_usec()
-			var smoothed_points: PackedVector2Array = _smooth_road_corners(raw_points)
-			_record_perf("curb_smooth", Time.get_ticks_usec() - t0)
+		if is_instance_valid(item.parent) and item.local_points.size() >= 2:
+			# Точки уже в локальных координатах — пропускаем latlon конвертацию
+			# Сглаживание тоже не нужно: дорога и бордюр используют одни и те же raw points,
+			# а сглаживание дороги происходит в _add_road_to_batch_fast
+			var points: PackedVector2Array = item.local_points
 
 			# Клиппинг по chunk bbox (OSM данные загружаются с +100м overlap →
 			# без клиппинга один бордюр создаётся в нескольких чанках)
@@ -6393,13 +6389,13 @@ func _process_curb_queue() -> void:
 				var clip_max_x: float = float(ck_x + 1) * chunk_size + margin
 				var clip_min_z: float = float(ck_z) * chunk_size - margin
 				var clip_max_z: float = float(ck_z + 1) * chunk_size + margin
-				smoothed_points = _clip_polyline_to_rect(smoothed_points, clip_min_x, clip_max_x, clip_min_z, clip_max_z)
-				if smoothed_points.size() < 2:
+				points = _clip_polyline_to_rect(points, clip_min_x, clip_max_x, clip_min_z, clip_max_z)
+				if points.size() < 2:
 					continue
 
 			# Добавляем в очередь для генерации меша
 			_curb_smoothed_queue.append({
-				"points": smoothed_points,
+				"points": points,
 				"width": item.width,
 				"height_offset": item.height_offset,
 				"curb_height": item.curb_height,
@@ -10682,16 +10678,12 @@ func _clip_segment_to_rect(a: Vector2, b: Vector2, min_x: float, max_x: float, m
 
 
 func _smooth_road_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
-	return _smooth_points(raw_points, 10.0, 3, 1.0)  # Оптимизация: реже точки, меньше subdivisions
+	return _smooth_points_adaptive(raw_points, 1.0)
 
 
-## Упрощённое сглаживание для бордюров (меньше точек)
-func _smooth_curb_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
-	return _smooth_points(raw_points, 12.0, 2, 2.0)  # Оптимизация: минимум subdivisions для бордюров
-
-
-## Общая функция сглаживания с настраиваемыми параметрами
-func _smooth_points(raw_points: PackedVector2Array, meters_per_point: float, max_subdiv: int, min_dist: float) -> PackedVector2Array:
+## Адаптивное сглаживание: мало точек на прямых, много на поворотах
+## min_dist — минимальное расстояние между точками (для дорог 1м, для бордюров 2м)
+func _smooth_points_adaptive(raw_points: PackedVector2Array, min_dist: float) -> PackedVector2Array:
 	if raw_points.size() < 3:
 		return raw_points
 
@@ -10700,48 +10692,65 @@ func _smooth_points(raw_points: PackedVector2Array, meters_per_point: float, max
 	# Always add first point
 	result.append(raw_points[0])
 
-	# Interpolate between each pair of points using Catmull-Rom
 	for i in range(raw_points.size() - 1):
-		# Get 4 control points for Catmull-Rom (p0, p1, p2, p3)
 		var p0: Vector2 = raw_points[maxi(0, i - 1)]
 		var p1: Vector2 = raw_points[i]
 		var p2: Vector2 = raw_points[mini(raw_points.size() - 1, i + 1)]
 		var p3: Vector2 = raw_points[mini(raw_points.size() - 1, i + 2)]
 
-		# Calculate segment length to determine subdivision count
 		var seg_length: float = p1.distance_to(p2)
 
-		# Check angle at p1 (current point)
-		var angle_sharpness: float = 1.0
+		# Measure angle sharpness at both ends of the segment
+		var sharpness_at_p1: float = 0.0
 		if i > 0:
 			var d1: Vector2 = (p1 - p0).normalized()
 			var d2: Vector2 = (p2 - p1).normalized()
-			var dot: float = d1.dot(d2)
-			# dot = 1 means straight, dot = -1 means 180° turn
-			# Convert to sharpness: 0 = straight, 1 = very sharp
-			angle_sharpness = (1.0 - dot) * 0.5
+			sharpness_at_p1 = (1.0 - d1.dot(d2)) * 0.5
 
-		# More subdivisions for sharp turns and longer segments
-		var base_subdivisions: int = maxi(2, int(seg_length / meters_per_point))
-		var subdivisions: int = base_subdivisions
+		var sharpness_at_p2: float = 0.0
+		if i + 2 < raw_points.size():
+			var d1: Vector2 = (p2 - p1).normalized()
+			var d2: Vector2 = (p3 - p2).normalized()
+			sharpness_at_p2 = (1.0 - d1.dot(d2)) * 0.5
 
-		# Add extra subdivisions for sharp corners
-		if angle_sharpness > 0.1:  # > ~25 degrees
-			subdivisions = maxi(subdivisions, mini(4, max_subdiv))
-		if angle_sharpness > 0.25:  # > ~60 degrees
-			subdivisions = maxi(subdivisions, mini(6, max_subdiv))
-		if angle_sharpness > 0.5:  # > ~90 degrees
-			subdivisions = maxi(subdivisions, max_subdiv)
+		var sharpness: float = maxf(sharpness_at_p1, sharpness_at_p2)
 
-		# Cap at maximum
-		subdivisions = mini(subdivisions, max_subdiv)
+		# Also check curvature via Catmull-Rom midpoint deviation from straight line
+		# This catches gradual curves where each angle is small but the arc is significant
+		var mid_interp: Vector2 = _catmull_rom(p0, p1, p2, p3, 0.5)
+		var mid_straight: Vector2 = (p1 + p2) * 0.5
+		var deviation: float = mid_interp.distance_to(mid_straight)
+		# Normalize deviation by segment length to get relative curvature
+		var rel_curvature: float = deviation / maxf(seg_length, 0.1)
+
+		# Combine: use whichever indicates more curvature
+		# rel_curvature 0.006 → sharpness 0.05 (gentle), 0.019 → 0.15 (medium)
+		if rel_curvature > 0.005:
+			sharpness = maxf(sharpness, rel_curvature * 8.0)
+
+		# Adaptive subdivisions based on sharpness:
+		# Straight (sharpness < 0.05): 1 subdivision (no intermediate points)
+		# Gentle curve (0.05-0.15): 2 subdivisions
+		# Medium curve (0.15-0.3): 3-4 subdivisions based on segment length
+		# Sharp turn (0.3-0.5): 4-6 subdivisions
+		# Very sharp (>0.5): 6-8 subdivisions
+		var subdivisions: int
+		if sharpness < 0.05:
+			subdivisions = 1
+		elif sharpness < 0.15:
+			subdivisions = 2
+		elif sharpness < 0.3:
+			subdivisions = maxi(3, mini(4, int(seg_length / 8.0)))
+		elif sharpness < 0.5:
+			subdivisions = maxi(4, mini(6, int(seg_length / 5.0)))
+		else:
+			subdivisions = maxi(6, mini(8, int(seg_length / 3.0)))
 
 		# Interpolate from p1 to p2
 		for j in range(1, subdivisions):
 			var t: float = float(j) / float(subdivisions)
 			var interp: Vector2 = _catmull_rom(p0, p1, p2, p3, t)
 
-			# Only add if far enough from last point (avoid duplicates)
 			if result[result.size() - 1].distance_to(interp) > min_dist:
 				result.append(interp)
 
