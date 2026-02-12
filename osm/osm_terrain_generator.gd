@@ -9969,6 +9969,7 @@ func _create_intersection_signs(pos: Vector2, elevation: float, parent: Node3D) 
 
 # Создание знака "Уступи дорогу" - разрушаемый при столкновении
 func _create_yield_sign(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	return  # TEMP: знаки уступи дорогу выключены
 	# Смещаем знак с дороги если нужно
 	var safe_pos := _move_object_off_road(pos, 0.5, 5)
 	if safe_pos == Vector2.ZERO:
@@ -10035,20 +10036,50 @@ func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D
 	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	body.add_child(pole)
 
-	# Треугольный знак (используем призму/цилиндр с 3 гранями)
-	var sign_plate := MeshInstance3D.new()
-	var sign_mesh := PrismMesh.new()
-	sign_mesh.size = Vector3(0.5, 0.5, 0.02)
-	sign_plate.mesh = sign_mesh
+	# Треугольный знак: красный ободок + белый центр + серая спинка
+	# 1) Красный треугольник (ободок)
+	var border_plate := MeshInstance3D.new()
+	var border_mesh := PrismMesh.new()
+	border_mesh.size = Vector3(0.5, 0.5, 0.02)
+	border_plate.mesh = border_mesh
+	var border_mat := StandardMaterial3D.new()
+	border_mat.albedo_color = Color(0.85, 0.1, 0.1)
+	border_plate.material_override = border_mat
+	border_plate.position.y = 2.3
+	border_plate.rotation.y = -PI / 2
+	border_plate.rotation.z = PI
+	border_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	body.add_child(border_plate)
 
-	var sign_mat := StandardMaterial3D.new()
-	sign_mat.albedo_color = Color(0.95, 0.95, 0.95)  # Белый с красной каймой (упрощённо - белый)
-	sign_plate.material_override = sign_mat
-	sign_plate.position.y = 2.3
-	sign_plate.rotation.x = PI / 2  # Поворот чтобы был вертикально
-	sign_plate.rotation.z = PI  # Вершина вниз (уступи дорогу)
-	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	body.add_child(sign_plate)
+	# 2) Белый треугольник (центр, чуть меньше, чуть впереди)
+	var center_plate := MeshInstance3D.new()
+	var center_mesh := PrismMesh.new()
+	center_mesh.size = Vector3(0.36, 0.36, 0.02)
+	center_plate.mesh = center_mesh
+	var center_mat := StandardMaterial3D.new()
+	center_mat.albedo_color = Color(0.95, 0.95, 0.95)
+	center_plate.material_override = center_mat
+	center_plate.position.y = 2.3
+	center_plate.position.x = -0.02
+	center_plate.rotation.y = -PI / 2
+	center_plate.rotation.z = PI
+	body.add_child(center_plate)
+
+	# 3) Серая металлическая задняя сторона
+	var back_plate := MeshInstance3D.new()
+	var back_mesh := PrismMesh.new()
+	back_mesh.size = Vector3(0.5, 0.5, 0.02)
+	back_plate.mesh = back_mesh
+	var back_mat := StandardMaterial3D.new()
+	back_mat.albedo_color = Color(0.55, 0.55, 0.55)
+	back_mat.metallic = 0.4
+	back_mat.roughness = 0.6
+	back_plate.material_override = back_mat
+	back_plate.position.y = 2.3
+	back_plate.position.x = 0.02
+	back_plate.rotation.y = -PI / 2
+	back_plate.rotation.z = PI
+	body.add_child(back_plate)
 
 	parent.add_child(body)
 
