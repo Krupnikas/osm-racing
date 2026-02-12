@@ -166,6 +166,14 @@ func _load_building_overrides_json(path: String) -> void:
 		if od.has("shop_entrances"):
 			override.shop_entrances = od["shop_entrances"]
 
+		# POI nodes to skip
+		if od.has("skip_pois"):
+			override.skip_pois = od["skip_pois"]
+
+		# Custom entrance groups (МАРС и т.д.)
+		if od.has("custom_entrances"):
+			override.custom_entrances = od["custom_entrances"]
+
 		_building_overrides.append(override)
 
 

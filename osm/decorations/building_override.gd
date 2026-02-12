@@ -45,6 +45,12 @@ var entrances: Array = []
 # Входные группы магазинов [{lat: float, lon: float, sign_logo: String (optional)}]
 var shop_entrances: Array = []
 
+# POI nodes to skip (suppress auto-generated entrance) [int osm_node_id, ...]
+var skip_pois: Array = []
+
+# Custom entrance groups [{type: String, lat: float, lon: float, ...}]
+var custom_entrances: Array = []
+
 
 func matches_way_id(way_id: int) -> bool:
 	"""Проверяет совпадение по OSM way ID"""

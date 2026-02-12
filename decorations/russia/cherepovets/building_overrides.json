@@ -50,9 +50,19 @@
     },
     {
       "osm_way_id": 1408400824,
-      "comment": "Окинина 8",
+      "comment": "Окинина 8/31 (МАРС мини-рынок)",
       "wall_texture": "buildings/111-126.jpg",
-      "repeat_y": 1.0
+      "repeat_y": 1.0,
+      "skip_pois": [12943374800],
+      "custom_entrances": [
+        {
+          "type": "mars",
+          "lat": 59.148946,
+          "lon": 37.948017,
+          "sign_text": "МАРС",
+          "sign_subtitle": "мини-рынок"
+        }
+      ]
     },
     {
       "osm_way_id": 45836631,

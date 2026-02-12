@@ -12,6 +12,7 @@ const BuildingWallShader = preload("res://osm/building_wall.gdshader")
 const BuildingWallCustomShader = preload("res://osm/building_wall_custom.gdshader")
 const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
+const MarsEntranceGeneratorScript = preload("res://osm/mars_entrance_generator.gd")
 const BIRCH_TREE_SCENE = preload("res://models/trees/birch/scene.gltf")
 const BUS_STOP_SCENE = preload("res://models/bus_stop/scene.gltf")
 const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
@@ -5107,7 +5108,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
-	_add_business_signs_simple(points, tags, parent, building_height, base_elev, loader)
+	_add_business_signs_simple(points, tags, parent, building_height, base_elev, loader, way_id)
 
 	# Добавляем подъезды жилых домов (из building_overrides JSON)
 	if way_id > 0 and _decoration_layer:
@@ -5116,6 +5117,10 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	# Добавляем входные группы магазинов (из building_overrides JSON)
 	if way_id > 0 and _decoration_layer:
 		_add_shop_entrances_from_override(points, parent, building_height, base_elev, way_id)
+
+	# Добавляем кастомные входные группы (МАРС и т.д.)
+	if way_id > 0 and _decoration_layer:
+		_add_custom_entrances_from_override(points, parent, building_height, base_elev, way_id, elev_data)
 
 
 func _create_parking(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
@@ -10611,7 +10616,7 @@ func _add_building_windows(points: PackedVector2Array, height: float, rng: Rando
 ## BUSINESS SIGNS (вывески для заведений)
 ## ============================================================================
 
-func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, parent: Node3D, building_height: float, base_elev: float = 0.0, loader: Node = null) -> void:
+func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, parent: Node3D, building_height: float, base_elev: float = 0.0, loader: Node = null, way_id: int = 0) -> void:
 	"""
 	Добавление вывесок для заведений
 	Приоритет: вход (entrance) > POI node > самая длинная стена
@@ -10630,8 +10635,16 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 	# 2. Ищем POI nodes внутри здания
 	if loader != null:
 		var pois_inside = _find_pois_inside_building(points, loader)
+		var skip_override = null
+		if way_id > 0 and _decoration_layer:
+			skip_override = _decoration_layer.get_building_override_for_way(way_id)
 		for poi in pois_inside:
-			businesses_to_process.append({"tags": poi.tags, "poi_position": poi.position, "poi_id": poi.get("id", 0)})
+			var poi_id_val = poi.get("id", 0)
+			if skip_override and not skip_override.skip_pois.is_empty():
+				if poi_id_val in skip_override.skip_pois:
+					print("BusinessSign: Skipping POI %s (suppressed by override for way %d)" % [str(poi_id_val), way_id])
+					continue
+			businesses_to_process.append({"tags": poi.tags, "poi_position": poi.position, "poi_id": poi_id_val})
 	else:
 		print("BusinessSign WARNING: loader is null, cannot search for POIs")
 
@@ -10824,6 +10837,107 @@ func _add_shop_entrances_from_override(points: PackedVector2Array, parent: Node3
 		parent.add_child(back_wall)
 
 		print("ShopEntrance: added at (%.1f, %.1f) for way %d" % [sign_position_2d.x, sign_position_2d.y, way_id])
+
+
+func _add_custom_entrances_from_override(points: PackedVector2Array, parent: Node3D,
+		building_height: float, base_elev: float, way_id: int, elev_data: Dictionary) -> void:
+	if not _decoration_layer or way_id <= 0:
+		return
+	var override = _decoration_layer.get_building_override_for_way(way_id)
+	if not override or override.custom_entrances.is_empty():
+		return
+
+	for entrance_data in override.custom_entrances:
+		var entrance_type: String = entrance_data.get("type", "")
+		var lat: float = entrance_data.get("lat", 0.0)
+		var lon: float = entrance_data.get("lon", 0.0)
+		if lat == 0.0 or lon == 0.0:
+			continue
+
+		var entrance_pos := _latlon_to_local(lat, lon)
+		var wall := _find_closest_wall_to_point(points, entrance_pos, 3.0)
+		if wall.is_empty():
+			print("CustomEntrance: no wall found for %s at (%.6f, %.6f)" % [entrance_type, lat, lon])
+			continue
+
+		var elev := _get_elevation_at_point(wall.closest_point, elev_data)
+		var world_pos := Vector3(wall.closest_point.x, elev, wall.closest_point.y)
+		var rotation_y: float = atan2(wall.normal.x, wall.normal.z)
+
+		match entrance_type:
+			"mars":
+				_add_mars_entrance(world_pos, rotation_y, parent, entrance_data)
+			_:
+				push_warning("CustomEntrance: unknown type '%s'" % entrance_type)
+
+
+func _add_mars_entrance(world_pos: Vector3, rotation_y: float, parent: Node3D, entrance_data: Dictionary) -> void:
+	var geo := MarsEntranceGeneratorScript.generate_entrance_geometry(world_pos, rotation_y)
+	var materials := MarsEntranceGeneratorScript.get_materials()
+
+	var arr_mesh := ArrayMesh.new()
+	for key in MarsEntranceGeneratorScript.MATERIAL_KEYS:
+		var g: Dictionary = geo[key]
+		if g["vertices"].size() == 0:
+			continue
+
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = g["vertices"]
+		arrays[Mesh.ARRAY_NORMAL] = g["normals"]
+		arrays[Mesh.ARRAY_INDEX] = g["indices"]
+		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		arr_mesh.surface_set_material(arr_mesh.get_surface_count() - 1, materials[key])
+
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.mesh = arr_mesh
+	mesh_inst.name = "MarsEntrance"
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mesh_inst.visibility_range_end = 250.0
+	mesh_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
+	parent.add_child(mesh_inst)
+
+	# Label3D текст вывески
+	if geo.has("sign_data"):
+		var sd: Dictionary = geo["sign_data"]
+		var sign_text: String = entrance_data.get("sign_text", "МАРС")
+		var sign_subtitle: String = entrance_data.get("sign_subtitle", "")
+		_add_mars_sign_label(sd["position"], sd["rotation_y"], sign_text, sign_subtitle, parent)
+
+	# Коллизии
+	if geo.has("collisions"):
+		var body := StaticBody3D.new()
+		body.collision_layer = 2
+		body.collision_mask = 0
+		body.name = "MarsEntranceCollision"
+		parent.add_child(body)
+		for coll in geo["collisions"]:
+			var shape := CollisionShape3D.new()
+			var box := BoxShape3D.new()
+			box.size = coll["size"]
+			shape.shape = box
+			shape.position = coll["center"]
+			if coll.has("rotation_y"):
+				shape.rotation.y = coll["rotation_y"]
+			body.add_child(shape)
+
+	print("MarsEntrance: created at (%.1f, %.1f)" % [world_pos.x, world_pos.z])
+
+
+func _add_mars_sign_label(pos: Vector3, rot_y: float, text: String, subtitle: String, parent: Node3D) -> void:
+	var label := Label3D.new()
+	label.text = text
+	label.font_size = 400
+	label.pixel_size = 0.0025
+	label.modulate = Color(0.95, 0.95, 0.95)
+	label.outline_size = 8
+	label.outline_modulate = Color(0.6, 0.1, 0.1)
+	label.billboard = BaseMaterial3D.BILLBOARD_DISABLED
+	label.no_depth_test = false
+	label.position = pos
+	label.rotation.y = rot_y
+	label.name = "MarsSignText"
+	parent.add_child(label)
 
 
 func _create_shop_back_wall(height: float, width: float, colors: Array) -> MeshInstance3D:
