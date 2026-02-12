@@ -1,4 +1,4 @@
-[gd_scene load_steps=7 format=3 uid="uid://bcar_nexia"]
+[gd_scene load_steps=8 format=3 uid="uid://bcar_nexia"]
 
 [ext_resource type="Script" path="res://car/car.gd" id="1_car"]
 [ext_resource type="Script" path="res://car/audio/engine_sound.gd" id="2_engine_sound"]
@@ -6,6 +6,7 @@
 [ext_resource type="Script" path="res://night_mode/car_lights.gd" id="4_car_lights"]
 [ext_resource type="PackedScene" path="res://car/models/nexia/scene.gltf" id="5_nexia_model"]
 [ext_resource type="Script" path="res://car/nexia_setup.gd" id="6_nexia_setup"]
+[ext_resource type="PackedScene" path="res://effects/dirt_effect.tscn" id="7_dirt_effect"]
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_body"]
 size = Vector3(1.68, 1.2, 4.33)
@@ -95,3 +96,6 @@ script = ExtResource("3_collision_sound")
 
 [node name="CarLights" type="Node3D" parent="."]
 script = ExtResource("4_car_lights")
+
+[node name="DirtParticles" parent="." instance=ExtResource("7_dirt_effect")]
+vehicle = NodePath("..")

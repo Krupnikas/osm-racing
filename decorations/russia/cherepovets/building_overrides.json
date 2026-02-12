@@ -55,6 +55,18 @@
       "repeat_y": 1.0
     },
     {
+      "osm_way_id": 45836631,
+      "comment": "28/6 Пионерская улица",
+      "wall_texture": "buildings/111-126.jpg",
+      "repeat_y": 1.0
+    },
+    {
+      "osm_way_id": 45836630,
+      "comment": "33 Северное шоссе",
+      "wall_texture": "buildings/111-126.jpg",
+      "repeat_y": 1.0
+    },
+    {
       "osm_way_id": 45747168,
       "comment": "Химико-технологический колледж",
       "wall_texture": "buildings/ptu.png",

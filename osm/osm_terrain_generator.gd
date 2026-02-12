@@ -24,6 +24,7 @@ var _decoration_layer: Node = null  # DecorationLayer
 var _road_textures: Dictionary = {}
 var _building_textures: Dictionary = {}
 var _window_shader: Shader = null  # Кэш шейдера окон (создается один раз)
+var _shop_back_wall_shader: Shader = null  # Кэш шейдера задней стенки магазина
 var _ground_textures: Dictionary = {}
 var _normal_textures: Dictionary = {}  # Normal maps
 var _textures_initialized := false
@@ -5002,8 +5003,6 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 			color = Color(0.95, 0.95, 0.95)  # Белый для больниц
 		elif amenity_type == "clinic":
 			color = Color(0.9, 0.9, 0.95)  # Бело-голубой для поликлиник
-		elif amenity_type == "pharmacy":
-			color = Color(0.4, 0.75, 0.4)  # Зелёный для аптек
 		elif amenity_type == "police":
 			color = Color(0.3, 0.4, 0.6)  # Тёмно-синий для полиции
 		elif amenity_type == "fire_station":
@@ -5716,9 +5715,6 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 		"clinic":
 			building_height = 12.0
 			color = Color(0.9, 0.9, 0.95)  # Бело-голубой
-		"pharmacy":
-			building_height = 5.0
-			color = Color(0.4, 0.75, 0.4)  # Зелёный
 		"police":
 			building_height = 10.0
 			color = Color(0.3, 0.4, 0.6)  # Тёмно-синий
@@ -10635,7 +10631,7 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 	if loader != null:
 		var pois_inside = _find_pois_inside_building(points, loader)
 		for poi in pois_inside:
-			businesses_to_process.append({"tags": poi.tags, "poi_position": poi.position})
+			businesses_to_process.append({"tags": poi.tags, "poi_position": poi.position, "poi_id": poi.get("id", 0)})
 	else:
 		print("BusinessSign WARNING: loader is null, cannot search for POIs")
 
@@ -10646,6 +10642,7 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 	for business in businesses_to_process:
 		var business_tags: Dictionary = business.tags
 		var poi_pos = business.poi_position  # Vector2 или null
+		var poi_id: int = business.get("poi_id", 0)
 
 		var sign_text = BusinessSignGenerator.get_sign_text(business_tags)
 		if sign_text == "":
@@ -10719,7 +10716,33 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 			entrance_group.position = Vector3(sign_position_2d.x, base_elev, sign_position_2d.y)
 			entrance_group.rotation.y = atan2(wall_normal.x, wall_normal.z)
 			entrance_group.name = "EntranceGroup_%s" % sign_text.substr(0, 10)
+			# Антей: непрозрачные двери
+			if poi_id == 12155325753:
+				var opaque_glass := StandardMaterial3D.new()
+				opaque_glass.albedo_color = Color(0.3, 0.4, 0.5, 1.0)
+				opaque_glass.metallic = 0.1
+				opaque_glass.roughness = 0.1
+				opaque_glass.cull_mode = BaseMaterial3D.CULL_DISABLED
+				entrance_group.mesh.surface_set_material(1, opaque_glass)
 			parent.add_child(entrance_group)
+
+			# Задняя стенка (от козырька до земли)
+			var back_wall_colors: Array = [Color(0.85, 0.83, 0.80)]
+			if poi_id == 12155325753:  # Антей
+				back_wall_colors = [
+					Color(0.40, 0.50, 0.78),  # синий (верх)
+					Color(0.90, 0.78, 0.20),  # жёлтый
+					Color(0.25, 0.72, 0.62),  # бирюзовый
+					Color(0.45, 0.60, 0.38),  # зелёный (низ)
+				]
+			var back_wall := _create_shop_back_wall(
+				EntranceGroupGenerator.get_canopy_top_height(),
+				EntranceGroupGenerator.get_canopy_width(2),
+				back_wall_colors)
+			back_wall.position = Vector3(sign_position_2d.x, base_elev, sign_position_2d.y)
+			back_wall.rotation.y = atan2(wall_normal.x, wall_normal.z)
+			back_wall.name = "BackWall_%s" % sign_text.substr(0, 10)
+			parent.add_child(back_wall)
 
 		parent.add_child(sign)
 
@@ -10782,7 +10805,89 @@ func _add_shop_entrances_from_override(points: PackedVector2Array, parent: Node3
 		sign_root.rotation.y = atan2(wall_normal.x, wall_normal.z)
 		parent.add_child(sign_root)
 
+		# Задняя стенка (от козырька до земли, ShaderMaterial для корректного освещения)
+		var canopy_top := EntranceGroupGenerator.get_canopy_top_height()
+		var canopy_w := EntranceGroupGenerator.get_canopy_width(2)
+		var back_wall_colors: Array = [Color(0.85, 0.83, 0.80)]
+		var back_wall_color_arr = shop_data.get("back_wall_color", [])
+		if back_wall_color_arr.size() >= 3:
+			back_wall_colors = [Color(back_wall_color_arr[0], back_wall_color_arr[1], back_wall_color_arr[2])]
+		var back_wall_stripes = shop_data.get("back_wall_stripes", [])
+		if not back_wall_stripes.is_empty():
+			back_wall_colors = []
+			for s in back_wall_stripes:
+				back_wall_colors.append(Color(s[0], s[1], s[2]))
+		var back_wall := _create_shop_back_wall(canopy_top, canopy_w, back_wall_colors)
+		back_wall.position = Vector3(sign_position_2d.x, base_elev, sign_position_2d.y)
+		back_wall.rotation.y = atan2(wall_normal.x, wall_normal.z)
+		back_wall.name = "ShopBackWall_%d" % way_id
+		parent.add_child(back_wall)
+
 		print("ShopEntrance: added at (%.1f, %.1f) for way %d" % [sign_position_2d.x, sign_position_2d.y, way_id])
+
+
+func _create_shop_back_wall(height: float, width: float, colors: Array) -> MeshInstance3D:
+	"""Создаёт заднюю стенку для входной группы магазина (ShaderMaterial).
+	colors: Array of Color — одна = сплошной цвет, несколько = горизонтальные полосы (сверху вниз)"""
+	if _shop_back_wall_shader == null:
+		_shop_back_wall_shader = Shader.new()
+		_shop_back_wall_shader.code = """
+shader_type spatial;
+render_mode cull_disabled;
+uniform vec4 albedo_color = vec4(0.85, 0.83, 0.80, 1.0);
+uniform float roughness_value : hint_range(0.0, 1.0) = 0.85;
+void fragment() {
+	ALBEDO = albedo_color.rgb;
+	ROUGHNESS = roughness_value;
+	if (!FRONT_FACING) {
+		NORMAL = -NORMAL;
+	}
+}
+"""
+
+	var hx := width / 2.0
+	var wall_z := 0.02
+	var stripe_count := colors.size()
+	var stripe_height := height / stripe_count
+
+	var arr_mesh := ArrayMesh.new()
+
+	for i in range(stripe_count):
+		var color: Color = colors[i]
+		# Полосы сверху вниз: i=0 верх, i=last низ
+		var y_top := height - i * stripe_height
+		var y_bottom := height - (i + 1) * stripe_height
+
+		var mat := ShaderMaterial.new()
+		mat.shader = _shop_back_wall_shader
+		mat.set_shader_parameter("albedo_color", color)
+		mat.set_shader_parameter("roughness_value", 0.85)
+
+		var verts := PackedVector3Array()
+		var norms := PackedVector3Array()
+		var idx := PackedInt32Array()
+
+		verts.append(Vector3(-hx, y_bottom, wall_z))
+		verts.append(Vector3(hx, y_bottom, wall_z))
+		verts.append(Vector3(hx, y_top, wall_z))
+		verts.append(Vector3(-hx, y_top, wall_z))
+		for _j in range(4):
+			norms.append(Vector3(0, 0, 1))
+		idx.append_array([0, 1, 2, 0, 2, 3])
+
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = verts
+		arrays[Mesh.ARRAY_NORMAL] = norms
+		arrays[Mesh.ARRAY_INDEX] = idx
+		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		arr_mesh.surface_set_material(arr_mesh.get_surface_count() - 1, mat)
+
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.mesh = arr_mesh
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mesh_inst.name = "BackWall"
+	return mesh_inst
 
 
 func _calculate_sign_width(text: String) -> float:
@@ -10915,10 +11020,11 @@ func _find_pois_inside_building(building_points: PackedVector2Array, _loader: No
 		# Точная проверка point-in-polygon
 		if _point_in_polygon(poi_pos, building_points):
 			var name = poi.tags.get("name", "unknown")
-			print("POI_DEBUG: Found '%s' inside building at local (%.1f, %.1f)" % [name, poi_pos.x, poi_pos.y])
+			print("POI_DEBUG: Found '%s' (id=%s) inside building at local (%.1f, %.1f)" % [name, str(poi.get("id", 0)), poi_pos.x, poi_pos.y])
 			result.append({
 				"position": poi_pos,
-				"tags": poi.tags
+				"tags": poi.tags,
+				"id": poi.get("id", 0)
 			})
 
 	return result

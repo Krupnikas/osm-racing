@@ -13,7 +13,7 @@ const OVERPASS_SERVERS := [
 
 # Кеширование
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 5  # Увеличить при изменении формата запроса (v5: добавлен way id для decoration layer)
+const CACHE_VERSION := 6  # v6: добавлен poi node id
 var use_cache := true
 
 var http_request: HTTPRequest
@@ -227,6 +227,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 				# Точечные заведения (shop или amenity с названием)
 				if (tags.has("shop") or tags.has("amenity")) and (tags.has("name") or tags.has("brand")):
 					poi_nodes.append({
+						"id": element.id,
 						"lat": element.lat,
 						"lon": element.lon,
 						"tags": tags
