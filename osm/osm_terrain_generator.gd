@@ -13,7 +13,9 @@ const BuildingWallCustomShader = preload("res://osm/building_wall_custom.gdshade
 const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
 const MarsEntranceGeneratorScript = preload("res://osm/mars_entrance_generator.gd")
-const BIRCH_TREE_SCENE = preload("res://models/trees/birch/scene.gltf")
+const LEAF_TREE_SCENE = preload("res://models/trees/leaf/scene.gltf")
+const PINE_TREE_SCENE = preload("res://models/trees/pine/scene.gltf")
+const TreeBillboardShader = preload("res://shaders/tree_billboard.gdshader")
 const BUS_STOP_SCENE = preload("res://models/bus_stop/scene.gltf")
 const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
 
@@ -181,9 +183,27 @@ var _curb_geo_batch: Dictionary = {}  # chunk_key -> {parent, vertices, normals,
 var _curb_material: StandardMaterial3D = null  # Shared material для всех бордюров
 
 # Vegetation batching system - MultiMesh with LOD
-var _tree_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: [], collisions: [], parent: Node3D}
+var _tree_batch_data: Dictionary = {}  # key: chunk_key -> {leaf_transforms: [], pine_transforms: [], collisions: [], parent: Node3D}
 var _tree_batches_to_finalize: Array[String] = []  # Chunk keys ready for finalization
-var _tree_mesh: ArrayMesh  # Меш дерева для MultiMesh (модель или процедурный)
+var _tree_mesh_leaf: ArrayMesh  # Меш лиственного дерева LOD0
+var _tree_mesh_leaf_lod1: ArrayMesh  # Меш лиственного дерева LOD1 (декимация 50%)
+var _tree_mesh_pine: ArrayMesh  # Меш сосны LOD0
+var _tree_mesh_pine_lod1: ArrayMesh  # Меш сосны LOD1 (декимация 50%)
+
+# LOD2 billboard meshes
+var _tree_billboard_leaf: ArrayMesh  # Billboard cross-plane для leaf
+var _tree_billboard_pine: ArrayMesh  # Billboard cross-plane для pine
+var _tree_billboard_mat_leaf: ShaderMaterial  # Billboard материал leaf
+var _tree_billboard_mat_pine: ShaderMaterial  # Billboard материал pine
+
+# LOD distances for trees
+const TREE_LOD0_END := 50.0    # Full mesh: 0-50m
+const TREE_LOD1_BEGIN := 50.0  # Simplified mesh: 50-150m
+const TREE_LOD1_END := 150.0
+const TREE_LOD2_BEGIN := 150.0 # Billboard: 150-250m
+const TREE_LOD2_END := 250.0
+# Pine mix ratio in forests
+const PINE_MIX_RATIO := 0.15  # 15% сосен среди лиственных
 var _tree_simplified := false  # true = процедурный меш, false = GLTF модель
 
 # Lamp batching system - MultiMesh with per-chunk batching
@@ -355,6 +375,7 @@ func _ready() -> void:
 
 	# Инициализируем tree meshes для LOD
 	_init_tree_meshes()
+	_init_tree_billboards()
 
 	# Инициализируем lamp meshes для батчинга
 	_init_lamp_meshes()
@@ -541,7 +562,7 @@ func _init_tree_meshes_simplified() -> void:
 	crown.radial_segments = 8
 	crown.rings = 4
 
-	_tree_mesh = ArrayMesh.new()
+	_tree_mesh_leaf = ArrayMesh.new()
 
 	# Surface 0: ствол (сдвинут вверх на 2.5)
 	var trunk_arrays := trunk.get_mesh_arrays()
@@ -549,11 +570,11 @@ func _init_tree_meshes_simplified() -> void:
 	for i in range(trunk_verts.size()):
 		trunk_verts[i].y += 2.5
 	trunk_arrays[Mesh.ARRAY_VERTEX] = trunk_verts
-	_tree_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, trunk_arrays)
+	_tree_mesh_leaf.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, trunk_arrays)
 
 	var trunk_mat := StandardMaterial3D.new()
 	trunk_mat.albedo_color = Color(0.35, 0.22, 0.1)
-	_tree_mesh.surface_set_material(0, trunk_mat)
+	_tree_mesh_leaf.surface_set_material(0, trunk_mat)
 
 	# Surface 1: крона (сдвинута вверх на 6.5)
 	var crown_arrays := crown.get_mesh_arrays()
@@ -561,79 +582,69 @@ func _init_tree_meshes_simplified() -> void:
 	for i in range(crown_verts.size()):
 		crown_verts[i].y += 6.5
 	crown_arrays[Mesh.ARRAY_VERTEX] = crown_verts
-	_tree_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, crown_arrays)
+	_tree_mesh_leaf.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, crown_arrays)
 
 	var crown_mat := StandardMaterial3D.new()
 	crown_mat.albedo_color = Color(0.2, 0.5, 0.15)
-	_tree_mesh.surface_set_material(1, crown_mat)
+	_tree_mesh_leaf.surface_set_material(1, crown_mat)
+
+	# Для упрощённого режима pine = leaf и LOD1 = LOD0
+	_tree_mesh_pine = _tree_mesh_leaf
+	_tree_mesh_leaf_lod1 = _tree_mesh_leaf
+	_tree_mesh_pine_lod1 = _tree_mesh_leaf
 
 	_tree_simplified = true
 	print("OSM: Simplified tree mesh initialized (trunk + crown, 2 surfaces)")
 
 
 func _init_tree_meshes_model() -> void:
-	"""Извлекает меш из GLTF модели берёзы, масштабирует и собирает ArrayMesh для MultiMesh"""
-	print("OSM: Initializing tree mesh from birch model...")
+	"""Загружает leaf и pine модели деревьев с нормализацией pivot + LOD1 декимация"""
+	print("OSM: Initializing tree meshes from GLTF models...")
 
-	# Инстанцируем сцену чтобы извлечь меши и материалы
-	var scene_inst: Node3D = BIRCH_TREE_SCENE.instantiate()
+	_tree_mesh_leaf = _load_tree_mesh_normalized(LEAF_TREE_SCENE, 10.0)
+	_tree_mesh_leaf_lod1 = _create_lod1_with_trunk(_tree_mesh_leaf, 10.0, 0.7)
+	print("OSM: Leaf tree: %d verts, %d tris" % [
+		_tree_mesh_leaf.surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size(),
+		_tree_mesh_leaf.surface_get_arrays(0)[Mesh.ARRAY_INDEX].size() / 3
+	])
 
-	# Модель Sketchfab: корневой узел имеет поворот Y→Z (rotation matrix в GLTF)
-	# Дочерние MeshInstance3D содержат 3 меша: Branches, Leaves, Trunk
-	# Координаты модели ~0-420 по X, -400..0 по Y, 0-800 по Z (до поворота)
-	# Базовый масштаб: 0.018 (среднее от оригинального 0.015-0.022)
-	const BASE_SCALE := 0.018
+	_tree_mesh_pine = _load_tree_mesh_normalized(PINE_TREE_SCENE, 12.0)
+	_tree_mesh_pine_lod1 = _create_lod1_with_trunk(_tree_mesh_pine, 12.0, 0.55)
+	print("OSM: Pine tree: %d verts, %d tris" % [
+		_tree_mesh_pine.surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size(),
+		_tree_mesh_pine.surface_get_arrays(0)[Mesh.ARRAY_INDEX].size() / 3
+	])
 
-	# Собираем все MeshInstance3D из дерева сцены
+
+## Загружает GLTF сцену дерева, извлекает меш, нормализует pivot (XZ по центру, Y=0 основание)
+## и масштабирует до target_height метров
+func _load_tree_mesh_normalized(scene: PackedScene, target_height: float) -> ArrayMesh:
+	var scene_inst: Node3D = scene.instantiate()
 	var mesh_instances: Array[MeshInstance3D] = []
 	_collect_mesh_instances(scene_inst, mesh_instances)
 
-	_tree_mesh = ArrayMesh.new()
+	# Собираем все surface с трансформированными вершинами
+	var surfaces: Array = []  # [{arrays: Array, material: Material}]
 
 	for mi in mesh_instances:
 		var mesh: Mesh = mi.mesh
 		if mesh == null:
 			continue
-
-		# Получаем глобальный трансформ этого MeshInstance3D (включая родительские повороты)
-		# Так как сцена не в дереве, вычисляем вручную
 		var xform := _get_node_transform_recursive(mi)
-		# Добавляем масштаб
-		xform = xform.scaled(Vector3(BASE_SCALE, BASE_SCALE, BASE_SCALE))
 
 		for surf_idx in range(mesh.get_surface_count()):
 			var arrays := mesh.surface_get_arrays(surf_idx)
 			var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 			var norms = arrays[Mesh.ARRAY_NORMAL]
-			var indices = arrays[Mesh.ARRAY_INDEX]
 
-			# Decimate high-poly surfaces (leaves/branches): keep every Nth triangle
-			if verts.size() > 1000 and indices != null and indices is PackedInt32Array:
-				var src_indices: PackedInt32Array = indices
-				var tri_count: int = src_indices.size() / 3
-				var keep_step := 4  # Keep 1 out of 4 triangles (~75% reduction)
-				var new_indices := PackedInt32Array()
-				new_indices.resize(src_indices.size() / keep_step + 3)
-				var write_pos := 0
-				var tri_idx := 0
-				while tri_idx < tri_count:
-					var base: int = tri_idx * 3
-					new_indices[write_pos] = src_indices[base]
-					new_indices[write_pos + 1] = src_indices[base + 1]
-					new_indices[write_pos + 2] = src_indices[base + 2]
-					write_pos += 3
-					tri_idx += keep_step
-				new_indices.resize(write_pos)
-				arrays[Mesh.ARRAY_INDEX] = new_indices
-				print("OSM: Decimated tree surface: %d -> %d triangles" % [tri_count, write_pos / 3])
-
-			# Трансформируем вершины и нормали
+			# Трансформируем вершины
 			var transformed_verts := PackedVector3Array()
 			transformed_verts.resize(verts.size())
 			for i in range(verts.size()):
 				transformed_verts[i] = xform * verts[i]
 			arrays[Mesh.ARRAY_VERTEX] = transformed_verts
 
+			# Трансформируем нормали
 			if norms != null and norms is PackedVector3Array:
 				var normal_basis := xform.basis.inverse().transposed()
 				var transformed_norms := PackedVector3Array()
@@ -642,13 +653,325 @@ func _init_tree_meshes_model() -> void:
 					transformed_norms[i] = (normal_basis * norms[i]).normalized()
 				arrays[Mesh.ARRAY_NORMAL] = transformed_norms
 
-			_tree_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-			var mat := mesh.surface_get_material(surf_idx)
-			if mat:
-				_tree_mesh.surface_set_material(_tree_mesh.get_surface_count() - 1, mat)
+			surfaces.append({
+				"arrays": arrays,
+				"material": mesh.surface_get_material(surf_idx)
+			})
 
 	scene_inst.queue_free()
-	print("OSM: Tree mesh initialized from birch model (%d surfaces)" % _tree_mesh.get_surface_count())
+
+	# Вычисляем AABB всех поверхностей
+	var aabb_min := Vector3(INF, INF, INF)
+	var aabb_max := Vector3(-INF, -INF, -INF)
+	for surf in surfaces:
+		var verts: PackedVector3Array = surf["arrays"][Mesh.ARRAY_VERTEX]
+		for v in verts:
+			aabb_min.x = min(aabb_min.x, v.x)
+			aabb_min.y = min(aabb_min.y, v.y)
+			aabb_min.z = min(aabb_min.z, v.z)
+			aabb_max.x = max(aabb_max.x, v.x)
+			aabb_max.y = max(aabb_max.y, v.y)
+			aabb_max.z = max(aabb_max.z, v.z)
+
+	# Нормализация pivot: центр XZ → 0, основание Y → 0
+	var center_x := (aabb_min.x + aabb_max.x) / 2.0
+	var center_z := (aabb_min.z + aabb_max.z) / 2.0
+	var offset := Vector3(center_x, aabb_min.y, center_z)
+	var current_height := aabb_max.y - aabb_min.y
+	var scale_f := target_height / current_height if current_height > 0.001 else 1.0
+
+	# Применяем нормализацию и масштаб
+	var result_mesh := ArrayMesh.new()
+	for surf in surfaces:
+		var arrays: Array = surf["arrays"]
+		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var normalized_verts := PackedVector3Array()
+		normalized_verts.resize(verts.size())
+		for i in range(verts.size()):
+			normalized_verts[i] = (verts[i] - offset) * scale_f
+		arrays[Mesh.ARRAY_VERTEX] = normalized_verts
+
+		result_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		var mat: Material = surf["material"]
+		if mat:
+			result_mesh.surface_set_material(result_mesh.get_surface_count() - 1, mat)
+
+	print("OSM: Tree normalized: AABB (%.1f, %.1f, %.1f)→(%.1f, %.1f, %.1f), height %.1f→%.1fm, scale=%.4f" % [
+		aabb_min.x, aabb_min.y, aabb_min.z, aabb_max.x, aabb_max.y, aabb_max.z,
+		current_height, target_height, scale_f
+	])
+
+	return result_mesh
+
+
+## Создаёт упрощённую копию меша: оставляет каждый N-й треугольник
+static func _decimate_mesh(source: ArrayMesh, keep_step: int) -> ArrayMesh:
+	var result := ArrayMesh.new()
+	for surf_idx in range(source.get_surface_count()):
+		var arrays := source.surface_get_arrays(surf_idx)
+		var indices = arrays[Mesh.ARRAY_INDEX]
+		if indices != null and indices is PackedInt32Array:
+			var src_indices: PackedInt32Array = indices
+			var tri_count: int = src_indices.size() / 3
+			var new_indices := PackedInt32Array()
+			var write_pos := 0
+			var tri_idx := 0
+			while tri_idx < tri_count:
+				var base: int = tri_idx * 3
+				new_indices.append(src_indices[base])
+				new_indices.append(src_indices[base + 1])
+				new_indices.append(src_indices[base + 2])
+				write_pos += 3
+				tri_idx += keep_step
+			arrays[Mesh.ARRAY_INDEX] = new_indices
+		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		var mat := source.surface_get_material(surf_idx)
+		if mat:
+			result.surface_set_material(result.get_surface_count() - 1, mat)
+	return result
+
+
+## Создаёт LOD1 меш: копия исходного дерева + толстый процедурный цилиндр-ствол для видимости на 50-150м
+func _create_lod1_with_trunk(source: ArrayMesh, tree_height: float, trunk_radius: float) -> ArrayMesh:
+	var result := ArrayMesh.new()
+
+	# Копируем все surface из исходного меша
+	for surf_idx in range(source.get_surface_count()):
+		var arrays := source.surface_get_arrays(surf_idx)
+		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		var mat := source.surface_get_material(surf_idx)
+		if mat:
+			result.surface_set_material(result.get_surface_count() - 1, mat)
+
+	# Генерируем цилиндр-ствол
+	var segments := 6
+	var trunk_height := tree_height * 0.55  # ствол — нижние 55% дерева
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+
+	# Верхняя и нижняя окружности
+	for i in range(segments):
+		var angle := float(i) / float(segments) * TAU
+		var nx := cos(angle)
+		var nz := sin(angle)
+		var x := nx * trunk_radius
+		var z := nz * trunk_radius
+		var normal := Vector3(nx, 0, nz)
+		var u := float(i) / float(segments)
+
+		# Нижняя вершина
+		verts.append(Vector3(x, 0, z))
+		norms.append(normal)
+		uvs.append(Vector2(u, 1.0))
+
+		# Верхняя вершина
+		verts.append(Vector3(x, trunk_height, z))
+		norms.append(normal)
+		uvs.append(Vector2(u, 0.0))
+
+	# Индексы боковых граней
+	for i in range(segments):
+		var bl := i * 2       # bottom-left
+		var tl := i * 2 + 1   # top-left
+		var br := ((i + 1) % segments) * 2       # bottom-right
+		var tr := ((i + 1) % segments) * 2 + 1   # top-right
+		indices.append_array([bl, br, tr, bl, tr, tl])
+
+	var trunk_arrays := []
+	trunk_arrays.resize(Mesh.ARRAY_MAX)
+	trunk_arrays[Mesh.ARRAY_VERTEX] = verts
+	trunk_arrays[Mesh.ARRAY_NORMAL] = norms
+	trunk_arrays[Mesh.ARRAY_TEX_UV] = uvs
+	trunk_arrays[Mesh.ARRAY_INDEX] = indices
+	result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, trunk_arrays)
+
+	# Коричневый материал для ствола
+	var trunk_mat := StandardMaterial3D.new()
+	trunk_mat.albedo_color = Color(0.45, 0.3, 0.15)
+	trunk_mat.roughness = 1.0
+	result.surface_set_material(result.get_surface_count() - 1, trunk_mat)
+
+	return result
+
+
+## Создаёт cross-plane billboard меш (2 пересекающиеся плоскости) заданного размера
+static func _create_billboard_cross_mesh(width: float, height: float) -> ArrayMesh:
+	var mesh := ArrayMesh.new()
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+
+	var hw := width / 2.0
+
+	# Plane 1: вдоль X (нормаль Z)
+	verts.append(Vector3(-hw, 0, 0))
+	verts.append(Vector3(hw, 0, 0))
+	verts.append(Vector3(hw, height, 0))
+	verts.append(Vector3(-hw, height, 0))
+	for _i in range(4):
+		norms.append(Vector3(0, 0, 1))
+	uvs.append(Vector2(0, 1))
+	uvs.append(Vector2(1, 1))
+	uvs.append(Vector2(1, 0))
+	uvs.append(Vector2(0, 0))
+	indices.append_array([0, 1, 2, 0, 2, 3])
+
+	# Plane 2: вдоль Z (нормаль X)
+	verts.append(Vector3(0, 0, -hw))
+	verts.append(Vector3(0, 0, hw))
+	verts.append(Vector3(0, height, hw))
+	verts.append(Vector3(0, height, -hw))
+	for _i in range(4):
+		norms.append(Vector3(1, 0, 0))
+	uvs.append(Vector2(0, 1))
+	uvs.append(Vector2(1, 1))
+	uvs.append(Vector2(1, 0))
+	uvs.append(Vector2(0, 0))
+	indices.append_array([4, 5, 6, 4, 6, 7])
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = norms
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+
+## Генерирует процедурную billboard текстуру дерева (овальный силуэт кроны + ствол)
+static func _generate_tree_billboard_texture(crown_color: Color, trunk_color: Color, is_conifer: bool) -> ImageTexture:
+	var size := 64
+	var image := Image.create(size, size, false, Image.FORMAT_RGBA8)
+
+	# Ствол: узкая полоса внизу по центру
+	var trunk_width := 4
+	var trunk_height := int(size * 0.35)
+	var trunk_top := size - 1
+	var trunk_bottom := trunk_top - trunk_height
+	for y in range(trunk_bottom, trunk_top + 1):
+		for x in range(size / 2 - trunk_width / 2, size / 2 + trunk_width / 2):
+			image.set_pixel(x, y, trunk_color)
+
+	# Крона: для лиственного — овал, для хвойного — треугольник
+	var crown_center_y := int(size * 0.35)
+	if is_conifer:
+		# Треугольная крона (конус)
+		var tip_y := 2
+		var base_y := trunk_bottom
+		for y in range(tip_y, base_y):
+			var t := float(y - tip_y) / float(base_y - tip_y)
+			var half_w := int(t * size * 0.45)
+			for x in range(size / 2 - half_w, size / 2 + half_w):
+				if x >= 0 and x < size:
+					var shade := 0.85 + randf() * 0.15  # Лёгкий шум
+					image.set_pixel(x, y, Color(crown_color.r * shade, crown_color.g * shade, crown_color.b * shade, 1.0))
+	else:
+		# Овальная крона
+		var rx := size * 0.42
+		var ry := size * 0.35
+		for y in range(size):
+			for x in range(size):
+				var dx := (x - size / 2.0) / rx
+				var dy := (y - crown_center_y) / ry
+				if dx * dx + dy * dy <= 1.0:
+					var shade := 0.85 + randf() * 0.15
+					image.set_pixel(x, y, Color(crown_color.r * shade, crown_color.g * shade, crown_color.b * shade, 1.0))
+
+	return ImageTexture.create_from_image(image)
+
+
+## Инициализирует billboard меши и материалы для LOD2 деревьев
+func _init_tree_billboards() -> void:
+	if _tree_simplified:
+		return
+
+	print("OSM: Initializing tree billboard meshes...")
+
+	# Создаём billboard cross-plane меши
+	_tree_billboard_leaf = _create_billboard_cross_mesh(8.0, 10.0)
+	_tree_billboard_pine = _create_billboard_cross_mesh(6.0, 12.0)
+
+	# Процедурные placeholder текстуры (заменяются SubViewport рендером позже)
+	var leaf_tex := _generate_tree_billboard_texture(
+		Color(0.2, 0.45, 0.15), Color(0.35, 0.22, 0.1), false)
+	var pine_tex := _generate_tree_billboard_texture(
+		Color(0.1, 0.35, 0.12), Color(0.3, 0.2, 0.08), true)
+
+	_tree_billboard_mat_leaf = ShaderMaterial.new()
+	_tree_billboard_mat_leaf.shader = TreeBillboardShader
+	_tree_billboard_mat_leaf.set_shader_parameter("billboard_texture", leaf_tex)
+	_tree_billboard_mat_leaf.set_shader_parameter("alpha_scissor_threshold", 0.5)
+
+	_tree_billboard_mat_pine = ShaderMaterial.new()
+	_tree_billboard_mat_pine.shader = TreeBillboardShader
+	_tree_billboard_mat_pine.set_shader_parameter("billboard_texture", pine_tex)
+	_tree_billboard_mat_pine.set_shader_parameter("alpha_scissor_threshold", 0.5)
+
+	_tree_billboard_leaf.surface_set_material(0, _tree_billboard_mat_leaf)
+	_tree_billboard_pine.surface_set_material(0, _tree_billboard_mat_pine)
+
+	call_deferred("_render_billboard_textures_async")
+
+	print("OSM: Tree billboard meshes ready (SubViewport render deferred)")
+
+
+## Рендерит billboard текстуру одного дерева через SubViewport (ортогональная камера сбоку)
+func _render_single_billboard(tree_mesh: ArrayMesh, height: float) -> ImageTexture:
+	var viewport := SubViewport.new()
+	viewport.size = Vector2i(128, 128)
+	viewport.transparent_bg = true
+	viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+	viewport.own_world_3d = true
+
+	# Сначала добавляем viewport в дерево, чтобы look_at работал
+	add_child(viewport)
+
+	# Камера ортогональная, смотрит сбоку
+	var camera := Camera3D.new()
+	camera.projection = Camera3D.PROJECTION_ORTHOGONAL
+	camera.size = height * 1.2
+	camera.position = Vector3(30, height / 2.0, 0)
+	camera.near = 0.1
+	camera.far = 100.0
+	viewport.add_child(camera)
+	camera.look_at(Vector3(0, height / 2.0, 0))
+
+	# Мягкий направленный свет
+	var light := DirectionalLight3D.new()
+	light.rotation_degrees = Vector3(-40, -30, 0)
+	light.light_energy = 1.2
+	viewport.add_child(light)
+
+	# Меш дерева
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.mesh = tree_mesh
+	viewport.add_child(mesh_inst)
+
+	# Ждём 2 кадра чтобы viewport отрендерился
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+	var image := viewport.get_texture().get_image()
+	viewport.queue_free()
+
+	return ImageTexture.create_from_image(image)
+
+
+## Async: рендерит billboard текстуры через SubViewport и обновляет материалы
+func _render_billboard_textures_async() -> void:
+	print("OSM: Starting SubViewport billboard render...")
+
+	var leaf_tex := await _render_single_billboard(_tree_mesh_leaf, 10.0)
+	_tree_billboard_mat_leaf.set_shader_parameter("billboard_texture", leaf_tex)
+
+	var pine_tex := await _render_single_billboard(_tree_mesh_pine, 12.0)
+	_tree_billboard_mat_pine.set_shader_parameter("billboard_texture", pine_tex)
+
+	print("OSM: Billboard textures updated from SubViewport render")
 
 
 ## Рекурсивно собирает все MeshInstance3D из дерева узлов
@@ -2769,10 +3092,6 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 	var highway_type: String = tags.get("highway", "residential")
 
 	# Пропускаем пешеходные дорожки (не нужны для миникарты)
-	const PEDESTRIAN_ROADS := ["footway", "path", "cycleway", "track", "steps", "pedestrian"]
-	if highway_type in PEDESTRIAN_ROADS:
-		return
-
 	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
 	for i in range(nodes.size() - 1):
 		var p1 = _latlon_to_local(nodes[i].lat, nodes[i].lon)
@@ -5584,6 +5903,10 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 	# Natural объекты ниже дорог чтобы не было z-fighting
 	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
+	# Генерируем густые деревья внутри лесных полигонов
+	if natural_type in ["wood", "tree_row"]:
+		_generate_trees_in_polygon(points, elev_data, parent, true)
+
 
 ## Немедленное создание землепользования (вызывается из очереди)
 func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
@@ -5629,6 +5952,10 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 	# Landuse ниже дорог чтобы не было z-fighting
 	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
+	# Генерируем густые деревья внутри лесных полигонов
+	if landuse_type == "forest":
+		_generate_trees_in_polygon(points, elev_data, parent, true)
+
 
 ## Немедленное создание объекта отдыха (вызывается из очереди)
 func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
@@ -5660,6 +5987,10 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 	# Добавляем коллизию с группой Park для высокого сопротивления качению
 	if leisure_type in ["park", "garden", "pitch"]:
 		_create_park_collision(points, elev_data, parent)
+
+	# Генерируем деревья в парках и садах
+	if leisure_type in ["park", "garden"]:
+		_generate_trees_in_polygon(points, elev_data, parent, false)
 
 	# Grass полигоны не нужны — terrain mesh уже покрывает чанк травой
 	if texture_key == "grass":
@@ -8506,13 +8837,14 @@ func _update_lamp_night_mode(is_night: bool) -> void:
 	print("OSM: Updated lamp night mode (is_night=%s)" % is_night)
 
 ## Add tree to batch for MultiMesh rendering
-func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, parent: Node3D) -> void:
+func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, parent: Node3D, is_pine: bool = false) -> void:
 	if not enable_vegetation:
 		return
 
 	if not _tree_batch_data.has(chunk_key):
 		_tree_batch_data[chunk_key] = {
-			"transforms": [],
+			"leaf_transforms": [],
+			"pine_transforms": [],
 			"collisions": [],
 			"parent": parent
 		}
@@ -8525,18 +8857,12 @@ func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, paren
 	var basis := Basis(Vector3.UP, rotation_y).scaled(Vector3(scale_factor, scale_factor, scale_factor))
 	var transform := Transform3D(basis, tree_pos)
 
-	_tree_batch_data[chunk_key]["transforms"].append(transform)
+	var type_key := "pine_transforms" if is_pine else "leaf_transforms"
+	_tree_batch_data[chunk_key][type_key].append(transform)
 
-	# Для GLTF модели: ствол берёзы смещён от центра (~195, ~190 в модельных координатах)
-	# После Sketchfab root rotation и BASE_SCALE 0.018: offset ≈ (3.5, 0, 3.4)
-	var collision_pos := tree_pos
-	if not _tree_simplified:
-		var trunk_offset := Vector3(3.5, 0, 3.4) * scale_factor
-		trunk_offset = Basis(Vector3.UP, rotation_y) * trunk_offset
-		collision_pos += trunk_offset
-
+	# Pivot нормализован — коллизия ставится прямо на позицию дерева
 	_tree_batch_data[chunk_key]["collisions"].append({
-		"position": collision_pos,
+		"position": tree_pos,
 		"radius": 0.4
 	})
 
@@ -8555,53 +8881,81 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		_tree_batch_data.erase(chunk_key)
 		return
 
-	var transforms: Array = batch["transforms"]
-	if transforms.size() == 0:
+	var leaf_transforms: Array = batch["leaf_transforms"]
+	var pine_transforms: Array = batch["pine_transforms"]
+	var total_trees := leaf_transforms.size() + pine_transforms.size()
+	if total_trees == 0:
 		_tree_batch_data.erase(chunk_key)
 		return
 
-	# Один MultiMesh на все деревья чанка — 1 draw call (2 surface = 2 draw calls)
-	var mm_inst := MultiMeshInstance3D.new()
-	mm_inst.name = "Trees"
-	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mm_inst.visibility_range_end = render_distance
-	mm_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.mesh = _tree_mesh
-	mm.instance_count = transforms.size()
-	for i in range(transforms.size()):
-		mm.set_instance_transform(i, transforms[i])
-	# Если elevation финализирован — пересчитываем Y для ВСЕХ деревьев.
-	# Часть деревьев (из OSM point objects) могла быть добавлена с Y=0 до прихода elevation.
-	# Пересчёт гарантирует корректную высоту и позволяет пометить _elevation_applied.
+	# Elevation пересчёт
 	var elev_applied := false
 	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0 and _chunk_elevations.has(chunk_key):
 		var elev_data: Dictionary = _chunk_elevations[chunk_key]
-		for i in range(transforms.size()):
-			var t: Transform3D = transforms[i]
-			var pos_2d := Vector2(t.origin.x, t.origin.z)
-			t.origin.y = _get_elevation_at_point(pos_2d, elev_data)
-			transforms[i] = t
+		for transforms in [leaf_transforms, pine_transforms]:
+			for i in range(transforms.size()):
+				var t: Transform3D = transforms[i]
+				var pos_2d := Vector2(t.origin.x, t.origin.z)
+				t.origin.y = _get_elevation_at_point(pos_2d, elev_data)
+				transforms[i] = t
 		elev_applied = true
 
-	mm_inst.multimesh = mm
-	for i in range(transforms.size()):
-		mm.set_instance_transform(i, transforms[i])
-	parent.add_child(mm_inst)
+	# Создаём LOD0 + LOD1 + LOD2(billboard) MultiMesh для каждого типа дерева
+	var draw_calls := 0
+	var tree_configs: Array = []
+	if leaf_transforms.size() > 0:
+		tree_configs.append({
+			"name": "Leaf",
+			"transforms": leaf_transforms,
+			"mesh_lod0": _tree_mesh_leaf,
+			"mesh_lod1": _tree_mesh_leaf_lod1,
+			"mesh_lod2": _tree_billboard_leaf,
+		})
+	if pine_transforms.size() > 0:
+		tree_configs.append({
+			"name": "Pine",
+			"transforms": pine_transforms,
+			"mesh_lod0": _tree_mesh_pine,
+			"mesh_lod1": _tree_mesh_pine_lod1,
+			"mesh_lod2": _tree_billboard_pine,
+		})
+
+	for config in tree_configs:
+		var transforms: Array = config["transforms"]
+		var name_prefix: String = config["name"]
+
+		# Один MultiMesh на тип дерева, без visibility_range (LOD через MultiMesh не работает per-instance)
+		var mm_inst := MultiMeshInstance3D.new()
+		mm_inst.name = "Trees%s" % name_prefix
+		mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = config["mesh_lod0"]
+		mm.instance_count = transforms.size()
+		for i in range(transforms.size()):
+			mm.set_instance_transform(i, transforms[i])
+		mm_inst.multimesh = mm
+		parent.add_child(mm_inst)
+
+		draw_calls += config["mesh_lod0"].get_surface_count()
 
 	if _draw_call_logging_enabled:
-		_draw_call_stats["vegetation"] += _tree_mesh.get_surface_count()
+		_draw_call_stats["vegetation"] += draw_calls
 
-	# Коллизии деревьев
+	# Коллизии деревьев (только для деревьев близко к дороге)
 	for collision_data in batch["collisions"]:
-		var body := StaticBody3D.new()
-		body.collision_layer = 2
-		body.collision_mask = 0
 		var coll_pos: Vector3 = collision_data["position"]
 		if elev_applied:
 			var coll_2d := Vector2(coll_pos.x, coll_pos.z)
 			coll_pos.y = _get_elevation_at_point(coll_2d, _chunk_elevations[chunk_key])
+
+		# Коллизия только для деревьев в ~60м от дороги
+		if not _is_point_near_road(Vector2(coll_pos.x, coll_pos.z), 60.0):
+			continue
+
+		var body := StaticBody3D.new()
+		body.collision_layer = 2
+		body.collision_mask = 0
 		body.position = coll_pos
 
 		var collision := CollisionShape3D.new()
@@ -8613,12 +8967,11 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		body.add_child(collision)
 		parent.add_child(body)
 
-	print("OSM: Trees for chunk %s: %d trees (1 MultiMesh)" % [chunk_key, transforms.size()])
+	print("OSM: Trees for chunk %s: %d leaf + %d pine (LOD0+LOD1+LOD2)" % [
+		chunk_key, leaf_transforms.size(), pine_transforms.size()
+	])
 
 	_tree_batch_data.erase(chunk_key)
-
-	if elev_applied:
-		mm_inst.set_meta("_elevation_applied", true)
 
 
 ## Финализирует билборды из DecorationLayer для чанка
@@ -8980,15 +9333,23 @@ func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, 
 
 	var width := max_x - min_x
 	var height := max_y - min_y
+	var area := width * height
 
-	# Ограничиваем максимальное количество деревьев на полигон
-	var max_trees := 50 if dense else 30
+	# Плотность от площади полигона
+	const TREE_DENSITY_FOREST := 0.012  # ~120 деревьев на 100×100м
+	const TREE_DENSITY_PARK := 0.005    # ~50 деревьев на 100×100м
+	const MAX_TREES_PER_POLYGON := 600
+
+	var density := TREE_DENSITY_FOREST if dense else TREE_DENSITY_PARK
+	var max_trees := mini(int(area * density), MAX_TREES_PER_POLYGON)
+	if max_trees < 1:
+		max_trees = 1
 	var tree_count := 0
 
 	# Используем хаотичное размещение на основе хеша координат полигона
 	var seed_value := int(abs(min_x * 1000 + min_y * 100 + width * 10 + height)) % 10000
-	var avg_spacing := 12.0 if dense else 20.0
-	var estimated_trees := int((width * height) / (avg_spacing * avg_spacing))
+	var avg_spacing := sqrt(1.0 / density)
+	var estimated_trees := int(area / (avg_spacing * avg_spacing))
 	estimated_trees = mini(estimated_trees, max_trees)
 
 	for i in range(estimated_trees):
@@ -9008,10 +9369,12 @@ func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, 
 
 			var elevation := _get_elevation_at_point(test_point, elev_data)
 
-			# NEW: Add to batch instead of creating individual tree
+			# Детерминистичный выбор типа: pine ~15% в лесах
+			var is_pine := dense and fmod(hash1 * 97.0 + hash2 * 53.0, 1.0) < PINE_MIX_RATIO
+
 			var chunk_key := _get_chunk_key_from_node(parent)
 			if chunk_key != "":
-				_add_tree_to_batch(chunk_key, test_point, elevation, parent)
+				_add_tree_to_batch(chunk_key, test_point, elevation, parent, is_pine)
 
 			tree_count += 1
 
@@ -9063,8 +9426,8 @@ func _create_chunk_trees_immediate(chunk_key: String, elev_data: Dictionary, par
 	var min_x := chunk_x * chunk_size
 	var min_z := chunk_z * chunk_size
 
-	var avg_spacing := 25.0  # Среднее расстояние между деревьями (метры)
-	var max_trees := 50  # Максимум деревьев на чанк
+	var avg_spacing := 10.0  # Среднее расстояние между деревьями (метры)
+	var max_trees := 250  # Максимум деревьев на чанк
 	var tree_count := 0
 
 	# Псевдорандом на основе координат чанка (используем chunk_x/chunk_z для уникальности)
