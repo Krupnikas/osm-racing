@@ -92,5 +92,13 @@
         {"lat": 59.148141, "lon": 37.947518, "sign_logo": "sytyi-pryany.png"}
       ]
     }
+  ],
+  "landuse_overrides": [
+    {
+      "osm_way_id": 694466407,
+      "comment": "Газон у пекарни — деревья",
+      "trees": true,
+      "dense": false
+    }
   ]
 }

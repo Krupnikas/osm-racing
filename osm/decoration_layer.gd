@@ -16,6 +16,7 @@ var _terrain_generator: Node = null
 # Загруженные декорации
 var _billboards: Array = []  # Array[BillboardDecoration]
 var _building_overrides: Array = []  # Array[BuildingOverride]
+var _landuse_tree_overrides: Dictionary = {}  # way_id -> {dense: bool}
 
 # Spatial index для быстрого поиска
 var _billboard_spatial_hash: Dictionary = {}  # cell_key -> Array[int] (индексы)
@@ -176,6 +177,15 @@ func _load_building_overrides_json(path: String) -> void:
 
 		_building_overrides.append(override)
 
+	# Landuse overrides (деревья на конкретных landuse зонах)
+	var landuse_data: Array = data.get("landuse_overrides", [])
+	for lo in landuse_data:
+		var wid: int = lo.get("osm_way_id", 0)
+		if wid > 0 and lo.get("trees", false):
+			_landuse_tree_overrides[wid] = {
+				"dense": lo.get("dense", false)
+			}
+
 
 func _load_json(path: String) -> Dictionary:
 	"""Загружает и парсит JSON файл"""
@@ -221,6 +231,11 @@ func set_terrain_generator(generator: Node) -> void:
 func get_building_override_for_way(way_id: int):
 	"""Возвращает переопределение для здания по OSM way ID"""
 	return _building_override_by_way_id.get(way_id, null)
+
+
+func get_landuse_tree_override(way_id: int):
+	"""Возвращает оверрайд деревьев для landuse зоны по OSM way ID"""
+	return _landuse_tree_overrides.get(way_id, null)
 
 
 func get_billboards_in_chunk(chunk_min: Vector2, chunk_max: Vector2) -> Array:

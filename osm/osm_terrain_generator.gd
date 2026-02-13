@@ -2779,7 +2779,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				"nodes": nodes,
 				"tags": tags,
 				"parent": target,
-				"elev_data": elev_data
+				"elev_data": elev_data,
+				"way_id": int(way.get("id", 0))
 			})
 		elif tags.has("leisure"):
 			_terrain_objects_queue.append({
@@ -5909,7 +5910,7 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 
 
 ## Немедленное создание землепользования (вызывается из очереди)
-func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
+func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}, way_id: int = 0) -> void:
 	if not is_instance_valid(parent):
 		return
 	if nodes.size() < 3:
@@ -5944,6 +5945,13 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 			is_water = true
 		_:
 			texture_key = "grass"
+
+	# Деревья для конкретных landuse зон по way_id (из JSON оверрайдов)
+	if _decoration_layer and way_id > 0:
+		var tree_override = _decoration_layer.get_landuse_tree_override(way_id)
+		if tree_override:
+			var dense_override: bool = tree_override.get("dense", false)
+			_generate_trees_in_polygon(points, elev_data, parent, dense_override)
 
 	# Grass полигоны не нужны — terrain mesh уже покрывает чанк травой
 	if texture_key == "grass":
@@ -7588,7 +7596,7 @@ func _process_terrain_objects_queue() -> void:
 				_create_natural_immediate(item.nodes, item.tags, item.parent, elev_data)
 				_record_perf("terrain_natural", Time.get_ticks_usec() - t0)
 			"landuse":
-				_create_landuse_immediate(item.nodes, item.tags, item.parent, elev_data)
+				_create_landuse_immediate(item.nodes, item.tags, item.parent, elev_data, item.get("way_id", 0))
 				_record_perf("terrain_landuse", Time.get_ticks_usec() - t0)
 			"leisure":
 				_create_leisure_immediate(item.nodes, item.tags, item.parent, elev_data)
@@ -9351,8 +9359,10 @@ func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, 
 	var avg_spacing := sqrt(1.0 / density)
 	var estimated_trees := int(area / (avg_spacing * avg_spacing))
 	estimated_trees = mini(estimated_trees, max_trees)
+	# Bbox может быть гораздо больше реального полигона — увеличиваем попытки в 3x
+	var max_attempts := estimated_trees * 3
 
-	for i in range(estimated_trees):
+	for i in range(max_attempts):
 		var hash1 := fmod(float(seed_value + i * 7919) * 0.61803398875, 1.0)
 		var hash2 := fmod(float(seed_value + i * 104729) * 0.41421356237, 1.0)
 
@@ -9363,23 +9373,25 @@ func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, 
 		var test_y := min_y + (hash2 * 0.7 + hash4 * 0.3) * height
 		var test_point := Vector2(test_x, test_y)
 
-		if Geometry2D.is_point_in_polygon(test_point, points):
-			if _is_point_near_road(test_point, 3.0):
-				continue
+		var in_poly := Geometry2D.is_point_in_polygon(test_point, points)
+		if not in_poly:
+			continue
+		if _is_point_near_road(test_point, 3.0):
+			continue
 
-			var elevation := _get_elevation_at_point(test_point, elev_data)
+		var elevation := _get_elevation_at_point(test_point, elev_data)
 
-			# Детерминистичный выбор типа: pine ~15% в лесах
-			var is_pine := dense and fmod(hash1 * 97.0 + hash2 * 53.0, 1.0) < PINE_MIX_RATIO
+		# Детерминистичный выбор типа: pine ~15% в лесах
+		var is_pine := dense and fmod(hash1 * 97.0 + hash2 * 53.0, 1.0) < PINE_MIX_RATIO
 
-			var chunk_key := _get_chunk_key_from_node(parent)
-			if chunk_key != "":
-				_add_tree_to_batch(chunk_key, test_point, elevation, parent, is_pine)
+		var chunk_key := _get_chunk_key_from_node(parent)
+		if chunk_key != "":
+			_add_tree_to_batch(chunk_key, test_point, elevation, parent, is_pine)
 
-			tree_count += 1
+		tree_count += 1
 
-			if tree_count >= max_trees:
-				break
+		if tree_count >= max_trees:
+			break
 
 
 # Проверка близости к дороге через spatial hash (быстрая версия)
