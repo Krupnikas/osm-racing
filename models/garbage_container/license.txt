@@ -1,0 +1,11 @@
+Model Information:
+* title:	Garbage container lowpoly
+* source:	https://sketchfab.com/3d-models/garbage-container-lowpoly-4666c14060bb4682add9a9155b046537
+* author:	Robal (https://sketchfab.com/robaal)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Garbage container lowpoly" (https://sketchfab.com/3d-models/garbage-container-lowpoly-4666c14060bb4682add9a9155b046537) by Robal (https://sketchfab.com/robaal) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

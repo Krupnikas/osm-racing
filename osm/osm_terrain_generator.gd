@@ -17,6 +17,7 @@ const LEAF_TREE_SCENE = preload("res://models/trees/leaf/scene.gltf")
 const PINE_TREE_SCENE = preload("res://models/trees/pine/scene.gltf")
 const TreeBillboardShader = preload("res://shaders/tree_billboard.gdshader")
 const BUS_STOP_SCENE = preload("res://models/bus_stop/scene.gltf")
+const GARBAGE_CONTAINER_SCENE = preload("res://models/garbage_container/scene.gltf")
 const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
 
 
@@ -189,6 +190,9 @@ var _tree_mesh_leaf: ArrayMesh  # Меш лиственного дерева LOD
 var _tree_mesh_leaf_lod1: ArrayMesh  # Меш лиственного дерева LOD1 (декимация 50%)
 var _tree_mesh_pine: ArrayMesh  # Меш сосны LOD0
 var _tree_mesh_pine_lod1: ArrayMesh  # Меш сосны LOD1 (декимация 50%)
+
+# Garbage container mesh
+var _garbage_container_mesh: Mesh
 
 # LOD2 billboard meshes
 var _tree_billboard_leaf: ArrayMesh  # Billboard cross-plane для leaf
@@ -376,6 +380,7 @@ func _ready() -> void:
 	# Инициализируем tree meshes для LOD
 	_init_tree_meshes()
 	_init_tree_billboards()
+	_init_garbage_container_mesh()
 
 	# Инициализируем lamp meshes для батчинга
 	_init_lamp_meshes()
@@ -614,6 +619,18 @@ func _init_tree_meshes_model() -> void:
 		_tree_mesh_pine.surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size(),
 		_tree_mesh_pine.surface_get_arrays(0)[Mesh.ARRAY_INDEX].size() / 3
 	])
+
+
+func _init_garbage_container_mesh() -> void:
+	var scene_inst: Node3D = GARBAGE_CONTAINER_SCENE.instantiate()
+	var mesh_instances: Array[MeshInstance3D] = []
+	_collect_mesh_instances(scene_inst, mesh_instances)
+	if mesh_instances.size() > 0:
+		_garbage_container_mesh = mesh_instances[0].mesh
+		print("OSM: Garbage container mesh loaded: %d surfaces" % _garbage_container_mesh.get_surface_count())
+	else:
+		push_warning("OSM: Failed to load garbage container mesh")
+	scene_inst.queue_free()
 
 
 ## Загружает GLTF сцену дерева, извлекает меш, нормализует pivot (XZ по центру, Y=0 основание)
@@ -2930,6 +2947,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 					tree_chunk_key = "%d,%d" % [cx, cz]
 				_add_tree_to_batch(tree_chunk_key, local, elevation, target)
 				tree_count += 1
+		elif tags.get("amenity") == "waste_disposal":
+			_create_garbage_container(local, elevation, target)
 		elif tags.has("traffic_sign"):
 			_create_traffic_sign(local, elevation, tags, target)
 			sign_count += 1
@@ -9023,6 +9042,22 @@ func _finalize_billboard_batch_for_chunk(chunk_key: String) -> void:
 
 
 # Создание дорожного знака - разрушаемый при столкновении
+func _set_no_shadow_recursive(node: Node) -> void:
+	if node is MeshInstance3D:
+		node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	for child in node.get_children():
+		_set_no_shadow_recursive(child)
+
+
+func _create_garbage_container(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	var instance: Node3D = GARBAGE_CONTAINER_SCENE.instantiate()
+	instance.position = Vector3(pos.x, elevation, pos.y)
+	# Отключаем тени на всех MeshInstance3D
+	for child in instance.get_children():
+		_set_no_shadow_recursive(child)
+	parent.add_child(instance)
+
+
 func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, parent: Node3D) -> void:
 	if not enable_traffic_signs:
 		return
