@@ -2764,15 +2764,25 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		# Строим контур перекрёстка
 		var contour := _build_intersection_contour(_intersection_positions.size() - 1)
 		_intersection_contours.append(contour)
-		# Увеличенный контур для обрезки бордюров (1.3× от центра)
+		# Увеличенный контур для обрезки бордюров (+0.3м от контура)
 		if contour.size() > 0:
 			var center_pos: Vector2 = info["pos"]
 			var curb_contour := PackedVector2Array()
 			for cp in contour:
-				curb_contour.append(center_pos + (cp - center_pos) * 1.3)
+				var offset_dir := (cp - center_pos).normalized()
+				curb_contour.append(cp + offset_dir * 0.3)
 			_intersection_curb_contours.append(curb_contour)
 		else:
 			_intersection_curb_contours.append(PackedVector2Array())
+
+		# Debug: выводим информацию о перекрёстке
+		var arm_info := ""
+		for fa in filtered_arms:
+			arm_info += " w=%.1f" % fa["width"]
+		print("  Intersection #%d at (%.1f, %.1f): %d arms%s, contour=%d pts" % [
+			_intersection_positions.size() - 1, info["pos"].x, info["pos"].y,
+			filtered_arms.size(), arm_info,
+			contour.size()])
 
 		# Добавляем в spatial hash — используем bounding radius контура
 		var idx := _intersection_positions.size() - 1
@@ -2780,8 +2790,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		if contour.size() > 0:
 			for cp in contour:
 				hash_radius = maxf(hash_radius, cp.distance_to(info["pos"]))
-		# Дополнительный запас для curb contour (1.3×)
-		hash_radius *= 1.4
+		# Запас для curb contour
+		hash_radius += 1.0
 		_add_intersection_to_spatial_hash(info["pos"], Vector2(hash_radius, hash_radius), idx)
 
 	# Второй проход: создаём все объекты
@@ -2928,12 +2938,11 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			var elevation := _get_elevation_at_point(pos, elev_data)
 
 			# Считаем дороги для которых делаем заплатки и бордюры
-			# (motorway, trunk, primary, secondary, tertiary, residential)
 			var major_road_count := 0
 			var max_width := 0.0
 			var max_height_offset := 0.096  # default (residential)
 			for t in road_types:
-				if t in ["motorway", "trunk", "primary", "secondary", "tertiary", "residential"]:
+				if t in ["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "service"]:
 					major_road_count += 1
 				var w: float = ROAD_WIDTHS.get(t, 6.0)
 				max_width = maxf(max_width, w)
@@ -2966,13 +2975,15 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				# На обычных перекрёстках - один знак
 				_create_yield_sign(pos + sign_offset, elevation, target)
 
-			# Создаём заплатку без разметки если есть хотя бы 1 крупная дорога (secondary+)
+			# Создаём заплатку без разметки если есть хотя бы 1 дорога (service+)
 			if major_road_count >= 1:
 				_create_intersection_patch(pos, target, intersection_idx, elev_data, max_height_offset)
 
 			# Скруглённые бордюры на углах перекрёстка
 			if intersection_idx >= 0:
 				_create_intersection_curbs(intersection_idx, target, elev_data, max_height_offset)
+			else:
+				print("  NO curb rounding: pos=(%.1f,%.1f) types=%s major=%d idx=%d" % [pos.x, pos.y, str(road_types), major_road_count, intersection_idx])
 
 			intersection_count += 1
 
