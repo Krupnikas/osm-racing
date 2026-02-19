@@ -3013,11 +3013,9 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			if major_road_count >= 1:
 				_create_intersection_patch(pos, target, intersection_idx, elev_data, max_height_offset)
 
-			# Скруглённые бордюры на углах перекрёстка
-			if intersection_idx >= 0:
-				_create_intersection_curbs(intersection_idx, target, elev_data, max_height_offset)
-			else:
-				print("  NO curb rounding: pos=(%.1f,%.1f) types=%s major=%d idx=%d" % [pos.x, pos.y, str(road_types), major_road_count, intersection_idx])
+			# Бордюры перекрёстков теперь генерируются по краям террейна в _create_chunk_ground_terrain
+			if intersection_idx < 0:
+				print("  NO intersection contour: pos=(%.1f,%.1f) types=%s major=%d idx=%d" % [pos.x, pos.y, str(road_types), major_road_count, intersection_idx])
 
 			intersection_count += 1
 
@@ -3255,27 +3253,27 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> v
 		"motorway", "trunk":
 			texture_key = "highway"
 			height_offset = 0.012
-			curb_height = 0.22
+			curb_height = 0.0
 		"primary":
 			texture_key = "primary"
 			height_offset = 0.010
-			curb_height = 0.22
+			curb_height = 0.0
 		"secondary":
 			texture_key = "primary"
 			height_offset = 0.008
-			curb_height = 0.22
+			curb_height = 0.0
 		"tertiary":
 			texture_key = "residential"
 			height_offset = 0.007
-			curb_height = 0.22
+			curb_height = 0.0
 		"residential", "unclassified":
 			texture_key = "residential"
 			height_offset = 0.006
-			curb_height = 0.22
+			curb_height = 0.0
 		"service":
 			texture_key = "residential"
 			height_offset = 0.004
-			curb_height = 0.22
+			curb_height = 0.0
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
 			height_offset = 0.23
@@ -3283,7 +3281,7 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> v
 		_:
 			texture_key = "residential"
 			height_offset = 0.006
-			curb_height = 0.22
+			curb_height = 0.0
 
 	# Сглаживаем точки один раз — используются и для дороги, и для бордюров
 	var smoothed_points: PackedVector2Array = _smooth_road_corners(local_points)
@@ -3361,27 +3359,27 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		"motorway", "trunk":
 			texture_key = "highway"
 			height_offset = 0.012
-			curb_height = 0.22
+			curb_height = 0.0
 		"primary":
 			texture_key = "primary"
 			height_offset = 0.010
-			curb_height = 0.22
+			curb_height = 0.0
 		"secondary":
 			texture_key = "primary"
 			height_offset = 0.008
-			curb_height = 0.22
+			curb_height = 0.0
 		"tertiary":
 			texture_key = "residential"
 			height_offset = 0.007
-			curb_height = 0.22
+			curb_height = 0.0
 		"residential", "unclassified":
 			texture_key = "residential"
 			height_offset = 0.006
-			curb_height = 0.22
+			curb_height = 0.0
 		"service":
 			texture_key = "residential"
 			height_offset = 0.004
-			curb_height = 0.22
+			curb_height = 0.0
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
 			height_offset = 0.23
@@ -3389,7 +3387,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		_:
 			texture_key = "residential"
 			height_offset = 0.006
-			curb_height = 0.22
+			curb_height = 0.0
 
 	# Smoothing (thread-safe: pure math)
 	var smoothed_points: PackedVector2Array = _smooth_road_corners(local_points)
@@ -9983,6 +9981,64 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 	if terrain_polys.is_empty():
 		print("OSM: ChunkTerrain %s: no polygons after clipping" % chunk_key)
 		return
+
+	# 2d. Генерируем бордюры по внутренним краям (где террейн граничит с дорогой)
+	var curb_verts := PackedVector3Array()
+	var curb_norms := PackedVector3Array()
+	var curb_idxs := PackedInt32Array()
+	var road_level := 0.005
+	var boundary_eps := 0.1
+
+	for poly in terrain_polys:
+		var pn := poly.size()
+		for ei in range(pn):
+			var p1: Vector2 = poly[ei]
+			var p2: Vector2 = poly[(ei + 1) % pn]
+			# Пропускаем края на границе чанка
+			var p1_on_boundary := absf(p1.x - min_x) < boundary_eps or absf(p1.x - max_x) < boundary_eps or absf(p1.y - min_z) < boundary_eps or absf(p1.y - max_z) < boundary_eps
+			var p2_on_boundary := absf(p2.x - min_x) < boundary_eps or absf(p2.x - max_x) < boundary_eps or absf(p2.y - min_z) < boundary_eps or absf(p2.y - max_z) < boundary_eps
+			if p1_on_boundary and p2_on_boundary:
+				continue
+			# Вертикальная стенка бордюра от уровня дороги до уровня террейна
+			var h1 := _get_elevation_at_point(p1, elev_data)
+			var h2 := _get_elevation_at_point(p2, elev_data)
+			var bot_y1 := h1 + road_level
+			var bot_y2 := h2 + road_level
+			var top_y1 := h1 + sidewalk_height
+			var top_y2 := h2 + sidewalk_height
+			# Нормаль наружу от полигона (к дороге)
+			var dir := (p2 - p1).normalized()
+			var outward := Vector2(dir.y, -dir.x)
+			var normal := Vector3(outward.x, 0.0, outward.y)
+			var ci := curb_verts.size()
+			curb_verts.append(Vector3(p1.x, bot_y1, p1.y))
+			curb_verts.append(Vector3(p2.x, bot_y2, p2.y))
+			curb_verts.append(Vector3(p2.x, top_y2, p2.y))
+			curb_verts.append(Vector3(p1.x, top_y1, p1.y))
+			for _j in 4: curb_norms.append(normal)
+			curb_idxs.append(ci + 0)
+			curb_idxs.append(ci + 1)
+			curb_idxs.append(ci + 2)
+			curb_idxs.append(ci + 0)
+			curb_idxs.append(ci + 2)
+			curb_idxs.append(ci + 3)
+
+	if curb_verts.size() > 0:
+		var curb_arrays := []
+		curb_arrays.resize(Mesh.ARRAY_MAX)
+		curb_arrays[Mesh.ARRAY_VERTEX] = curb_verts
+		curb_arrays[Mesh.ARRAY_NORMAL] = curb_norms
+		curb_arrays[Mesh.ARRAY_INDEX] = curb_idxs
+		var curb_mesh := ArrayMesh.new()
+		curb_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, curb_arrays)
+		var curb_inst := MeshInstance3D.new()
+		curb_inst.name = "ChunkCurbs"
+		curb_inst.mesh = curb_mesh
+		curb_inst.material_override = _curb_material
+		curb_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		if not elev_data.is_empty():
+			curb_inst.set_meta("_elevation_applied", true)
+		parent.add_child(curb_inst)
 
 	# 3. Триангулируем все оставшиеся полигоны и собираем меш
 	var all_vertices := PackedVector3Array()
