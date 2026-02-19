@@ -189,6 +189,10 @@ var _curb_material: StandardMaterial3D = null  # Shared material для всех
 # Vegetation batching system - MultiMesh with LOD
 var _tree_batch_data: Dictionary = {}  # key: chunk_key -> {leaf_transforms: [], pine_transforms: [], collisions: [], parent: Node3D}
 var _tree_batches_to_finalize: Array[String] = []  # Chunk keys ready for finalization
+# Threaded vegetation processing
+var _veg_mutex: Mutex
+var _veg_thread_results: Array = []  # Готовые результаты из воркер-тредов
+var _pending_veg_tasks: int = 0  # Счётчик активных задач
 var _tree_mesh_leaf: ArrayMesh  # Меш лиственного дерева LOD0
 var _tree_mesh_leaf_lod1: ArrayMesh  # Меш лиственного дерева LOD1 (декимация 50%)
 var _tree_mesh_pine: ArrayMesh  # Меш сосны LOD0
@@ -362,6 +366,7 @@ func _ready() -> void:
 	_building_mutex = Mutex.new()
 	_curb_collision_mutex = Mutex.new()
 	_road_mutex = Mutex.new()
+	_veg_mutex = Mutex.new()
 
 	osm_loader = OSMLoaderScript.new()
 	add_child(osm_loader)
@@ -1092,13 +1097,18 @@ func _process(delta: float) -> void:
 		t_infra = Time.get_ticks_usec() - t0
 		_record_perf("infra_queue", t_infra)
 
-	# Обрабатываем очередь растительности
+	# Диспетчер растительности (отправка в воркер-треды, мгновенно)
 	var t_veg := 0
-	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
-		t0 = Time.get_ticks_usec()
-		_process_vegetation_queue()
-		t_veg = Time.get_ticks_usec() - t0
-		_record_perf("vegetation_queue", t_veg)
+	t0 = Time.get_ticks_usec()
+	_process_vegetation_queue()
+	t_veg = Time.get_ticks_usec() - t0
+	_record_perf("vegetation_queue", t_veg)
+
+	# Применяем результаты из воркер-тредов деревьев
+	t0 = Time.get_ticks_usec()
+	_apply_veg_thread_results()
+	var t_veg_apply := Time.get_ticks_usec() - t0
+	_record_perf("veg_results_apply", t_veg_apply)
 
 	# Применяем коллизии бордюров из worker threads
 	t0 = Time.get_ticks_usec()
@@ -1273,7 +1283,7 @@ func _check_initial_load_complete() -> void:
 	var chunk_progress: float = float(loaded_count) / float(max(1, total_chunks))  # 0.0-1.0
 
 	# Считаем размер всех очередей
-	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + _pending_road_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size()
+	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + _pending_road_tasks + _pending_veg_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size()
 
 	# DEBUG: Детальное логирование очередей
 	if loaded_count >= total_chunks and total_queued > 0:
@@ -1362,7 +1372,7 @@ func _check_initial_load_complete() -> void:
 				return
 
 		# Проверяем что все очереди обработаны (для плавности старта)
-		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and _pending_road_tasks <= 0
+		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and _pending_road_tasks <= 0 and _pending_veg_tasks <= 0
 		if not queues_empty:
 			# Отслеживаем зависание очереди
 			if total_queued == _last_queue_size:
@@ -1372,6 +1382,7 @@ func _check_initial_load_complete() -> void:
 					print("OSM: Queue stuck at %d items for %.1fs, forcing completion..." % [total_queued, _queue_stuck_time])
 					_pending_building_tasks = 0
 					_pending_road_tasks = 0
+					_pending_veg_tasks = 0
 					_queue_stuck_time = 0.0
 					# НЕ делаем return - продолжаем к финализации ниже
 				else:
@@ -1817,6 +1828,15 @@ func _unload_chunk(chunk_key: String) -> void:
 		if finalize_idx >= 0:
 			_tree_batches_to_finalize.remove_at(finalize_idx)
 
+		# Clean up pending vegetation thread results for this chunk
+		_veg_mutex.lock()
+		var filtered_veg: Array = []
+		for veg_result in _veg_thread_results:
+			if veg_result.chunk_key != chunk_key:
+				filtered_veg.append(veg_result)
+		_veg_thread_results = filtered_veg
+		_veg_mutex.unlock()
+
 		# Clean up billboard batch data
 		var billboard_finalize_idx := _billboard_batches_to_finalize.find(chunk_key)
 		if billboard_finalize_idx >= 0:
@@ -1966,6 +1986,10 @@ func reset_terrain() -> void:
 	_road_results.clear()
 	_pending_road_tasks = 0
 	_road_mutex.unlock()
+	_veg_mutex.lock()
+	_veg_thread_results.clear()
+	_pending_veg_tasks = 0
+	_veg_mutex.unlock()
 	_terrain_objects_queue.clear()
 	_infrastructure_queue.clear()
 	_vegetation_queue.clear()
@@ -7748,25 +7772,19 @@ func _process_infrastructure_queue() -> void:
 		processed += 1
 
 
-## Обрабатывает очередь растительности (time budget, не блокирует)
+## Диспетчер растительности — отправляет задачи в воркер-треды
 func _process_vegetation_queue() -> void:
 	if _vegetation_queue.is_empty():
 		return
 
-	# Ждём base_elevation (без него _get_elevation_at_point вернёт абсолютную высоту)
+	# Ждём base_elevation (без него elevation будет абсолютным)
 	if enable_elevation and _base_elevation == 0.0:
 		return
 
-	# Time budget: до 2ms на растительность
-	const VEG_TIME_BUDGET_USEC := 2000
-	var start_time := Time.get_ticks_usec()
-	var processed := 0
+	const MAX_CONCURRENT_VEG_TASKS := 4
 
-	while not _vegetation_queue.is_empty():
-		if processed > 0 and (Time.get_ticks_usec() - start_time) > VEG_TIME_BUDGET_USEC:
-			break
-
-		# Ищем первый элемент с финализированным elevation
+	while not _vegetation_queue.is_empty() and _pending_veg_tasks < MAX_CONCURRENT_VEG_TASKS:
+		# Ищем первый элемент с финализированным elevation и готовыми дорогами/зданиями
 		var item: Dictionary = {}
 		var item_idx := -1
 		for qi in range(_vegetation_queue.size()):
@@ -7774,41 +7792,118 @@ func _process_vegetation_queue() -> void:
 			if not is_instance_valid(candidate.get("parent")):
 				_vegetation_queue.remove_at(qi)
 				break  # Удалили невалидный — попробуем следующий
+			var ck: String = _get_chunk_key_from_node(candidate.get("parent"))
+			if ck == "":
+				ck = candidate.get("chunk_key", "")
 			if enable_elevation:
-				var ck: String = _get_chunk_key_from_node(candidate.get("parent"))
-				if ck == "":
-					ck = candidate.get("chunk_key", "")
 				if ck != "" and not _elevation_finalized.has(ck):
 					continue  # Elevation не готов — пропускаем
+			# Проверяем что дороги и здания для этого чанка финализированы
+			if ck != "" and _road_batch_data.has(ck):
+				continue  # Дороги ещё не финализированы
+			if ck != "" and _building_geo_batch.has(ck):
+				continue  # Здания ещё не финализированы
 			item = candidate
 			item_idx = qi
 			break
 
 		if item_idx < 0:
-			break  # Все элементы ждут elevation
+			break  # Все элементы ждут зависимостей
 
 		_vegetation_queue.remove_at(item_idx)
 
-		var veg_type: String = item.get("type", "")
-		var t0 := Time.get_ticks_usec()
-
-		# Elevation финализирован — берём данные
+		# Получаем chunk_key и elevation data
+		var chunk_key: String = _get_chunk_key_from_node(item.get("parent"))
+		if chunk_key == "":
+			chunk_key = item.get("chunk_key", "")
 		var elev_data: Dictionary = item.get("elev_data", {})
-		if elev_data.is_empty():
-			var ck: String = _get_chunk_key_from_node(item.get("parent"))
-			if ck == "":
-				ck = item.get("chunk_key", "")
-			if ck != "" and _elevation_finalized.has(ck):
-				elev_data = _chunk_elevations[ck]
+		if elev_data.is_empty() and chunk_key != "" and _elevation_finalized.has(chunk_key):
+			elev_data = _chunk_elevations[chunk_key]
+
+		var veg_type: String = item.get("type", "")
 
 		match veg_type:
 			"trees":
-				_create_trees_immediate(item.points, elev_data, item.parent, item.dense)
-				_record_perf("veg_trees", Time.get_ticks_usec() - t0)
+				var task_data := {
+					"points": item.points,
+					"dense": item.dense,
+					"elev_data": elev_data,
+					"chunk_key": chunk_key,
+					"chunk_size": chunk_size,
+					"base_elevation": _base_elevation,
+					"elevation_scale": elevation_scale,
+					"road_spatial_hash": _road_spatial_hash,
+					"parent": item.parent,
+				}
+				_pending_veg_tasks += 1
+				WorkerThreadPool.add_task(_compute_trees_thread.bind(task_data))
 			"chunk_trees":
-				_create_chunk_trees_immediate(item.chunk_key, elev_data, item.parent)
-				_record_perf("veg_chunk_trees", Time.get_ticks_usec() - t0)
-		processed += 1
+				var task_data := {
+					"chunk_key": chunk_key,
+					"elev_data": elev_data,
+					"chunk_size": chunk_size,
+					"base_elevation": _base_elevation,
+					"elevation_scale": elevation_scale,
+					"road_spatial_hash": _road_spatial_hash,
+					"building_spatial_hash": _building_spatial_hash,
+					"parking_spatial_hash": _parking_spatial_hash,
+					"parking_polygons": _parking_polygons,
+					"parent": item.parent,
+				}
+				_pending_veg_tasks += 1
+				WorkerThreadPool.add_task(_compute_chunk_trees_thread.bind(task_data))
+
+
+## Применяет результаты из воркер-тредов деревьев (с бюджетом)
+func _apply_veg_thread_results() -> void:
+	_veg_mutex.lock()
+	if _veg_thread_results.is_empty():
+		_veg_mutex.unlock()
+		return
+	var results := _veg_thread_results.duplicate()
+	_veg_thread_results.clear()
+	_veg_mutex.unlock()
+
+	const VEG_APPLY_BUDGET_USEC := 2000
+	var apply_start := Time.get_ticks_usec()
+	var applied := 0
+
+	for result in results:
+		var chunk_key: String = result.chunk_key
+		var parent: Node3D = result.parent
+
+		# Проверяем что чанк ещё загружен
+		if not is_instance_valid(parent) or not _loaded_chunks.has(chunk_key):
+			applied += 1
+			continue
+
+		# Мёржим в существующую систему батчей
+		if not _tree_batch_data.has(chunk_key):
+			_tree_batch_data[chunk_key] = {
+				"leaf_transforms": [],
+				"pine_transforms": [],
+				"collisions": [],
+				"parent": parent
+			}
+
+		var batch: Dictionary = _tree_batch_data[chunk_key]
+		batch["leaf_transforms"].append_array(result.leaf_transforms)
+		batch["pine_transforms"].append_array(result.pine_transforms)
+		batch["collisions"].append_array(result.collisions)
+
+		if not _tree_batches_to_finalize.has(chunk_key):
+			_tree_batches_to_finalize.append(chunk_key)
+
+		applied += 1
+		if applied > 1 and (Time.get_ticks_usec() - apply_start) > VEG_APPLY_BUDGET_USEC:
+			break
+
+	# Возвращаем необработанные результаты обратно
+	if applied < results.size():
+		_veg_mutex.lock()
+		for i in range(applied, results.size()):
+			_veg_thread_results.append(results[i])
+		_veg_mutex.unlock()
 
 
 func _create_3d_building_with_texture(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
@@ -8432,7 +8527,7 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 		var i1: int = indices[ti + 1]
 		var i2: int = indices[ti + 2]
 		var center := (points[i0] + points[i1] + points[i2]) / 3.0
-		if _is_point_near_road_fast(center, 0.0):
+		if _is_point_near_road(center, 0.0):
 			continue
 		tri_indices.append(i0)
 		tri_indices.append(i1)
@@ -9420,7 +9515,262 @@ func _generate_trees_in_polygon(points: PackedVector2Array, elev_data: Dictionar
 	})
 
 
-# Немедленное создание деревьев (вызывается из очереди)
+# === Потокобезопасные функции поиска (для воркер-тредов) ===
+
+func _is_point_near_road_threadsafe(point: Vector2, min_distance: float, road_hash: Dictionary) -> bool:
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not road_hash.has(key):
+				continue
+			for seg in road_hash[key]:
+				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+				if point.distance_to(closest) < (seg.width / 2.0) + min_distance:
+					return true
+	return false
+
+
+func _is_point_near_building_threadsafe(point: Vector2, min_distance: float, building_hash: Dictionary) -> bool:
+	var cell_x := int(floor(point.x / BUILDING_CELL_SIZE))
+	var cell_y := int(floor(point.y / BUILDING_CELL_SIZE))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not building_hash.has(key):
+				continue
+			for seg in building_hash[key]:
+				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+				if point.distance_to(closest) < min_distance:
+					return true
+	return false
+
+
+func _is_point_in_any_parking_threadsafe(point: Vector2, parking_hash: Dictionary, parking_polys: Array) -> bool:
+	const PARKING_BUFFER := 10.0
+	var cell_x := int(floor(point.x / PARKING_CELL_SIZE))
+	var cell_y := int(floor(point.y / PARKING_CELL_SIZE))
+	var checked_polygons: Dictionary = {}
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not parking_hash.has(key):
+				continue
+			for entry in parking_hash[key]:
+				var pidx: int = entry.idx
+				var closest := Geometry2D.get_closest_point_to_segment(point, entry.p1, entry.p2)
+				if point.distance_to(closest) < PARKING_BUFFER:
+					return true
+				if not checked_polygons.has(pidx):
+					checked_polygons[pidx] = true
+					if pidx < parking_polys.size():
+						var parking: PackedVector2Array = parking_polys[pidx]
+						if parking.size() >= 3 and Geometry2D.is_point_in_polygon(point, parking):
+							return true
+	return false
+
+
+func _get_elevation_threadsafe(point: Vector2, elev_data: Dictionary, t_chunk_size: float, base_elev: float, elev_scale: float) -> float:
+	if elev_data.is_empty():
+		return 0.0
+	var cx := int(floor(point.x / t_chunk_size))
+	var cz := int(floor(point.y / t_chunk_size))
+	var fallback_key: String = elev_data.get("_chunk_key", "")
+	if fallback_key != "":
+		var parts: PackedStringArray = fallback_key.split(",")
+		cx = int(parts[0])
+		cz = int(parts[1])
+	var grid: Array = elev_data.get("grid", [])
+	var grid_size: int = elev_data.get("grid_size", 0)
+	if grid_size < 2 or grid.size() == 0:
+		return 0.0
+	var x_norm: float = clamp((point.x - float(cx) * t_chunk_size) / t_chunk_size, 0.0, 1.0)
+	var z_norm: float = clamp((point.y - float(cz) * t_chunk_size) / t_chunk_size, 0.0, 1.0)
+	var elevation: float = ElevationLoaderScript.interpolate_elevation(grid, grid_size, x_norm, z_norm)
+	return (elevation - base_elev) * elev_scale
+
+
+# === Воркер-треды для деревьев ===
+
+func _compute_trees_thread(task_data: Dictionary) -> void:
+	var points: PackedVector2Array = task_data.points
+	var dense: bool = task_data.dense
+	var elev_data: Dictionary = task_data.elev_data
+	var chunk_key: String = task_data.chunk_key
+	var t_chunk_size: float = task_data.chunk_size
+	var base_elev: float = task_data.base_elevation
+	var elev_scale: float = task_data.elevation_scale
+	var road_hash: Dictionary = task_data.road_spatial_hash
+
+	var min_x := points[0].x
+	var max_x := points[0].x
+	var min_y := points[0].y
+	var max_y := points[0].y
+	for p in points:
+		min_x = min(min_x, p.x)
+		max_x = max(max_x, p.x)
+		min_y = min(min_y, p.y)
+		max_y = max(max_y, p.y)
+
+	var width := max_x - min_x
+	var height := max_y - min_y
+	var area := width * height
+
+	const TREE_DENSITY_FOREST := 0.012
+	const TREE_DENSITY_PARK := 0.005
+	const MAX_TREES_PER_POLYGON := 600
+
+	var density := TREE_DENSITY_FOREST if dense else TREE_DENSITY_PARK
+	var max_trees := mini(int(area * density), MAX_TREES_PER_POLYGON)
+	if max_trees < 1:
+		max_trees = 1
+	var tree_count := 0
+
+	var seed_value := int(abs(min_x * 1000 + min_y * 100 + width * 10 + height)) % 10000
+	var avg_spacing := sqrt(1.0 / density)
+	var estimated_trees := int(area / (avg_spacing * avg_spacing))
+	estimated_trees = mini(estimated_trees, max_trees)
+	var max_attempts := estimated_trees * 3
+
+	var leaf_transforms: Array[Transform3D] = []
+	var pine_transforms: Array[Transform3D] = []
+	var collisions: Array[Dictionary] = []
+
+	for i in range(max_attempts):
+		var hash1 := fmod(float(seed_value + i * 7919) * 0.61803398875, 1.0)
+		var hash2 := fmod(float(seed_value + i * 104729) * 0.41421356237, 1.0)
+		var hash3 := fmod(hash1 * 17.0 + hash2 * 31.0, 1.0)
+		var hash4 := fmod(hash2 * 23.0 + hash1 * 13.0, 1.0)
+
+		var test_x := min_x + (hash1 * 0.7 + hash3 * 0.3) * width
+		var test_y := min_y + (hash2 * 0.7 + hash4 * 0.3) * height
+		var test_point := Vector2(test_x, test_y)
+
+		if not Geometry2D.is_point_in_polygon(test_point, points):
+			continue
+		if _is_point_near_road_threadsafe(test_point, 3.0, road_hash):
+			continue
+
+		var elevation := _get_elevation_threadsafe(test_point, elev_data, t_chunk_size, base_elev, elev_scale)
+		var is_pine := dense and fmod(hash1 * 97.0 + hash2 * 53.0, 1.0) < PINE_MIX_RATIO
+
+		# Детерминистичные масштаб/поворот (не randf для потокобезопасности)
+		var scale_hash := fmod(float(seed_value + i * 3571) * 0.7236, 1.0)
+		var rot_hash := fmod(float(seed_value + i * 6271) * 0.5413, 1.0)
+		var scale_factor := 0.8 + scale_hash * 0.5
+		var rotation_y := rot_hash * TAU
+
+		var tree_pos := Vector3(test_x, elevation, test_y)
+		var basis := Basis(Vector3.UP, rotation_y).scaled(Vector3(scale_factor, scale_factor, scale_factor))
+		var transform := Transform3D(basis, tree_pos)
+
+		if is_pine:
+			pine_transforms.append(transform)
+		else:
+			leaf_transforms.append(transform)
+
+		collisions.append({"position": tree_pos, "radius": 0.4})
+
+		tree_count += 1
+		if tree_count >= max_trees:
+			break
+
+	var result := {
+		"chunk_key": chunk_key,
+		"parent": task_data.parent,
+		"leaf_transforms": leaf_transforms,
+		"pine_transforms": pine_transforms,
+		"collisions": collisions,
+	}
+
+	_veg_mutex.lock()
+	_veg_thread_results.append(result)
+	_pending_veg_tasks -= 1
+	_veg_mutex.unlock()
+
+
+func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
+	var chunk_key: String = task_data.chunk_key
+	var elev_data: Dictionary = task_data.elev_data
+	var t_chunk_size: float = task_data.chunk_size
+	var base_elev: float = task_data.base_elevation
+	var elev_scale: float = task_data.elevation_scale
+	var road_hash: Dictionary = task_data.road_spatial_hash
+	var building_hash: Dictionary = task_data.building_spatial_hash
+	var parking_hash: Dictionary = task_data.parking_spatial_hash
+	var parking_polys: Array = task_data.parking_polygons
+
+	var coords: Array = chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+	var min_x := chunk_x * t_chunk_size
+	var min_z := chunk_z * t_chunk_size
+
+	var avg_spacing := 10.0
+	var max_trees := 250
+	var tree_count := 0
+
+	var seed_value := int(abs(chunk_x * 73856093 + chunk_z * 19349669)) % 100000
+	var estimated_trees := int((t_chunk_size * t_chunk_size) / (avg_spacing * avg_spacing))
+	estimated_trees = mini(estimated_trees, max_trees)
+
+	var leaf_transforms: Array[Transform3D] = []
+	var pine_transforms: Array[Transform3D] = []
+	var collisions: Array[Dictionary] = []
+
+	for i in range(estimated_trees):
+		var hash1 := fmod(float(seed_value + i * 7919) * 0.61803398875, 1.0)
+		var hash2 := fmod(float(seed_value + i * 104729) * 0.41421356237, 1.0)
+		var hash3 := fmod(hash1 * 17.0 + hash2 * 31.0, 1.0)
+		var hash4 := fmod(hash2 * 23.0 + hash1 * 13.0, 1.0)
+
+		var test_x := min_x + (hash1 * 0.7 + hash3 * 0.3) * t_chunk_size
+		var test_y := min_z + (hash2 * 0.7 + hash4 * 0.3) * t_chunk_size
+		var test_point := Vector2(test_x, test_y)
+
+		if _is_point_near_road_threadsafe(test_point, 2.0, road_hash):
+			continue
+		if _is_point_near_building_threadsafe(test_point, 2.0, building_hash):
+			continue
+		if _is_point_in_any_parking_threadsafe(test_point, parking_hash, parking_polys):
+			continue
+
+		var elevation := _get_elevation_threadsafe(test_point, elev_data, t_chunk_size, base_elev, elev_scale)
+
+		# Детерминистичные масштаб/поворот
+		var scale_hash := fmod(float(seed_value + i * 3571) * 0.7236, 1.0)
+		var rot_hash := fmod(float(seed_value + i * 6271) * 0.5413, 1.0)
+		var scale_factor := 0.8 + scale_hash * 0.5
+		var rotation_y := rot_hash * TAU
+
+		var tree_pos := Vector3(test_x, elevation, test_y)
+		var basis := Basis(Vector3.UP, rotation_y).scaled(Vector3(scale_factor, scale_factor, scale_factor))
+		var transform := Transform3D(basis, tree_pos)
+
+		# chunk_trees — всегда лиственные (без pine mix)
+		leaf_transforms.append(transform)
+		collisions.append({"position": tree_pos, "radius": 0.4})
+
+		tree_count += 1
+		if tree_count >= max_trees:
+			break
+
+	var result := {
+		"chunk_key": chunk_key,
+		"parent": task_data.parent,
+		"leaf_transforms": leaf_transforms,
+		"pine_transforms": pine_transforms,
+		"collisions": collisions,
+	}
+
+	_veg_mutex.lock()
+	_veg_thread_results.append(result)
+	_pending_veg_tasks -= 1
+	_veg_mutex.unlock()
+
+
+# Немедленное создание деревьев (вызывается из очереди) — LEGACY, заменено тредами
 func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D, dense: bool = false) -> void:
 	if not is_instance_valid(parent):
 		return
@@ -9492,23 +9842,6 @@ func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, 
 			break
 
 
-# Проверка близости к дороге через spatial hash (быстрая версия)
-func _is_point_near_road_fast(point: Vector2, min_distance: float) -> bool:
-	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
-	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
-
-	for dx in range(-1, 2):
-		for dy in range(-1, 2):
-			var key := Vector2i(cell_x + dx, cell_y + dy)
-			if not _road_spatial_hash.has(key):
-				continue
-			for seg in _road_spatial_hash[key]:
-				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
-				var dist := point.distance_to(closest)
-				if dist < (seg.width / 2.0) + min_distance:
-					return true
-
-	return false
 
 
 # Генерация деревьев по всему чанку (на обычной земле, вне дорог и зданий)
@@ -9558,7 +9891,7 @@ func _create_chunk_trees_immediate(chunk_key: String, elev_data: Dictionary, par
 		var test_point := Vector2(test_x, test_y)
 
 		# Пропускаем если близко к дороге (2м от края дороги)
-		if _is_point_near_road_fast(test_point, 2.0):
+		if _is_point_near_road(test_point, 2.0):
 			continue
 
 		# Пропускаем если близко к зданию (2м от стены)
@@ -9691,8 +10024,8 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 				# Проверяем, не попадают ли фонари на парковку или другую дорогу
 				var left_on_parking := _is_point_in_any_parking(lamp_pos_left)
 				var right_on_parking := _is_point_in_any_parking(lamp_pos_right)
-				var left_on_road := _is_point_near_road_fast(lamp_pos_left, 0.0)
-				var right_on_road := _is_point_near_road_fast(lamp_pos_right, 0.0)
+				var left_on_road := _is_point_near_road(lamp_pos_left, 0.0)
+				var right_on_road := _is_point_near_road(lamp_pos_right, 0.0)
 
 				var elev_left := _get_elevation_at_point(lamp_pos_left, elev_data)
 				var elev_right := _get_elevation_at_point(lamp_pos_right, elev_data)
@@ -9789,14 +10122,14 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 		var lamp_pos_left := road_pos + perp * lamp_offset
 		var lamp_pos_right := road_pos - perp * lamp_offset
 
-		if not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road_fast(lamp_pos_left, 0.0):
+		if not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road(lamp_pos_left, 0.0):
 			var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
 			var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
 			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
 			if _loaded_chunks.has(chunk_key):
 				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_left.x, 0.0, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[chunk_key])
 
-		if not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road_fast(lamp_pos_right, 0.0):
+		if not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road(lamp_pos_right, 0.0):
 			var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
 			var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
 			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
@@ -9852,7 +10185,7 @@ func _generate_street_lamps_fast(local_points: PackedVector2Array, road_width: f
 		var lamp_pos_right := road_pos - perp * lamp_offset
 
 		# Check left side
-		if not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road_fast(lamp_pos_left, 0.0):
+		if not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road(lamp_pos_left, 0.0):
 			var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
 			var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
 			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
@@ -9860,7 +10193,7 @@ func _generate_street_lamps_fast(local_points: PackedVector2Array, road_width: f
 				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_left.x, 0.0, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[chunk_key])
 
 		# Check right side
-		if not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road_fast(lamp_pos_right, 0.0):
+		if not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road(lamp_pos_right, 0.0):
 			var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
 			var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
 			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
@@ -10243,19 +10576,19 @@ func _is_point_in_any_parking(point: Vector2) -> bool:
 
 
 func _is_point_near_road(point: Vector2, min_distance: float) -> bool:
-	"""Проверяет, находится ли точка слишком близко к любой дороге"""
-	for seg in _road_segments:
-		var p1: Vector2 = seg.p1
-		var p2: Vector2 = seg.p2
-		var road_width: float = seg.width
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
 
-		# Вычисляем расстояние от точки до сегмента дороги
-		var closest := Geometry2D.get_closest_point_to_segment(point, p1, p2)
-		var dist := point.distance_to(closest)
-
-		# Учитываем ширину дороги (расстояние от центра до края + буфер)
-		if dist < (road_width / 2.0) + min_distance:
-			return true
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not _road_spatial_hash.has(key):
+				continue
+			for seg in _road_spatial_hash[key]:
+				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+				var dist := point.distance_to(closest)
+				if dist < (seg.width / 2.0) + min_distance:
+					return true
 
 	return false
 
