@@ -2818,6 +2818,9 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		hash_radius += 1.0
 		_add_intersection_to_spatial_hash(info["pos"], Vector2(hash_radius, hash_radius), idx)
 
+	# Собираем полилинии дорог для генерации террейна (сглаженные коридоры)
+	var chunk_road_polylines: Array = []  # {points: PackedVector2Array, width: float}
+
 	# Второй проход: создаём все объекты
 	var skipped_buildings := 0
 	for way in ways:
@@ -2868,6 +2871,13 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			_create_road(nodes, tags, target, loader, flat_elev)
 			road_count += 1
 			objects_this_frame += 1
+			# Собираем полилинии для террейна (пешеходки пропускаем)
+			var hw_type: String = tags.get("highway", "")
+			if hw_type not in ["footway", "path", "cycleway", "track", "steps"]:
+				var local_pts: PackedVector2Array = []
+				for node in nodes:
+					local_pts.append(_latlon_to_local(node.lat, node.lon))
+				chunk_road_polylines.append({"points": local_pts, "width": ROAD_WIDTHS.get(hw_type, 5.0)})
 		elif tags.has("building"):
 			var way_id: int = int(way.get("id", 0))  # Ensure int conversion from JSON float
 			_create_building(nodes, tags, target, loader, elev_data, way_id)
@@ -2964,21 +2974,21 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			# Считаем дороги для которых делаем заплатки и бордюры
 			var major_road_count := 0
 			var max_width := 0.0
-			var max_height_offset := 0.096  # default (residential)
+			var max_height_offset := 0.006  # default (residential)
 			for t in road_types:
 				if t in ["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "service"]:
 					major_road_count += 1
 				var w: float = ROAD_WIDTHS.get(t, 6.0)
 				max_width = maxf(max_width, w)
 				# height_offset по типу дороги (совпадает с _create_road_immediate)
-				var ho := 0.096
+				var ho := 0.006
 				match t:
-					"motorway", "trunk": ho = 0.102
-					"primary": ho = 0.100
-					"secondary": ho = 0.098
-					"tertiary": ho = 0.097
-					"residential", "unclassified": ho = 0.096
-					"service": ho = 0.094
+					"motorway", "trunk": ho = 0.012
+					"primary": ho = 0.010
+					"secondary": ho = 0.008
+					"tertiary": ho = 0.007
+					"residential", "unclassified": ho = 0.006
+					"service": ho = 0.004
 				max_height_offset = maxf(max_height_offset, ho)
 			# Ищем данные эллипса для этого перекрёстка
 			var intersection_idx := _find_nearest_intersection(pos, 2.0)
@@ -3089,8 +3099,9 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 	if bus_stop_count > 0:
 		print("OSM: Created %d bus stops" % bus_stop_count)
 
-	# Генерация деревьев по всей площади чанка (вне дорог и зданий)
+	# Приподнятый террейн (газон/тротуар) и деревья по всей площади чанка
 	if chunk_key != "":
+		_create_chunk_ground_terrain(chunk_key, elev_data, target, chunk_road_polylines)
 		_generate_trees_for_chunk(chunk_key, elev_data, target)
 
 	# OPTIMIZATION: Помечаем чанк для финализации road batches (когда road_queue опустеет)
@@ -3243,36 +3254,36 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> v
 	match highway_type:
 		"motorway", "trunk":
 			texture_key = "highway"
-			height_offset = 0.102
-			curb_height = 0.05
+			height_offset = 0.012
+			curb_height = 0.22
 		"primary":
 			texture_key = "primary"
-			height_offset = 0.100
-			curb_height = 0.05
+			height_offset = 0.010
+			curb_height = 0.22
 		"secondary":
 			texture_key = "primary"
-			height_offset = 0.098
-			curb_height = 0.05
+			height_offset = 0.008
+			curb_height = 0.22
 		"tertiary":
 			texture_key = "residential"
-			height_offset = 0.097
-			curb_height = 0.05
+			height_offset = 0.007
+			curb_height = 0.22
 		"residential", "unclassified":
 			texture_key = "residential"
-			height_offset = 0.096
-			curb_height = 0.05
+			height_offset = 0.006
+			curb_height = 0.22
 		"service":
 			texture_key = "residential"
-			height_offset = 0.094
-			curb_height = 0.05
+			height_offset = 0.004
+			curb_height = 0.22
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
-			height_offset = 0.087
+			height_offset = 0.23
 			curb_height = 0.0
 		_:
 			texture_key = "residential"
-			height_offset = 0.096
-			curb_height = 0.05
+			height_offset = 0.006
+			curb_height = 0.22
 
 	# Сглаживаем точки один раз — используются и для дороги, и для бордюров
 	var smoothed_points: PackedVector2Array = _smooth_road_corners(local_points)
@@ -3349,36 +3360,36 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	match highway_type:
 		"motorway", "trunk":
 			texture_key = "highway"
-			height_offset = 0.102
-			curb_height = 0.05
+			height_offset = 0.012
+			curb_height = 0.22
 		"primary":
 			texture_key = "primary"
-			height_offset = 0.100
-			curb_height = 0.05
+			height_offset = 0.010
+			curb_height = 0.22
 		"secondary":
 			texture_key = "primary"
-			height_offset = 0.098
-			curb_height = 0.05
+			height_offset = 0.008
+			curb_height = 0.22
 		"tertiary":
 			texture_key = "residential"
-			height_offset = 0.097
-			curb_height = 0.05
+			height_offset = 0.007
+			curb_height = 0.22
 		"residential", "unclassified":
 			texture_key = "residential"
-			height_offset = 0.096
-			curb_height = 0.05
+			height_offset = 0.006
+			curb_height = 0.22
 		"service":
 			texture_key = "residential"
-			height_offset = 0.094
-			curb_height = 0.05
+			height_offset = 0.004
+			curb_height = 0.22
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
-			height_offset = 0.087
+			height_offset = 0.23
 			curb_height = 0.0
 		_:
 			texture_key = "residential"
-			height_offset = 0.096
-			curb_height = 0.05
+			height_offset = 0.006
+			curb_height = 0.22
 
 	# Smoothing (thread-safe: pure math)
 	var smoothed_points: PackedVector2Array = _smooth_road_corners(local_points)
@@ -3405,7 +3416,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 
 		if points.size() >= 2:
 			var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-			var z_offset: float = hash_val * 0.0003
+			var z_offset: float = hash_val * 0.00003
 			var half_w: float = width * 0.5
 			var h: float = height_offset + z_offset
 			var n_points: int = points.size()
@@ -3979,7 +3990,7 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 
 	# Z-fighting offset based on hash
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-	var z_offset: float = hash_val * 0.0003
+	var z_offset: float = hash_val * 0.00003
 
 	var arrays: Array = []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -4147,7 +4158,7 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 
 	# Z-fighting offset
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-	var z_offset: float = hash_val * 0.0003
+	var z_offset: float = hash_val * 0.00003
 
 	# Генерируем geometry для этого road segment
 	var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
@@ -4251,7 +4262,7 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 			return
 
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-	var z_offset: float = hash_val * 0.0003
+	var z_offset: float = hash_val * 0.00003
 
 	var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
 	var vertex_offset: int = batch["vertices"].size()
@@ -4897,7 +4908,7 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 	# Добавляем небольшое случайное смещение по высоте для предотвращения z-fighting
 	# на пересечениях (используем хэш от первой точки дороги)
 	var hash_val := int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-	var z_offset := hash_val * 0.0003  # Совпадает с z_offset дороги
+	var z_offset := hash_val * 0.00003  # Совпадает с z_offset дороги
 
 	# Создаём меш для бордюров
 	var arrays := []
@@ -5653,8 +5664,8 @@ func _create_parking_surface(points: PackedVector2Array, elev_data: Dictionary, 
 
 	st.set_material(material)
 
-	# Высота парковки ниже самых низких дорог (service = 0.012)
-	var height_offset := 0.01
+	# Высота парковки вровень с дорогами (service = 0.004)
+	var height_offset := 0.005
 
 	# Добавляем вершины треугольников
 	for i in range(0, indices.size(), 3):
@@ -6005,11 +6016,9 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	# Grass полигоны не нужны — terrain mesh уже покрывает чанк травой
+	# Трава уже покрыта per-chunk terrain, пропускаем чтобы не было z-fighting
 	if texture_key == "grass":
 		return
-
-	# Natural объекты ниже дорог чтобы не было z-fighting
 	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
 	# Генерируем густые деревья внутри лесных полигонов
@@ -6061,11 +6070,9 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 			var dense_override: bool = tree_override.get("dense", false)
 			_generate_trees_in_polygon(points, elev_data, parent, dense_override)
 
-	# Grass полигоны не нужны — terrain mesh уже покрывает чанк травой
+	# Трава уже покрыта per-chunk terrain, пропускаем чтобы не было z-fighting
 	if texture_key == "grass":
 		return
-
-	# Landuse ниже дорог чтобы не было z-fighting
 	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
 	# Генерируем густые деревья внутри лесных полигонов
@@ -6108,11 +6115,9 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 	if leisure_type in ["park", "garden"]:
 		_generate_trees_in_polygon(points, elev_data, parent, false)
 
-	# Grass полигоны не нужны — terrain mesh уже покрывает чанк травой
+	# Трава уже покрыта per-chunk terrain, пропускаем чтобы не было z-fighting
 	if texture_key == "grass":
 		return
-
-	# Leisure объекты ниже дорог чтобы не было z-fighting
 	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
 
 func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
@@ -7255,7 +7260,7 @@ func _init_curb_mesh_state(item: Dictionary) -> void:
 
 	var curb_width := 0.15
 	var hash_val := int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-	var z_offset := hash_val * 0.0003  # Совпадает с z_offset дороги
+	var z_offset := hash_val * 0.00003  # Совпадает с z_offset дороги
 
 	# Предварительно вычисляем валидные сегменты (не в контурах перекрёстков)
 	var valid_segments: Array[int] = []
@@ -9842,6 +9847,219 @@ func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, 
 			break
 
 
+# Возвращает расстояние от точки до ближайшего края дороги
+# Отрицательное = внутри дороги, положительное = снаружи
+func _get_distance_to_road_edge(point: Vector2) -> float:
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+	var min_edge_dist := 999.0
+
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not _road_spatial_hash.has(key):
+				continue
+			for seg in _road_spatial_hash[key]:
+				var s_p1: Vector2 = seg.p1
+				var s_p2: Vector2 = seg.p2
+				var s_width: float = seg.width
+				var closest := Geometry2D.get_closest_point_to_segment(point, s_p1, s_p2)
+				var dist_to_center := point.distance_to(closest)
+				var edge_dist: float = dist_to_center - s_width / 2.0
+				min_edge_dist = minf(min_edge_dist, edge_dist)
+
+	return min_edge_dist
+
+
+# Проверка близости к дороге через spatial hash (быстрая версия)
+func _is_point_near_road_fast(point: Vector2, min_distance: float) -> bool:
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not _road_spatial_hash.has(key):
+				continue
+			for seg in _road_spatial_hash[key]:
+				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+				var dist := point.distance_to(closest)
+				if dist < (seg.width / 2.0) + min_distance:
+					return true
+
+	return false
+
+
+# Генерирует приподнятый террейн (газон/тротуар) по контурам дорог с коллизией
+func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, parent: Node3D, road_polylines: Array) -> void:
+	if not is_instance_valid(parent):
+		return
+
+	var coords: Array = chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+	var min_x := float(chunk_x) * chunk_size
+	var max_x := min_x + chunk_size
+	var min_z := float(chunk_z) * chunk_size
+	var max_z := min_z + chunk_size
+	var sidewalk_height := 0.22  # Уровень тротуара/газона (22см — резкий бордюр)
+
+	# 1. Прямоугольник чанка (CCW для Geometry2D)
+	var chunk_rect := PackedVector2Array([
+		Vector2(min_x, min_z),
+		Vector2(max_x, min_z),
+		Vector2(max_x, max_z),
+		Vector2(min_x, max_z),
+	])
+
+	# 2. Вырезаем коридоры дорог из прямоугольника чанка
+	var terrain_polys: Array[PackedVector2Array] = [chunk_rect]
+
+	for road in road_polylines:
+		var raw_pts: PackedVector2Array = road.points
+		if raw_pts.size() < 2:
+			continue
+		var smoothed := _smooth_road_corners(raw_pts)
+		if smoothed.size() < 2:
+			continue
+		var road_w: float = road.width
+		# offset_polyline возвращает массив полигонов-коридоров
+		var corridors: Array[PackedVector2Array] = Geometry2D.offset_polyline(smoothed, road_w / 2.0 + 0.3)
+		for corridor in corridors:
+			if corridor.size() < 3:
+				continue
+			var new_polys: Array[PackedVector2Array] = []
+			for poly in terrain_polys:
+				var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, corridor)
+				for cp in clipped:
+					if cp.size() >= 3:
+						new_polys.append(cp)
+			terrain_polys = new_polys
+
+	# 2b. Вырезаем контуры перекрёстков (заплатки шире коридоров дорог)
+	for i in range(_intersection_contours.size()):
+		var contour: PackedVector2Array = _intersection_contours[i]
+		if contour.size() < 3:
+			continue
+		# Проверяем что перекрёсток в пределах чанка (с запасом)
+		var ipos: Vector2 = _intersection_positions[i]
+		if ipos.x < min_x - 30.0 or ipos.x > max_x + 30.0 or ipos.y < min_z - 30.0 or ipos.y > max_z + 30.0:
+			continue
+		# Немного раздуваем контур (+0.3м) чтобы не было z-fighting на границе
+		var expanded := PackedVector2Array()
+		for cp in contour:
+			var offset_dir := (cp - ipos).normalized()
+			expanded.append(cp + offset_dir * 0.3)
+		if expanded.size() < 3:
+			continue
+		var new_polys: Array[PackedVector2Array] = []
+		for poly in terrain_polys:
+			var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, expanded)
+			for cp in clipped:
+				if cp.size() >= 3:
+					new_polys.append(cp)
+		terrain_polys = new_polys
+
+	# 2c. Вырезаем парковки (на уровне дорог, не должны быть под травой)
+	for parking_poly in _parking_polygons:
+		if parking_poly.size() < 3:
+			continue
+		# Быстрая проверка — хотя бы одна точка парковки в пределах чанка
+		var in_chunk := false
+		for pp in parking_poly:
+			if pp.x >= min_x - 5.0 and pp.x <= max_x + 5.0 and pp.y >= min_z - 5.0 and pp.y <= max_z + 5.0:
+				in_chunk = true
+				break
+		if not in_chunk:
+			continue
+		var new_polys: Array[PackedVector2Array] = []
+		for poly in terrain_polys:
+			var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, parking_poly)
+			for cp in clipped:
+				if cp.size() >= 3:
+					new_polys.append(cp)
+		terrain_polys = new_polys
+
+	if terrain_polys.is_empty():
+		print("OSM: ChunkTerrain %s: no polygons after clipping" % chunk_key)
+		return
+
+	# 3. Триангулируем все оставшиеся полигоны и собираем меш
+	var all_vertices := PackedVector3Array()
+	var all_uvs := PackedVector2Array()
+	var all_normals := PackedVector3Array()
+	var all_indices := PackedInt32Array()
+	var uv_scale := 0.05
+	var total_tris := 0
+
+	for poly in terrain_polys:
+		var indices := Geometry2D.triangulate_polygon(poly)
+		if indices.size() < 3:
+			continue
+		var base_idx: int = all_vertices.size()
+		for p in poly:
+			var h := _get_elevation_at_point(p, elev_data) + sidewalk_height
+			all_vertices.append(Vector3(p.x, h, p.y))
+			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
+			all_normals.append(Vector3.UP)
+		for idx in indices:
+			all_indices.append(base_idx + idx)
+		total_tris += indices.size() / 3
+
+	if all_indices.is_empty():
+		return
+
+	print("OSM: ChunkTerrain %s: %d polys, %d verts, %d tris" % [chunk_key, terrain_polys.size(), all_vertices.size(), total_tris])
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = all_vertices
+	arrays[Mesh.ARRAY_TEX_UV] = all_uvs
+	arrays[Mesh.ARRAY_NORMAL] = all_normals
+	arrays[Mesh.ARRAY_INDEX] = all_indices
+
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.name = "ChunkTerrain"
+	mesh_inst.mesh = arr_mesh
+
+	# Материал — трава
+	var material := StandardMaterial3D.new()
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if _ground_textures.has("grass"):
+		material.albedo_texture = _ground_textures["grass"]
+		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	else:
+		material.albedo_color = Color(0.3, 0.5, 0.2)
+	mesh_inst.material_override = material
+
+	if not elev_data.is_empty():
+		mesh_inst.set_meta("_elevation_applied", true)
+
+	parent.add_child(mesh_inst)
+
+	# 4. Коллизия — ConcavePolygonShape3D из тех же граней
+	var faces := PackedVector3Array()
+	for ti in range(0, all_indices.size(), 3):
+		faces.append(all_vertices[all_indices[ti]])
+		faces.append(all_vertices[all_indices[ti + 1]])
+		faces.append(all_vertices[all_indices[ti + 2]])
+
+	var shape := ConcavePolygonShape3D.new()
+	shape.set_faces(faces)
+
+	var body := StaticBody3D.new()
+	body.name = "TerrainCollision"
+	body.collision_layer = 1
+	var col_shape := CollisionShape3D.new()
+	col_shape.shape = shape
+	body.add_child(col_shape)
+	parent.add_child(body)
+
+	if _draw_call_logging_enabled:
+		_draw_call_stats["terrain"] += 1
 
 
 # Генерация деревьев по всему чанку (на обычной земле, вне дорог и зданий)
@@ -12792,7 +13010,7 @@ func _create_intersection_curbs(intersection_idx: int, parent: Node3D, elev_data
 
 	var road_count := sorted_roads.size()
 	var curb_width := 0.15
-	var curb_height := 0.05
+	var curb_height := 0.22
 	var curve_segments := 8
 
 	# Максимальная полуширина для extend
@@ -12948,7 +13166,7 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
 	# Z-offset: дороги имеют hash-based z_offset до 0.03, заплатка должна быть выше всех
-	var z_off := 0.035
+	var z_off := 0.005
 
 	# Elevation в центре перекрёстка
 	var h_center := _get_elevation_at_point(pos, elev_data)
