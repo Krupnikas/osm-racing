@@ -24,14 +24,11 @@ var track_info := {
 # Audio player
 var music_player: AudioStreamPlayer
 
-# Настройки
-var volume_db: float = -5.0  # Громкость музыки
-
 func _ready() -> void:
 	# Создаём основной music player
 	music_player = AudioStreamPlayer.new()
 	music_player.bus = "Music"
-	music_player.volume_db = volume_db
+	music_player.volume_db = 0.0  # Громкость контролируется через Music bus
 	music_player.process_mode = Node.PROCESS_MODE_ALWAYS  # Работает даже во время паузы
 	add_child(music_player)
 
@@ -112,11 +109,6 @@ func play_previous_track() -> void:
 func stop_music() -> void:
 	"""Останавливает музыку"""
 	music_player.stop()
-
-func set_volume(db: float) -> void:
-	"""Устанавливает громкость музыки в dB"""
-	volume_db = db
-	music_player.volume_db = db
 
 func add_track(track_path: String) -> void:
 	"""Добавляет трек в плейлист"""

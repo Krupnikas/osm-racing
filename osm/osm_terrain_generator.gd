@@ -7271,7 +7271,6 @@ func _init_curb_mesh_state(item: Dictionary) -> void:
 		"curb_height": curb_height,
 		"curb_width": curb_width,
 		"z_offset": z_offset,
-		"curb_ellipse_scale": 1.41,  # Оставлен для совместимости
 		"elev_data": item.elev_data,
 		"parent": item.parent,
 		"groups": groups,
@@ -12307,33 +12306,6 @@ func _move_object_off_road(pos: Vector2, margin: float = 0.5, max_attempts: int 
 
 	# Не удалось найти безопасное место за max_attempts попыток
 	return Vector2.ZERO
-
-
-func _is_point_in_intersection_ellipse(pos: Vector2, scale: float = 1.0) -> int:
-	# Используем spatial hash для быстрого поиска
-	var nearby := _get_nearby_intersections(pos)
-
-	for i in nearby:
-		var center: Vector2 = _intersection_positions[i]
-		var radii: Vector2 = _intersection_radii[i] * scale
-		var angle: float = _intersection_angles[i]
-
-		# Смещение точки относительно центра
-		var dx := pos.x - center.x
-		var dy := pos.y - center.y
-
-		# Поворот в систему координат эллипса
-		var cos_a := cos(-angle)
-		var sin_a := sin(-angle)
-		var rx := dx * cos_a - dy * sin_a
-		var ry := dx * sin_a + dy * cos_a
-
-		# Проверка: (rx/a)^2 + (ry/b)^2 <= 1
-		var normalized := (rx * rx) / (radii.x * radii.x) + (ry * ry) / (radii.y * radii.y)
-		if normalized <= 1.0:
-			return i
-
-	return -1
 
 
 ## Строит контур перекрёстка: "лепестки" вдоль входящих дорог + дуги скругления между ними

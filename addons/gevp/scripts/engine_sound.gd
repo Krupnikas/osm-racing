@@ -3,6 +3,10 @@ extends AudioStreamPlayer3D
 @export var vehicle: Vehicle
 @export var sample_rpm: float = 4000.0
 
+func _ready() -> void:
+	bus = &"SFX"
+
+
 func _physics_process(_delta: float) -> void:
 	if not vehicle:
 		return

@@ -22,6 +22,18 @@ var _current_mode: String = "sprint"  # "sprint" или "checkpoint"
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
+	# Применяем сохранённые настройки громкости
+	var config := ConfigFile.new()
+	if config.load("user://graphics.cfg") == OK:
+		var music_vol: float = config.get_value("audio", "music_volume", 80.0)
+		var sfx_vol: float = config.get_value("audio", "sfx_volume", 80.0)
+		var music_idx := AudioServer.get_bus_index("Music")
+		if music_idx >= 0:
+			AudioServer.set_bus_volume_db(music_idx, linear_to_db(music_vol / 100.0))
+		var sfx_idx := AudioServer.get_bus_index("SFX")
+		if sfx_idx >= 0:
+			AudioServer.set_bus_volume_db(sfx_idx, linear_to_db(sfx_vol / 100.0))
+
 	# Музыка автоматически запускается в MusicManager._ready()
 
 	# Генерируем кнопки трасс для режима гонок
@@ -135,6 +147,7 @@ func _on_settings_pressed() -> void:
 	"""Показать настройки"""
 	$VBox.visible = false
 	$SettingsPanel.visible = true
+	_sync_audio_sliders()
 
 
 func _on_quit_pressed() -> void:
@@ -251,6 +264,60 @@ func _on_controls_back_pressed() -> void:
 func _on_settings_back_pressed() -> void:
 	$SettingsPanel.visible = false
 	$VBox.visible = true
+
+
+func _sync_audio_sliders() -> void:
+	var config := ConfigFile.new()
+	var music_vol := 80.0
+	var sfx_vol := 80.0
+	if config.load("user://graphics.cfg") == OK:
+		music_vol = config.get_value("audio", "music_volume", 80.0)
+		sfx_vol = config.get_value("audio", "sfx_volume", 80.0)
+	var music_slider := $SettingsPanel/VBox/MusicVolBox/MusicVolSlider as HSlider
+	if music_slider:
+		music_slider.set_value_no_signal(music_vol)
+	var music_label := $SettingsPanel/VBox/MusicVolBox/MusicVolValue as Label
+	if music_label:
+		music_label.text = "%.0f%%" % music_vol
+	var sfx_slider := $SettingsPanel/VBox/SFXVolBox/SFXVolSlider as HSlider
+	if sfx_slider:
+		sfx_slider.set_value_no_signal(sfx_vol)
+	var sfx_label := $SettingsPanel/VBox/SFXVolBox/SFXVolValue as Label
+	if sfx_label:
+		sfx_label.text = "%.0f%%" % sfx_vol
+
+
+func _apply_and_save_audio(music_vol: float, sfx_vol: float) -> void:
+	var music_idx := AudioServer.get_bus_index("Music")
+	if music_idx >= 0:
+		AudioServer.set_bus_volume_db(music_idx, linear_to_db(music_vol / 100.0))
+	var sfx_idx := AudioServer.get_bus_index("SFX")
+	if sfx_idx >= 0:
+		AudioServer.set_bus_volume_db(sfx_idx, linear_to_db(sfx_vol / 100.0))
+	# Сохраняем в конфиг
+	var config := ConfigFile.new()
+	config.load("user://graphics.cfg")  # Загружаем существующий чтобы не потерять другие настройки
+	config.set_value("audio", "music_volume", music_vol)
+	config.set_value("audio", "sfx_volume", sfx_vol)
+	config.save("user://graphics.cfg")
+
+
+func _on_music_vol_changed(value: float) -> void:
+	var sfx_slider := $SettingsPanel/VBox/SFXVolBox/SFXVolSlider as HSlider
+	var sfx_val := sfx_slider.value if sfx_slider else 80.0
+	_apply_and_save_audio(value, sfx_val)
+	var label := $SettingsPanel/VBox/MusicVolBox/MusicVolValue as Label
+	if label:
+		label.text = "%.0f%%" % value
+
+
+func _on_sfx_vol_changed(value: float) -> void:
+	var music_slider := $SettingsPanel/VBox/MusicVolBox/MusicVolSlider as HSlider
+	var music_val := music_slider.value if music_slider else 80.0
+	_apply_and_save_audio(music_val, value)
+	var label := $SettingsPanel/VBox/SFXVolBox/SFXVolValue as Label
+	if label:
+		label.text = "%.0f%%" % value
 
 
 # === Тестовые трассы ===

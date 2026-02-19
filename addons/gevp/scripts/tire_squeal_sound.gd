@@ -29,7 +29,7 @@ extends AudioStreamPlayer3D
 var _debug_timer: float = 0.0
 
 func _ready() -> void:
-	pass  # Debug print отключен
+	bus = &"SFX"
 
 func _physics_process(delta: float) -> void:
 	if not vehicle:

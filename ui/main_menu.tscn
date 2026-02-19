@@ -315,6 +315,8 @@ text = "Назад"
 [connection signal="toggled" from="SettingsPanel/VBox/DOFCheck" to="." method="_on_dof_toggled"]
 [connection signal="toggled" from="SettingsPanel/VBox/VignetteCheck" to="." method="_on_vignette_toggled"]
 [connection signal="toggled" from="SettingsPanel/VBox/SimplifiedTreesCheck" to="." method="_on_simplified_trees_toggled"]
+[connection signal="value_changed" from="SettingsPanel/VBox/MusicVolBox/MusicVolSlider" to="." method="_on_music_vol_changed"]
+[connection signal="value_changed" from="SettingsPanel/VBox/SFXVolBox/SFXVolSlider" to="." method="_on_sfx_vol_changed"]
 [connection signal="value_changed" from="SettingsPanel/VBox/RenderDistBox/RenderDistSlider" to="." method="_on_render_dist_changed"]
 [connection signal="pressed" from="SettingsPanel/VBox/ApplyButton" to="." method="_on_apply_settings_pressed"]
 [connection signal="pressed" from="SettingsPanel/VBox/BackButton" to="." method="_on_settings_back_pressed"]
@@ -370,6 +372,56 @@ text = "Дождь (R)"
 layout_mode = 2
 button_pressed = false
 text = "Неон под машиной (G)"
+
+[node name="AudioLabel" type="Label" parent="SettingsPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Звук"
+horizontal_alignment = 1
+
+[node name="MusicVolBox" type="HBoxContainer" parent="SettingsPanel/VBox"]
+layout_mode = 2
+
+[node name="MusicVolLabel" type="Label" parent="SettingsPanel/VBox/MusicVolBox"]
+custom_minimum_size = Vector2(90, 0)
+layout_mode = 2
+text = "Музыка"
+
+[node name="MusicVolSlider" type="HSlider" parent="SettingsPanel/VBox/MusicVolBox"]
+custom_minimum_size = Vector2(200, 0)
+layout_mode = 2
+size_flags_horizontal = 3
+max_value = 100.0
+step = 5.0
+value = 80.0
+
+[node name="MusicVolValue" type="Label" parent="SettingsPanel/VBox/MusicVolBox"]
+custom_minimum_size = Vector2(50, 0)
+layout_mode = 2
+text = "80%"
+horizontal_alignment = 2
+
+[node name="SFXVolBox" type="HBoxContainer" parent="SettingsPanel/VBox"]
+layout_mode = 2
+
+[node name="SFXVolLabel" type="Label" parent="SettingsPanel/VBox/SFXVolBox"]
+custom_minimum_size = Vector2(90, 0)
+layout_mode = 2
+text = "Эффекты"
+
+[node name="SFXVolSlider" type="HSlider" parent="SettingsPanel/VBox/SFXVolBox"]
+custom_minimum_size = Vector2(200, 0)
+layout_mode = 2
+size_flags_horizontal = 3
+max_value = 100.0
+step = 5.0
+value = 80.0
+
+[node name="SFXVolValue" type="Label" parent="SettingsPanel/VBox/SFXVolBox"]
+custom_minimum_size = Vector2(50, 0)
+layout_mode = 2
+text = "80%"
+horizontal_alignment = 2
 
 [node name="GraphicsLabel" type="Label" parent="SettingsPanel/VBox"]
 layout_mode = 2

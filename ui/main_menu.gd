@@ -671,6 +671,19 @@ func _update_graphics_checkboxes() -> void:
 	var label := $SettingsPanel/VBox/RenderDistBox/RenderDistValue as Label
 	if label:
 		label.text = "%.0f м" % _graphics_settings.render_distance
+	# Audio sliders
+	var music_slider := $SettingsPanel/VBox/MusicVolBox/MusicVolSlider as HSlider
+	if music_slider:
+		music_slider.set_value_no_signal(_graphics_settings.music_volume)
+	var music_label := $SettingsPanel/VBox/MusicVolBox/MusicVolValue as Label
+	if music_label:
+		music_label.text = "%.0f%%" % _graphics_settings.music_volume
+	var sfx_slider := $SettingsPanel/VBox/SFXVolBox/SFXVolSlider as HSlider
+	if sfx_slider:
+		sfx_slider.set_value_no_signal(_graphics_settings.sfx_volume)
+	var sfx_label := $SettingsPanel/VBox/SFXVolBox/SFXVolValue as Label
+	if sfx_label:
+		sfx_label.text = "%.0f%%" % _graphics_settings.sfx_volume
 
 
 func _on_ssr_toggled(toggled_on: bool) -> void:
@@ -768,3 +781,23 @@ func _on_render_dist_changed(value: float) -> void:
 	var label := $SettingsPanel/VBox/RenderDistBox/RenderDistValue as Label
 	if label:
 		label.text = "%.0f м" % value
+
+
+func _on_music_vol_changed(value: float) -> void:
+	if _graphics_settings:
+		_graphics_settings.music_volume = value
+		_graphics_settings._apply_audio()
+		_graphics_settings.settings_changed.emit()
+	var label := $SettingsPanel/VBox/MusicVolBox/MusicVolValue as Label
+	if label:
+		label.text = "%.0f%%" % value
+
+
+func _on_sfx_vol_changed(value: float) -> void:
+	if _graphics_settings:
+		_graphics_settings.sfx_volume = value
+		_graphics_settings._apply_audio()
+		_graphics_settings.settings_changed.emit()
+	var label := $SettingsPanel/VBox/SFXVolBox/SFXVolValue as Label
+	if label:
+		label.text = "%.0f%%" % value

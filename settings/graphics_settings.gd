@@ -31,6 +31,10 @@ var simplified_trees := false
 # Дальность прорисовки
 var render_distance := 400.0  # Метры
 
+# Громкость (0-100)
+var music_volume := 80.0
+var sfx_volume := 80.0
+
 # Ссылки на сцену
 var _environment: Environment
 var _world_env: WorldEnvironment
@@ -440,6 +444,16 @@ func _apply_all() -> void:
 	_apply_dof()
 	_apply_vignette()
 	_apply_render_distance()
+	_apply_audio()
+
+
+func _apply_audio() -> void:
+	var music_idx := AudioServer.get_bus_index("Music")
+	if music_idx >= 0:
+		AudioServer.set_bus_volume_db(music_idx, linear_to_db(music_volume / 100.0))
+	var sfx_idx := AudioServer.get_bus_index("SFX")
+	if sfx_idx >= 0:
+		AudioServer.set_bus_volume_db(sfx_idx, linear_to_db(sfx_volume / 100.0))
 
 
 func _load_settings() -> void:
@@ -461,6 +475,8 @@ func _load_settings() -> void:
 		vignette_enabled = config.get_value("graphics", "vignette", false)  # Дефолт false как при инициализации
 		simplified_trees = config.get_value("graphics", "simplified_trees", false)
 		render_distance = config.get_value("graphics", "render_distance", 400.0)  # Дефолт как при инициализации
+		music_volume = config.get_value("audio", "music_volume", 80.0)
+		sfx_volume = config.get_value("audio", "sfx_volume", 80.0)
 		print("GraphicsSettings: Settings loaded - FXAA: ", fxaa_enabled, ", TAA: ", taa_enabled, ", MSAA: ", msaa_mode)
 	else:
 		print("GraphicsSettings: No saved settings found (err: ", err, "), using defaults")
@@ -484,6 +500,8 @@ func save_settings() -> void:
 	config.set_value("graphics", "vignette", vignette_enabled)
 	config.set_value("graphics", "simplified_trees", simplified_trees)
 	config.set_value("graphics", "render_distance", render_distance)
+	config.set_value("audio", "music_volume", music_volume)
+	config.set_value("audio", "sfx_volume", sfx_volume)
 	var err := config.save("user://graphics.cfg")
 	if err == OK:
 		print("GraphicsSettings: Settings saved successfully")

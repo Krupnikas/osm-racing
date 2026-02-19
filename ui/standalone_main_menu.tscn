@@ -396,6 +396,56 @@ horizontal_alignment = 1
 custom_minimum_size = Vector2(0, 20)
 layout_mode = 2
 
+[node name="AudioLabel" type="Label" parent="SettingsPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Звук"
+horizontal_alignment = 1
+
+[node name="MusicVolBox" type="HBoxContainer" parent="SettingsPanel/VBox"]
+layout_mode = 2
+
+[node name="MusicVolLabel" type="Label" parent="SettingsPanel/VBox/MusicVolBox"]
+custom_minimum_size = Vector2(90, 0)
+layout_mode = 2
+text = "Музыка"
+
+[node name="MusicVolSlider" type="HSlider" parent="SettingsPanel/VBox/MusicVolBox"]
+custom_minimum_size = Vector2(200, 0)
+layout_mode = 2
+size_flags_horizontal = 3
+max_value = 100.0
+step = 5.0
+value = 80.0
+
+[node name="MusicVolValue" type="Label" parent="SettingsPanel/VBox/MusicVolBox"]
+custom_minimum_size = Vector2(50, 0)
+layout_mode = 2
+text = "80%"
+horizontal_alignment = 2
+
+[node name="SFXVolBox" type="HBoxContainer" parent="SettingsPanel/VBox"]
+layout_mode = 2
+
+[node name="SFXVolLabel" type="Label" parent="SettingsPanel/VBox/SFXVolBox"]
+custom_minimum_size = Vector2(90, 0)
+layout_mode = 2
+text = "Эффекты"
+
+[node name="SFXVolSlider" type="HSlider" parent="SettingsPanel/VBox/SFXVolBox"]
+custom_minimum_size = Vector2(200, 0)
+layout_mode = 2
+size_flags_horizontal = 3
+max_value = 100.0
+step = 5.0
+value = 80.0
+
+[node name="SFXVolValue" type="Label" parent="SettingsPanel/VBox/SFXVolBox"]
+custom_minimum_size = Vector2(50, 0)
+layout_mode = 2
+text = "80%"
+horizontal_alignment = 2
+
 [node name="Info" type="Label" parent="SettingsPanel/VBox"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 20
@@ -493,4 +543,6 @@ text = "v0.1 alpha"
 [connection signal="pressed" from="ModesPanel/VBox/BackButton" to="." method="_on_modes_back_pressed"]
 [connection signal="pressed" from="TracksPanel/VBox/BackButton" to="." method="_on_tracks_back_pressed"]
 [connection signal="pressed" from="ControlsPanel/VBox/BackButton" to="." method="_on_controls_back_pressed"]
+[connection signal="value_changed" from="SettingsPanel/VBox/MusicVolBox/MusicVolSlider" to="." method="_on_music_vol_changed"]
+[connection signal="value_changed" from="SettingsPanel/VBox/SFXVolBox/SFXVolSlider" to="." method="_on_sfx_vol_changed"]
 [connection signal="pressed" from="SettingsPanel/VBox/BackButton" to="." method="_on_settings_back_pressed"]

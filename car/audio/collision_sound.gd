@@ -18,7 +18,7 @@ var _crash_sounds: Array[AudioStreamWAV] = []
 func _ready() -> void:
 	# Создаём аудио плеер как дочерний узел
 	_audio_player = AudioStreamPlayer.new()
-	_audio_player.bus = "Master"
+	_audio_player.bus = "SFX"
 	_audio_player.volume_db = max_volume
 	add_child(_audio_player)
 
