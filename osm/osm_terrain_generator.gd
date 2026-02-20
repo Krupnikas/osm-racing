@@ -491,7 +491,7 @@ func _init_textures() -> void:
 
 	# Shared material бордюров
 	_curb_material = StandardMaterial3D.new()
-	_curb_material.albedo_color = Color(0.6, 0.6, 0.58)
+	_curb_material.albedo_color = Color(0.78, 0.76, 0.72)
 	_curb_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_curb_material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
 
@@ -9922,7 +9922,7 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 			continue
 		var road_w: float = road.width
 		# offset_polyline возвращает массив полигонов-коридоров
-		var corridors: Array[PackedVector2Array] = Geometry2D.offset_polyline(smoothed, road_w / 2.0 + 0.3)
+		var corridors: Array[PackedVector2Array] = Geometry2D.offset_polyline(smoothed, road_w / 2.0)
 		for corridor in corridors:
 			if corridor.size() < 3:
 				continue
@@ -9943,16 +9943,9 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 		var ipos: Vector2 = _intersection_positions[i]
 		if ipos.x < min_x - 30.0 or ipos.x > max_x + 30.0 or ipos.y < min_z - 30.0 or ipos.y > max_z + 30.0:
 			continue
-		# Немного раздуваем контур (+0.3м) чтобы не было z-fighting на границе
-		var expanded := PackedVector2Array()
-		for cp in contour:
-			var offset_dir := (cp - ipos).normalized()
-			expanded.append(cp + offset_dir * 0.3)
-		if expanded.size() < 3:
-			continue
 		var new_polys: Array[PackedVector2Array] = []
 		for poly in terrain_polys:
-			var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, expanded)
+			var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, contour)
 			for cp in clipped:
 				if cp.size() >= 3:
 					new_polys.append(cp)
@@ -9999,29 +9992,48 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 			var p2_on_boundary := absf(p2.x - min_x) < boundary_eps or absf(p2.x - max_x) < boundary_eps or absf(p2.y - min_z) < boundary_eps or absf(p2.y - max_z) < boundary_eps
 			if p1_on_boundary and p2_on_boundary:
 				continue
-			# Вертикальная стенка бордюра от уровня дороги до уровня террейна
+			# Бордюр 15×15 см в сечении: выступает наружу (к дороге) от края террейна
+			var curb_w := 0.15  # ширина (к дороге)
+			var curb_h := 0.15  # высота
 			var h1 := _get_elevation_at_point(p1, elev_data)
 			var h2 := _get_elevation_at_point(p2, elev_data)
-			var bot_y1 := h1 + road_level
-			var bot_y2 := h2 + road_level
-			var top_y1 := h1 + sidewalk_height
-			var top_y2 := h2 + sidewalk_height
-			# Нормаль наружу от полигона (к дороге)
+			var top1 := h1 + sidewalk_height
+			var top2 := h2 + sidewalk_height
+			var bot1 := top1 - curb_h
+			var bot2 := top2 - curb_h
 			var dir := (p2 - p1).normalized()
 			var outward := Vector2(dir.y, -dir.x)
-			var normal := Vector3(outward.x, 0.0, outward.y)
+			var p1_out := p1 + outward * curb_w
+			var p2_out := p2 + outward * curb_w
+			var n_front := Vector3(outward.x, 0.0, outward.y)
 			var ci := curb_verts.size()
-			curb_verts.append(Vector3(p1.x, bot_y1, p1.y))
-			curb_verts.append(Vector3(p2.x, bot_y2, p2.y))
-			curb_verts.append(Vector3(p2.x, top_y2, p2.y))
-			curb_verts.append(Vector3(p1.x, top_y1, p1.y))
-			for _j in 4: curb_norms.append(normal)
-			curb_idxs.append(ci + 0)
-			curb_idxs.append(ci + 1)
-			curb_idxs.append(ci + 2)
-			curb_idxs.append(ci + 0)
-			curb_idxs.append(ci + 2)
-			curb_idxs.append(ci + 3)
+			# Передняя грань (вертикальная, к дороге)
+			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))  # 0
+			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))  # 1
+			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))  # 2
+			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))  # 3
+			for _j in 4: curb_norms.append(n_front)
+			# Верхняя грань (горизонтальная)
+			curb_verts.append(Vector3(p1.x, top1, p1.y))          # 4
+			curb_verts.append(Vector3(p2.x, top2, p2.y))          # 5
+			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))  # 6
+			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))  # 7
+			for _j in 4: curb_norms.append(Vector3.UP)
+			# Нижняя грань
+			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))  # 8
+			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))  # 9
+			curb_verts.append(Vector3(p2.x, bot2, p2.y))          # 10
+			curb_verts.append(Vector3(p1.x, bot1, p1.y))          # 11
+			for _j in 4: curb_norms.append(Vector3.DOWN)
+			# Индексы: 3 грани × 2 треугольника
+			for face_off in [0, 4, 8]:
+				var f: int = ci + face_off
+				curb_idxs.append(f + 0)
+				curb_idxs.append(f + 1)
+				curb_idxs.append(f + 2)
+				curb_idxs.append(f + 0)
+				curb_idxs.append(f + 2)
+				curb_idxs.append(f + 3)
 
 	if curb_verts.size() > 0:
 		var curb_arrays := []
@@ -10090,6 +10102,7 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 	else:
 		material.albedo_color = Color(0.3, 0.5, 0.2)
 	mesh_inst.material_override = material
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 	if not elev_data.is_empty():
 		mesh_inst.set_meta("_elevation_applied", true)
@@ -10487,7 +10500,7 @@ func _generate_manholes_along_road(nodes: Array, road_width: float, elev_data: D
 
 	var accumulated := 0.0
 	var last_manhole := 0.0
-	var offset := road_width / 2.0 - 0.5  # 0.5м от правого края
+	var offset := road_width / 2.0 - 0.7  # 0.7м от правого края (за бордюром)
 
 	for i in range(nodes.size() - 1):
 		var p1 := _latlon_to_local(nodes[i].lat, nodes[i].lon)
@@ -10521,7 +10534,7 @@ func _generate_manholes_fast(local_points: PackedVector2Array, road_width: float
 
 	var accumulated := 0.0
 	var last_manhole := 0.0
-	var offset := road_width / 2.0 - 0.5
+	var offset := road_width / 2.0 - 0.7
 
 	for i in range(local_points.size() - 1):
 		var p1: Vector2 = local_points[i]
