@@ -2867,6 +2867,11 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 					skipped_buildings += 1
 				continue
 
+		# Пропускаем конкретные way по ID (нерелевантные/ошибочные дороги)
+		var way_id_raw: int = int(way.get("id", 0))
+		if way_id_raw in [75621890]:  # service road, не существует
+			continue
+
 		var _t0 := Time.get_ticks_msec()
 		if tags.has("highway"):
 			_create_road(nodes, tags, target, loader, flat_elev)
@@ -9974,6 +9979,10 @@ func _is_point_near_road_fast(point: Vector2, min_distance: float) -> bool:
 # или внутри контура перекрёстка
 # margin: запас за пределами края дороги (0 = точно по краю)
 func _is_point_on_vehicle_road(point: Vector2, margin: float = 1.0) -> bool:
+	# 0. Парковки: footpath поверх парковки остаётся тротуаром (не crossing)
+	for poly in _parking_polygons:
+		if poly.size() >= 3 and Geometry2D.is_point_in_polygon(point, poly):
+			return false
 	# 1. Проверка прямых участков дорог через spatial hash
 	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
 	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
@@ -9999,12 +10008,7 @@ func _is_point_on_vehicle_road(point: Vector2, margin: float = 1.0) -> bool:
 				continue
 		if Geometry2D.is_point_in_polygon(point, contour):
 			return true
-	# 3. Проверка парковок (тоже вырезаны из террейна)
-	for poly in _parking_polygons:
-		if poly.size() < 3:
-			continue
-		if Geometry2D.is_point_in_polygon(point, poly):
-			return true
+	# Парковки НЕ проверяем — пешеходные дорожки должны оставаться тротуарами поверх парковок
 	return false
 
 
