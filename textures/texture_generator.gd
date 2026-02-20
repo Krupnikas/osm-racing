@@ -209,6 +209,32 @@ static func create_sidewalk_texture(size: int = 256) -> ImageTexture:
 	var texture := ImageTexture.create_from_image(image)
 	return texture
 
+static func create_crossing_texture(size: int = 256) -> ImageTexture:
+	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 77777
+	# Зебра: белые полосы на тёмном асфальте
+	# UV: x = поперёк дороги, y = вдоль дороги
+	# Полосы идут поперёк (по оси x) — чередуются по y
+	var stripe_count := 6
+	var stripe_h := size / (stripe_count * 2)  # половина периода = полоса
+	for y in range(size):
+		var band := (y / stripe_h) % 2  # 0 = асфальт, 1 = белая полоса
+		for x in range(size):
+			rng.seed = 77777 + x * 13 + y * 29
+			var noise := rng.randf() * 0.04
+			if band == 1:
+				# Белая полоса с лёгким износом
+				var wear := rng.randf()
+				var base := 0.88 if wear > 0.15 else 0.5
+				image.set_pixel(x, y, Color(base + noise, base + noise, base + noise * 0.9))
+			else:
+				# Тёмный асфальт между полосами
+				var base := 0.22 + noise
+				image.set_pixel(x, y, Color(base, base, base))
+	var texture := ImageTexture.create_from_image(image)
+	return texture
+
 static func create_concrete_texture(size: int = 256) -> ImageTexture:
 	var image := Image.create(size, size, false, Image.FORMAT_RGB8)
 	var rng := RandomNumberGenerator.new()

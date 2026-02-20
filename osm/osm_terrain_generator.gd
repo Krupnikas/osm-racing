@@ -455,6 +455,7 @@ func _init_textures() -> void:
 	_road_textures["primary"] = TextureGeneratorScript.create_primary_texture(512, 4)  # Одна сплошная в центре
 	_road_textures["residential"] = TextureGeneratorScript.create_road_texture(256, 2, true, false)
 	_road_textures["path"] = TextureGeneratorScript.create_sidewalk_texture(256)
+	_road_textures["crossing"] = TextureGeneratorScript.create_crossing_texture(256)
 	_road_textures["intersection"] = TextureGeneratorScript.create_intersection_texture(256)  # Чистый асфальт
 
 	# Текстуры люков
@@ -3295,7 +3296,34 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> v
 		if b_height > 0:
 			print("OSM: Bridge created: height=%.1fm, ramp=%.1fm, layer=%d" % [b_height, b_ramp, b_layer])
 	else:
-		_add_road_to_batch_fast(smoothed_points, width, texture_key, height_offset, parent)
+		# Пешеходные дорожки: crossing на уровне дороги, off-road — elevated
+		if highway_type in ["footway", "path"] and smoothed_points.size() >= 2:
+			var on_road: Array[bool] = []
+			for p in smoothed_points:
+				on_road.append(_is_point_on_vehicle_road(p))
+			var current_pts := PackedVector2Array()
+			current_pts.append(smoothed_points[0])
+			var current_on := on_road[0]
+			for i in range(1, smoothed_points.size()):
+				if on_road[i] != current_on:
+					var edge_pt := _find_road_edge_point(smoothed_points[i - 1], current_on, smoothed_points[i])
+					current_pts.append(edge_pt)
+					if current_pts.size() >= 2:
+						if current_on:
+							_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+						else:
+							_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
+					current_pts = PackedVector2Array()
+					current_pts.append(edge_pt)
+					current_on = on_road[i]
+				current_pts.append(smoothed_points[i])
+			if current_pts.size() >= 2:
+				if current_on:
+					_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+				else:
+					_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
+		else:
+			_add_road_to_batch_fast(smoothed_points, width, texture_key, height_offset, parent)
 
 	if curb_height > 0.0:
 		_curb_queue.append({
@@ -3506,6 +3534,32 @@ func _apply_road_result(result: Dictionary) -> void:
 
 	if is_bridge:
 		_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent)
+	elif highway_type in ["footway", "path"] and smoothed_points.size() >= 2:
+		# Пешеходные: crossing на уровне дороги, off-road — elevated тротуар
+		var on_road: Array[bool] = []
+		for p in smoothed_points:
+			on_road.append(_is_point_on_vehicle_road(p))
+		var current_pts := PackedVector2Array()
+		current_pts.append(smoothed_points[0])
+		var current_on := on_road[0]
+		for i in range(1, smoothed_points.size()):
+			if on_road[i] != current_on:
+				var edge_pt := _find_road_edge_point(smoothed_points[i - 1], current_on, smoothed_points[i])
+				current_pts.append(edge_pt)
+				if current_pts.size() >= 2:
+					if current_on:
+						_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+					else:
+						_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
+				current_pts = PackedVector2Array()
+				current_pts.append(edge_pt)
+				current_on = on_road[i]
+			current_pts.append(smoothed_points[i])
+		if current_pts.size() >= 2:
+			if current_on:
+				_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+			else:
+				_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
 	else:
 		# Merge geometry into batch data
 		var verts: PackedVector3Array = result.vertices
@@ -9888,6 +9942,59 @@ func _is_point_near_road_fast(point: Vector2, min_distance: float) -> bool:
 	return false
 
 
+# Проверяет, находится ли точка внутри коридора автомобильной дороги (width >= 4.0)
+# или внутри контура перекрёстка
+# margin: запас за пределами края дороги (0 = точно по краю)
+func _is_point_on_vehicle_road(point: Vector2, margin: float = 1.0) -> bool:
+	# 1. Проверка прямых участков дорог через spatial hash
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not _road_spatial_hash.has(key):
+				continue
+			for seg in _road_spatial_hash[key]:
+				var s_width: float = seg.width
+				if s_width < 4.0:
+					continue
+				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+				if point.distance_to(closest) < s_width / 2.0 + margin:
+					return true
+	# 2. Проверка контуров перекрёстков
+	for i in range(_intersection_contours.size()):
+		var contour: PackedVector2Array = _intersection_contours[i]
+		if contour.size() < 3:
+			continue
+		if i < _intersection_positions.size():
+			if point.distance_to(_intersection_positions[i]) > 30.0:
+				continue
+		if Geometry2D.is_point_in_polygon(point, contour):
+			return true
+	# 3. Проверка парковок (тоже вырезаны из террейна)
+	for poly in _parking_polygons:
+		if poly.size() < 3:
+			continue
+		if Geometry2D.is_point_in_polygon(point, poly):
+			return true
+	return false
+
+
+# Находит точку на отрезке [p1, p2], где проходит край дороги (binary search)
+func _find_road_edge_point(p1: Vector2, p1_on_road: bool, p2: Vector2) -> Vector2:
+	var t_lo := 0.0
+	var t_hi := 1.0
+	for _iter in 8:
+		var t_mid := (t_lo + t_hi) / 2.0
+		var p_mid := p1.lerp(p2, t_mid)
+		var mid_on := _is_point_on_vehicle_road(p_mid, 0.0)
+		if mid_on == p1_on_road:
+			t_lo = t_mid
+		else:
+			t_hi = t_mid
+	return p1.lerp(p2, (t_lo + t_hi) / 2.0)
+
+
 # Генерирует приподнятый террейн (газон/тротуар) по контурам дорог с коллизией
 func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, parent: Node3D, road_polylines: Array) -> void:
 	if not is_instance_valid(parent):
@@ -9913,6 +10020,7 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 	# 2. Вырезаем коридоры дорог из прямоугольника чанка
 	var terrain_polys: Array[PackedVector2Array] = [chunk_rect]
 
+	print("TERRAIN_DEBUG chunk=%s roads=%d" % [chunk_key, road_polylines.size()])
 	for road in road_polylines:
 		var raw_pts: PackedVector2Array = road.points
 		if raw_pts.size() < 2:
@@ -9921,11 +10029,32 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 		if smoothed.size() < 2:
 			continue
 		var road_w: float = road.width
-		# offset_polyline возвращает массив полигонов-коридоров
-		var corridors: Array[PackedVector2Array] = Geometry2D.offset_polyline(smoothed, road_w / 2.0)
-		for corridor in corridors:
-			if corridor.size() < 3:
-				continue
+		var half_w: float = road_w / 2.0 + 0.05
+		print("  ROAD w=%.1f pts=%d smoothed=%d first=%s" % [road_w, raw_pts.size(), smoothed.size(), str(smoothed[0])])
+		# Строим полигон-коридор через перпендикуляры (как road quads)
+		var n_pts: int = smoothed.size()
+		var left_side := PackedVector2Array()
+		var right_side := PackedVector2Array()
+		for i in range(n_pts):
+			var perp: Vector2
+			if i == 0:
+				var d: Vector2 = (smoothed[1] - smoothed[0]).normalized()
+				perp = Vector2(-d.y, d.x)
+			elif i == n_pts - 1:
+				var d: Vector2 = (smoothed[i] - smoothed[i - 1]).normalized()
+				perp = Vector2(-d.y, d.x)
+			else:
+				var d: Vector2 = (smoothed[i + 1] - smoothed[i]).normalized()
+				perp = Vector2(-d.y, d.x)
+			left_side.append(smoothed[i] - perp * half_w)
+			right_side.append(smoothed[i] + perp * half_w)
+		# Полигон: left вперёд + right назад (замкнутый CCW)
+		var corridor := PackedVector2Array()
+		for i in range(n_pts):
+			corridor.append(left_side[i])
+		for i in range(n_pts - 1, -1, -1):
+			corridor.append(right_side[i])
+		if corridor.size() >= 3:
 			var new_polys: Array[PackedVector2Array] = []
 			for poly in terrain_polys:
 				var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, corridor)
