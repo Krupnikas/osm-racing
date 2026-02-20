@@ -45,3 +45,31 @@ Emission texture в Godot 4 StandardMaterial3D не работает как ма
 - `osm/osm_terrain_generator.gd` — использует ShaderMaterial для зданий с emissive
 - `night_mode/night_mode_manager.gd` — регистрирует и обновляет `is_night_global`
 - `textures/buildings/111-125_emissive_mask.png` — маска (RGB, чёрный фон, цветные окна)
+
+---
+
+## Бордюр пропадает на стыке чанков у северного шоссе
+
+**Статус:** Открыт
+
+**Описание:**
+В одном месте на северном шоссе (~59.150372, 37.949004) бордюр не виден по краю дороги. Появилось после фикса треугольников травы на шоссе (commit 3a0ca91).
+
+**Координаты:**
+- Geo: 59.150372, 37.949004
+- Локальные: ~(-20.8, -34.0), chunk -1,-1, граница с 0,-1 или -1,0
+
+**Причина:**
+Шоссе проходит через chunk -1,-1 без узлов OSM — для terrain cutout нет точной геометрии дороги (`_chunk_terrain_roads`). Cutout делается через spatial hash коридоры — простые прямоугольники по `seg.p1`/`seg.p2` с `width * 0.5` перпендикулярным отступом. Эти прямоугольники не совпадают с реальным road mesh (который строится из smoothed_points с кривизной), поэтому край террейна и бордюр оказываются не на месте.
+
+**Попытки исправления:**
+- Перенос `_chunk_terrain_roads.erase()` из `_create_deferred_terrain` в `_unload_chunk()` — не помогло
+
+**Возможные решения:**
+1. Построить точный коридор из mesh-вершин дороги для сегментов, проходящих через чанк (вместо spatial hash прямоугольников)
+2. Генерировать бордюр по реальному краю road mesh (из `smoothed_points` + `width`), а не по краю terrain cutout
+3. Расширить spatial hash коридоры на ~0.3м и добавить бордюр отдельно по центральной линии сегмента
+
+**Файлы:**
+- `osm/osm_terrain_generator.gd` — `_create_deferred_terrain()` ~строка 4567 (spatial hash коридоры)
+- `osm/osm_terrain_generator.gd` — `_create_chunk_ground_terrain()` ~строка 10190 (генерация бордюров по краям terrain)
