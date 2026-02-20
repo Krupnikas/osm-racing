@@ -2874,7 +2874,7 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 
 		var _t0 := Time.get_ticks_msec()
 		if tags.has("highway"):
-			_create_road(nodes, tags, target, loader, flat_elev)
+			_create_road(nodes, tags, target, loader, flat_elev, way_id_raw)
 			road_count += 1
 			objects_this_frame += 1
 		elif tags.has("building"):
@@ -3198,7 +3198,7 @@ func _compute_averaged_perpendiculars(points: PackedVector2Array) -> Array[Vecto
 	return perpendiculars
 
 
-func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node, _elev_data: Dictionary = {}) -> void:
+func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node, _elev_data: Dictionary = {}, way_id: int = 0) -> void:
 	if not enable_roads:
 		return
 	# Добавляем в очередь для отложенного создания
@@ -3206,6 +3206,7 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 		"nodes": nodes,
 		"tags": tags,
 		"parent": parent,
+		"way_id": way_id,
 	})
 
 	# Сегменты дорог сохраняем сразу (нужны для знаков парковки и проверки фонарей)
@@ -3506,6 +3507,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		"nodes": nodes,
 		"is_bridge": is_bridge,
 		"elevation_info": elevation_info,
+		"way_id": task_data.get("way_id", 0),
 	}
 	_road_mutex.lock()
 	_road_results.append(result)
@@ -3533,9 +3535,42 @@ func _apply_road_result(result: Dictionary) -> void:
 		_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent)
 	elif highway_type in ["footway", "path"] and smoothed_points.size() >= 2:
 		# Пешеходные: crossing на уровне дороги, off-road — elevated тротуар
+		var way_id: int = result.get("way_id", 0)
+		# Удаляем zigzag (обратный ход) из smoothed_points — причина z-fighting
+		smoothed_points = _remove_polyline_zigzag(smoothed_points)
 		var on_road: Array[bool] = []
+		var in_parking: Array[bool] = []
 		for p in smoothed_points:
 			on_road.append(_is_point_on_vehicle_road(p))
+			var ip := false
+			for poly in _parking_polygons:
+				if poly.size() >= 3 and Geometry2D.is_point_in_polygon(p, poly):
+					ip = true
+					break
+			in_parking.append(ip)
+		# Постобработка: если on_road=true точка между двумя parking-участками,
+		# переводим в off_road (дорога пересекает парковку, footpath остаётся тротуаром)
+		for i in range(on_road.size()):
+			if not on_road[i]:
+				continue
+			var has_parking_before := false
+			for j in range(i - 1, -1, -1):
+				if in_parking[j]:
+					has_parking_before = true
+					break
+				if i - j > 20:
+					break
+			if not has_parking_before:
+				continue
+			var has_parking_after := false
+			for j in range(i + 1, on_road.size()):
+				if in_parking[j]:
+					has_parking_after = true
+					break
+				if j - i > 20:
+					break
+			if has_parking_after:
+				on_road[i] = false
 		var current_pts := PackedVector2Array()
 		current_pts.append(smoothed_points[0])
 		var current_on := on_road[0]
@@ -4519,7 +4554,43 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 	if not parent_node or not is_instance_valid(parent_node):
 		return
 	var elev_data: Dictionary = _chunk_elevations.get(chunk_key, {})
-	var terrain_roads: Array = _chunk_terrain_roads.get(chunk_key, [])
+	# Собираем коридоры из текущего чанка И соседних (дороги могут проходить через чанк без узлов в нём)
+	var terrain_roads: Array = []
+	var ck_parts: PackedStringArray = chunk_key.split(",")
+	var ck_x := int(ck_parts[0])
+	var ck_z := int(ck_parts[1])
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			var nk := "%d,%d" % [ck_x + dx, ck_z + dz]
+			if _chunk_terrain_roads.has(nk):
+				terrain_roads.append_array(_chunk_terrain_roads[nk])
+	# Дополнительно: строим коридоры из spatial hash для дорог без узлов в чанке
+	# (длинные шоссе проходят через чанк, но все узлы — в соседних)
+	var ch_min_x := float(ck_x) * chunk_size
+	var ch_max_x := ch_min_x + chunk_size
+	var ch_min_z := float(ck_z) * chunk_size
+	var ch_max_z := ch_min_z + chunk_size
+	var cell_x0 := int(floor(ch_min_x / ROAD_CELL_SIZE))
+	var cell_x1 := int(floor(ch_max_x / ROAD_CELL_SIZE))
+	var cell_z0 := int(floor(ch_min_z / ROAD_CELL_SIZE))
+	var cell_z1 := int(floor(ch_max_z / ROAD_CELL_SIZE))
+	for cx in range(cell_x0, cell_x1 + 1):
+		for cz in range(cell_z0, cell_z1 + 1):
+			var key := Vector2i(cx, cz)
+			if not _road_spatial_hash.has(key):
+				continue
+			for seg in _road_spatial_hash[key]:
+				if seg.width < 4.0:
+					continue
+				var hw: float = seg.width * 0.5
+				# Простой коридор-прямоугольник из сегмента
+				var dir: Vector2 = (seg.p2 - seg.p1).normalized()
+				var perp := Vector2(-dir.y, dir.x)
+				var corridor := PackedVector2Array([
+					seg.p1 + perp * hw, seg.p2 + perp * hw,
+					seg.p2 - perp * hw, seg.p1 - perp * hw,
+				])
+				terrain_roads.append(corridor)
 	_create_chunk_ground_terrain(chunk_key, elev_data, parent_node, terrain_roads)
 	_chunk_terrain_roads.erase(chunk_key)
 
@@ -7248,6 +7319,7 @@ func _process_road_queue() -> void:
 			"start_lat": start_lat,
 			"start_lon": start_lon,
 			"lon_scale": _lon_scale,
+			"way_id": item.get("way_id", 0),
 		}
 		_pending_road_tasks += 1
 		WorkerThreadPool.add_task(_compute_road_geometry_thread.bind(task_data))
@@ -10101,11 +10173,18 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 					new_polys.append(cp)
 		terrain_polys = new_polys
 
+	# 2d. Фильтруем мелкие осколки (slivers) от клиппинга — площадь < 2 м²
+	var filtered_polys: Array[PackedVector2Array] = []
+	for poly in terrain_polys:
+		if poly.size() >= 3 and absf(_polygon_area(poly)) >= 2.0:
+			filtered_polys.append(poly)
+	terrain_polys = filtered_polys
+
 	if terrain_polys.is_empty():
 		print("OSM: ChunkTerrain %s: no polygons after clipping" % chunk_key)
 		return
 
-	# 2d. Генерируем бордюры по внутренним краям (где террейн граничит с дорогой)
+	# 2e. Генерируем бордюры по внутренним краям (где террейн граничит с дорогой)
 	var curb_verts := PackedVector3Array()
 	var curb_norms := PackedVector3Array()
 	var curb_idxs := PackedInt32Array()
@@ -12647,6 +12726,38 @@ func _smooth_points_adaptive(raw_points: PackedVector2Array, min_dist: float) ->
 		result.append(last_point)
 
 	return result
+
+
+## Удаляет zigzag-точки из полилинии: точки слишком близкие к предыдущему сегменту
+## или создающие обратный ход. Применяется ДО splitting footway.
+func _remove_polyline_zigzag(points: PackedVector2Array) -> PackedVector2Array:
+	if points.size() < 3:
+		return points
+	var result := PackedVector2Array()
+	result.append(points[0])
+	result.append(points[1])
+	var prev_dir: Vector2 = (points[1] - points[0]).normalized()
+	for i in range(2, points.size()):
+		var new_dir: Vector2 = (points[i] - result[result.size() - 1]).normalized()
+		# Пропускаем точку если она идёт назад (dot < 0) или слишком близко (< 0.5m)
+		if prev_dir.dot(new_dir) < 0.0:
+			continue
+		if points[i].distance_to(result[result.size() - 1]) < 0.5:
+			continue
+		result.append(points[i])
+		prev_dir = new_dir
+	return result
+
+
+## Вычисляет площадь полигона (shoelace formula). Возвращает signed area.
+func _polygon_area(poly: PackedVector2Array) -> float:
+	var area := 0.0
+	var n := poly.size()
+	for i in range(n):
+		var j := (i + 1) % n
+		area += poly[i].x * poly[j].y
+		area -= poly[j].x * poly[i].y
+	return area * 0.5
 
 
 ## Validates road direction to remove points that create loops/flips
