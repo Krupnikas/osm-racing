@@ -160,6 +160,7 @@ var _pending_road_tasks: int = 0  # Счётчик активных задач
 # Road batching system - накопление geometry данных для mesh merging
 var _road_batch_data: Dictionary = {}  # key: chunk_key -> { "highway": {vertices, uvs, normals, indices}, "primary": {...}, ...}
 var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batches (нужно финализировать)
+var _chunk_terrain_roads: Dictionary = {}  # chunk_key → Array[{points: PackedVector2Array, width: float}] — для отложенного выреза террейна
 
 # Window batching system - ONE MultiMesh per chunk instead of per-building
 var _window_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], colors: Array[Color], parent: Node3D}
@@ -1223,6 +1224,7 @@ func start_loading() -> void:
 	_curb_collision_results.clear()  # Очищаем очередь коллизий
 	_curb_collision_mutex.unlock()
 	_road_batch_data.clear()  # Очищаем road batch data
+	_chunk_terrain_roads.clear()
 
 	# Reconnect night mode after reset
 	_connect_to_night_mode()
@@ -2032,6 +2034,7 @@ func reset_terrain() -> void:
 	_window_batch_materials.clear()
 	_pending_batch_chunks.clear()
 	_road_batch_data.clear()
+	_chunk_terrain_roads.clear()
 
 	# Reset draw call stats (prevent stale stats across location changes)
 	for key in _draw_call_stats:
@@ -2819,9 +2822,6 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		hash_radius += 1.0
 		_add_intersection_to_spatial_hash(info["pos"], Vector2(hash_radius, hash_radius), idx)
 
-	# Собираем полилинии дорог для генерации террейна (сглаженные коридоры)
-	var chunk_road_polylines: Array = []  # {points: PackedVector2Array, width: float}
-
 	# Второй проход: создаём все объекты
 	var skipped_buildings := 0
 	for way in ways:
@@ -2872,13 +2872,6 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			_create_road(nodes, tags, target, loader, flat_elev)
 			road_count += 1
 			objects_this_frame += 1
-			# Собираем полилинии для террейна (пешеходки пропускаем)
-			var hw_type: String = tags.get("highway", "")
-			if hw_type not in ["footway", "path", "cycleway", "track", "steps"]:
-				var local_pts: PackedVector2Array = []
-				for node in nodes:
-					local_pts.append(_latlon_to_local(node.lat, node.lon))
-				chunk_road_polylines.append({"points": local_pts, "width": ROAD_WIDTHS.get(hw_type, 5.0)})
 		elif tags.has("building"):
 			var way_id: int = int(way.get("id", 0))  # Ensure int conversion from JSON float
 			_create_building(nodes, tags, target, loader, elev_data, way_id)
@@ -3098,9 +3091,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 	if bus_stop_count > 0:
 		print("OSM: Created %d bus stops" % bus_stop_count)
 
-	# Приподнятый террейн (газон/тротуар) и деревья по всей площади чанка
+	# Деревья по площади чанка (террейн создаётся позже в _finalize_road_batches_for_chunk)
 	if chunk_key != "":
-		_create_chunk_ground_terrain(chunk_key, elev_data, target, chunk_road_polylines)
 		_generate_trees_for_chunk(chunk_key, elev_data, target)
 
 	# OPTIMIZATION: Помечаем чанк для финализации road batches (когда road_queue опустеет)
@@ -3589,6 +3581,24 @@ func _apply_road_result(result: Dictionary) -> void:
 				batch["indices"].append_array(offset_indices)
 			else:
 				batch["indices"].append_array(src_indices)
+
+	# Строим коридор-полигон напрямую из вершин дороги для выреза террейна
+	# Вершины идут парами: [left0, right0, left1, right1, ...]
+	var road_verts: PackedVector3Array = result.vertices
+	if not is_bridge and highway_type not in ["footway", "path", "cycleway", "track", "steps"] and road_verts.size() >= 4:
+		var n_pairs: int = road_verts.size() / 2
+		var corridor := PackedVector2Array()
+		# Left edge forward
+		for i in range(n_pairs):
+			var v: Vector3 = road_verts[i * 2]
+			corridor.append(Vector2(v.x, v.z))
+		# Right edge backward
+		for i in range(n_pairs - 1, -1, -1):
+			var v: Vector3 = road_verts[i * 2 + 1]
+			corridor.append(Vector2(v.x, v.z))
+		if not _chunk_terrain_roads.has(chunk_key):
+			_chunk_terrain_roads[chunk_key] = []
+		_chunk_terrain_roads[chunk_key].append(corridor)
 
 	# Curbs
 	if curb_height > 0.0:
@@ -4378,9 +4388,11 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		prof_start_total = _profiler.start_measure("road_batch_finalize_total_" + chunk_key)
 
 	if not _road_batch_data.has(chunk_key):
+		# Нет дорог — но террейн всё равно создаём
+		_create_deferred_terrain(chunk_key)
 		if _profiler:
 			_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
-		return  # Нет дорог в этом чанке
+		return
 
 	var chunk_batches: Dictionary = _road_batch_data[chunk_key]
 
@@ -4475,6 +4487,9 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	# Очищаем batch data для этого чанка
 	_road_batch_data.erase(chunk_key)
 
+	# Создаём террейн ПОСЛЕ финализации дорог — используем те же сглажённые точки
+	_create_deferred_terrain(chunk_key)
+
 	# Если elevation финализирован (32x32 grid готов) — применяем высоты.
 	# Все объекты создаются плоскими (elev_data={}), elevation применяется здесь или
 	# в _try_finalize_elevation (если elevation финализируется позже).
@@ -4490,6 +4505,19 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		var total_time_ms = (Time.get_ticks_usec() - prof_start_total) / 1000.0
 		if total_time_ms > 8.0:
 			print("⚠️ SLOW: road batch finalization took %.1f ms for chunk %s" % [total_time_ms, chunk_key])
+
+## Создаёт террейн чанка используя сглажённые точки из road rendering thread
+func _create_deferred_terrain(chunk_key: String) -> void:
+	if chunk_key == "" or chunk_key == "initial":
+		return
+	var parent_node: Node3D = _loaded_chunks.get(chunk_key, null)
+	if not parent_node or not is_instance_valid(parent_node):
+		return
+	var elev_data: Dictionary = _chunk_elevations.get(chunk_key, {})
+	var terrain_roads: Array = _chunk_terrain_roads.get(chunk_key, [])
+	_create_chunk_ground_terrain(chunk_key, elev_data, parent_node, terrain_roads)
+	_chunk_terrain_roads.erase(chunk_key)
+
 
 # Обновляет высоту всех объектов в чанке после загрузки elevation.
 # Пересчитывает y-координаты вершин: new_y = terrain_h + original_y.
@@ -10020,48 +10048,17 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 	# 2. Вырезаем коридоры дорог из прямоугольника чанка
 	var terrain_polys: Array[PackedVector2Array] = [chunk_rect]
 
-	print("TERRAIN_DEBUG chunk=%s roads=%d" % [chunk_key, road_polylines.size()])
-	for road in road_polylines:
-		var raw_pts: PackedVector2Array = road.points
-		if raw_pts.size() < 2:
+	# road_polylines — массив PackedVector2Array (полигоны-коридоры из вершин дороги)
+	for corridor in road_polylines:
+		if corridor.size() < 4:
 			continue
-		var smoothed := _smooth_road_corners(raw_pts)
-		if smoothed.size() < 2:
-			continue
-		var road_w: float = road.width
-		var half_w: float = road_w / 2.0 + 0.05
-		print("  ROAD w=%.1f pts=%d smoothed=%d first=%s" % [road_w, raw_pts.size(), smoothed.size(), str(smoothed[0])])
-		# Строим полигон-коридор через перпендикуляры (как road quads)
-		var n_pts: int = smoothed.size()
-		var left_side := PackedVector2Array()
-		var right_side := PackedVector2Array()
-		for i in range(n_pts):
-			var perp: Vector2
-			if i == 0:
-				var d: Vector2 = (smoothed[1] - smoothed[0]).normalized()
-				perp = Vector2(-d.y, d.x)
-			elif i == n_pts - 1:
-				var d: Vector2 = (smoothed[i] - smoothed[i - 1]).normalized()
-				perp = Vector2(-d.y, d.x)
-			else:
-				var d: Vector2 = (smoothed[i + 1] - smoothed[i]).normalized()
-				perp = Vector2(-d.y, d.x)
-			left_side.append(smoothed[i] - perp * half_w)
-			right_side.append(smoothed[i] + perp * half_w)
-		# Полигон: left вперёд + right назад (замкнутый CCW)
-		var corridor := PackedVector2Array()
-		for i in range(n_pts):
-			corridor.append(left_side[i])
-		for i in range(n_pts - 1, -1, -1):
-			corridor.append(right_side[i])
-		if corridor.size() >= 3:
-			var new_polys: Array[PackedVector2Array] = []
-			for poly in terrain_polys:
-				var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, corridor)
-				for cp in clipped:
-					if cp.size() >= 3:
-						new_polys.append(cp)
-			terrain_polys = new_polys
+		var new_polys: Array[PackedVector2Array] = []
+		for poly in terrain_polys:
+			var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, corridor)
+			for cp in clipped:
+				if cp.size() >= 3:
+					new_polys.append(cp)
+		terrain_polys = new_polys
 
 	# 2b. Вырезаем контуры перекрёстков (заплатки шире коридоров дорог)
 	for i in range(_intersection_contours.size()):
