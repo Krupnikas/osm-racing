@@ -14,12 +14,17 @@ var _current_speed: float = 0.0
 var _current_rpm: float = 0.0
 var _current_gear: String = "N"
 
+# Титры событий
+var _event_label: Label
+var _event_tween: Tween
+
 func _ready() -> void:
 	visible = false
 	await get_tree().process_frame
 
 	_speedometer = $Speedometer
 	_minimap = $MiniMap if has_node("MiniMap") else null
+	_event_label = $EventLabel if has_node("EventLabel") else null
 
 	if car_path:
 		_car = get_node(car_path)
@@ -109,3 +114,23 @@ func set_race_mode(enabled: bool) -> void:
 	"""Включает режим гонки (показывает соперников на мини-карте)"""
 	if _minimap and _minimap.has_method("set_show_opponents"):
 		_minimap.set_show_opponents(enabled)
+
+
+## Показывает титр события над миникартой.
+## text — текст титра, duration — сколько секунд висит перед fade-out.
+## Если вызвать повторно до исчезновения — текст обновляется, таймер рестартует.
+func show_event_title(text: String, duration: float = 3.0) -> void:
+	if not _event_label:
+		return
+	_event_label.text = text
+	_event_label.visible = true
+	_event_label.modulate.a = 1.0
+	_event_label.scale = Vector2(1.3, 1.3)
+	_event_label.pivot_offset = _event_label.size * 0.5
+	if _event_tween and _event_tween.is_valid():
+		_event_tween.kill()
+	_event_tween = create_tween()
+	_event_tween.tween_property(_event_label, "scale", Vector2(1.0, 1.0), 0.15).set_ease(Tween.EASE_OUT)
+	_event_tween.tween_interval(duration)
+	_event_tween.tween_property(_event_label, "modulate:a", 0.0, 0.3)
+	_event_tween.tween_callback(func(): _event_label.visible = false)

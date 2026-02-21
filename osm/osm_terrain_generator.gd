@@ -3296,28 +3296,42 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> v
 	else:
 		# Пешеходные дорожки: crossing на уровне дороги, off-road — elevated
 		if highway_type in ["footway", "path"] and smoothed_points.size() >= 2:
+			var is_tagged_crossing: bool = tags.get("footway", "") == "crossing"
 			var on_road: Array[bool] = []
 			for p in smoothed_points:
 				on_road.append(_is_point_on_vehicle_road(p))
 			var current_pts := PackedVector2Array()
 			current_pts.append(smoothed_points[0])
 			var current_on := on_road[0]
+			var last_off_road_pt := smoothed_points[0]  # fallback: начало пути
+			var has_before_off := true  # smoothed_points[0] всегда годится как reference
+			if not current_on:
+				last_off_road_pt = smoothed_points[0]
 			for i in range(1, smoothed_points.size()):
 				if on_road[i] != current_on:
 					var edge_pt := _find_road_edge_point(smoothed_points[i - 1], current_on, smoothed_points[i])
 					current_pts.append(edge_pt)
 					if current_pts.size() >= 2:
 						if current_on:
-							_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+							if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, smoothed_points[i])):
+								_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
 						else:
 							_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
+							last_off_road_pt = smoothed_points[i - 1]
+							has_before_off = true
 					current_pts = PackedVector2Array()
 					current_pts.append(edge_pt)
 					current_on = on_road[i]
+				else:
+					if not current_on:
+						last_off_road_pt = smoothed_points[i]
+						has_before_off = true
 				current_pts.append(smoothed_points[i])
 			if current_pts.size() >= 2:
 				if current_on:
-					_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+					var last_pt: Vector2 = smoothed_points[smoothed_points.size() - 1]
+					if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, last_pt)):
+						_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
 				else:
 					_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
 		else:
@@ -3536,6 +3550,8 @@ func _apply_road_result(result: Dictionary) -> void:
 	elif highway_type in ["footway", "path"] and smoothed_points.size() >= 2:
 		# Пешеходные: crossing на уровне дороги, off-road — elevated тротуар
 		var way_id: int = result.get("way_id", 0)
+		var tags: Dictionary = result.get("tags", {})
+		var is_tagged_crossing: bool = tags.get("footway", "") == "crossing"
 		# Удаляем zigzag (обратный ход) из smoothed_points — причина z-fighting
 		smoothed_points = _remove_polyline_zigzag(smoothed_points)
 		var on_road: Array[bool] = []
@@ -3574,22 +3590,39 @@ func _apply_road_result(result: Dictionary) -> void:
 		var current_pts := PackedVector2Array()
 		current_pts.append(smoothed_points[0])
 		var current_on := on_road[0]
+		var last_off_road_pt := smoothed_points[0]  # fallback: начало пути
+		var has_before_off := true  # smoothed_points[0] всегда годится как reference
+		if not current_on:
+			last_off_road_pt = smoothed_points[0]
 		for i in range(1, smoothed_points.size()):
 			if on_road[i] != current_on:
 				var edge_pt := _find_road_edge_point(smoothed_points[i - 1], current_on, smoothed_points[i])
 				current_pts.append(edge_pt)
 				if current_pts.size() >= 2:
 					if current_on:
-						_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+						# on→off: проверяем, полное ли пересечение (или footway=crossing тег)
+						var is_full: bool = is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, smoothed_points[i]))
+						if is_full:
+							_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+						# иначе: частичное касание — тротуар просто обрывается у дороги
 					else:
 						_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
+						last_off_road_pt = smoothed_points[i - 1]
+						has_before_off = true
 				current_pts = PackedVector2Array()
 				current_pts.append(edge_pt)
 				current_on = on_road[i]
+			else:
+				if not current_on:
+					last_off_road_pt = smoothed_points[i]
+					has_before_off = true
 			current_pts.append(smoothed_points[i])
 		if current_pts.size() >= 2:
 			if current_on:
-				_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+				# Заканчивается на дороге — используем последнюю точку как after reference
+				var last_pt: Vector2 = smoothed_points[smoothed_points.size() - 1]
+				if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, last_pt)):
+					_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
 			else:
 				_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
 	else:
@@ -10082,6 +10115,38 @@ func _is_point_on_vehicle_road(point: Vector2, margin: float = 1.0) -> bool:
 			return true
 	# Парковки НЕ проверяем — пешеходные дорожки должны оставаться тротуарами поверх парковок
 	return false
+
+
+# Проверяет, является ли on_road участок footpath полным пересечением дороги:
+# before_pt и after_pt лежат по разные стороны от ближайшей дороги.
+func _is_full_road_crossing(before_pt: Vector2, after_pt: Vector2) -> bool:
+	var mid := (before_pt + after_pt) * 0.5
+	var cell_x := int(floor(mid.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(mid.y / ROAD_CELL_SIZE))
+	var best_dist := 999.0
+	var best_seg_p1 := Vector2.ZERO
+	var best_seg_p2 := Vector2.ZERO
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not _road_spatial_hash.has(key):
+				continue
+			for seg in _road_spatial_hash[key]:
+				if seg.width < 4.0:
+					continue
+				var closest := Geometry2D.get_closest_point_to_segment(mid, seg.p1, seg.p2)
+				var dist: float = mid.distance_to(closest)
+				if dist < best_dist:
+					best_dist = dist
+					best_seg_p1 = seg.p1
+					best_seg_p2 = seg.p2
+	if best_dist > 50.0:
+		return false
+	var road_dir: Vector2 = (best_seg_p2 - best_seg_p1).normalized()
+	var cross_before: float = road_dir.cross(before_pt - best_seg_p1)
+	var cross_after: float = road_dir.cross(after_pt - best_seg_p1)
+	# Разные знаки → разные стороны дороги → полное пересечение
+	return cross_before * cross_after < 0.0
 
 
 # Находит точку на отрезке [p1, p2], где проходит край дороги (binary search)

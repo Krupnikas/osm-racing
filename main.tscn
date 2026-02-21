@@ -1,4 +1,4 @@
-[gd_scene load_steps=22 format=3 uid="uid://bmain123"]
+[gd_scene load_steps=23 format=3 uid="uid://bmain123"]
 
 [ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://race/race_manager.gd" id="20_race_mgr"]
@@ -21,6 +21,7 @@
 [ext_resource type="Script" path="res://traffic/traffic_manager.gd" id="11_traffic"]
 [ext_resource type="Script" path="res://car/lane_assist.gd" id="30_lane_assist"]
 [ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="12_night"]
+[ext_resource type="Script" path="res://traffic/near_miss_detector.gd" id="31_nearmiss"]
 [ext_resource type="Script" path="res://ui/track_display.gd" id="12_track_display"]
 [ext_resource type="Script" path="res://settings/graphics_settings.gd" id="16_graphics"]
 [ext_resource type="Script" path="res://textures/ground_setup.gd" id="17_ground"]
@@ -106,6 +107,9 @@ script = ExtResource("30_lane_assist")
 
 [node name="TrafficManager" type="Node" parent="."]
 script = ExtResource("11_traffic")
+
+[node name="NearMissDetector" type="Node" parent="."]
+script = ExtResource("31_nearmiss")
 
 [node name="CameraManager" type="Node" parent="."]
 script = ExtResource("6_cam_mgr")
