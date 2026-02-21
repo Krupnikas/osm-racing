@@ -18,7 +18,6 @@ const SPAWN_POSITIONS := {
 	"test_flat": Vector3(100, 1.0, 0),
 	"test_suspension": Vector3(0, 1.0, 5),
 	"test_npc": Vector3(100, 1.0, 0),
-	"test_elevation": Vector3(100, 1.0, 0),
 }
 
 ## Повороты спавна (Y rotation в радианах)
@@ -26,7 +25,6 @@ const SPAWN_ROTATIONS := {
 	"test_flat": 0.0,
 	"test_suspension": PI,  # 180° — лицом к трассе (Z+)
 	"test_npc": 0.0,
-	"test_elevation": 0.0,
 }
 
 
@@ -64,19 +62,7 @@ func _ready() -> void:
 	_terrain.test_data_provider = func(lat: float, lon: float, size: float) -> Dictionary:
 		return FakeOSMData.get_data(tid, lat, lon, size)
 
-	# Elevation (если есть) — данные приходят асинхронно через _on_elevation_loaded,
-	# проходят полный пайплайн: reverse → preprocess (upscale 8→32, smooth) → apply.
-	var elev: Dictionary = FakeOSMData.get_elevation(tid, "0,0", 0.0, 0.0)
-	if not elev.is_empty():
-		_terrain.test_elevation_provider = func(key: String, lat: float, lon: float) -> Dictionary:
-			return FakeOSMData.get_elevation(tid, key, lat, lon)
-		_terrain.enable_elevation = true
-		_terrain.elevation_scale = 1.0
-
 	# Доп. настройки по треку
-	if _track_id == "test_elevation":
-		_terrain.enable_buildings = true
-		_terrain.enable_street_lamps = true
 	if _track_id == "test_npc":
 		_setup_traffic_manager()
 
@@ -98,21 +84,6 @@ func _on_generation_complete() -> void:
 
 	# Позиционируем машину на старте
 	var spawn_pos: Vector3 = SPAWN_POSITIONS.get(_track_id, Vector3(0, 1.0, 0))
-
-	# Для elevation треков — находим высоту terrain рейкастом
-	if _terrain and _terrain.enable_elevation:
-		var space_state := get_world_3d().direct_space_state
-		var from := Vector3(spawn_pos.x, 100.0, spawn_pos.z)
-		var to := Vector3(spawn_pos.x, -100.0, spawn_pos.z)
-		var query := PhysicsRayQueryParameters3D.create(from, to)
-		query.collision_mask = 1
-		var result := space_state.intersect_ray(query)
-		if not result.is_empty():
-			spawn_pos.y = result.position.y + 1.5
-			print("TestTrackScene: raycast hit at y=%.2f, spawn_y=%.2f" % [result.position.y, spawn_pos.y])
-		else:
-			spawn_pos.y = 2.0
-			print("TestTrackScene: raycast miss, using default spawn_y=2.0")
 
 	print("TestTrackScene: spawn_pos=", spawn_pos)
 

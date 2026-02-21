@@ -66,7 +66,7 @@ const SPEED_LIMITS := {
 }
 
 
-func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_key: String, elev_data: Dictionary, bridge_info: Dictionary = {}) -> void:
+func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_key: String, bridge_info: Dictionary = {}) -> void:
 	"""Добавляет дорожный сегмент в навигационную сеть
 	Примечание: _chunk_key не используется, каждый waypoint определяет свой чанк по позиции
 	Создаёт waypoints в ОБОИХ направлениях для двустороннего движения
@@ -89,10 +89,10 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_k
 	_next_road_id += 1
 
 	# Создаём waypoints в прямом направлении
-	var forward_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, false, road_id, bridge_info)
+	var forward_waypoints := _create_directional_waypoints(points, speed_limit, width, lanes, false, road_id, bridge_info)
 
 	# Создаём waypoints в обратном направлении
-	var reverse_waypoints := _create_directional_waypoints(points, elev_data, speed_limit, width, lanes, true, road_id, bridge_info)
+	var reverse_waypoints := _create_directional_waypoints(points, speed_limit, width, lanes, true, road_id, bridge_info)
 
 	# Замыкаем кольцевые дороги (последняя точка совпадает с первой)
 	if points.size() >= 3:
@@ -118,7 +118,7 @@ func _close_loop(waypoints: Array) -> void:
 		first_wp.prev_waypoints.append(last_wp)
 
 
-func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictionary, speed_limit: float, width: float, lanes: int, reverse: bool, road_id: int = 0, bridge_info: Dictionary = {}) -> Array[Waypoint]:
+func _create_directional_waypoints(points: PackedVector2Array, speed_limit: float, width: float, lanes: int, reverse: bool, road_id: int = 0, bridge_info: Dictionary = {}) -> Array[Waypoint]:
 	"""Создаёт waypoints вдоль дороги в одном направлении
 	bridge_info содержит: is_bridge, bridge_height, ramp_length для расчёта высоты на мостах"""
 	var all_road_waypoints: Array[Waypoint] = []
@@ -159,9 +159,8 @@ func _create_directional_waypoints(points: PackedVector2Array, elev_data: Dictio
 		var start_2d := points[i]
 		var end_2d := points[i + step]
 
-		# Получаем базовые высоты из terrain generator (точнее чем elev_data)
-		var start_height := _get_height_at(start_2d, elev_data)
-		var end_height := _get_height_at(end_2d, elev_data)
+		var start_height := 0.0
+		var end_height := 0.0
 
 		var start_pos := Vector3(start_2d.x, start_height, start_2d.y)
 		var end_pos := Vector3(end_2d.x, end_height, end_2d.y)
@@ -546,23 +545,6 @@ func get_waypoints_in_chunk(chunk_key: String) -> Array:
 	return waypoints_by_chunk.get(chunk_key, [])
 
 
-func update_waypoint_heights_for_chunk(chunk_key: String) -> void:
-	"""Обновляет Y позиции waypoints в чанке из terrain generator"""
-	if not terrain_generator or not terrain_generator.has_method("get_terrain_height_at"):
-		return
-	var wps: Array = waypoints_by_chunk.get(chunk_key, [])
-	if wps.is_empty():
-		return
-	var updated := 0
-	for wp in wps:
-		var h: float = terrain_generator.get_terrain_height_at(wp.position.x, wp.position.z)
-		if absf(wp.position.y - h) > 0.1:
-			wp.position.y = h
-			updated += 1
-	if updated > 0:
-		print("RoadNetwork: Updated %d waypoint heights in chunk %s" % [updated, chunk_key])
-
-
 func clear_chunk(chunk_key: String) -> void:
 	"""Удаляет все waypoints из чанка"""
 	if not waypoints_by_chunk.has(chunk_key):
@@ -636,66 +618,6 @@ func _get_lanes_per_direction(highway_type: String) -> int:
 			return 2  # 2 полосы в каждом направлении (4 всего)
 		_:
 			return 1  # 1 полоса в каждом направлении (2 всего)
-
-
-## Получает высоту: предпочитает terrain_generator (точные финализированные данные),
-## fallback на локальный _get_elevation_at_point (raw elev_data).
-func _get_height_at(point: Vector2, elev_data: Dictionary) -> float:
-	if terrain_generator and terrain_generator.has_method("get_terrain_height_at"):
-		var h: float = terrain_generator.get_terrain_height_at(point.x, point.y)
-		if h != 0.0 or elev_data.is_empty():
-			return h
-	return _get_elevation_at_point(point, elev_data)
-
-
-func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
-	"""Получает высоту в точке (из elevation data или 0)"""
-	if elev_data.is_empty():
-		return 0.0
-
-	# Интерполяция из сетки высот
-	var grid_size: int = elev_data.get("grid_size", 16)
-	var chunk_size: float = elev_data.get("chunk_size", 300.0)
-	var elevations: Array = elev_data.get("elevations", [])
-
-	if elevations.is_empty():
-		return 0.0
-
-	# Нормализуем координаты к сетке [0..grid_size-1]
-	var normalized_x := (point.x / chunk_size + 0.5) * float(grid_size - 1)
-	var normalized_y := (point.y / chunk_size + 0.5) * float(grid_size - 1)
-
-	normalized_x = clamp(normalized_x, 0, grid_size - 1)
-	normalized_y = clamp(normalized_y, 0, grid_size - 1)
-
-	var x0: int = int(normalized_x)
-	var y0: int = int(normalized_y)
-	var x1: int = min(x0 + 1, grid_size - 1)
-	var y1: int = min(y0 + 1, grid_size - 1)
-
-	# Билинейная интерполяция
-	var fx: float = normalized_x - x0
-	var fy: float = normalized_y - y0
-
-	# Проверяем что индексы в пределах массива
-	var idx00: int = y0 * grid_size + x0
-	var idx10: int = y0 * grid_size + x1
-	var idx01: int = y1 * grid_size + x0
-	var idx11: int = y1 * grid_size + x1
-	var max_idx: int = elevations.size() - 1
-
-	if idx00 > max_idx or idx10 > max_idx or idx01 > max_idx or idx11 > max_idx:
-		return 0.0  # Fallback если данные некорректны
-
-	var h00: float = elevations[idx00]
-	var h10: float = elevations[idx10]
-	var h01: float = elevations[idx01]
-	var h11: float = elevations[idx11]
-
-	var h0: float = lerp(h00, h10, fx)
-	var h1: float = lerp(h01, h11, fx)
-
-	return lerp(h0, h1, fy)
 
 
 func get_debug_info() -> String:

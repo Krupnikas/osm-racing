@@ -6,7 +6,6 @@ signal initial_load_progress(progress: float, status: String)  # 0.0-1.0 про�
 signal initial_load_complete
 
 const OSMLoaderScript = preload("res://osm/osm_loader.gd")
-const ElevationLoaderScript = preload("res://osm/elevation_loader.gd")
 const TextureGeneratorScript = preload("res://textures/texture_generator.gd")
 const BuildingWallShader = preload("res://osm/building_wall.gdshader")
 const BuildingWallCustomShader = preload("res://osm/building_wall_custom.gdshader")
@@ -51,9 +50,6 @@ var _lon_scale := 0.0  # Cached cos(deg_to_rad(start_lat)) * 111000.0
 @export var car_path: NodePath
 @export var camera_path: NodePath
 @export var debug_print := false  # Выключить debug output для производительности
-@export var enable_elevation := false  # Включить загрузку высот (экспериментально)
-@export var elevation_scale := 1.0  # Масштаб высоты (1.0 = реальный)
-@export var elevation_grid_resolution := 8  # Разрешение сетки высот на чанк (8x8 = 128 triangles)
 
 ## Feature Flags для A/B тестирования производительности
 @export_group("Features", "enable_")
@@ -74,7 +70,6 @@ var _lon_scale := 0.0  # Cached cos(deg_to_rad(start_lat)) * 111000.0
 ## Тестовый режим: провайдер данных вместо HTTP (Callable(lat, lon, size) -> Dictionary)
 var test_data_provider: Callable = Callable()
 ## Тестовый режим: провайдер высот (Callable(chunk_key, lat, lon) -> Dictionary)
-var test_elevation_provider: Callable = Callable()
 
 var osm_loader: Node
 var _car: Node3D
@@ -83,14 +78,6 @@ var _profiler: PerformanceProfiler  # Для измерения производ
 var _loaded_chunks: Dictionary = {}  # key: "x,z" -> value: Node3D (chunk node)
 var _loading_chunks: Dictionary = {}  # key: "x,z" -> value: timestamp (start time in msec)
 const CHUNK_LOAD_TIMEOUT := 30.0  # Таймаут загрузки чанка (секунд)
-var _chunk_elevations: Dictionary = {}  # key: "x,z" -> value: elevation data
-var _chunk_median_elevations: Dictionary = {}  # key: "x,z" -> value: float (median height from raw API grid)
-var _elevation_finalized: Dictionary = {}  # key: "x,z" -> true — grid built, terrain mesh created
-var _loading_elevations: Dictionary = {}  # Чанки с загружающимися высотами
-var _elevation_queue: Array = []  # Очередь чанков для загрузки высот
-var _active_elevation_requests: int = 0  # Количество активных запросов
-const MAX_ELEVATION_REQUESTS := 2  # Максимум параллельных запросов
-var _base_elevation := 0.0  # Базовая высота (высота стартовой точки)
 var _last_check_pos := Vector3.ZERO
 var _check_interval := 0.5  # Проверка каждые 0.5 сек
 var _check_timer := 0.0
@@ -272,10 +259,10 @@ var _draw_call_stats: Dictionary = {
 var _draw_call_logging_enabled := true  # PHASE 1 DIAGNOSTIC: Track draw calls by category
 
 # Отложенная генерация terrain объектов (natural, landuse, leisure)
-var _terrain_objects_queue: Array = []  # Очередь {type, nodes, tags, parent, elev_data}
 
+var _terrain_objects_queue: Array = []  # Очередь {type, nodes, tags, parent}
 # Очередь растительности (деревья, кусты, трава) - обрабатывается отдельно с меньшим приоритетом
-var _vegetation_queue: Array = []  # Очередь {type, points, elev_data, parent, dense}
+var _vegetation_queue: Array = []  # Очередь {type, points, parent, dense}
 
 # FPS статистика для отображения на экране
 var _fps_samples: Array[float] = []
@@ -294,7 +281,7 @@ var _current_frame_perf: Dictionary = {}  # name → float (мс), заполн�
 var _slow_frame_cooldown := 0.0  # Ограничиваем частоту логирования (не чаще 1 раз в сек)
 
 # Terrain clipping via WorkerThreadPool — результаты из worker потоков
-var _terrain_thread_results: Array = []  # Array of Dictionary {chunk_key, terrain_polys, elev_data}
+var _terrain_thread_results: Array = []  # Results from terrain worker threads
 var _terrain_thread_mutex: Mutex
 var _pending_terrain_tasks: int = 0
 
@@ -343,7 +330,7 @@ const COLORS := {
 	"grass": Color(0.3, 0.6, 0.3),
 	"forest": Color(0.2, 0.5, 0.2),
 	"farmland": Color(0.7, 0.7, 0.4),
-	"default": Color(0.4, 0.5, 0.4),
+	"default": Color(0.4, 0.5, 0.4)
 }
 
 const ROAD_WIDTHS := {
@@ -358,7 +345,7 @@ const ROAD_WIDTHS := {
 	"footway": 2.0,
 	"path": 1.5,
 	"cycleway": 2.5,
-	"track": 3.5,
+	"track": 3.5
 }
 
 # Константы для мостов и туннелей
@@ -1407,34 +1394,6 @@ func _check_initial_load_complete() -> void:
 
 	# Все начальные чанки загружены?
 	if loaded_count >= total_chunks:
-		# Ждём завершения загрузки и финализации elevation (если включен)
-		if enable_elevation:
-			var elev_downloaded := 0
-			var elev_finalized := 0
-			var elev_total := 0
-			for ck in _initial_chunks_needed:
-				elev_total += 1
-				if _chunk_elevations.has(ck):
-					elev_downloaded += 1
-				if _elevation_finalized.has(ck):
-					elev_finalized += 1
-
-			var elev_pending: bool = elev_downloaded < elev_total or elev_finalized < elev_total
-			if elev_pending:
-				# Прогресс: 60% чанки + 20% скачивание elevation + 20% финализация
-				var dl_progress: float = float(elev_downloaded) / float(max(1, elev_total))
-				var fin_progress: float = float(elev_finalized) / float(max(1, elev_total))
-				var elev_progress: float = 0.6 + dl_progress * 0.2 + fin_progress * 0.2
-				elev_progress = clampf(elev_progress, 0.6, 0.99)
-
-				var elev_status: String
-				if elev_downloaded < elev_total:
-					elev_status = "Загрузка рельефа: %d/%d..." % [elev_downloaded, elev_total]
-				else:
-					elev_status = "Построение рельефа: %d/%d..." % [elev_finalized, elev_total]
-				initial_load_progress.emit(elev_progress, elev_status)
-				return
-
 		# Проверяем что все очереди обработаны (для плавности старта)
 		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and _pending_road_tasks <= 0 and _pending_veg_tasks <= 0
 		if not queues_empty:
@@ -1812,30 +1771,6 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 
 	# Тестовый режим — данные без HTTP, но тот же async flow что и в игре
 	if test_data_provider.is_valid():
-		# Elevation: отправляем через _deliver_test_elevation асинхронно (через 2 кадра),
-		# чтобы воспроизвести реальный flow — elevation приходит ПОСЛЕ начала генерации OSM.
-		# Данные пройдут через _on_elevation_loaded → _preprocess_elevation_grid как реальные.
-		if test_elevation_provider.is_valid():
-			var cos_lat := cos(deg_to_rad(start_lat))
-			for dz in range(-1, 2):
-				for dx in range(-1, 2):
-					var ncx := chunk_x + dx
-					var ncz := chunk_z + dz
-					var nk := "%d,%d" % [ncx, ncz]
-					if _chunk_elevations.has(nk) or _loading_elevations.has(nk):
-						continue
-					var nc_x := ncx * chunk_size + chunk_size / 2
-					var nc_z := ncz * chunk_size + chunk_size / 2
-					var nlat := start_lat - nc_z / 111000.0
-					var nlon := start_lon + nc_x / (111000.0 * cos_lat)
-					var elev: Dictionary = test_elevation_provider.call(nk, nlat, nlon)
-					if not elev.is_empty():
-						_loading_elevations[nk] = true
-						_active_elevation_requests += 1
-						var fake_elev_loader := Node.new()
-						fake_elev_loader.name = "FakeElevLoader_" + nk
-						add_child(fake_elev_loader)
-						_deliver_test_elevation.call_deferred(elev, nk, fake_elev_loader)
 		var osm_data: Dictionary = test_data_provider.call(chunk_lat, chunk_lon, chunk_size)
 		osm_data["center_lat"] = chunk_lat
 		osm_data["center_lon"] = chunk_lon
@@ -1844,17 +1779,6 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 		add_child(fake_loader)
 		_on_chunk_data_loaded(osm_data, chunk_key, fake_loader, _load_generation)
 		return
-
-	# Добавляем в очередь загрузки высот: этот чанк + 8 соседей
-	# (соседи нужны для билинейного сглаживания в _rebuild_elevation_grid)
-	if enable_elevation:
-		_queue_elevation_for_chunk(chunk_x, chunk_z)
-		for dz in range(-1, 2):
-			for dx in range(-1, 2):
-				if dz == 0 and dx == 0:
-					continue
-				_queue_elevation_for_chunk(chunk_x + dx, chunk_z + dz)
-		_process_elevation_queue()
 
 	# Создаём отдельный загрузчик для этого чанка
 	var loader := OSMLoaderScript.new()
@@ -1955,8 +1879,6 @@ func _unload_chunk(chunk_key: String) -> void:
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
 		chunk_node.queue_free()
 		_loaded_chunks.erase(chunk_key)
-		_chunk_elevations.erase(chunk_key)
-		_elevation_finalized.erase(chunk_key)
 
 		# Очищаем позиции фонарей и знаков в выгруженном чанке
 		_clear_chunk_objects_positions(chunk_key)
@@ -2030,13 +1952,6 @@ func reset_terrain() -> void:
 
 	# Сбрасываем состояние
 	_loading_chunks.clear()
-	_chunk_elevations.clear()
-	_chunk_median_elevations.clear()
-	_elevation_finalized.clear()
-	_loading_elevations.clear()
-	_elevation_queue.clear()
-	_active_elevation_requests = 0
-	_base_elevation = 0.0
 	_initial_loading = false
 	_initial_chunks_needed.clear()
 	_initial_chunks_loaded = 0
@@ -2138,279 +2053,6 @@ func _on_chunk_load_failed(error: String, chunk_key: String, loader: Node, gen: 
 	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
 	loader.queue_free()
 
-## Добавляет чанк в очередь загрузки elevation (если ещё не загружен/загружается).
-func _queue_elevation_for_chunk(cx: int, cz: int) -> void:
-	var key := "%d,%d" % [cx, cz]
-	if _chunk_elevations.has(key) or _loading_elevations.has(key):
-		return
-	# Проверяем, не стоит ли уже в очереди
-	for item in _elevation_queue:
-		if item["key"] == key:
-			return
-	var cos_lat := cos(deg_to_rad(start_lat))
-	var min_x: float = float(cx) * chunk_size
-	var max_x: float = min_x + chunk_size
-	var min_z: float = float(cz) * chunk_size
-	var max_z: float = min_z + chunk_size
-	_elevation_queue.append({
-		"key": key,
-		"min_lat": start_lat - max_z / 111000.0,
-		"max_lat": start_lat - min_z / 111000.0,
-		"min_lon": start_lon + min_x / (111000.0 * cos_lat),
-		"max_lon": start_lon + max_x / (111000.0 * cos_lat),
-	})
-
-# Обработка очереди загрузки высот (ограничение параллельных запросов)
-func _process_elevation_queue() -> void:
-	while _active_elevation_requests < MAX_ELEVATION_REQUESTS and _elevation_queue.size() > 0:
-		var item: Dictionary = _elevation_queue.pop_front()
-		var chunk_key: String = item["key"]
-
-		if _chunk_elevations.has(chunk_key) or _loading_elevations.has(chunk_key):
-			continue
-
-		_loading_elevations[chunk_key] = true
-		_active_elevation_requests += 1
-
-		var elev_loader := ElevationLoaderScript.new()
-		add_child(elev_loader)
-		elev_loader.elevation_loaded.connect(_on_elevation_loaded.bind(chunk_key, elev_loader))
-		elev_loader.elevation_failed.connect(_on_elevation_failed.bind(chunk_key, elev_loader))
-		elev_loader.load_elevation_grid_bbox(
-			item["min_lat"], item["max_lat"],
-			item["min_lon"], item["max_lon"],
-			elevation_grid_resolution
-		)
-
-## Доставляет тестовые elevation данные через 2 кадра, имитируя HTTP задержку.
-## Данные пройдут через _on_elevation_loaded → _preprocess_elevation_grid, как реальные.
-func _deliver_test_elevation(elev_data: Dictionary, chunk_key: String, loader: Node) -> void:
-	# Ждём 2 кадра чтобы OSM данные успели начать генерацию
-	await get_tree().process_frame
-	await get_tree().process_frame
-	_on_elevation_loaded(elev_data, chunk_key, loader)
-
-func _on_elevation_loaded(elev_data: Dictionary, chunk_key: String, loader: Node) -> void:
-	print("Elevation: Chunk %s loaded" % chunk_key)
-	_loading_elevations.erase(chunk_key)
-	_active_elevation_requests -= 1
-
-	# API возвращает grid в порядке lat (grid[0]=min_lat=south=большой world_z),
-	# но _create_terrain_mesh и _get_elevation_at_point ожидают world-z порядок
-	# (grid[0]=малый world_z=north). Переворачиваем строки.
-	var grid: Array = elev_data.get("grid", [])
-	if grid.size() > 1:
-		grid.reverse()
-		elev_data["grid"] = grid
-
-	elev_data["_chunk_key"] = chunk_key
-	_chunk_elevations[chunk_key] = elev_data
-
-	# Шаг 1: извлекаем медиану из raw grid
-	_extract_chunk_median(elev_data)
-
-	# Шаг 2: пробуем финализировать этот чанк и соседей (которые могли ждать нашу медиану).
-	# _try_finalize_elevation строит 32x32 grid ТОЛЬКО когда ВСЕ 8 медиан соседей доступны.
-	# Каждый чанк финализируется ровно один раз — grid не мутируется после создания.
-	var coords := chunk_key.split(",")
-	var cx: int = int(coords[0])
-	var cz: int = int(coords[1])
-	_try_finalize_elevation(chunk_key)
-	for dz in range(-1, 2):
-		for dx in range(-1, 2):
-			if dz == 0 and dx == 0:
-				continue
-			var nk := "%d,%d" % [cx + dx, cz + dz]
-			_try_finalize_elevation(nk)
-
-	loader.queue_free()
-
-	# Продолжаем обработку очереди
-	_process_elevation_queue()
-
-	# Проверяем завершение начальной загрузки (elevation мог быть последним)
-	_check_initial_load_complete()
-
-## Пробует финализировать elevation для чанка: строит 32x32 grid, создаёт terrain mesh.
-## Финализация происходит ТОЛЬКО когда все 8 медиан соседей доступны (или сосед не будет загружен).
-## Каждый чанк финализируется ровно один раз — после этого grid не мутируется.
-func _try_finalize_elevation(chunk_key: String) -> void:
-	# Уже финализирован — не трогаем
-	if _elevation_finalized.has(chunk_key):
-		return
-	# Нет raw elevation data — ещё не загружен
-	if not _chunk_elevations.has(chunk_key):
-		return
-
-	var elev_data: Dictionary = _chunk_elevations[chunk_key]
-	var src_size: int = elev_data.get("grid_size", 0)
-
-	# Данные >= 32x32 (тестовые suspension и т.п.) — уже чистые, финализируем сразу
-	if src_size >= 32:
-		_elevation_finalized[chunk_key] = true
-	else:
-		# Данные < 32 (8x8 raw API) — нужна медиана и медианы ВСЕХ 8 соседей
-		if not _chunk_median_elevations.has(chunk_key):
-			return
-		var coords := chunk_key.split(",")
-		var cx: int = int(coords[0])
-		var cz: int = int(coords[1])
-		for dz in range(-1, 2):
-			for dx in range(-1, 2):
-				if dz == 0 and dx == 0:
-					continue
-				var nk := "%d,%d" % [cx + dx, cz + dz]
-				if not _chunk_median_elevations.has(nk):
-					# Сосед ещё не загружен — ждём
-					return
-		# Все 8 медиан доступны — строим 32x32 grid из медиан
-		_elevation_finalized[chunk_key] = true
-		_rebuild_elevation_grid(chunk_key)
-
-	var grid: Array = elev_data.get("grid", [])
-
-	# Устанавливаем базовую высоту по chunk 0,0 (точка спавна)
-	var base_just_set := false
-	if _base_elevation == 0.0 and chunk_key == "0,0":
-		if grid.size() > 0:
-			var mid := grid.size() / 2
-			_base_elevation = grid[mid][mid]
-			base_just_set = true
-			print("Elevation: Base elevation set to %.1f m" % _base_elevation)
-
-			var static_ground := get_parent().get_node_or_null("StaticGround")
-			if static_ground:
-				static_ground.visible = false
-				static_ground.set_collision_layer_value(1, false)
-
-	# Создаём terrain mesh и обновляем высоты объектов
-	if base_just_set:
-		# Base только что установлен — обрабатываем ВСЕ ранее финализированные чанки
-		for prev_key in _elevation_finalized:
-			if _loaded_chunks.has(prev_key):
-				_create_terrain_mesh(prev_key, _loaded_chunks[prev_key])
-				_update_chunk_heights(prev_key, _loaded_chunks[prev_key], _chunk_elevations[prev_key])
-			_update_waypoint_heights(prev_key)
-	elif _base_elevation != 0.0:
-		if _loaded_chunks.has(chunk_key):
-			_create_terrain_mesh(chunk_key, _loaded_chunks[chunk_key])
-			_update_chunk_heights(chunk_key, _loaded_chunks[chunk_key], elev_data)
-		_update_waypoint_heights(chunk_key)
-
-
-## Извлекает медиану из raw API grid и сохраняет в _chunk_median_elevations.
-## Тестовые данные (grid_size >= 32) пропускаются.
-func _extract_chunk_median(elev_data: Dictionary) -> void:
-	var grid: Array = elev_data.get("grid", [])
-	var src_size: int = elev_data.get("grid_size", 0)
-	if src_size < 3 or grid.size() != src_size:
-		return
-	if src_size >= 32:
-		return
-
-	var chunk_key: String = elev_data.get("_chunk_key", "")
-	var values: Array[float] = []
-	for z in range(src_size):
-		for x in range(src_size):
-			var v: float = grid[z][x]
-			if absf(v) > 0.001:
-				values.append(v)
-	if values.is_empty():
-		return
-	values.sort()
-	var n: int = values.size()
-	var median_elev: float
-	if n % 2 == 1:
-		median_elev = values[n / 2]
-	else:
-		median_elev = (values[n / 2 - 1] + values[n / 2]) * 0.5
-	_chunk_median_elevations[chunk_key] = median_elev
-	print("Elevation: Chunk %s median = %.1f m" % [chunk_key, median_elev])
-
-## Строит 32x32 грид для чанка из медиан соседей (билинейная интерполяция).
-## Вызывается при каждом обновлении медиан (новый чанк загрузился).
-func _rebuild_elevation_grid(chunk_key: String) -> void:
-	if not _chunk_median_elevations.has(chunk_key):
-		return
-	if not _chunk_elevations.has(chunk_key):
-		return
-	var elev_data: Dictionary = _chunk_elevations[chunk_key]
-	# Тестовые данные (32x32) — пропускаем, они не из медиан
-	var src_size: int = elev_data.get("_raw_grid_size", elev_data.get("grid_size", 0))
-	if src_size >= 32:
-		return
-
-	var coords := chunk_key.split(",")
-	var cx: int = int(coords[0])
-	var cz: int = int(coords[1])
-	var own_median: float = _chunk_median_elevations[chunk_key]
-
-	# 3x3 грид медиан: [1][1] = центр, fallback = своя медиана
-	var medians: Array = []
-	for dz in range(3):
-		var row: Array[float] = []
-		for dx in range(3):
-			var nk := "%d,%d" % [cx + dx - 1, cz + dz - 1]
-			if _chunk_median_elevations.has(nk):
-				row.append(_chunk_median_elevations[nk])
-			else:
-				row.append(own_median)
-		medians.append(row)
-
-	# Билинейная интерполяция 3x3 медиан → 32x32
-	var dst_size := 32
-	var result: Array = []
-	result.resize(dst_size)
-	for gz in range(dst_size):
-		var row: Array = []
-		row.resize(dst_size)
-		var tz: float = float(gz) / float(dst_size - 1)
-		var sz: float = 0.5 + tz  # 0.5..1.5 в координатах 3x3 грида
-		var z0: int = clampi(int(floor(sz)), 0, 2)
-		var z1: int = mini(z0 + 1, 2)
-		var fz: float = sz - float(z0)
-		for gx in range(dst_size):
-			var tx: float = float(gx) / float(dst_size - 1)
-			var sx: float = 0.5 + tx
-			var x0: int = clampi(int(floor(sx)), 0, 2)
-			var x1: int = mini(x0 + 1, 2)
-			var fx: float = sx - float(x0)
-			var h00: float = medians[z0][x0]
-			var h10: float = medians[z0][x1]
-			var h01: float = medians[z1][x0]
-			var h11: float = medians[z1][x1]
-			row[gx] = lerpf(lerpf(h00, h10, fx), lerpf(h01, h11, fx), fz)
-		result[gz] = row
-
-	var min_elev := 99999.0
-	var max_elev := -99999.0
-	for z in range(dst_size):
-		for x in range(dst_size):
-			var h: float = result[z][x]
-			if h < min_elev:
-				min_elev = h
-			if h > max_elev:
-				max_elev = h
-
-	elev_data["grid"] = result
-	elev_data["grid_size"] = dst_size
-	elev_data["_raw_grid_size"] = src_size  # запоминаем оригинальный размер
-	elev_data["min_elevation"] = min_elev
-	elev_data["max_elevation"] = max_elev
-
-
-func _on_elevation_failed(error: String, chunk_key: String, loader: Node) -> void:
-	push_warning("Elevation chunk %s failed: %s" % [chunk_key, error])
-	_loading_elevations.erase(chunk_key)
-	_active_elevation_requests -= 1
-	loader.queue_free()
-
-	# Продолжаем обработку очереди
-	_process_elevation_queue()
-
-	# Проверяем завершение начальной загрузки
-	_check_initial_load_complete()
-
 func _on_osm_data_loaded(osm_data: Dictionary) -> void:
 	print("OSM: Initial data loaded")
 	# Запускаем генерацию асинхронно (не блокируя callback)
@@ -2433,10 +2075,6 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	add_child(chunk_node)
 	_loaded_chunks[chunk_key] = chunk_node
 
-	# Если elevation финализирован (32x32 grid готов) И base_elevation установлен — создаём terrain mesh.
-	# Без base_elevation terrain будет на абсолютной высоте (480м для Тбилиси).
-	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
-		_create_terrain_mesh(chunk_key, chunk_node)
 
 	# Генерируем объекты асинхронно (с frame budgeting)
 	_generate_chunk_async(osm_data, chunk_node, chunk_key, loader, gen)
@@ -2461,155 +2099,12 @@ func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: 
 	if _decoration_layer and not _billboard_batches_to_finalize.has(chunk_key):
 		_billboard_batches_to_finalize.append(chunk_key)
 
-	# Дороги/бордюры создаются плоскими (flat_elev={}), elevation через _update_chunk_heights.
-	# Здания/фонари/деревья/terrain patches используют elev_data напрямую (baked in).
-	# При финализации ставится meta _elevation_applied чтобы _update_chunk_heights не задвоил.
 
 	# Если ночь уже включена - активируем свет в новом чанке
 	_apply_night_mode_to_chunk(chunk_node)
 
 	# Проверяем завершение начальной загрузки
 	_check_initial_load_complete()
-
-# Создаёт меш террейна с высотами
-func _create_terrain_mesh(chunk_key: String, parent: Node3D) -> void:
-	if not _elevation_finalized.has(chunk_key) or not _chunk_elevations.has(chunk_key):
-		return
-	# Без base_elevation все высоты будут абсолютными (480м для Тбилиси)
-	if _base_elevation == 0.0:
-		return
-
-	# Удаляем существующий terrain body (содержит TerrainMesh + collision).
-	# Переименовываем перед queue_free чтобы имя "TerrainBody" освободилось
-	# для нового body — иначе Godot даст auto-name @StaticBody3D@XX,
-	# и _update_chunk_heights не пропустит его по begins_with("Terrain") фильтру.
-	var old_body := parent.get_node_or_null("TerrainBody")
-	if old_body:
-		old_body.name = "_OldTerrainBody"
-		old_body.queue_free()
-
-	var elev_data: Dictionary = _chunk_elevations[chunk_key]
-	var grid: Array = elev_data.get("grid", [])
-	var grid_size: int = elev_data.get("grid_size", 0)
-
-	if grid_size < 2:
-		return
-
-	# Парсим координаты чанка
-	var coords: Array = chunk_key.split(",")
-	var chunk_x := int(coords[0])
-	var chunk_z := int(coords[1])
-
-	# Позиция чанка в мире
-	var chunk_origin := Vector3(chunk_x * chunk_size, 0, chunk_z * chunk_size)
-	var cell_size := chunk_size / (grid_size - 1)
-
-	var mesh := MeshInstance3D.new()
-	mesh.name = "TerrainMesh"
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-
-	var vertices := PackedVector3Array()
-	var normals := PackedVector3Array()
-	var uvs := PackedVector2Array()
-	var indices := PackedInt32Array()
-
-	# Создаём вершины
-	# Grid уже в world-z порядке: grid[0] = малый z (north), grid[N-1] = большой z (south)
-	# (API данные переворачиваются в _on_elevation_loaded, тестовые — уже в правильном порядке)
-	for z in range(grid_size):
-		for x in range(grid_size):
-			var elevation: float = grid[z][x] - _base_elevation
-			elevation *= elevation_scale
-
-			var pos := Vector3(
-				chunk_origin.x + x * cell_size,
-				elevation,
-				chunk_origin.z + z * cell_size
-			)
-			vertices.append(pos)
-			# UV с tiling: 1 повтор текстуры на 20м
-			var uv_scale := 0.05  # 1/20
-			uvs.append(Vector2(pos.x * uv_scale, pos.z * uv_scale))
-
-	# Вычисляем нормали и индексы
-	for z in range(grid_size - 1):
-		for x in range(grid_size - 1):
-			var i00 := z * grid_size + x
-			var i10 := z * grid_size + (x + 1)
-			var i01 := (z + 1) * grid_size + x
-			var i11 := (z + 1) * grid_size + (x + 1)
-
-			# Два треугольника на ячейку (CCW — нормали вверх)
-			indices.append(i00)
-			indices.append(i10)
-			indices.append(i01)
-
-			indices.append(i10)
-			indices.append(i11)
-			indices.append(i01)
-
-	# Вычисляем нормали по треугольникам (усреднение для smooth shading)
-	normals.resize(vertices.size())
-	for i in range(normals.size()):
-		normals[i] = Vector3.ZERO
-
-	for i in range(0, indices.size(), 3):
-		var v0 := vertices[indices[i]]
-		var v1 := vertices[indices[i + 1]]
-		var v2 := vertices[indices[i + 2]]
-
-		var normal := (v2 - v0).cross(v1 - v0).normalized()  # Нормаль вверх
-		normals[indices[i]] += normal
-		normals[indices[i + 1]] += normal
-		normals[indices[i + 2]] += normal
-
-	for i in range(normals.size()):
-		if normals[i].length_squared() > 0:
-			normals[i] = normals[i].normalized()
-		else:
-			normals[i] = Vector3.UP
-
-	arrays[Mesh.ARRAY_VERTEX] = vertices
-	arrays[Mesh.ARRAY_NORMAL] = normals
-	arrays[Mesh.ARRAY_TEX_UV] = uvs
-	arrays[Mesh.ARRAY_INDEX] = indices
-
-	var arr_mesh := ArrayMesh.new()
-	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	mesh.mesh = arr_mesh
-
-	var material := StandardMaterial3D.new()
-	if _ground_textures.has("grass"):
-		material.albedo_texture = _ground_textures["grass"]
-		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-	else:
-		material.albedo_color = COLORS["default"]
-	mesh.material_override = material
-
-	# Коллизия: создаём ConcavePolygonShape3D из меш-данных
-	var body := StaticBody3D.new()
-	body.name = "TerrainBody"
-	body.collision_layer = 1  # Слой 1 - земля, по которой едет машина
-	body.collision_mask = 1   # Реагирует на слой 1
-	body.add_to_group("Grass")  # GEVP - террейн как трава (большое сопротивление)
-	# Elevation уже baked in (grid[z][x] - base) — помечаем чтобы _update_chunk_heights не задвоил
-	mesh.set_meta("_elevation_applied", true)
-	body.add_child(mesh)
-
-	# Строим faces из indices (порядок вершин уже CCW — нормали вверх)
-	var faces := PackedVector3Array()
-	faces.resize(indices.size())
-	for fi in range(indices.size()):
-		faces[fi] = vertices[indices[fi]]
-	var shape := ConcavePolygonShape3D.new()
-	shape.set_faces(faces)
-	var col := CollisionShape3D.new()
-	col.shape = shape
-	col.set_meta("_elevation_applied", true)
-	body.add_child(col)
-
-	parent.add_child(body)
 
 func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String = "") -> void:
 	var _profile_start := Time.get_ticks_msec()
@@ -2632,13 +2127,6 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		loader.center_lon = osm_data.get("center_lon", start_lon)
 	else:
 		loader = osm_loader
-
-	# Дороги/бордюры создаются плоскими (flat_elev={}), elevation применяется позже через
-	# _update_chunk_heights (из finalization или _on_elevation_loaded).
-	# Остальные объекты используют elev_data — актуальные данные после preprocessing.
-	# elev_data обновляется перед каждым await чтобы подхватить elevation, пришедший асинхронно.
-	var elev_data: Dictionary = _get_chunk_elev_data(chunk_key)
-	var flat_elev: Dictionary = {}  # Для дорог/бордюров — всегда плоские
 
 	# Вычисляем границы чанка для фильтрации дубликатов
 	var chunk_min_x := 0.0
@@ -2949,25 +2437,24 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 
 		var _t0 := Time.get_ticks_msec()
 		if tags.has("highway"):
-			_create_road(nodes, tags, target, loader, flat_elev, way_id_raw)
+			_create_road(nodes, tags, target, loader, way_id_raw)
 			road_count += 1
 			objects_this_frame += 1
 		elif tags.has("building"):
 			var way_id: int = int(way.get("id", 0))  # Ensure int conversion from JSON float
-			_create_building(nodes, tags, target, loader, elev_data, way_id)
+			_create_building(nodes, tags, target, loader, way_id)
 			building_count += 1
 			# Здания теперь в thread pool - не нужен await
 		elif tags.has("amenity") and not tags.has("building"):
 			# Amenity без building тега - создаём как здание
-			_create_amenity_building(nodes, tags, target, loader, elev_data)
+			_create_amenity_building(nodes, tags, target, loader)
 			building_count += 1
 		elif tags.has("natural"):
 			_terrain_objects_queue.append({
 				"type": "natural",
 				"nodes": nodes,
 				"tags": tags,
-				"parent": target,
-				"elev_data": elev_data
+				"parent": target
 			})
 		elif tags.has("landuse"):
 			_terrain_objects_queue.append({
@@ -2975,7 +2462,6 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				"nodes": nodes,
 				"tags": tags,
 				"parent": target,
-				"elev_data": elev_data,
 				"way_id": int(way.get("id", 0))
 			})
 		elif tags.has("leisure"):
@@ -2983,11 +2469,10 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				"type": "leisure",
 				"nodes": nodes,
 				"tags": tags,
-				"parent": target,
-				"elev_data": elev_data
+				"parent": target
 			})
 		elif tags.has("waterway"):
-			_create_waterway(nodes, tags, target, loader, elev_data)
+			_create_waterway(nodes, tags, target, loader)
 			objects_this_frame += 1
 
 		# Frame budgeting ОТКЛЮЧЕН - вызывает исчезновение бизнес-вывесок
@@ -3043,7 +2528,7 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		if node_road_count[node_key] >= 2:  # Перекрёсток - 2+ дороги сходятся концами
 			var pos: Vector2 = node_positions[node_key]
 			var road_types: Array = node_road_types[node_key]
-			var elevation := _get_elevation_at_point(pos, elev_data)
+			var elevation := 0.0
 
 			# Считаем дороги для которых делаем заплатки и бордюры
 			var major_road_count := 0
@@ -3085,7 +2570,7 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 
 			# Создаём заплатку без разметки если есть хотя бы 1 дорога (service+)
 			if major_road_count >= 1:
-				_create_intersection_patch(pos, target, intersection_idx, elev_data, max_height_offset)
+				_create_intersection_patch(pos, target, intersection_idx, max_height_offset)
 
 			# Бордюры перекрёстков теперь генерируются по краям террейна в _create_chunk_ground_terrain
 			if intersection_idx < 0:
@@ -3110,7 +2595,7 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
 				continue
 
-		var elevation := _get_elevation_at_point(local, elev_data)
+		var elevation := 0.0
 
 		if tags.get("natural") == "tree":
 			# Пропускаем деревья слишком близко к дорогам
@@ -3164,7 +2649,7 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
 				continue
 
-		var elevation := _get_elevation_at_point(local, elev_data)
+		var elevation := 0.0
 		_create_bus_stop(local, elevation, tags, target)
 		bus_stop_count += 1
 
@@ -3173,7 +2658,7 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 
 	# Деревья по площади чанка (террейн создаётся позже в _finalize_road_batches_for_chunk)
 	if chunk_key != "":
-		_generate_trees_for_chunk(chunk_key, elev_data, target)
+		_generate_trees_for_chunk(chunk_key, target)
 
 	# OPTIMIZATION: Помечаем чанк для финализации road batches (когда road_queue опустеет)
 	var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
@@ -3273,7 +2758,7 @@ func _compute_averaged_perpendiculars(points: PackedVector2Array) -> Array[Vecto
 	return perpendiculars
 
 
-func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node, _elev_data: Dictionary = {}, way_id: int = 0) -> void:
+func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node, way_id: int = 0) -> void:
 	if not enable_roads:
 		return
 	# Добавляем в очередь для отложенного создания
@@ -3281,7 +2766,7 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 		"nodes": nodes,
 		"tags": tags,
 		"parent": parent,
-		"way_id": way_id,
+		"way_id": way_id
 	})
 
 	# Сегменты дорог сохраняем сразу (нужны для знаков парковки и проверки фонарей)
@@ -3423,21 +2908,20 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> v
 			"height_offset": height_offset,
 			"curb_height": curb_height,
 			"parent": parent,
-			"elev_data": {},
 			"is_bridge": is_bridge,
 			"bridge_info": elevation_info
 		})
 
 	# Фонари (только крупные дороги)
 	if highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary"]:
-		_generate_street_lamps_fast(smoothed_points, width, {}, parent)
+		_generate_street_lamps_fast(smoothed_points, width, parent)
 
 	# Люки
 	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
-		_generate_manholes_fast(smoothed_points, width, {}, parent)
+		_generate_manholes_fast(smoothed_points, width, parent)
 
 	# RoadNetwork для NPC
-	_extract_road_for_traffic_fast(smoothed_points, tags, {}, elevation_info)
+	_extract_road_for_traffic_fast(smoothed_points, tags, elevation_info)
 
 
 ## Вычисляет геометрию дороги в worker thread (чистая математика, thread-safe)
@@ -3600,7 +3084,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		"nodes": nodes,
 		"is_bridge": is_bridge,
 		"elevation_info": elevation_info,
-		"way_id": task_data.get("way_id", 0),
+		"way_id": task_data.get("way_id", 0)
 	}
 	_road_mutex.lock()
 	_road_results.append(result)
@@ -3796,7 +3280,6 @@ func _apply_road_result(result: Dictionary) -> void:
 			"height_offset": height_offset,
 			"curb_height": curb_height,
 			"parent": parent,
-			"elev_data": {},
 			"is_bridge": is_bridge,
 			"bridge_info": elevation_info
 		})
@@ -3869,7 +3352,6 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 		var p: Vector2 = points[i]
 		var perp: Vector2 = perpendiculars[i]
 
-		# Базовая высота (flat — elevation applied later)
 		var base_elev: float = height_offset
 
 		# Вычисляем высоту моста в этой точке с учётом рамп
@@ -3954,10 +3436,10 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 	_create_bridge_collision(vertices, indices, parent)
 
 	# Создаём опоры моста
-	_create_bridge_pillars(points, bridge_height, ramp_length, total_length, {}, parent)
+	_create_bridge_pillars(points, bridge_height, ramp_length, total_length, parent)
 
 	# Создаём отбойники по краям моста
-	_create_bridge_barriers(points, width, bridge_height, ramp_length, total_length, {}, height_offset, parent)
+	_create_bridge_barriers(points, width, bridge_height, ramp_length, total_length, height_offset, parent)
 
 
 ## Создаёт коллизию для моста
@@ -3983,7 +3465,7 @@ func _create_bridge_collision(vertices: PackedVector3Array, indices: PackedInt32
 
 
 ## Создаёт опоры моста
-func _create_bridge_pillars(points: PackedVector2Array, bridge_height: float, ramp_length: float, total_length: float, elev_data: Dictionary, parent: Node3D) -> void:
+func _create_bridge_pillars(points: PackedVector2Array, bridge_height: float, ramp_length: float, total_length: float, parent: Node3D) -> void:
 	# Короткие и низкие мосты не нуждаются в опорах
 	if bridge_height < 1.5 or total_length < BRIDGE_MIN_LENGTH_FOR_PILLARS:
 		return
@@ -4018,7 +3500,7 @@ func _create_bridge_pillars(points: PackedVector2Array, bridge_height: float, ra
 					var t := (pos - seg_start) / segment_length if segment_length > 0 else 0.0
 					t = clampf(t, 0.0, 1.0)
 					var pillar_pos_2d := p1.lerp(p2, t)
-					var ground_elev := _get_elevation_at_point(pillar_pos_2d, elev_data)
+					var ground_elev := 0.0
 
 					# Создаём опору
 					_create_single_pillar(pillar_pos_2d, ground_elev, bridge_height, parent)
@@ -4069,7 +3551,7 @@ func _create_single_pillar(pos: Vector2, ground_elev: float, bridge_height: floa
 
 
 ## Создаёт отбойники по краям моста
-func _create_bridge_barriers(points: PackedVector2Array, road_width: float, bridge_height: float, ramp_length: float, total_length: float, elev_data: Dictionary, height_offset: float, parent: Node3D) -> void:
+func _create_bridge_barriers(points: PackedVector2Array, road_width: float, bridge_height: float, ramp_length: float, total_length: float, height_offset: float, parent: Node3D) -> void:
 	if points.size() < 2:
 		return
 
@@ -4093,7 +3575,7 @@ func _create_bridge_barriers(points: PackedVector2Array, road_width: float, brid
 			var perp: Vector2 = perpendiculars[i]
 
 			# Базовая высота
-			var base_elev: float = _get_elevation_at_point(p, elev_data) + height_offset
+			var base_elev: float = 0.0 + height_offset
 
 			# Высота моста в этой точке
 			var bridge_y := 0.0
@@ -4206,7 +3688,7 @@ func _create_bridge_barriers(points: PackedVector2Array, road_width: float, brid
 		parent.add_child(body)
 
 
-func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: String, height_offset: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
+func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: String, height_offset: float, parent: Node3D) -> void:
 	var prof_start := 0
 	if _profiler:
 		prof_start = _profiler.start_measure("road_generation")
@@ -4282,9 +3764,9 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 		# Sample elevation at left, center, right — use max(center, edge) to prevent grass mid-road
 		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
-		var h_center: float = _get_elevation_at_point(p, elev_data) + height_offset + z_offset
-		var h_left: float = maxf(_get_elevation_at_point(left_pos, elev_data) + height_offset + z_offset, h_center)
-		var h_right: float = maxf(_get_elevation_at_point(right_pos, elev_data) + height_offset + z_offset, h_center)
+		var h_center: float = 0.0 + height_offset + z_offset
+		var h_left: float = maxf(0.0 + height_offset + z_offset, h_center)
+		var h_right: float = maxf(0.0 + height_offset + z_offset, h_center)
 
 		# Left vertex
 		vertices.append(Vector3(left_pos.x, h_left, left_pos.y))
@@ -4354,7 +3836,7 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 
 # OPTIMIZATION: Road Batching System (Mesh Merging)
 # Добавляет дорогу в batch вместо создания отдельного MeshInstance3D
-func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_offset: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
+func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_offset: float, parent: Node3D) -> void:
 	if nodes.size() < 2:
 		return
 
@@ -4392,7 +3874,6 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 
 	# Клиппинг дороги по границам чанка (с запасом на ширину дороги)
 	# Без этого дороги из Overpass API (загружены с +100м overlap) уходят далеко за чанк,
-	# и _update_chunk_heights применяет к ним elevation из чужого чанка → дороги взмывают в небо.
 	if chunk_key != "initial":
 		var ck_parts: PackedStringArray = chunk_key.split(",")
 		var ck_x := int(ck_parts[0])
@@ -4446,9 +3927,9 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 		# Sample elevation at left, center, right — use max(center, edge) to prevent grass mid-road
 		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
-		var h_center: float = _get_elevation_at_point(p, elev_data) + height_offset + z_offset
-		var h_left: float = maxf(_get_elevation_at_point(left_pos, elev_data) + height_offset + z_offset, h_center)
-		var h_right: float = maxf(_get_elevation_at_point(right_pos, elev_data) + height_offset + z_offset, h_center)
+		var h_center: float = 0.0 + height_offset + z_offset
+		var h_left: float = maxf(0.0 + height_offset + z_offset, h_center)
+		var h_right: float = maxf(0.0 + height_offset + z_offset, h_center)
 
 		# Left vertex
 		batch["vertices"].append(Vector3(left_pos.x, h_left, left_pos.y))
@@ -4537,7 +4018,6 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 			perp = Vector2(-dir_out.y, dir_out.x)
 		perpendiculars[i] = perp
 
-	# Generate vertices (flat — elevation applied later via _update_chunk_heights)
 	var h: float = height_offset + z_offset
 	for i in range(n_points):
 		var p: Vector2 = points[i]
@@ -4678,15 +4158,6 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	# Создаём террейн ПОСЛЕ финализации дорог — используем те же сглажённые точки
 	_create_deferred_terrain(chunk_key)
 
-	# Если elevation финализирован (32x32 grid готов) — применяем высоты.
-	# Все объекты создаются плоскими (elev_data={}), elevation применяется здесь или
-	# в _try_finalize_elevation (если elevation финализируется позже).
-	# Per-mesh meta `_elevation_applied` защищает от повторного применения.
-	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
-		var parent_node: Node3D = _loaded_chunks.get(chunk_key, null)
-		if parent_node and is_instance_valid(parent_node):
-			_update_chunk_heights(chunk_key, parent_node, _chunk_elevations[chunk_key])
-
 	# Измерить общее время финализации
 	if _profiler:
 		_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
@@ -4702,7 +4173,6 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 	var parent_node: Node3D = _loaded_chunks.get(chunk_key, null)
 	if not parent_node or not is_instance_valid(parent_node):
 		return
-	var elev_data: Dictionary = _chunk_elevations.get(chunk_key, {})
 	# Собираем сглажённые коридоры из текущего чанка И соседних
 	# Коридоры хранятся во всех чанках которые пересекают (см. _apply_road_result)
 	var terrain_roads: Array = []
@@ -4751,12 +4221,11 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 	])
 	var task_data := {
 		"chunk_key": chunk_key,
-		"elev_data": elev_data,
 		"road_polylines": terrain_roads,
 		"contours": relevant_contours,
 		"parking": relevant_parking,
 		"chunk_rect": chunk_rect,
-		"chunk_size": chunk_size,
+		"chunk_size": chunk_size
 	}
 	_pending_terrain_tasks += 1
 	WorkerThreadPool.add_task(_compute_terrain_clipping_thread.bind(task_data))
@@ -4765,255 +4234,6 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 	# Очистка произойдёт при _unload_chunk.
 
 
-# Обновляет высоту всех объектов в чанке после загрузки elevation.
-# Пересчитывает y-координаты вершин: new_y = terrain_h + original_y.
-# Обрабатывает: дороги, бордюры, перекрёстки, здания, фонари.
-# Per-mesh meta `_elevation_applied` защищает от повторного применения.
-func _update_chunk_heights(chunk_key: String, chunk_node: Node3D, elev_data: Dictionary) -> void:
-	if not is_instance_valid(chunk_node):
-		return
-
-	var updated_meshes := 0
-
-	for child in chunk_node.get_children():
-		# Road batches: StaticBody3D > MeshInstance3D + CollisionShape3D
-		if child is StaticBody3D and child.name.begins_with("RoadBatch"):
-			for sub in child.get_children():
-				if sub is MeshInstance3D and sub.mesh is ArrayMesh:
-					if _update_mesh_heights(sub, elev_data):
-						updated_meshes += 1
-				elif sub is CollisionShape3D and sub.shape is ConcavePolygonShape3D:
-					_update_collision_heights(sub, elev_data)
-
-		# Other StaticBody3D (curbs, building collisions etc — skip TerrainBody)
-		elif child is StaticBody3D and not child.name.begins_with("Terrain"):
-			for sub in child.get_children():
-				if sub is MeshInstance3D and sub.mesh is ArrayMesh:
-					if _update_mesh_heights(sub, elev_data):
-						updated_meshes += 1
-				elif sub is CollisionShape3D and sub.shape is ConcavePolygonShape3D:
-					_update_collision_heights(sub, elev_data)
-
-		# Building batches: uniform elevation per building (не per-vertex)
-		elif child is MeshInstance3D and child.mesh is ArrayMesh and (child.name.begins_with("BuildingWalls") or child.name == "BuildingRoofs"):
-			if _update_building_batch_heights(child, elev_data):
-				updated_meshes += 1
-
-		# Direct MeshInstance3D: roads, curbs, intersections
-		elif child is MeshInstance3D and child.mesh is ArrayMesh:
-			if not child.name.begins_with("Terrain") and not child.name.begins_with("Building"):
-				if _update_mesh_heights(child, elev_data):
-					updated_meshes += 1
-
-		# Lamp batches: Node3D "LampBatches" > MultiMeshInstance3D + Lights
-		elif child.name == "LampBatches":
-			if not child.has_meta("_elevation_applied"):
-				child.set_meta("_elevation_applied", true)
-				_update_lamp_batch_heights(child, elev_data)
-				updated_meshes += 1
-
-		# Trees: MultiMeshInstance3D "Trees"
-		elif child is MultiMeshInstance3D and child.name == "Trees":
-			if not child.has_meta("_elevation_applied"):
-				child.set_meta("_elevation_applied", true)
-				var mm: MultiMesh = child.multimesh
-				if mm:
-					for i in range(mm.instance_count):
-						var t: Transform3D = mm.get_instance_transform(i)
-						var pos_2d := Vector2(t.origin.x, t.origin.z)
-						var terrain_h: float = _get_elevation_at_point(pos_2d, elev_data)
-						t.origin.y = terrain_h + t.origin.y
-						mm.set_instance_transform(i, t)
-				updated_meshes += 1
-
-		# Окна (WindowBatch): MultiMeshInstance3D с per-instance elevation
-		elif child is MultiMeshInstance3D and child.name == "WindowBatch":
-			if not child.has_meta("_elevation_applied"):
-				child.set_meta("_elevation_applied", true)
-				var mm: MultiMesh = child.multimesh
-				if mm:
-					for i in range(mm.instance_count):
-						var t: Transform3D = mm.get_instance_transform(i)
-						var pos_2d := Vector2(t.origin.x, t.origin.z)
-						var terrain_h: float = _get_elevation_at_point(pos_2d, elev_data)
-						t.origin.y += terrain_h
-						mm.set_instance_transform(i, t)
-				updated_meshes += 1
-
-		# Инфраструктура (светофоры, знаки, неоновые вывески): обновляем position.y если были созданы без elevation
-		elif child.name == "TrafficLight" or child.name.begins_with("YieldSign") or child.name.begins_with("ParkingSign") or child.name.begins_with("NeonSign_"):
-			if not child.has_meta("_elevation_applied"):
-				child.set_meta("_elevation_applied", true)
-				var pos_2d := Vector2(child.position.x, child.position.z)
-				child.position.y = _get_elevation_at_point(pos_2d, elev_data)
-				updated_meshes += 1
-
-	if updated_meshes > 0:
-		print("Elevation: Updated %d meshes in chunk %s" % [updated_meshes, chunk_key])
-
-
-func _update_mesh_heights(mesh_instance: MeshInstance3D, elev_data: Dictionary) -> bool:
-	# Защита от повторного применения (не идемпотентно — задвоит высоты)
-	if mesh_instance.has_meta("_elevation_applied"):
-		return false
-	mesh_instance.set_meta("_elevation_applied", true)
-
-	var arr_mesh: ArrayMesh = mesh_instance.mesh
-	if arr_mesh.get_surface_count() == 0:
-		return false
-
-	var arrays: Array = arr_mesh.surface_get_arrays(0)
-	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-	var new_vertices := PackedVector3Array()
-	new_vertices.resize(vertices.size())
-
-	for i in range(vertices.size()):
-		var v := vertices[i]
-		var terrain_h: float = _get_elevation_at_point(Vector2(v.x, v.z), elev_data)
-		new_vertices[i] = Vector3(v.x, terrain_h + v.y, v.z)
-
-	arrays[Mesh.ARRAY_VERTEX] = new_vertices
-
-	# Пересоздаём surface с обновлёнными вершинами
-	var material: Material = arr_mesh.surface_get_material(0)
-	arr_mesh.clear_surfaces()
-	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	if material:
-		arr_mesh.surface_set_material(0, material)
-	return true
-
-
-## Обновляет высоты building batch mesh (uniform elevation per building).
-## Использует _building_ranges meta с parent node для определения границ зданий.
-func _update_building_batch_heights(mesh_instance: MeshInstance3D, elev_data: Dictionary) -> bool:
-	if mesh_instance.has_meta("_elevation_applied"):
-		return false
-	mesh_instance.set_meta("_elevation_applied", true)
-
-	var parent_node: Node3D = mesh_instance.get_parent()
-	if not parent_node or not parent_node.has_meta("_building_ranges"):
-		# Нет range данных — fallback на per-vertex (лучше чем ничего)
-		return _update_mesh_heights_force(mesh_instance, elev_data)
-
-	var ranges: Array = parent_node.get_meta("_building_ranges")
-	var mesh_name: String = mesh_instance.name
-	var is_roof: bool = mesh_name == "BuildingRoofs"
-
-	var arr_mesh: ArrayMesh = mesh_instance.mesh
-	if arr_mesh.get_surface_count() == 0:
-		return false
-
-	var arrays: Array = arr_mesh.surface_get_arrays(0)
-	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-	var new_vertices: PackedVector3Array = vertices.duplicate()
-
-	# BuildingWalls_panel → "panel_walls", BuildingRoofs → roof
-	var expected_wall_key := mesh_name.substr(14) + "_walls" if not is_roof else ""
-
-	for r in ranges:
-		# Пропускаем здания, которые уже получили elevation при bake
-		if r.get("elev_baked", false):
-			continue
-
-		# Определяем start/count для этого mesh
-		var start: int
-		var count: int
-		if is_roof:
-			start = r["roof_start"]
-			count = r["roof_count"]
-		else:
-			if r["wall_key"] != expected_wall_key:
-				continue
-			start = r["wall_start"]
-			count = r["wall_count"]
-
-		if start < 0 or count <= 0:
-			continue
-
-		# Min elevation по footprint — нижняя точка земли = основание здания
-		var footprint: PackedVector2Array = r["points"]
-		var min_h := 999999.0
-		for p in footprint:
-			var h: float = _get_elevation_at_point(p, elev_data)
-			if h < min_h:
-				min_h = h
-
-		# Применяем uniform elevation ко всем вершинам здания
-		var end_idx: int = mini(start + count, new_vertices.size())
-		for i in range(start, end_idx):
-			new_vertices[i].y += min_h
-
-	arrays[Mesh.ARRAY_VERTEX] = new_vertices
-	var material: Material = arr_mesh.surface_get_material(0)
-	arr_mesh.clear_surfaces()
-	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	if material:
-		arr_mesh.surface_set_material(0, material)
-	return true
-
-
-## Force variant of _update_mesh_heights (skips _elevation_applied check, used as fallback).
-func _update_mesh_heights_force(mesh_instance: MeshInstance3D, elev_data: Dictionary) -> bool:
-	var arr_mesh: ArrayMesh = mesh_instance.mesh
-	if arr_mesh.get_surface_count() == 0:
-		return false
-	var arrays: Array = arr_mesh.surface_get_arrays(0)
-	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-	var new_vertices := PackedVector3Array()
-	new_vertices.resize(vertices.size())
-	for i in range(vertices.size()):
-		var v := vertices[i]
-		var terrain_h: float = _get_elevation_at_point(Vector2(v.x, v.z), elev_data)
-		new_vertices[i] = Vector3(v.x, terrain_h + v.y, v.z)
-	arrays[Mesh.ARRAY_VERTEX] = new_vertices
-	var material: Material = arr_mesh.surface_get_material(0)
-	arr_mesh.clear_surfaces()
-	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	if material:
-		arr_mesh.surface_set_material(0, material)
-	return true
-
-
-func _update_collision_heights(col_shape_node: CollisionShape3D, elev_data: Dictionary) -> void:
-	# Защита от повторного применения
-	if col_shape_node.has_meta("_elevation_applied"):
-		return
-	col_shape_node.set_meta("_elevation_applied", true)
-
-	var shape: ConcavePolygonShape3D = col_shape_node.shape
-	var faces: PackedVector3Array = shape.get_faces()
-	var new_faces := PackedVector3Array()
-	new_faces.resize(faces.size())
-
-	for i in range(faces.size()):
-		var v := faces[i]
-		var terrain_h: float = _get_elevation_at_point(Vector2(v.x, v.z), elev_data)
-		new_faces[i] = Vector3(v.x, terrain_h + v.y, v.z)
-
-	shape.set_faces(new_faces)
-
-
-## Обновляет высоту ламп (MultiMesh transforms + lights) в LampBatches контейнере.
-func _update_lamp_batch_heights(lamp_container: Node3D, elev_data: Dictionary) -> void:
-	for child in lamp_container.get_children():
-		if child is MultiMeshInstance3D and child.multimesh:
-			var mm: MultiMesh = child.multimesh
-			for i in range(mm.instance_count):
-				var t: Transform3D = mm.get_instance_transform(i)
-				var pos_2d := Vector2(t.origin.x, t.origin.z)
-				var terrain_h: float = _get_elevation_at_point(pos_2d, elev_data)
-				t.origin.y = terrain_h + t.origin.y
-				mm.set_instance_transform(i, t)
-		# "Lights" sub-container with OmniLight3D nodes
-		elif child.name == "Lights":
-			for light in child.get_children():
-				if light is Light3D:
-					var pos_2d := Vector2(light.position.x, light.position.z)
-					var terrain_h: float = _get_elevation_at_point(pos_2d, elev_data)
-					light.position.y = terrain_h + light.position.y
-
-
-# Enqueue window batch for progressive finalization (splits buffer fill across frames)
 func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
 	if not _window_batch_data.has(chunk_key):
 		return
@@ -5066,8 +4286,6 @@ func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
 	mm_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 	mm_instance.name = "WindowBatch"
 
-	if _elevation_finalized.has(chunk_key):
-		mm_instance.set_meta("_elevation_applied", true)
 
 	if _draw_call_logging_enabled:
 		_draw_call_stats["windows"] += 1
@@ -5080,7 +4298,7 @@ func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
 		"transforms": transforms,
 		"colors": colors,
 		"parent": parent,
-		"mm_instance": mm_instance,
+		"mm_instance": mm_instance
 	}
 	if not _window_finalize_queue.has(chunk_key):
 		_window_finalize_queue.append(chunk_key)
@@ -5191,10 +4409,8 @@ func update_window_night_mode(is_night: bool) -> void:
 	])
 
 
-
-
 # Создаёт бордюры вдоль дороги (старая версия для обратной совместимости)
-func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_height: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
+func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_height: float, parent: Node3D) -> void:
 	if not enable_curbs or nodes.size() < 2:
 		return
 
@@ -5221,11 +4437,11 @@ func _create_curbs(nodes: Array, road_width: float, road_height: float, curb_hei
 		if points.size() < 2:
 			return
 
-	_create_curbs_from_points(points, road_width, road_height, curb_height, parent, elev_data)
+	_create_curbs_from_points(points, road_width, road_height, curb_height, parent)
 
 
 # Создаёт бордюры из уже сглаженных точек
-func _create_curbs_from_points(points: PackedVector2Array, road_width: float, road_height: float, curb_height: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
+func _create_curbs_from_points(points: PackedVector2Array, road_width: float, road_height: float, curb_height: float, parent: Node3D) -> void:
 	if points.size() < 2:
 		return
 
@@ -5297,8 +4513,8 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 			var perp := Vector2(-dir.y, dir.x)
 
 			# Elevation в центре и на краях — max(edge, center) как дорога
-			var h_center1 := _get_elevation_at_point(p1, elev_data)
-			var h_center2 := _get_elevation_at_point(p2, elev_data)
+			var h_center1 := 0.0
+			var h_center2 := 0.0
 
 			# Левый бордюр
 			var left_inner1 := p1 + perp * (road_width * 0.5)
@@ -5313,10 +4529,10 @@ func _create_curbs_from_points(points: PackedVector2Array, road_width: float, ro
 			var right_outer2 := p2 - perp * (road_width * 0.5 + curb_width)
 
 			# Высота края = max(elevation_edge, elevation_center) — повторяет логику дороги
-			var h_left1 := maxf(_get_elevation_at_point(left_inner1, elev_data), h_center1)
-			var h_left2 := maxf(_get_elevation_at_point(left_inner2, elev_data), h_center2)
-			var h_right1 := maxf(_get_elevation_at_point(right_inner1, elev_data), h_center1)
-			var h_right2 := maxf(_get_elevation_at_point(right_inner2, elev_data), h_center2)
+			var h_left1 := maxf(0.0, h_center1)
+			var h_left2 := maxf(0.0, h_center2)
+			var h_right1 := maxf(0.0, h_center1)
+			var h_right2 := maxf(0.0, h_center2)
 
 			# Высоты для левого бордюра
 			var left_road_y1 := h_left1 + road_height + z_offset
@@ -5488,7 +4704,6 @@ func _compute_curb_collisions_thread(task: Dictionary) -> void:
 	var curb_height: float = task.curb_height
 	var curb_width: float = task.curb_width
 	var z_offset: float = task.z_offset
-	var elev_data: Dictionary = task.elev_data
 
 	var collision_boxes: Array = []
 
@@ -5513,16 +4728,16 @@ func _compute_curb_collisions_thread(task: Dictionary) -> void:
 			var dir := (p2 - p1).normalized()
 			var perp := Vector2(-dir.y, dir.x)
 
-			var h_center1 := _get_elevation_at_point(p1, elev_data)
-			var h_center2 := _get_elevation_at_point(p2, elev_data)
+			var h_center1 := 0.0
+			var h_center2 := 0.0
 			var slab_thickness := 0.02  # 2 см толщина
 			var wall_angle := atan2(p2.y - p1.y, p2.x - p1.x)
 
 			# Левый бордюр — elevation на краю дороги, max с центром
 			var left_edge1 := p1 + perp * (road_width * 0.5)
 			var left_edge2 := p2 + perp * (road_width * 0.5)
-			var h_left1 := maxf(_get_elevation_at_point(left_edge1, elev_data), h_center1)
-			var h_left2 := maxf(_get_elevation_at_point(left_edge2, elev_data), h_center2)
+			var h_left1 := maxf(0.0, h_center1)
+			var h_left2 := maxf(0.0, h_center2)
 			var left_top1 := h_left1 + road_height + curb_height + z_offset
 			var left_top2 := h_left2 + road_height + curb_height + z_offset
 			var left_top_y := (left_top1 + left_top2) / 2.0
@@ -5540,8 +4755,8 @@ func _compute_curb_collisions_thread(task: Dictionary) -> void:
 			# Правый бордюр — elevation на краю дороги, max с центром
 			var right_edge1 := p1 - perp * (road_width * 0.5)
 			var right_edge2 := p2 - perp * (road_width * 0.5)
-			var h_right1 := maxf(_get_elevation_at_point(right_edge1, elev_data), h_center1)
-			var h_right2 := maxf(_get_elevation_at_point(right_edge2, elev_data), h_center2)
+			var h_right1 := maxf(0.0, h_center1)
+			var h_right2 := maxf(0.0, h_center2)
 			var right_top1 := h_right1 + road_height + curb_height + z_offset
 			var right_top2 := h_right2 + road_height + curb_height + z_offset
 			var right_top_y := (right_top1 + right_top2) / 2.0
@@ -5615,7 +4830,7 @@ func _apply_curb_collisions() -> void:
 
 
 # Старая версия без текстур (для совместимости)
-func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: float, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
+func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: float, parent: Node3D, loader: Node) -> void:
 	if nodes.size() < 2:
 		return
 
@@ -5644,8 +4859,8 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: 
 		var perp := Vector2(-dir.y, dir.x) * width * 0.5
 
 		# Получаем высоты для каждой точки
-		var h1 := _get_elevation_at_point(p1, elev_data) + height_offset
-		var h2 := _get_elevation_at_point(p2, elev_data) + height_offset
+		var h1 := 0.0 + height_offset
+		var h2 := 0.0 + height_offset
 
 		var v1 := Vector3(p1.x - perp.x, h1, p1.y - perp.y)
 		var v2 := Vector3(p1.x + perp.x, h1, p1.y + perp.y)
@@ -5663,15 +4878,11 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: 
 	im.surface_end()
 	parent.add_child(mesh)
 
-func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}, way_id: int = 0) -> void:
+func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, way_id: int = 0) -> void:
 	if not enable_buildings or nodes.size() < 3:
 		return
 
-	# Используем финализированные elevation данные (32x32 grid после preprocessing)
-	if elev_data.is_empty():
 		var ck: String = _get_chunk_key_from_node(parent)
-		if ck != "" and _elevation_finalized.has(ck):
-			elev_data = _chunk_elevations[ck]
 
 	var points: PackedVector2Array = []
 	for node in nodes:
@@ -5827,7 +5038,6 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 				_:
 					color = Color(0.65, 0.55, 0.45)  # Стандартный коричневатый
 
-	# Здания создаются плоскими (base_elev=0), elevation применяется через _update_chunk_heights
 	var center := _get_polygon_center(points)
 	var base_elev := 0.0
 
@@ -5877,7 +5087,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 
 	# Добавляем подъезды жилых домов (из building_overrides JSON)
 	if way_id > 0 and _decoration_layer:
-		_add_residential_entrances(points, parent, base_elev, way_id, elev_data)
+		_add_residential_entrances(points, parent, base_elev, way_id)
 
 	# Добавляем входные группы магазинов (из building_overrides JSON)
 	if way_id > 0 and _decoration_layer:
@@ -5885,10 +5095,10 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 
 	# Добавляем кастомные входные группы (МАРС и т.д.)
 	if way_id > 0 and _decoration_layer:
-		_add_custom_entrances_from_override(points, parent, building_height, base_elev, way_id, elev_data)
+		_add_custom_entrances_from_override(points, parent, building_height, base_elev, way_id)
 
 
-func _create_parking(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
+func _create_parking(points: PackedVector2Array, parent: Node3D) -> void:
 	"""Создаёт парковку: асфальтовую поверхность + знак P (знак отложен) + припаркованные машины"""
 	if points.size() < 3:
 		return
@@ -5896,18 +5106,17 @@ func _create_parking(points: PackedVector2Array, elev_data: Dictionary, parent: 
 	# Примечание: полигон уже добавлен в _parking_polygons в первом проходе
 
 	# 1. Создаём асфальтовую поверхность
-	_create_parking_surface(points, elev_data, parent)
+	_create_parking_surface(points, parent)
 
 	# 2. Сохраняем данные для отложенного создания знака
 	# (знак создаётся после загрузки всех чанков, когда все дороги известны)
 	_pending_parking_signs.append({
 		"points": points,
-		"elev_data": elev_data,
 		"parent": parent
 	})
 
 	# 3. Добавляем припаркованные машины (0-2 штуки)
-	_spawn_parked_cars(points, elev_data, parent)
+	_spawn_parked_cars(points, parent)
 
 
 func _find_parking_sign_position(parking_points: PackedVector2Array) -> Dictionary:
@@ -5961,7 +5170,7 @@ func _find_parking_sign_position(parking_points: PackedVector2Array) -> Dictiona
 	return {"position": sign_pos, "rotation": rotation}
 
 
-func _create_parking_surface(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
+func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void:
 	"""Создаёт асфальтовую поверхность парковки"""
 	# Триангулируем полигон
 	var indices := Geometry2D.triangulate_polygon(points)
@@ -5998,7 +5207,7 @@ func _create_parking_surface(points: PackedVector2Array, elev_data: Dictionary, 
 		for j in range(3):
 			var idx = indices[i + j]
 			var p = points[idx]
-			var h = _get_elevation_at_point(p, elev_data) + height_offset
+			var h = 0.0 + height_offset
 
 			# UV координаты для текстуры
 			st.set_uv(Vector2(p.x * 0.1, p.y * 0.1))
@@ -6006,12 +5215,10 @@ func _create_parking_surface(points: PackedVector2Array, elev_data: Dictionary, 
 			st.add_vertex(Vector3(p.x, h, p.y))
 
 	mesh.mesh = st.commit()
-	if not elev_data.is_empty():
-		mesh.set_meta("_elevation_applied", true)
 	parent.add_child(mesh)
 
 
-func _spawn_parked_cars(parking_points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
+func _spawn_parked_cars(parking_points: PackedVector2Array, parent: Node3D) -> void:
 	"""Спавнит 0-2 припаркованных машины на парковке"""
 	if parking_points.size() < 3:
 		return
@@ -6051,7 +5258,7 @@ func _spawn_parked_cars(parking_points: PackedVector2Array, elev_data: Dictionar
 			car = _parked_lada_scene.instantiate()
 
 		# Получаем высоту
-		var elevation: float = _get_elevation_at_point(pos, elev_data)
+		var elevation: float = 0.0
 
 		# Позиционируем
 		car.position = Vector3(pos.x, elevation, pos.y)
@@ -6207,8 +5414,6 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	var body := RigidBody3D.new()
 	body.name = "ParkingSign"
 	body.position = Vector3(pos.x, elevation, pos.y)
-	if elevation != 0.0:
-		body.set_meta("_elevation_applied", true)
 	body.rotation.y = rotation_y
 	body.collision_layer = 4  # Слой 4 - разрушаемые знаки (отдельный от статики)
 	body.collision_mask = 7  # Машины(1) + статика(2) + другие знаки(4)
@@ -6447,7 +5652,7 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 
 
 ## Немедленное создание природного объекта (вызывается из очереди)
-func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
+func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> void:
 	if not is_instance_valid(parent):
 		return
 	if nodes.size() < 3:
@@ -6476,15 +5681,15 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 	# Трава уже покрыта per-chunk terrain, пропускаем чтобы не было z-fighting
 	if texture_key == "grass":
 		return
-	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
+	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, is_water)
 
 	# Генерируем густые деревья внутри лесных полигонов
 	if natural_type in ["wood", "tree_row"]:
-		_generate_trees_in_polygon(points, elev_data, parent, true)
+		_generate_trees_in_polygon(points, parent, true)
 
 
 ## Немедленное создание землепользования (вызывается из очереди)
-func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}, way_id: int = 0) -> void:
+func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, way_id: int = 0) -> void:
 	if not is_instance_valid(parent):
 		return
 	if nodes.size() < 3:
@@ -6499,8 +5704,8 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 
 	# Индустриальные и коммерческие зоны - рисуем забор и генерируем здания внутри
 	if landuse_type in ["industrial", "commercial"]:
-		_create_fence(points, parent, elev_data)
-		_generate_industrial_buildings(points, elev_data, parent)
+		_create_fence(points, parent)
+		_generate_industrial_buildings(points, parent)
 		return
 
 	var texture_key := "grass"
@@ -6525,20 +5730,20 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 		var tree_override = _decoration_layer.get_landuse_tree_override(way_id)
 		if tree_override:
 			var dense_override: bool = tree_override.get("dense", false)
-			_generate_trees_in_polygon(points, elev_data, parent, dense_override)
+			_generate_trees_in_polygon(points, parent, dense_override)
 
 	# Трава уже покрыта per-chunk terrain, пропускаем чтобы не было z-fighting
 	if texture_key == "grass":
 		return
-	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
+	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, is_water)
 
 	# Генерируем густые деревья внутри лесных полигонов
 	if landuse_type == "forest":
-		_generate_trees_in_polygon(points, elev_data, parent, true)
+		_generate_trees_in_polygon(points, parent, true)
 
 
 ## Немедленное создание объекта отдыха (вызывается из очереди)
-func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
+func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> void:
 	if not is_instance_valid(parent):
 		return
 	if nodes.size() < 3:
@@ -6566,26 +5771,22 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, e
 
 	# Добавляем коллизию с группой Park для высокого сопротивления качению
 	if leisure_type in ["park", "garden", "pitch"]:
-		_create_park_collision(points, elev_data, parent)
+		_create_park_collision(points, parent)
 
 	# Генерируем деревья в парках и садах
 	if leisure_type in ["park", "garden"]:
-		_generate_trees_in_polygon(points, elev_data, parent, false)
+		_generate_trees_in_polygon(points, parent, false)
 
 	# Трава уже покрыта per-chunk terrain, пропускаем чтобы не было z-fighting
 	if texture_key == "grass":
 		return
-	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, elev_data, is_water)
+	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, is_water)
 
-func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
+func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node) -> void:
 	if nodes.size() < 3:
 		return
 
-	# Используем финализированные elevation данные
-	if elev_data.is_empty():
 		var ck: String = _get_chunk_key_from_node(parent)
-		if ck != "" and _elevation_finalized.has(ck):
-			elev_data = _chunk_elevations[ck]
 
 	var points: PackedVector2Array = []
 	for node in nodes:
@@ -6606,7 +5807,7 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 	# Здание внутри рисуется отдельно если есть building тег
 	var territory_types := ["school", "kindergarten", "college", "university", "fire_station", "police"]
 	if amenity_type in territory_types:
-		_create_fence(points, parent, elev_data)
+		_create_fence(points, parent)
 		return
 
 	# Заправки не создаём как здания
@@ -6615,7 +5816,7 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 
 	# Парковки обрабатываем отдельно
 	if amenity_type == "parking":
-		_create_parking(points, elev_data, parent)
+		_create_parking(points, parent)
 		return
 
 	# Остальные amenity - создаём как маленькие здания
@@ -6660,10 +5861,9 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 			building_height = 8.0
 			color = Color(0.6, 0.5, 0.5)
 
-	# Здания создаются плоскими (base_elev=0), elevation через _update_chunk_heights
 	_create_3d_building(points, color, building_height, parent, 0.0)
 
-func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictionary = {}) -> void:
+func _create_fence(points: PackedVector2Array, parent: Node3D) -> void:
 	# Создаём забор по контуру территории
 	if points.size() < 3:
 		return
@@ -6696,8 +5896,8 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 		p1 = p1 + outward
 		p2 = p2 + outward
 
-		var h1 := _get_elevation_at_point(p1, elev_data) + 0.12
-		var h2 := _get_elevation_at_point(p2, elev_data) + 0.12
+		var h1 := 0.0 + 0.12
+		var h2 := 0.0 + 0.12
 
 		var v1 := Vector3(p1.x, h1, p1.y)
 		var v2 := Vector3(p2.x, h2, p2.y)
@@ -6724,8 +5924,6 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 
 	mesh.mesh = st.commit()
 	mesh.material_override = material
-	if not elev_data.is_empty():
-		mesh.set_meta("_elevation_applied", true)
 
 	# Добавляем коллизию для забора
 	var body := StaticBody3D.new()
@@ -6747,8 +5945,8 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 		if wall_length < 0.5:
 			continue
 
-		var h1 := _get_elevation_at_point(p1, elev_data) + 0.12
-		var h2 := _get_elevation_at_point(p2, elev_data) + 0.12
+		var h1 := 0.0 + 0.12
+		var h2 := 0.0 + 0.12
 		var avg_h := (h1 + h2) / 2.0
 
 		var wall_center := Vector3((p1.x + p2.x) / 2, avg_h + fence_height / 2, (p1.y + p2.y) / 2)
@@ -6765,7 +5963,7 @@ func _create_fence(points: PackedVector2Array, parent: Node3D, elev_data: Dictio
 
 	parent.add_child(body)
 
-func _create_waterway(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, elev_data: Dictionary = {}) -> void:
+func _create_waterway(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node) -> void:
 	var waterway_type: String = tags.get("waterway", "")
 	var width: float
 
@@ -6781,7 +5979,7 @@ func _create_waterway(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		_:
 			width = 5.0
 
-	_create_path_mesh(nodes, width, COLORS["water"], 0.03, parent, null, elev_data)
+	_create_path_mesh(nodes, width, COLORS["water"], 0.03, parent, null)
 
 func _create_3d_building(points: PackedVector2Array, color: Color, building_height: float, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
 	# Минимум 4 точки для нормального здания (3 - треугольник, плохо)
@@ -7145,33 +6343,9 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 
 	var batch: Dictionary = _building_geo_batch[chunk_key]
 
-	# === BAKE ELEVATION (uniform per building) ===
-	# Здание должно стоять вертикально: одна высота для всех вершин.
-	# Берём min elevation по углам footprint — нижняя точка земли = основание здания.
-	var building_elev := 0.0
-	var elev_baked := false
-	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
-		var elev_data: Dictionary = _chunk_elevations[chunk_key]
-		var min_h := 999999.0
-		for p in points:
-			var h: float = _get_elevation_at_point(p, elev_data)
-			if h < min_h:
-				min_h = h
-		building_elev = min_h
-		elev_baked = true
 
 	var wall_verts: PackedVector3Array = result.wall_vertices
 	var roof_verts: PackedVector3Array = result.roof_vertices
-	if elev_baked:
-		# Сдвигаем все вершины на uniform elevation
-		wall_verts = wall_verts.duplicate()
-		for i in range(wall_verts.size()):
-			wall_verts[i].y += building_elev
-		if roof_verts.size() > 0:
-			roof_verts = roof_verts.duplicate()
-			for i in range(roof_verts.size()):
-				roof_verts[i].y += building_elev
-
 	# === НАКАПЛИВАЕМ СТЕНЫ ===
 	var wall_key: String = texture_type + "_walls"
 	if not batch.has(wall_key):
@@ -7207,23 +6381,20 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 		"roof_start": roof_start,
 		"roof_count": roof_count,
 		"points": points,
-		"elev_baked": elev_baked,
+		"elev_baked": false
 	})
 
-	if elev_baked:
-		batch["_all_baked"] = batch.get("_all_baked", true) and true
-	else:
-		batch["_all_baked"] = false
+	batch["_all_baked"] = false
 
 	# === СОХРАНЯЕМ ДАННЫЕ КОЛЛИЗИЙ ===
 	batch["collisions"].append({
 		"points": points,
-		"base_elev": building_elev if elev_baked else base_elev,
-		"building_height": building_height,
+		"base_elev": base_elev,
+		"building_height": building_height
 	})
 
 	# === ОКНА — вызываем сразу (они сами накапливаются в _window_batch_data) ===
-	_add_building_night_decorations.call_deferred(null, points, building_height, parent, building_elev)
+	_add_building_night_decorations.call_deferred(null, points, building_height, parent, 0.0)
 
 
 ## Создаёт merged ArrayMesh для всех зданий чанка (вызывается при финализации)
@@ -7241,7 +6412,6 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 	# Shadow LOD — начальное значение ON; _update_building_shadows переключает по расстоянию каждые 0.5с
 	var shadow_setting: int = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
-	# Elevation уже baked per-building (uniform) — помечаем mesh'и
 	var all_baked: bool = batch.get("_all_baked", false)
 
 	# === MERGED СТЕНЫ (по типу текстуры) ===
@@ -7267,8 +6437,6 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		mesh_inst.cast_shadow = shadow_setting
 		mesh_inst.visibility_range_end = render_distance
 		mesh_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
-		if all_baked:
-			mesh_inst.set_meta("_elevation_applied", true)
 		parent.add_child(mesh_inst)
 
 		if _draw_call_logging_enabled:
@@ -7294,8 +6462,6 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		roof_inst.cast_shadow = shadow_setting
 		roof_inst.visibility_range_end = render_distance
 		roof_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
-		if all_baked:
-			roof_inst.set_meta("_elevation_applied", true)
 		parent.add_child(roof_inst)
 
 		if _draw_call_logging_enabled:
@@ -7303,15 +6469,13 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 
 	# === КОЛЛИЗИИ (per-building, нельзя объединить) ===
 	# Для не-baked зданий: если elevation уже доступен — вычисляем здесь
-	var has_elev: bool = _elevation_finalized.has(chunk_key) and _base_elevation != 0.0
-	var chunk_elev: Dictionary = _chunk_elevations[chunk_key] if has_elev else {}
 	for coll_data in batch["collisions"]:
 		var coll_elev: float = coll_data["base_elev"]
-		if coll_elev == 0.0 and has_elev:
+		if coll_elev == 0.0 and false:
 			# Вычисляем min elevation по footprint — основание здания на нижней точке
 			var min_h := 999999.0
 			for p in coll_data["points"]:
-				var h: float = _get_elevation_at_point(p, chunk_elev)
+				var h: float = 0.0
 				if h < min_h:
 					min_h = h
 			coll_elev = min_h
@@ -7326,12 +6490,6 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		parent.set_meta("_building_ranges", batch["_building_ranges"])
 
 	_building_geo_batch.erase(chunk_key)
-
-	# Здания с baked elevation уже не нужны в _update_chunk_heights.
-	# Для остальных (elevation ещё не готов) — _update_chunk_heights обработает позже.
-	if not all_baked and _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
-		if is_instance_valid(parent):
-			_update_chunk_heights(chunk_key, parent, _chunk_elevations[chunk_key])
 
 
 ## Обрабатывает готовые результаты из worker threads (вызывается из _process)
@@ -7563,12 +6721,12 @@ func _process_road_queue() -> void:
 			_deferred_manhole_queue.pop_front()
 			continue
 		_deferred_manhole_queue.pop_front()
-		_generate_manholes_fast(item.points, item.width, {}, item.parent)
+		_generate_manholes_fast(item.points, item.width, item.parent)
 	while not _deferred_traffic_queue.is_empty():
 		if (Time.get_ticks_usec() - queue_start) > 3500:
 			break
 		var item: Dictionary = _deferred_traffic_queue.pop_front()
-		_extract_road_for_traffic_fast(item.points, item.tags, {}, item.elevation_info)
+		_extract_road_for_traffic_fast(item.points, item.tags, item.elevation_info)
 
 	if _road_queue.is_empty() and _pending_road_tasks <= 0:
 		# Time budget для финализации — use remaining budget from queue_start
@@ -7704,7 +6862,7 @@ func _process_road_queue() -> void:
 			"start_lat": start_lat,
 			"start_lon": start_lon,
 			"lon_scale": _lon_scale,
-			"way_id": item.get("way_id", 0),
+			"way_id": item.get("way_id", 0)
 		}
 		_pending_road_tasks += 1
 		WorkerThreadPool.add_task(_compute_road_geometry_thread.bind(task_data))
@@ -7749,8 +6907,7 @@ func _process_curb_queue() -> void:
 				"width": item.width,
 				"height_offset": item.height_offset,
 				"curb_height": item.curb_height,
-				"parent": item.parent,
-				"elev_data": item.elev_data
+				"parent": item.parent
 			})
 			smoothed_count += 1
 
@@ -7760,8 +6917,6 @@ func _process_curb_queue() -> void:
 	_record_perf("curb_mesh", Time.get_ticks_usec() - t0)
 
 	# Этап 3: Финализация merged mesh когда все бордюры обработаны
-	# Бордюры создаются плоскими; если elevation финализирован — _finalize_curb_geo_batch
-	# применит высоты, иначе _try_finalize_elevation → _update_chunk_heights обновит позже.
 	if _curb_queue.is_empty() and _curb_smoothed_queue.is_empty() and _curb_mesh_state.is_empty():
 		if not _curb_geo_batch.is_empty():
 			var keys := _curb_geo_batch.keys()
@@ -7842,7 +6997,6 @@ func _init_curb_mesh_state(item: Dictionary) -> void:
 		"curb_height": curb_height,
 		"curb_width": curb_width,
 		"z_offset": z_offset,
-		"elev_data": item.elev_data,
 		"parent": item.parent,
 		"groups": groups,
 		"current_group_idx": 0,
@@ -7865,7 +7019,6 @@ func _process_curb_segments(max_count: int) -> int:
 	var curb_height: float = state.curb_height
 	var curb_width: float = state.curb_width
 	var z_offset: float = state.z_offset
-	var elev_data: Dictionary = state.elev_data
 	var vertices: PackedVector3Array = state.vertices
 	var normals: PackedVector3Array = state.normals
 	var indices: PackedInt32Array = state.indices
@@ -7888,8 +7041,8 @@ func _process_curb_segments(max_count: int) -> int:
 		var perp := Vector2(-dir.y, dir.x)
 
 		# Elevation в центре и на краях — как дорога использует maxf(edge, center)
-		var h_center1 := _get_elevation_at_point(p1, elev_data)
-		var h_center2 := _get_elevation_at_point(p2, elev_data)
+		var h_center1 := 0.0
+		var h_center2 := 0.0
 
 		var left_inner1 := p1 + perp * (road_width * 0.5)
 		var left_outer1 := p1 + perp * (road_width * 0.5 + curb_width)
@@ -7901,10 +7054,10 @@ func _process_curb_segments(max_count: int) -> int:
 		var right_outer2 := p2 - perp * (road_width * 0.5 + curb_width)
 
 		# Высота края дороги = max(elevation_edge, elevation_center) — повторяет логику дороги
-		var h_left1 := maxf(_get_elevation_at_point(left_inner1, elev_data), h_center1)
-		var h_left2 := maxf(_get_elevation_at_point(left_inner2, elev_data), h_center2)
-		var h_right1 := maxf(_get_elevation_at_point(right_inner1, elev_data), h_center1)
-		var h_right2 := maxf(_get_elevation_at_point(right_inner2, elev_data), h_center2)
+		var h_left1 := maxf(0.0, h_center1)
+		var h_left2 := maxf(0.0, h_center2)
+		var h_right1 := maxf(0.0, h_center1)
+		var h_right2 := maxf(0.0, h_center2)
 
 		# Высоты для левого бордюра
 		var left_road_y1 := h_left1 + road_height + z_offset
@@ -8090,7 +7243,6 @@ func _finalize_curb_mesh() -> void:
 		"curb_height": state.curb_height,
 		"curb_width": state.curb_width,
 		"z_offset": state.z_offset,
-		"elev_data": state.elev_data,
 		"parent": parent
 	}
 	WorkerThreadPool.add_task(_compute_curb_collisions_thread.bind(collision_task))
@@ -8127,14 +7279,6 @@ func _finalize_curb_geo_batch(chunk_key: String) -> void:
 
 	parent.add_child(mesh)
 	_curb_geo_batch.erase(chunk_key)
-
-	# Если elevation финализирован — применяем высоты к только что созданным бордюрам.
-	# Per-mesh meta защищает от повторного применения.
-	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
-		if is_instance_valid(parent):
-			# Обновляем только CurbsMerged (не трогаем уже обработанные road batches)
-			if mesh.mesh is ArrayMesh:
-				_update_mesh_heights(mesh, _chunk_elevations[chunk_key])
 
 
 ## Сортирует очередь по расстоянию до игрока (ближайшие первые)
@@ -8223,36 +7367,18 @@ func _process_terrain_objects_queue() -> void:
 		if not is_instance_valid(item.get("parent")):
 			continue
 
-		# Ждём финализации elevation И установки base_elevation — иначе объект создастся
-		# плоским или с абсолютной высотой (до вычитания base_elevation).
-		if enable_elevation:
-			if _base_elevation == 0.0:
-				deferred.append(item)
-				continue
-			var ck: String = _get_chunk_key_from_node(item.parent)
-			if ck != "" and not _elevation_finalized.has(ck):
-				deferred.append(item)
-				continue
-
 		var obj_type: String = item.get("type", "")
 		var t0 := Time.get_ticks_usec()
 
-		# Elevation финализирован — берём данные
-		var elev_data: Dictionary = item.elev_data
-		if elev_data.is_empty():
-			var ck: String = _get_chunk_key_from_node(item.parent)
-			if ck != "" and _elevation_finalized.has(ck):
-				elev_data = _chunk_elevations[ck]
-
 		match obj_type:
 			"natural":
-				_create_natural_immediate(item.nodes, item.tags, item.parent, elev_data)
+				_create_natural_immediate(item.nodes, item.tags, item.parent)
 				_record_perf("terrain_natural", Time.get_ticks_usec() - t0)
 			"landuse":
-				_create_landuse_immediate(item.nodes, item.tags, item.parent, elev_data, item.get("way_id", 0))
+				_create_landuse_immediate(item.nodes, item.tags, item.parent, item.get("way_id", 0))
 				_record_perf("terrain_landuse", Time.get_ticks_usec() - t0)
 			"leisure":
-				_create_leisure_immediate(item.nodes, item.tags, item.parent, elev_data)
+				_create_leisure_immediate(item.nodes, item.tags, item.parent)
 				_record_perf("terrain_leisure", Time.get_ticks_usec() - t0)
 
 		processed += 1
@@ -8291,16 +7417,7 @@ func _process_infrastructure_queue() -> void:
 		if parent == null or not is_instance_valid(parent):
 			continue
 
-		# Пересчитываем elevation из актуальных данных чанка
-		var elevation: float = item.get("elevation", 0.0)
-		var pos: Vector2 = item.get("pos", Vector2.ZERO)
-		if enable_elevation and _base_elevation != 0.0:
-			var cx := int(floor(pos.x / chunk_size))
-			var cz := int(floor(pos.y / chunk_size))
-			var ck := "%d,%d" % [cx, cz]
-			if _elevation_finalized.has(ck) and _chunk_elevations.has(ck):
-				elevation = _get_elevation_at_point(pos, _chunk_elevations[ck])
-
+		var elevation := 0.0
 		var t0 := Time.get_ticks_usec()
 
 		match item_type:
@@ -8327,8 +7444,6 @@ func _process_vegetation_queue() -> void:
 	if _vegetation_queue.is_empty():
 		return
 
-	# Ждём base_elevation (без него elevation будет абсолютным)
-	if enable_elevation and _base_elevation == 0.0:
 		return
 
 	const MAX_CONCURRENT_VEG_TASKS := 4
@@ -8345,9 +7460,6 @@ func _process_vegetation_queue() -> void:
 			var ck: String = _get_chunk_key_from_node(candidate.get("parent"))
 			if ck == "":
 				ck = candidate.get("chunk_key", "")
-			if enable_elevation:
-				if ck != "" and not _elevation_finalized.has(ck):
-					continue  # Elevation не готов — пропускаем
 			# Проверяем что дороги и здания для этого чанка финализированы
 			if ck != "" and _road_batch_data.has(ck):
 				continue  # Дороги ещё не финализированы
@@ -8366,9 +7478,6 @@ func _process_vegetation_queue() -> void:
 		var chunk_key: String = _get_chunk_key_from_node(item.get("parent"))
 		if chunk_key == "":
 			chunk_key = item.get("chunk_key", "")
-		var elev_data: Dictionary = item.get("elev_data", {})
-		if elev_data.is_empty() and chunk_key != "" and _elevation_finalized.has(chunk_key):
-			elev_data = _chunk_elevations[chunk_key]
 
 		var veg_type: String = item.get("type", "")
 
@@ -8377,28 +7486,22 @@ func _process_vegetation_queue() -> void:
 				var task_data := {
 					"points": item.points,
 					"dense": item.dense,
-					"elev_data": elev_data,
 					"chunk_key": chunk_key,
 					"chunk_size": chunk_size,
-					"base_elevation": _base_elevation,
-					"elevation_scale": elevation_scale,
 					"road_spatial_hash": _road_spatial_hash,
-					"parent": item.parent,
+					"parent": item.parent
 				}
 				_pending_veg_tasks += 1
 				WorkerThreadPool.add_task(_compute_trees_thread.bind(task_data))
 			"chunk_trees":
 				var task_data := {
 					"chunk_key": chunk_key,
-					"elev_data": elev_data,
 					"chunk_size": chunk_size,
-					"base_elevation": _base_elevation,
-					"elevation_scale": elevation_scale,
 					"road_spatial_hash": _road_spatial_hash,
 					"building_spatial_hash": _building_spatial_hash,
 					"parking_spatial_hash": _parking_spatial_hash,
 					"parking_polygons": _parking_polygons,
-					"parent": item.parent,
+					"parent": item.parent
 				}
 				_pending_veg_tasks += 1
 				WorkerThreadPool.add_task(_compute_chunk_trees_thread.bind(task_data))
@@ -8997,7 +8100,7 @@ func _create_building_collisions_deferred(body: StaticBody3D, points: PackedVect
 
 		body.add_child(collision)
 
-func _create_polygon_mesh(points: PackedVector2Array, color: Color, height_offset: float, parent: Node3D, elev_data: Dictionary = {}) -> void:
+func _create_polygon_mesh(points: PackedVector2Array, color: Color, height_offset: float, parent: Node3D) -> void:
 	if points.size() < 3:
 		return
 
@@ -9027,9 +8130,9 @@ func _create_polygon_mesh(points: PackedVector2Array, color: Color, height_offse
 			var p1 := points[indices[i]]
 			var p2 := points[indices[i + 1]]
 			var p3 := points[indices[i + 2]]
-			var h1 := _get_elevation_at_point(p1, elev_data) + height_offset
-			var h2 := _get_elevation_at_point(p2, elev_data) + height_offset
-			var h3 := _get_elevation_at_point(p3, elev_data) + height_offset
+			var h1 := 0.0 + height_offset
+			var h2 := 0.0 + height_offset
+			var h3 := 0.0 + height_offset
 			im.surface_add_vertex(Vector3(p1.x, h1, p1.y))
 			im.surface_add_vertex(Vector3(p2.x, h2, p2.y))
 			im.surface_add_vertex(Vector3(p3.x, h3, p3.y))
@@ -9038,7 +8141,7 @@ func _create_polygon_mesh(points: PackedVector2Array, color: Color, height_offse
 
 	parent.add_child(mesh)
 
-func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: String, height_offset: float, parent: Node3D, elev_data: Dictionary = {}, is_water: bool = false) -> void:
+func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: String, height_offset: float, parent: Node3D, is_water: bool = false) -> void:
 	if points.size() < 3:
 		return
 
@@ -9066,7 +8169,7 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 
 	# Добавляем вершины
 	for p in points:
-		var h := _get_elevation_at_point(p, elev_data) + height_offset
+		var h := 0.0 + height_offset
 		vertices.append(Vector3(p.x, h, p.y))
 		uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
 		normals.append(Vector3.UP)
@@ -9121,9 +8224,6 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 		material.albedo_color.a = 0.8
 
 	mesh.material_override = material
-	# Если elevation baked in — помечаем чтобы _update_chunk_heights не задвоил
-	if not elev_data.is_empty():
-		mesh.set_meta("_elevation_applied", true)
 
 	# Track draw calls
 	if _draw_call_logging_enabled:
@@ -9132,7 +8232,7 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 	parent.add_child(mesh)
 
 ## Создаёт коллизию для парка с группой "Park" (очень высокое сопротивление качению)
-func _create_park_collision(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
+func _create_park_collision(points: PackedVector2Array, parent: Node3D) -> void:
 	if points.size() < 3:
 		return
 
@@ -9143,7 +8243,7 @@ func _create_park_collision(points: PackedVector2Array, elev_data: Dictionary, p
 
 	var vertices := PackedVector3Array()
 	for p in points:
-		var h := _get_elevation_at_point(p, elev_data) + 0.01  # Чуть выше террейна
+		var h := 0.0 + 0.01  # Чуть выше террейна
 		vertices.append(Vector3(p.x, h, p.y))
 
 	# Создаём ConcavePolygonShape3D напрямую из vertices/indices (быстрее чем create_trimesh_collision)
@@ -9164,8 +8264,6 @@ func _create_park_collision(points: PackedVector2Array, elev_data: Dictionary, p
 	var col_shape := CollisionShape3D.new()
 	col_shape.shape = shape
 	# Если elevation baked in — помечаем чтобы _update_collision_heights не задвоил
-	if not elev_data.is_empty():
-		col_shape.set_meta("_elevation_applied", true)
 	body.add_child(col_shape)
 
 	parent.add_child(body)
@@ -9253,73 +8351,6 @@ func _get_way_center(nodes: Array) -> Vector2:
 		center += local
 	return center / nodes.size()
 
-## Возвращает актуальные elevation данные для чанка (после preprocessing).
-## Возвращает данные ТОЛЬКО если elevation финализирован (32x32 grid построен).
-## Публичный API: возвращает terrain height в world координатах.
-## Учитывает base_elevation. Возвращает 0 если elevation не финализирован.
-func get_terrain_height_at(world_x: float, world_z: float) -> float:
-	if _base_elevation == 0.0:
-		return 0.0
-	var point := Vector2(world_x, world_z)
-	var cx := int(floor(world_x / chunk_size))
-	var cz := int(floor(world_z / chunk_size))
-	var ck := "%d,%d" % [cx, cz]
-	if _elevation_finalized.has(ck) and _chunk_elevations.has(ck):
-		return _get_elevation_at_point(point, _chunk_elevations[ck])
-	return 0.0
-
-
-func _get_chunk_elev_data(chunk_key: String) -> Dictionary:
-	if chunk_key != "" and _elevation_finalized.has(chunk_key):
-		return _chunk_elevations[chunk_key]
-	return {}
-
-# Получение высоты террейна в точке (локальные координаты в метрах)
-func _get_elevation_at_point(point: Vector2, elev_data: Dictionary) -> float:
-	# Если elev_data пустой — вызывающий код хочет плоские координаты (дороги/бордюры
-	# создаются без elevation, высоты применяются позже через _update_chunk_heights).
-	if elev_data.is_empty():
-		return 0.0
-
-	# Определяем chunk по локальным координатам точки
-	var cx := int(floor(point.x / chunk_size))
-	var cz := int(floor(point.y / chunk_size))
-	var point_chunk_key := "%d,%d" % [cx, cz]
-
-	# Ищем elevation data: сначала финализированный кэш по чанку точки, затем fallback
-	var actual_elev: Dictionary = {}
-	if _elevation_finalized.has(point_chunk_key) and _chunk_elevations.has(point_chunk_key):
-		actual_elev = _chunk_elevations[point_chunk_key]
-	else:
-		# Fallback: точка вне своего чанка, используем переданный elev_data.
-		# Нормализуем по чанку elev_data (сохранённому в "_chunk_key"), а не по чанку точки.
-		actual_elev = elev_data
-		var fallback_key: String = elev_data.get("_chunk_key", "")
-		if fallback_key != "":
-			var parts: PackedStringArray = fallback_key.split(",")
-			cx = int(parts[0])
-			cz = int(parts[1])
-
-	var grid: Array = actual_elev.get("grid", [])
-	var grid_size: int = actual_elev.get("grid_size", 0)
-
-	if grid_size < 2 or grid.size() == 0:
-		return 0.0
-
-	# Нормализуем позицию внутри чанка к [0, 1]
-	# Grid покрывает ровно chunk bbox: [cx*chunk_size .. (cx+1)*chunk_size]
-	# Grid уже в world-z порядке (grid[0]=малый z, grid[N-1]=большой z)
-	var x_norm: float = clamp((point.x - float(cx) * chunk_size) / chunk_size, 0.0, 1.0)
-	var z_norm: float = clamp((point.y - float(cz) * chunk_size) / chunk_size, 0.0, 1.0)
-
-	# Билинейная интерполяция из сетки
-	var elevation: float = ElevationLoaderScript.interpolate_elevation(grid, grid_size, x_norm, z_norm)
-
-	# Возвращаем высоту относительно базовой
-	return (elevation - _base_elevation) * elevation_scale
-
-
-# Создание дерева из 3D модели берёзы
 ## Get chunk key from parent node name (e.g. "Chunk_1_2" -> "1,2")
 func _get_chunk_key_from_node(node: Node3D) -> String:
 	if not node:
@@ -9518,18 +8549,6 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		_tree_batch_data.erase(chunk_key)
 		return
 
-	# Elevation пересчёт
-	var elev_applied := false
-	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0 and _chunk_elevations.has(chunk_key):
-		var elev_data: Dictionary = _chunk_elevations[chunk_key]
-		for transforms in [leaf_transforms, pine_transforms]:
-			for i in range(transforms.size()):
-				var t: Transform3D = transforms[i]
-				var pos_2d := Vector2(t.origin.x, t.origin.z)
-				t.origin.y = _get_elevation_at_point(pos_2d, elev_data)
-				transforms[i] = t
-		elev_applied = true
-
 	# Создаём LOD0 + LOD1 + LOD2(billboard) MultiMesh для каждого типа дерева
 	var draw_calls := 0
 	var tree_configs: Array = []
@@ -9539,7 +8558,7 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 			"transforms": leaf_transforms,
 			"mesh_lod0": _tree_mesh_leaf,
 			"mesh_lod1": _tree_mesh_leaf_lod1,
-			"mesh_lod2": _tree_billboard_leaf,
+			"mesh_lod2": _tree_billboard_leaf
 		})
 	if pine_transforms.size() > 0:
 		tree_configs.append({
@@ -9547,7 +8566,7 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 			"transforms": pine_transforms,
 			"mesh_lod0": _tree_mesh_pine,
 			"mesh_lod1": _tree_mesh_pine_lod1,
-			"mesh_lod2": _tree_billboard_pine,
+			"mesh_lod2": _tree_billboard_pine
 		})
 
 	for config in tree_configs:
@@ -9575,10 +8594,6 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 	# Коллизии деревьев (только для деревьев близко к дороге)
 	for collision_data in batch["collisions"]:
 		var coll_pos: Vector3 = collision_data["position"]
-		if elev_applied:
-			var coll_2d := Vector2(coll_pos.x, coll_pos.z)
-			coll_pos.y = _get_elevation_at_point(coll_2d, _chunk_elevations[chunk_key])
-
 		# Коллизия только для деревьев в ~60м от дороги
 		if not _is_point_near_road(Vector2(coll_pos.x, coll_pos.z), 60.0):
 			continue
@@ -9635,8 +8650,7 @@ func _finalize_billboard_batch_for_chunk(chunk_key: String) -> void:
 	# Создаём каждый билборд
 	for billboard in billboards:
 		var pos: Vector2 = billboard.get_local_position(start_lat, start_lon)
-		var elev_data: Dictionary = _chunk_elevations.get(chunk_key, {})
-		var elevation: float = _get_elevation_at_point(pos, elev_data)
+		var elevation: float = 0.0
 
 		var billboard_mesh: Node3D = _decoration_layer.create_billboard_mesh(billboard, elevation)
 		parent.add_child(billboard_mesh)
@@ -9872,7 +8886,7 @@ func _get_direction_to_nearest_road(pos: Vector2) -> Vector2:
 
 
 # Процедурная генерация деревьев в полигоне (парк, лес) - добавляет в очередь
-func _generate_trees_in_polygon(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D, dense: bool = false) -> void:
+func _generate_trees_in_polygon(points: PackedVector2Array, parent: Node3D, dense: bool = false) -> void:
 	if points.size() < 3:
 		return
 
@@ -9880,7 +8894,6 @@ func _generate_trees_in_polygon(points: PackedVector2Array, elev_data: Dictionar
 	_vegetation_queue.append({
 		"type": "trees",
 		"points": points,
-		"elev_data": elev_data,
 		"parent": parent,
 		"dense": dense
 	})
@@ -9942,36 +8955,11 @@ func _is_point_in_any_parking_threadsafe(point: Vector2, parking_hash: Dictionar
 	return false
 
 
-func _get_elevation_threadsafe(point: Vector2, elev_data: Dictionary, t_chunk_size: float, base_elev: float, elev_scale: float) -> float:
-	if elev_data.is_empty():
-		return 0.0
-	var cx := int(floor(point.x / t_chunk_size))
-	var cz := int(floor(point.y / t_chunk_size))
-	var fallback_key: String = elev_data.get("_chunk_key", "")
-	if fallback_key != "":
-		var parts: PackedStringArray = fallback_key.split(",")
-		cx = int(parts[0])
-		cz = int(parts[1])
-	var grid: Array = elev_data.get("grid", [])
-	var grid_size: int = elev_data.get("grid_size", 0)
-	if grid_size < 2 or grid.size() == 0:
-		return 0.0
-	var x_norm: float = clamp((point.x - float(cx) * t_chunk_size) / t_chunk_size, 0.0, 1.0)
-	var z_norm: float = clamp((point.y - float(cz) * t_chunk_size) / t_chunk_size, 0.0, 1.0)
-	var elevation: float = ElevationLoaderScript.interpolate_elevation(grid, grid_size, x_norm, z_norm)
-	return (elevation - base_elev) * elev_scale
-
-
-# === Воркер-треды для деревьев ===
-
 func _compute_trees_thread(task_data: Dictionary) -> void:
 	var points: PackedVector2Array = task_data.points
 	var dense: bool = task_data.dense
-	var elev_data: Dictionary = task_data.elev_data
 	var chunk_key: String = task_data.chunk_key
 	var t_chunk_size: float = task_data.chunk_size
-	var base_elev: float = task_data.base_elevation
-	var elev_scale: float = task_data.elevation_scale
 	var road_hash: Dictionary = task_data.road_spatial_hash
 
 	var min_x := points[0].x
@@ -10023,7 +9011,7 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 		if _is_point_near_road_threadsafe(test_point, 3.0, road_hash):
 			continue
 
-		var elevation := _get_elevation_threadsafe(test_point, elev_data, t_chunk_size, base_elev, elev_scale)
+		var elevation := 0.0
 		var is_pine := dense and fmod(hash1 * 97.0 + hash2 * 53.0, 1.0) < PINE_MIX_RATIO
 
 		# Детерминистичные масштаб/поворот (не randf для потокобезопасности)
@@ -10052,7 +9040,7 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 		"parent": task_data.parent,
 		"leaf_transforms": leaf_transforms,
 		"pine_transforms": pine_transforms,
-		"collisions": collisions,
+		"collisions": collisions
 	}
 
 	_veg_mutex.lock()
@@ -10063,10 +9051,7 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 
 func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 	var chunk_key: String = task_data.chunk_key
-	var elev_data: Dictionary = task_data.elev_data
 	var t_chunk_size: float = task_data.chunk_size
-	var base_elev: float = task_data.base_elevation
-	var elev_scale: float = task_data.elevation_scale
 	var road_hash: Dictionary = task_data.road_spatial_hash
 	var building_hash: Dictionary = task_data.building_spatial_hash
 	var parking_hash: Dictionary = task_data.parking_spatial_hash
@@ -10107,7 +9092,7 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 		if _is_point_in_any_parking_threadsafe(test_point, parking_hash, parking_polys):
 			continue
 
-		var elevation := _get_elevation_threadsafe(test_point, elev_data, t_chunk_size, base_elev, elev_scale)
+		var elevation := 0.0
 
 		# Детерминистичные масштаб/поворот
 		var scale_hash := fmod(float(seed_value + i * 3571) * 0.7236, 1.0)
@@ -10132,7 +9117,7 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 		"parent": task_data.parent,
 		"leaf_transforms": leaf_transforms,
 		"pine_transforms": pine_transforms,
-		"collisions": collisions,
+		"collisions": collisions
 	}
 
 	_veg_mutex.lock()
@@ -10142,7 +9127,7 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 
 
 # Немедленное создание деревьев (вызывается из очереди) — LEGACY, заменено тредами
-func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D, dense: bool = false) -> void:
+func _create_trees_immediate(points: PackedVector2Array, parent: Node3D, dense: bool = false) -> void:
 	if not is_instance_valid(parent):
 		return
 
@@ -10198,7 +9183,7 @@ func _create_trees_immediate(points: PackedVector2Array, elev_data: Dictionary, 
 		if _is_point_near_road(test_point, 3.0):
 			continue
 
-		var elevation := _get_elevation_at_point(test_point, elev_data)
+		var elevation := 0.0
 
 		# Детерминистичный выбор типа: pine ~15% в лесах
 		var is_pine := dense and fmod(hash1 * 97.0 + hash2 * 53.0, 1.0) < PINE_MIX_RATIO
@@ -10341,7 +9326,7 @@ func _find_road_edge_point(p1: Vector2, p1_on_road: bool, p2: Vector2) -> Vector
 
 
 # Генерирует приподнятый террейн (газон/тротуар) по контурам дорог с коллизией
-func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, parent: Node3D, road_polylines: Array) -> void:
+func _create_chunk_ground_terrain(chunk_key: String, parent: Node3D, road_polylines: Array) -> void:
 	if not is_instance_valid(parent):
 		return
 
@@ -10445,8 +9430,8 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 			# Бордюр 15×15 см в сечении: выступает наружу (к дороге) от края террейна
 			var curb_w := 0.15  # ширина (к дороге)
 			var curb_h := 0.15  # высота
-			var h1 := _get_elevation_at_point(p1, elev_data)
-			var h2 := _get_elevation_at_point(p2, elev_data)
+			var h1 := 0.0
+			var h2 := 0.0
 			var top1 := h1 + sidewalk_height
 			var top2 := h2 + sidewalk_height
 			var bot1 := top1 - curb_h
@@ -10498,8 +9483,6 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 		curb_inst.mesh = curb_mesh
 		curb_inst.material_override = _curb_material
 		curb_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		if not elev_data.is_empty():
-			curb_inst.set_meta("_elevation_applied", true)
 		parent.add_child(curb_inst)
 
 	# 3. Триангулируем все оставшиеся полигоны и собираем меш
@@ -10516,7 +9499,7 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 			continue
 		var base_idx: int = all_vertices.size()
 		for p in poly:
-			var h := _get_elevation_at_point(p, elev_data) + sidewalk_height
+			var h := 0.0 + sidewalk_height
 			all_vertices.append(Vector3(p.x, h, p.y))
 			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
 			all_normals.append(Vector3.UP)
@@ -10554,8 +9537,6 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 	mesh_inst.material_override = material
 	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
-	if not elev_data.is_empty():
-		mesh_inst.set_meta("_elevation_applied", true)
 
 	parent.add_child(mesh_inst)
 
@@ -10645,8 +9626,7 @@ func _compute_terrain_clipping_thread(task_data: Dictionary) -> void:
 	# Отправляем результат в main thread через mutex-protected массив
 	var result := {
 		"chunk_key": chunk_key,
-		"terrain_polys": filtered_polys,
-		"elev_data": task_data.elev_data,
+		"terrain_polys": filtered_polys
 	}
 	_terrain_thread_mutex.lock()
 	_terrain_thread_results.append(result)
@@ -10659,31 +9639,28 @@ func _apply_terrain_thread_results() -> void:
 	if _terrain_thread_results.is_empty():
 		_terrain_thread_mutex.unlock()
 		return
-	# Забираем все готовые результаты
-	var results := _terrain_thread_results.duplicate()
-	_terrain_thread_results.clear()
+	# Забираем один результат за кадр чтобы избежать спайков
+	var result: Dictionary = _terrain_thread_results.pop_front()
 	_terrain_thread_mutex.unlock()
 
-	for result in results:
-		_pending_terrain_tasks -= 1
-		var chunk_key: String = result.chunk_key
-		var terrain_polys: Array[PackedVector2Array] = result.terrain_polys
-		var elev_data: Dictionary = result.elev_data
+	_pending_terrain_tasks -= 1
+	var chunk_key: String = result.chunk_key
+	var terrain_polys: Array[PackedVector2Array] = result.terrain_polys
 
-		var parent: Node3D = _loaded_chunks.get(chunk_key, null)
-		if not parent or not is_instance_valid(parent):
-			continue
+	var parent: Node3D = _loaded_chunks.get(chunk_key, null)
+	if not parent or not is_instance_valid(parent):
+		return
 
-		if terrain_polys.is_empty():
-			print("OSM: ChunkTerrain %s: no polygons after clipping" % chunk_key)
-			continue
+	if terrain_polys.is_empty():
+		print("OSM: ChunkTerrain %s: no polygons after clipping" % chunk_key)
+		return
 
-		_finalize_terrain_mesh(chunk_key, elev_data, parent, terrain_polys)
+	_finalize_terrain_mesh(chunk_key, parent, terrain_polys)
 
 
 ## Финализация террейн меша: триангуляция + бордюры + ArrayMesh + коллизия.
 ## Вызывается из _process_terrain_gen_queue после завершения клиппинга.
-func _finalize_terrain_mesh(chunk_key: String, elev_data: Dictionary, parent: Node3D, terrain_polys: Array[PackedVector2Array]) -> void:
+func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Array[PackedVector2Array]) -> void:
 	if not is_instance_valid(parent):
 		return
 
@@ -10713,8 +9690,8 @@ func _finalize_terrain_mesh(chunk_key: String, elev_data: Dictionary, parent: No
 				continue
 			var curb_w := 0.15
 			var curb_h := 0.15
-			var h1 := _get_elevation_at_point(p1, elev_data)
-			var h2 := _get_elevation_at_point(p2, elev_data)
+			var h1 := 0.0
+			var h2 := 0.0
 			var top1 := h1 + sidewalk_height
 			var top2 := h2 + sidewalk_height
 			var bot1 := top1 - curb_h
@@ -10762,8 +9739,6 @@ func _finalize_terrain_mesh(chunk_key: String, elev_data: Dictionary, parent: No
 		curb_inst.mesh = curb_mesh
 		curb_inst.material_override = _curb_material
 		curb_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		if not elev_data.is_empty():
-			curb_inst.set_meta("_elevation_applied", true)
 		parent.add_child(curb_inst)
 
 	# Триангулируем полигоны
@@ -10780,7 +9755,7 @@ func _finalize_terrain_mesh(chunk_key: String, elev_data: Dictionary, parent: No
 			continue
 		var base_idx: int = all_vertices.size()
 		for p in poly:
-			var h := _get_elevation_at_point(p, elev_data) + sidewalk_height
+			var h := 0.0 + sidewalk_height
 			all_vertices.append(Vector3(p.x, h, p.y))
 			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
 			all_normals.append(Vector3.UP)
@@ -10817,8 +9792,6 @@ func _finalize_terrain_mesh(chunk_key: String, elev_data: Dictionary, parent: No
 	mesh_inst.material_override = material
 	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
-	if not elev_data.is_empty():
-		mesh_inst.set_meta("_elevation_applied", true)
 
 	parent.add_child(mesh_inst)
 
@@ -10844,12 +9817,10 @@ func _finalize_terrain_mesh(chunk_key: String, elev_data: Dictionary, parent: No
 		_draw_call_stats["terrain"] += 1
 
 	# Применяем elevation если уже готов
-	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
-		_update_chunk_heights(chunk_key, parent, elev_data)
 
 
 # Генерация деревьев по всему чанку (на обычной земле, вне дорог и зданий)
-func _generate_trees_for_chunk(chunk_key: String, elev_data: Dictionary, parent: Node3D) -> void:
+func _generate_trees_for_chunk(chunk_key: String, parent: Node3D) -> void:
 	if not enable_vegetation:
 		return
 
@@ -10857,13 +9828,12 @@ func _generate_trees_for_chunk(chunk_key: String, elev_data: Dictionary, parent:
 	_vegetation_queue.append({
 		"type": "chunk_trees",
 		"chunk_key": chunk_key,
-		"elev_data": elev_data,
 		"parent": parent
 	})
 
 
 # Немедленная генерация деревьев по всей площади чанка
-func _create_chunk_trees_immediate(chunk_key: String, elev_data: Dictionary, parent: Node3D) -> void:
+func _create_chunk_trees_immediate(chunk_key: String, parent: Node3D) -> void:
 	if not is_instance_valid(parent):
 		return
 
@@ -10906,7 +9876,7 @@ func _create_chunk_trees_immediate(chunk_key: String, elev_data: Dictionary, par
 		if _is_point_in_any_parking(test_point):
 			continue
 
-		var elevation := _get_elevation_at_point(test_point, elev_data)
+		var elevation := 0.0
 		_add_tree_to_batch(chunk_key, test_point, elevation, parent)
 
 		tree_count += 1
@@ -10915,7 +9885,7 @@ func _create_chunk_trees_immediate(chunk_key: String, elev_data: Dictionary, par
 
 
 # Процедурная генерация промышленных зданий внутри территории
-func _generate_industrial_buildings(points: PackedVector2Array, elev_data: Dictionary, parent: Node3D) -> void:
+func _generate_industrial_buildings(points: PackedVector2Array, parent: Node3D) -> void:
 	if points.size() < 4:
 		return
 
@@ -10988,12 +9958,12 @@ func _generate_industrial_buildings(points: PackedVector2Array, elev_data: Dicti
 				break
 
 		if all_inside:
-			var base_elev := _get_elevation_at_point(bld_center, elev_data)
+			var base_elev := 0.0
 			_create_3d_building(bld_points, building_color, bld_height, parent, base_elev)
 
 
 # Процедурная генерация фонарей вдоль дороги
-func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_data: Dictionary, parent: Node3D) -> void:
+func _generate_street_lamps_along_road(nodes: Array, road_width: float, parent: Node3D) -> void:
 	if not enable_street_lamps or nodes.size() < 2:
 		return
 
@@ -11031,8 +10001,8 @@ func _generate_street_lamps_along_road(nodes: Array, road_width: float, elev_dat
 				var left_on_road := _is_point_near_road(lamp_pos_left, 0.0)
 				var right_on_road := _is_point_near_road(lamp_pos_right, 0.0)
 
-				var elev_left := _get_elevation_at_point(lamp_pos_left, elev_data)
-				var elev_right := _get_elevation_at_point(lamp_pos_right, elev_data)
+				var elev_left := 0.0
+				var elev_right := 0.0
 
 				# Направление к дороге (от фонаря к центру дороги)
 				var dir_to_road_left := -perp  # Левый фонарь смотрит вправо (к дороге)
@@ -11146,7 +10116,7 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 
 
 # Fast variant: accepts pre-computed local_points
-func _generate_street_lamps_fast(local_points: PackedVector2Array, road_width: float, _elev_data: Dictionary, parent: Node3D) -> void:
+func _generate_street_lamps_fast(local_points: PackedVector2Array, road_width: float, parent: Node3D) -> void:
 	if not enable_street_lamps or local_points.size() < 2:
 		return
 
@@ -11207,7 +10177,7 @@ func _generate_street_lamps_fast(local_points: PackedVector2Array, road_width: f
 		next_lamp_dist += lamp_spacing
 
 
-func _generate_manholes_along_road(nodes: Array, road_width: float, elev_data: Dictionary, parent: Node3D) -> void:
+func _generate_manholes_along_road(nodes: Array, road_width: float, parent: Node3D) -> void:
 	"""Генерирует люки вдоль дороги каждые manhole_spacing метров"""
 	if not enable_manholes or nodes.size() < 2:
 		return
@@ -11233,7 +10203,7 @@ func _generate_manholes_along_road(nodes: Array, road_width: float, elev_data: D
 				var road_pos := p1.lerp(p2, t)
 				var manhole_pos := road_pos - perp * offset  # Вправо от центра
 
-				var elev := _get_elevation_at_point(manhole_pos, elev_data)
+				var elev := 0.0
 				_create_manhole_decal(manhole_pos, elev, randf() * TAU, parent)
 				last_manhole = accumulated + pos_along
 
@@ -11243,7 +10213,7 @@ func _generate_manholes_along_road(nodes: Array, road_width: float, elev_data: D
 
 
 # Fast variant: accepts pre-computed local_points
-func _generate_manholes_fast(local_points: PackedVector2Array, road_width: float, _elev_data: Dictionary, parent: Node3D) -> void:
+func _generate_manholes_fast(local_points: PackedVector2Array, road_width: float, parent: Node3D) -> void:
 	if not enable_manholes or local_points.size() < 2:
 		return
 	if not _manhole_albedo or not _manhole_normal:
@@ -11305,7 +10275,7 @@ func _create_manhole_decal(pos: Vector2, elevation: float, rotation: float, pare
 
 # === RESIDENTIAL ENTRANCES BATCH SYSTEM ===
 
-func _add_residential_entrances(points: PackedVector2Array, parent: Node3D, base_elev: float, way_id: int, elev_data: Dictionary) -> void:
+func _add_residential_entrances(points: PackedVector2Array, parent: Node3D, base_elev: float, way_id: int) -> void:
 	"""Добавляет подъезды для здания если они есть в building_overrides"""
 	var override = _decoration_layer.get_building_override_for_way(way_id)
 	if not override or override.entrances.is_empty():
@@ -11340,7 +10310,7 @@ func _add_residential_entrances(points: PackedVector2Array, parent: Node3D, base
 			print("OSM Entrances: no wall found for entrance at (%.6f, %.6f)" % [lat, lon])
 			continue
 
-		var elev := _get_elevation_at_point(wall.closest_point, elev_data)
+		var elev := 0.0
 		var world_pos := Vector3(wall.closest_point.x, elev, wall.closest_point.y)
 		var rotation_y: float = atan2(wall.normal.x, wall.normal.z)
 
@@ -11533,7 +10503,6 @@ func _create_pending_parking_signs() -> void:
 	var created := 0
 	for sign_data in _pending_parking_signs:
 		var points: PackedVector2Array = sign_data.points
-		var elev_data: Dictionary = sign_data.elev_data
 		var parent: Node3D = sign_data.parent
 
 		var sign_result = _find_parking_sign_position(points)
@@ -11542,7 +10511,7 @@ func _create_pending_parking_signs() -> void:
 
 		var sign_pos: Vector2 = sign_result.position
 		var sign_rotation: float = sign_result.rotation
-		var base_elev = _get_elevation_at_point(sign_pos, elev_data)
+		var base_elev = 0.0
 
 		_create_parking_sign(sign_pos, base_elev, sign_rotation, parent)
 		created += 1
@@ -11668,8 +10637,6 @@ func _create_traffic_light_immediate(pos: Vector2, elevation: float, parent: Nod
 	var traffic_light := Node3D.new()
 	traffic_light.name = "TrafficLight"
 	traffic_light.position = Vector3(pos.x, elevation, pos.y)
-	if elevation != 0.0:
-		traffic_light.set_meta("_elevation_applied", true)
 
 	# Столб - тёмно-серый
 	var pole := MeshInstance3D.new()
@@ -11810,8 +10777,6 @@ func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D
 	var body := RigidBody3D.new()
 	body.name = "YieldSign"
 	body.position = Vector3(pos.x, elevation, pos.y)
-	if elevation != 0.0:
-		body.set_meta("_elevation_applied", true)
 	body.collision_layer = 4  # Слой 4 - разрушаемые знаки
 	body.collision_mask = 7  # Машины(1) + статика(2) + другие знаки(4)
 	body.mass = 12.0
@@ -11893,18 +10858,7 @@ func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D
 
 	parent.add_child(body)
 
-# Извлечение данных дороги для навигации NPC
-## Обновляет высоты waypoints в RoadNetwork после финализации elevation.
-func _update_waypoint_heights(chunk_key: String) -> void:
-	var traffic_mgr = get_parent().get_node_or_null("TrafficManager")
-	if not traffic_mgr:
-		return
-	var rn = traffic_mgr.get_road_network() if traffic_mgr.has_method("get_road_network") else null
-	if rn and rn.has_method("update_waypoint_heights_for_chunk"):
-		rn.update_waypoint_heights_for_chunk(chunk_key)
-
-
-func _extract_road_for_traffic(nodes: Array, tags: Dictionary, elev_data: Dictionary, bridge_info: Dictionary = {}) -> void:
+func _extract_road_for_traffic(nodes: Array, tags: Dictionary, bridge_info: Dictionary = {}) -> void:
 	"""Извлекает данные дороги в RoadNetwork для навигации NPC"""
 	# Проверяем наличие TrafficManager
 	if not get_parent().has_node("TrafficManager"):
@@ -11934,11 +10888,11 @@ func _extract_road_for_traffic(nodes: Array, tags: Dictionary, elev_data: Dictio
 	var highway_type: String = tags.get("highway", "residential")
 
 	# Добавляем дорожный сегмент в RoadNetwork (с информацией о мосте если есть)
-	road_network.add_road_segment(local_points, highway_type, chunk_key, elev_data, bridge_info)
+	road_network.add_road_segment(local_points, highway_type, chunk_key, bridge_info)
 
 
 # Fast variant: accepts pre-computed local_points
-func _extract_road_for_traffic_fast(local_points: PackedVector2Array, tags: Dictionary, elev_data: Dictionary, bridge_info: Dictionary = {}) -> void:
+func _extract_road_for_traffic_fast(local_points: PackedVector2Array, tags: Dictionary, bridge_info: Dictionary = {}) -> void:
 	if not get_parent().has_node("TrafficManager"):
 		return
 	var traffic_mgr = get_parent().get_node("TrafficManager")
@@ -11953,7 +10907,7 @@ func _extract_road_for_traffic_fast(local_points: PackedVector2Array, tags: Dict
 	var chunk_z := int(floor(first_point.y / chunk_size))
 	var chunk_key := "%d,%d" % [chunk_x, chunk_z]
 	var highway_type: String = tags.get("highway", "residential")
-	road_network.add_road_segment(local_points, highway_type, chunk_key, elev_data, bridge_info)
+	road_network.add_road_segment(local_points, highway_type, chunk_key, bridge_info)
 
 
 # === NIGHT MODE ===
@@ -12306,8 +11260,6 @@ func _add_neon_sign(center: Vector2, height: float, width: float, rng: RandomNum
 	sign_container.add_child(light)
 
 	sign_container.position = Vector3(center.x, building_elev, center.y)
-	if building_elev != 0.0:
-		sign_container.set_meta("_elevation_applied", true)
 	sign_container.visible = false  # Включается ночью
 
 	parent.add_child(sign_container)
@@ -12681,7 +11633,7 @@ func _add_shop_entrances_from_override(points: PackedVector2Array, parent: Node3
 
 
 func _add_custom_entrances_from_override(points: PackedVector2Array, parent: Node3D,
-		building_height: float, base_elev: float, way_id: int, elev_data: Dictionary) -> void:
+		building_height: float, base_elev: float, way_id: int) -> void:
 	if not _decoration_layer or way_id <= 0:
 		return
 	var override = _decoration_layer.get_building_override_for_way(way_id)
@@ -12701,7 +11653,7 @@ func _add_custom_entrances_from_override(points: PackedVector2Array, parent: Nod
 			print("CustomEntrance: no wall found for %s at (%.6f, %.6f)" % [entrance_type, lat, lon])
 			continue
 
-		var elev := _get_elevation_at_point(wall.closest_point, elev_data)
+		var elev := 0.0
 		var world_pos := Vector3(wall.closest_point.x, elev, wall.closest_point.y)
 		var rotation_y: float = atan2(wall.normal.x, wall.normal.z)
 
@@ -13864,7 +12816,7 @@ func _point_in_polygon_2d(point: Vector2, polygon: PackedVector2Array) -> bool:
 
 ## Создаёт скруглённые бордюры на углах перекрёстка
 ## Для каждой пары смежных дорог — кривая Безье от правого края одной к левому краю следующей
-func _create_intersection_curbs(intersection_idx: int, parent: Node3D, elev_data: Dictionary, height_offset: float) -> void:
+func _create_intersection_curbs(intersection_idx: int, parent: Node3D, height_offset: float) -> void:
 	var center: Vector2 = _intersection_positions[intersection_idx]
 	var roads: Array = _intersection_roads[intersection_idx]
 
@@ -13960,8 +12912,8 @@ func _create_intersection_curbs(intersection_idx: int, parent: Node3D, elev_data
 			var outer2 := p2 + out2 * curb_width
 
 			# Высоты
-			var h1 := _get_elevation_at_point(p1, elev_data)
-			var h2 := _get_elevation_at_point(p2, elev_data)
+			var h1 := 0.0
+			var h2 := 0.0
 			var road_y1 := h1 + height_offset
 			var road_y2 := h2 + height_offset
 			var curb_y1 := road_y1 + curb_height
@@ -14021,15 +12973,13 @@ func _create_intersection_curbs(intersection_idx: int, parent: Node3D, elev_data
 	mesh_instance.mesh = arr_mesh
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	mesh_instance.material_override = _curb_material
-	if not elev_data.is_empty():
-		mesh_instance.set_meta("_elevation_applied", true)
 	parent.add_child(mesh_instance)
 
 
 ## Создаёт заплатку на перекрёстке (чистый асфальт без разметки)
 ## Использует контур перекрёстка если доступен, иначе fallback на эллипс
 ## Каждая вершина следует за elevation terrain + наклон дороги
-func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: int = -1, elev_data: Dictionary = {}, height_offset: float = 0.096) -> void:
+func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: int = -1, height_offset: float = 0.096) -> void:
 	if not _road_textures.has("intersection"):
 		return
 
@@ -14040,7 +12990,7 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 	var z_off := 0.005
 
 	# Elevation в центре перекрёстка
-	var h_center := _get_elevation_at_point(pos, elev_data)
+	var h_center := 0.0
 	var center_y := h_center + height_offset + z_off
 
 	# Центральная вершина (индекс 0)
@@ -14069,7 +13019,7 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 		var range_y := maxf(max_y - min_y, 0.001)
 
 		for cp in contour:
-			var h_edge := _get_elevation_at_point(cp, elev_data)
+			var h_edge := 0.0
 			var vertex_y := h_edge + height_offset + z_off
 			var u := (cp.x - min_x) / range_x
 			var v := (cp.y - min_y) / range_y
@@ -14106,7 +13056,7 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 			var x := pos.x + rx
 			var z_coord := pos.y + ry
 			var edge_pos := Vector2(x, z_coord)
-			var h_edge := _get_elevation_at_point(edge_pos, elev_data)
+			var h_edge := 0.0
 			var vertex_y := h_edge + height_offset + z_off
 			var u := 0.5 + cos(angle) * 0.5
 			var v := 0.5 + sin(angle) * 0.5
@@ -14131,8 +13081,6 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 	)
 	mesh_instance.material_override = material
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	if not elev_data.is_empty():
-		mesh_instance.set_meta("_elevation_applied", true)
 
 	parent.add_child(mesh_instance)
 

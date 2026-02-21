@@ -8,7 +8,6 @@ static func get_all_test_tracks() -> Array:
 		_create_flat_track(),
 		_create_suspension_track(),
 		_create_npc_track(),
-		_create_elevation_track(),
 	]
 
 static func _create_flat_track() -> Dictionary:
@@ -32,9 +31,3 @@ static func _create_npc_track() -> Dictionary:
 		"description": "Овальная трасса с большим количеством NPC машин",
 	}
 
-static func _create_elevation_track() -> Dictionary:
-	return {
-		"track_id": "test_elevation",
-		"track_name": "Рельеф",
-		"description": "Овальная трасса с холмистым рельефом для тестирования elevation",
-	}

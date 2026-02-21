@@ -25,8 +25,6 @@ const _TRACK_NAME_MAP := {
 	"suspension": "test_suspension",
 	"нпс": "test_npc",
 	"npc": "test_npc",
-	"рельеф": "test_elevation",
-	"elevation": "test_elevation",
 }
 
 
@@ -42,7 +40,7 @@ func _ready() -> void:
 				call_deferred("_auto_launch_test_track")
 			else:
 				push_error("RaceState: Unknown test track: ", value)
-				print("RaceState: Available tracks: flat, подвеска/suspension, нпс/npc, рельеф/elevation")
+				print("RaceState: Available tracks: flat, подвеска/suspension, нпс/npc")
 
 
 func _resolve_track_id(name: String) -> String:
