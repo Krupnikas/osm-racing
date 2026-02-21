@@ -6,7 +6,7 @@ extends Node
 ## Всё остальное как в игре — NPC, профилирование, здания, деревья.
 
 @export var test_duration: float = 60.0
-@export var spike_threshold_ms: float = 25.0
+@export var spike_threshold_ms: float = 16.0
 @export var fly_speed: float = 27.78  # 100 km/h in m/s
 @export var fly_height: float = 50.0
 @export var test_location: Vector2 = Vector2(59.150406, 37.948805)  # Cherepovets center
@@ -219,6 +219,11 @@ func _process(delta: float) -> void:
 
 	# Track frame spikes
 	if frame_time_ms > spike_threshold_ms:
+		var viewport_rid: RID = get_viewport().get_viewport_rid()
+		var render_cpu := RenderingServer.viewport_get_measured_render_time_cpu(viewport_rid)
+		var render_gpu := RenderingServer.viewport_get_measured_render_time_gpu(viewport_rid)
+		var process_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+		var physics_ms := Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
 		var spike_data: Dictionary = {
 			"time": test_time,
 			"frame_time": frame_time_ms,
@@ -230,12 +235,38 @@ func _process(delta: float) -> void:
 			"vram_mb": Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0,
 			"camera_z": camera.global_position.z,
 			"chunks": osm_terrain._loaded_chunks.size() if osm_terrain and "_loaded_chunks" in osm_terrain else -1,
+			"render_cpu_ms": render_cpu,
+			"render_gpu_ms": render_gpu,
+			"process_ms": process_ms,
+			"physics_ms": physics_ms,
 		}
+		# Grab per-subsystem breakdown from terrain generator
+		if osm_terrain and "_current_frame_perf" in osm_terrain:
+			var perf: Dictionary = osm_terrain._current_frame_perf
+			if not perf.is_empty():
+				spike_data["perf_breakdown"] = perf.duplicate()
 		frame_spikes.append(spike_data)
-		print("SPIKE #%d: %.1f ms at %.1fs (z=%.0f, chunks=%d, draw=%d)" % [
-			frame_spikes.size(), frame_time_ms, test_time,
-			spike_data.camera_z, spike_data.chunks, spike_data.draw_calls
-		])
+		# Print breakdown for spikes >25ms
+		if frame_time_ms > 25.0:
+			var breakdown_str := ""
+			if spike_data.has("perf_breakdown"):
+				var parts: PackedStringArray = []
+				for key in spike_data.perf_breakdown:
+					var val: float = spike_data.perf_breakdown[key]
+					if val > 0.1:
+						parts.append("%s=%.1fms" % [key, val])
+				breakdown_str = " [%s]" % ", ".join(parts)
+			print("SPIKE #%d: %.1f ms at %.1fs (z=%.0f, chunks=%d) process=%.1f render_cpu=%.1f render_gpu=%.1f physics=%.1f%s" % [
+				frame_spikes.size(), frame_time_ms, test_time,
+				spike_data.camera_z, spike_data.chunks,
+				process_ms, render_cpu, render_gpu, physics_ms,
+				breakdown_str
+			])
+		else:
+			print("spike #%d: %.1f ms at %.1fs (z=%.0f) process=%.1f render_cpu=%.1f" % [
+				frame_spikes.size(), frame_time_ms, test_time,
+				spike_data.camera_z, process_ms, render_cpu
+			])
 
 	# Log frame metrics
 	if logger:
