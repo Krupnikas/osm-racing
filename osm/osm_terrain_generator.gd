@@ -1027,7 +1027,7 @@ func _init_lamp_meshes() -> void:
 
 	# Определяем позицию света — верхняя точка модели
 	var aabb := _lamp_model_mesh.get_aabb()
-	_lamp_light_offset = Vector3(0, aabb.end.y, 0)
+	_lamp_light_offset = Vector3(-0.6, aabb.end.y - 0.3, 0)
 
 	var total_tris := 0
 	for s in range(_lamp_model_mesh.get_surface_count()):
