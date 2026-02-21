@@ -13145,7 +13145,8 @@ func _clip_segment_to_rect(a: Vector2, b: Vector2, min_x: float, max_x: float, m
 
 
 func _smooth_road_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
-	return _smooth_points_adaptive(raw_points, 1.0)
+	var smoothed := _smooth_points_adaptive(raw_points, 1.0)
+	return _remove_polyline_loops(smoothed)
 
 
 ## Адаптивное сглаживание: мало точек на прямых, много на поворотах
@@ -13234,6 +13235,58 @@ func _smooth_points_adaptive(raw_points: PackedVector2Array, min_dist: float) ->
 		result.append(last_point)
 
 	return result
+
+
+## Убирает петли (self-intersection) из полилинии.
+## Проверяет каждый новый сегмент на пересечение со всеми предыдущими.
+## При обнаружении петли — вырезает все точки внутри петли и заменяет на точку пересечения.
+func _remove_polyline_loops(points: PackedVector2Array) -> PackedVector2Array:
+	if points.size() < 4:
+		return points
+	var result := PackedVector2Array()
+	result.append(points[0])
+	var i := 1
+	while i < points.size():
+		var a: Vector2 = result[result.size() - 1]
+		var b: Vector2 = points[i]
+		# Проверяем сегмент a→b на пересечение с предыдущими сегментами result
+		# Пропускаем последний сегмент result (он смежный — всегда «пересекается» в общей точке)
+		var loop_found := false
+		if result.size() >= 3:
+			var j := 0
+			while j < result.size() - 2:
+				var c: Vector2 = result[j]
+				var d: Vector2 = result[j + 1]
+				var ix := _segment_intersect(a, b, c, d)
+				if ix != Vector2.INF:
+					# Петля: вырезаем точки result[j+1..end], заменяем на точку пересечения
+					var new_result := PackedVector2Array()
+					for k in range(j + 1):
+						new_result.append(result[k])
+					new_result.append(ix)
+					result = new_result
+					loop_found = true
+					break
+				j += 1
+		if not loop_found:
+			result.append(b)
+		i += 1
+	return result
+
+
+## Пересечение двух отрезков. Возвращает Vector2.INF если не пересекаются.
+func _segment_intersect(a: Vector2, b: Vector2, c: Vector2, d: Vector2) -> Vector2:
+	var ab: Vector2 = b - a
+	var cd: Vector2 = d - c
+	var denom: float = ab.x * cd.y - ab.y * cd.x
+	if absf(denom) < 1e-10:
+		return Vector2.INF  # Параллельные
+	var ac: Vector2 = c - a
+	var t: float = (ac.x * cd.y - ac.y * cd.x) / denom
+	var u: float = (ac.x * ab.y - ac.y * ab.x) / denom
+	if t > 0.01 and t < 0.99 and u > 0.01 and u < 0.99:
+		return a + ab * t
+	return Vector2.INF
 
 
 ## Удаляет zigzag-точки из полилинии: точки слишком близкие к предыдущему сегменту
