@@ -4050,6 +4050,8 @@ func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
 					var is_full: bool = is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, smoothed_points[i]))
 					if is_full:
 						_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+						if enable_crossing_signs:
+							_enqueue_crossing_signs(current_pts, parent)
 				else:
 					_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
 					last_off_road_pt = smoothed_points[i - 1]
@@ -4067,6 +4069,8 @@ func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
 			var last_pt: Vector2 = smoothed_points[smoothed_points.size() - 1]
 			if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, last_pt)):
 				_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+				if enable_crossing_signs:
+					_enqueue_crossing_signs(current_pts, parent)
 		else:
 			_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
 	return true
