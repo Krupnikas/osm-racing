@@ -23,4 +23,5 @@ mono_crash.*.json
 game.log
 
 # Performance test logs
+*.log
 performance*.log
