@@ -19,6 +19,7 @@ const TreeBillboardShader = preload("res://shaders/tree_billboard.gdshader")
 const BUS_STOP_SCENE = preload("res://models/bus_stop/scene.gltf")
 const GARBAGE_CONTAINER_SCENE = preload("res://models/garbage_container/scene.gltf")
 const STREET_LAMP_SCENE = preload("res://models/street_lamp/Lone_Street_Lamp_on_Hex_post.glb")
+const CROSSING_SIGN_TEXTURE = preload("res://textures/signs/pedestrian_crossing.png")
 const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
 
 
@@ -67,6 +68,7 @@ var _lon_scale := 0.0  # Cached cos(deg_to_rad(start_lat)) * 111000.0
 @export var enable_night_mode_windows := true  # Включить подсветку окон ночью
 @export var enable_frustum_culling := true  # Включить frustum culling чанков
 @export var enable_manholes := true  # Включить люки на дорогах
+@export var enable_crossing_signs := true  # Включить знаки пешеходных переходов
 @export var manhole_spacing := 100.0  # Расстояние между люками (метры)
 
 ## Тестовый режим: провайдер данных вместо HTTP (Callable(lat, lon, size) -> Dictionary)
@@ -124,6 +126,8 @@ var _created_bus_stop_positions: Dictionary = {}  # Позиции создан�
 var _pending_lamps: Array = []  # Отложенные фонари (создаются после загрузки всех парковок)
 var _lamps_created := false  # Флаг что фонари уже созданы
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
+var _crossing_sign_front_mat: StandardMaterial3D
+var _crossing_sign_back_mat: StandardMaterial3D
 var _deferred_lamp_queue: Array = []  # Deferred lamp generation from road apply
 var _deferred_manhole_queue: Array = []  # Deferred manhole generation from road apply
 var _deferred_traffic_queue: Array = []  # Deferred traffic network extraction
@@ -392,6 +396,16 @@ func _ready() -> void:
 
 	# Инициализируем lamp meshes для батчинга
 	_init_lamp_meshes()
+
+	# Материалы знака пешеходного перехода (shared)
+	_crossing_sign_front_mat = StandardMaterial3D.new()
+	_crossing_sign_front_mat.albedo_texture = CROSSING_SIGN_TEXTURE
+	_crossing_sign_front_mat.metallic = 0.3
+	_crossing_sign_front_mat.roughness = 0.5
+	_crossing_sign_back_mat = StandardMaterial3D.new()
+	_crossing_sign_back_mat.albedo_color = Color(0.45, 0.45, 0.42)
+	_crossing_sign_back_mat.metallic = 0.6
+	_crossing_sign_back_mat.roughness = 0.7
 
 	# Инициализируем шейдер окон (один раз для всех батчей)
 	_init_window_shader()
@@ -3291,6 +3305,8 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> v
 						if current_on:
 							if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, smoothed_points[i])):
 								_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+								if enable_crossing_signs:
+									_enqueue_crossing_signs(current_pts, parent)
 						else:
 							_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
 							last_off_road_pt = smoothed_points[i - 1]
@@ -3308,6 +3324,8 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> v
 					var last_pt: Vector2 = smoothed_points[smoothed_points.size() - 1]
 					if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, last_pt)):
 						_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+						if enable_crossing_signs:
+							_enqueue_crossing_signs(current_pts, parent)
 				else:
 					_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
 		else:
@@ -3580,6 +3598,8 @@ func _apply_road_result(result: Dictionary) -> void:
 						var is_full: bool = is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, smoothed_points[i]))
 						if is_full:
 							_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+							if enable_crossing_signs:
+								_enqueue_crossing_signs(current_pts, parent)
 						# иначе: частичное касание — тротуар просто обрывается у дороги
 					else:
 						_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
@@ -3599,6 +3619,8 @@ func _apply_road_result(result: Dictionary) -> void:
 				var last_pt: Vector2 = smoothed_points[smoothed_points.size() - 1]
 				if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, last_pt)):
 					_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+					if enable_crossing_signs:
+						_enqueue_crossing_signs(current_pts, parent)
 			else:
 				_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
 	else:
@@ -6154,6 +6176,137 @@ func _on_sign_hit(other_body: Node, rigid_body: RigidBody3D) -> void:
 		rigid_body.apply_torque_impulse(torque * impulse_strength * 0.1)
 
 
+## Ставит два знака пешеходного перехода (по одному на каждое направление движения)
+func _enqueue_crossing_signs(crossing_pts: PackedVector2Array, parent: Node3D) -> void:
+	if crossing_pts.size() < 2:
+		return
+	var mid := (crossing_pts[0] + crossing_pts[crossing_pts.size() - 1]) * 0.5
+
+
+	# Ищем ближайший дорожный сегмент через spatial hash
+	var cell_x := int(floor(mid.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(mid.y / ROAD_CELL_SIZE))
+	var best_dist := 999.0
+	var best_seg: Dictionary = {}
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not _road_spatial_hash.has(key):
+				continue
+			for seg in _road_spatial_hash[key]:
+				if seg.width < 4.0:
+					continue
+				var closest := Geometry2D.get_closest_point_to_segment(mid, seg.p1, seg.p2)
+				var dist: float = mid.distance_to(closest)
+				if dist < best_dist:
+					best_dist = dist
+					best_seg = seg
+	if best_seg.is_empty() or best_dist > 30.0:
+		return
+
+	var road_dir: Vector2 = (best_seg.p2 - best_seg.p1).normalized()
+	var road_perp: Vector2 = Vector2(-road_dir.y, road_dir.x)
+	var half_road_w: float = best_seg.width / 2.0
+	var sign_offset_along := 2.0
+	var sign_offset_from_edge := 1.0
+
+	# Sign A: правая сторона для машин, едущих в road_dir (знак ДО перехода)
+	var pos_a: Vector2 = mid + road_dir * sign_offset_along + Vector2(road_dir.y, -road_dir.x) * (half_road_w + sign_offset_from_edge)
+	var rot_a: float = atan2(road_dir.x, road_dir.y)
+	_enqueue_single_crossing_sign(pos_a, rot_a, parent)
+
+	# Sign B: правая сторона для машин, едущих в -road_dir (знак ДО перехода для них)
+	var pos_b: Vector2 = mid - road_dir * sign_offset_along + Vector2(-road_dir.y, road_dir.x) * (half_road_w + sign_offset_from_edge)
+	var rot_b: float = atan2(-road_dir.x, -road_dir.y)
+	_enqueue_single_crossing_sign(pos_b, rot_b, parent)
+
+
+func _enqueue_single_crossing_sign(pos: Vector2, rotation_y: float, parent: Node3D) -> void:
+	var safe_pos := _move_object_off_road(pos, 0.3, 3)
+	var pos_key := "cs_%d_%d" % [int(safe_pos.x), int(safe_pos.y)]
+	if _created_sign_positions.has(pos_key):
+		return
+	_created_sign_positions[pos_key] = true
+	_infrastructure_queue.append({
+		"type": "crossing_sign",
+		"pos": safe_pos,
+		"elevation": 0.0,
+		"parent": parent,
+		"rotation": rotation_y,
+	})
+
+
+func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> void:
+	if not is_instance_valid(parent):
+		return
+	var body := RigidBody3D.new()
+	body.name = "CrossingSign"
+	body.position = Vector3(pos.x, elevation, pos.y)
+	if elevation != 0.0:
+		body.set_meta("_elevation_applied", true)
+	body.rotation.y = rotation_y
+	body.collision_layer = 4
+	body.collision_mask = 7
+	body.mass = 15.0
+	body.freeze = true
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	body.contact_monitor = true
+	body.max_contacts_reported = 4
+	body.body_entered.connect(_on_sign_hit.bind(body))
+
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.05
+	shape.height = 2.5
+	collision.shape = shape
+	collision.position.y = 1.25
+	body.add_child(collision)
+
+	var pole := MeshInstance3D.new()
+	var pole_mesh := CylinderMesh.new()
+	pole_mesh.top_radius = 0.03
+	pole_mesh.bottom_radius = 0.04
+	pole_mesh.height = 2.5
+	pole.mesh = pole_mesh
+	var pole_mat := StandardMaterial3D.new()
+	pole_mat.albedo_color = Color(0.5, 0.5, 0.5)
+	pole_mat.metallic = 0.8
+	pole.material_override = pole_mat
+	pole.position.y = 1.25
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	body.add_child(pole)
+
+	# Лицевая сторона знака (текстура пешеходного перехода)
+	var sign_front := MeshInstance3D.new()
+	var front_mesh := QuadMesh.new()
+	front_mesh.size = Vector2(0.6, 0.6)
+	sign_front.mesh = front_mesh
+	sign_front.material_override = _crossing_sign_front_mat
+	sign_front.position = Vector3(0, 2.3, 0.051)
+	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	body.add_child(sign_front)
+
+	# Обратная сторона (серый изношенный металл)
+	var sign_back := MeshInstance3D.new()
+	var back_mesh := QuadMesh.new()
+	back_mesh.size = Vector2(0.6, 0.6)
+	sign_back.mesh = back_mesh
+	sign_back.material_override = _crossing_sign_back_mat
+	sign_back.position = Vector3(0, 2.3, 0.029)
+	sign_back.rotation.y = PI
+	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	body.add_child(sign_back)
+
+	pole.visibility_range_end = 150.0
+	sign_front.visibility_range_end = 150.0
+	sign_back.visibility_range_end = 150.0
+
+	if _draw_call_logging_enabled:
+		_draw_call_stats["signs"] += 2
+
+	parent.add_child(body)
+
+
 ## Немедленное создание природного объекта (вызывается из очереди)
 func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D, elev_data: Dictionary = {}) -> void:
 	if not is_instance_valid(parent):
@@ -7940,6 +8093,9 @@ func _process_infrastructure_queue() -> void:
 			"parking_sign":
 				_create_parking_sign_immediate(item.pos, elevation, item.rotation, item.parent)
 				_record_perf("infra_parking_sign", Time.get_ticks_usec() - t0)
+			"crossing_sign":
+				_create_crossing_sign_immediate(item.pos, elevation, item.get("rotation", 0.0), item.parent)
+				_record_perf("infra_crossing_sign", Time.get_ticks_usec() - t0)
 		processed += 1
 
 
