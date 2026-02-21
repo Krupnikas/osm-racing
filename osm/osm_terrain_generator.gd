@@ -281,7 +281,22 @@ var _vegetation_queue: Array = []  # Очередь {type, points, elev_data, pa
 var _fps_samples: Array[float] = []
 var _fps_update_timer := 0.0
 var _debug_label: Label = null
+var _viewport_rid: RID  # Кешируем viewport RID для CPU/GPU метрик
 @export var show_debug_stats := true  # Показывать статистику на экране
+
+# Скользящее окно для per-function breakdown на экране (последние N кадров)
+var _perf_window: Dictionary = {}  # name → Array[float] (мс, последние 60 кадров)
+const PERF_WINDOW_SIZE := 60  # 1 секунда при 60fps
+# Собираем данные текущего кадра для slow-frame лога
+var _current_frame_perf: Dictionary = {}  # name → float (мс), заполняется каждый кадр
+
+# Slow frame tracking
+var _slow_frame_cooldown := 0.0  # Ограничиваем частоту логирования (не чаще 1 раз в сек)
+
+# Terrain clipping via WorkerThreadPool — результаты из worker потоков
+var _terrain_thread_results: Array = []  # Array of Dictionary {chunk_key, terrain_polys, elev_data}
+var _terrain_thread_mutex: Mutex
+var _pending_terrain_tasks: int = 0
 
 # Debug визуализация границ чанков
 var _show_chunk_boundaries := false
@@ -371,6 +386,7 @@ func _ready() -> void:
 	_curb_collision_mutex = Mutex.new()
 	_road_mutex = Mutex.new()
 	_veg_mutex = Mutex.new()
+	_terrain_thread_mutex = Mutex.new()
 
 	osm_loader = OSMLoaderScript.new()
 	add_child(osm_loader)
@@ -1054,9 +1070,8 @@ func _init_lamp_meshes() -> void:
 
 func _process(delta: float) -> void:
 	var _frame_start := Time.get_ticks_usec()
-
-	# ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ: Логируем только кадры с frame time > 10ms
-	var _log_this_frame := false
+	_current_frame_perf.clear()
+	_slow_frame_cooldown -= delta
 
 	# Обрабатываем готовые здания из worker threads (даже на паузе)
 	var t0 := Time.get_ticks_usec()
@@ -1108,6 +1123,12 @@ func _process(delta: float) -> void:
 	var t_curb := Time.get_ticks_usec() - t0
 	_record_perf("curb_collisions", t_curb)
 
+	# Применяем готовые результаты клиппинга террейна из worker threads
+	t0 = Time.get_ticks_usec()
+	_apply_terrain_thread_results()
+	var t_terrain_gen := Time.get_ticks_usec() - t0
+	_record_perf("terrain_gen", t_terrain_gen)
+
 	# Camera-based frustum culling для чанков (каждые 200ms)
 	_culling_update_timer += delta
 	if _culling_update_timer >= CULLING_UPDATE_INTERVAL:
@@ -1120,17 +1141,67 @@ func _process(delta: float) -> void:
 	var _frame_time := (Time.get_ticks_usec() - _frame_start) / 1000.0
 	_record_perf("total_frame", int(_frame_time * 1000))
 
-	# ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ: Выводим breakdown если кадр > 10ms
-	if _frame_time > 10.0:
-		print("⚠️ SLOW FRAME %.1fms: building=%.1f road=%.1f terrain=%.1f infra=%.1f veg=%.1f curb=%.1fms" % [
-			_frame_time,
-			t_building / 1000.0,
-			t_road / 1000.0,
-			t_terrain / 1000.0,
-			t_infra / 1000.0,
-			t_veg / 1000.0,
-			t_curb / 1000.0
-		])
+	# Детальное логирование при FPS < 30 (frame > 33ms), не чаще раза в секунду
+	var _total_frame_ms := 1000.0 / Engine.get_frames_per_second() if Engine.get_frames_per_second() > 0 else 0.0
+	if _total_frame_ms > 33.0 and _slow_frame_cooldown <= 0.0:
+		_slow_frame_cooldown = 1.0
+		if not _viewport_rid.is_valid():
+			_viewport_rid = get_viewport().get_viewport_rid()
+		var sf_render_cpu := RenderingServer.viewport_get_measured_render_time_cpu(_viewport_rid)
+		var sf_render_gpu := RenderingServer.viewport_get_measured_render_time_gpu(_viewport_rid)
+		var sf_process_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+		var sf_physics_ms := Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+		var sf_draw_calls := int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
+		var sf_vertices := Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)
+		var sf_objects := int(Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME))
+		var sf_phys_bodies := int(Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS))
+		var sf_phys_pairs := int(Performance.get_monitor(Performance.PHYSICS_3D_COLLISION_PAIRS))
+		var sf_nodes := int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+		var sf_resources := int(Performance.get_monitor(Performance.OBJECT_RESOURCE_COUNT))
+		var sf_vram := Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0
+		# GPU timing на macOS/Metal может возвращать 0 — не показывать misleading label
+		var sf_bottleneck: String
+		if sf_render_gpu < 0.01 and sf_render_cpu < 0.01:
+			sf_bottleneck = "GPU timing N/A"
+		elif sf_render_cpu > sf_render_gpu:
+			sf_bottleneck = "CPU-bound"
+		else:
+			sf_bottleneck = "GPU-bound"
+		print("")
+		print("===== SLOW FRAME #%d (%.0f FPS, %.1fms) [%s] =====" % [
+			Engine.get_process_frames(), Engine.get_frames_per_second(), _total_frame_ms, sf_bottleneck])
+		print("  Render: CPU=%.1fms GPU=%.1fms | Godot: Process=%.1fms Physics=%.1fms" % [
+			sf_render_cpu, sf_render_gpu, sf_process_ms, sf_physics_ms])
+		# Our _process breakdown (этот кадр)
+		print("  OSM _process: %.1fms breakdown:" % _frame_time)
+		print("    building_results=%.2fms road_queue=%.2fms terrain_queue=%.2fms" % [
+			t_building / 1000.0, t_road / 1000.0, t_terrain / 1000.0])
+		print("    infra_queue=%.2fms vegetation_queue=%.2fms veg_results_apply=%.2fms" % [
+			t_infra / 1000.0, t_veg / 1000.0, t_veg_apply / 1000.0])
+		print("    curb_collisions=%.2fms terrain_gen=%.2fms" % [t_curb / 1000.0, t_terrain_gen / 1000.0])
+		# Unaccounted time (разница между total и суммой подсистем)
+		var accounted := (t_building + t_road + t_terrain + t_infra + t_veg + t_veg_apply + t_curb + t_terrain_gen) / 1000.0
+		print("    unaccounted=%.2fms (overhead/other)" % maxf(0.0, _frame_time - accounted))
+		# Scene stats
+		print("  Scene: draws=%d verts=%.1fM objects=%d nodes=%d resources=%d" % [
+			sf_draw_calls, sf_vertices / 1_000_000.0, sf_objects, sf_nodes, sf_resources])
+		print("  Physics: bodies=%d pairs=%d | VRAM=%.0fMB" % [
+			sf_phys_bodies, sf_phys_pairs, sf_vram])
+		# Queues
+		print("  Queues: roads=%d terrain=%d infra=%d buildings=%d curbs=%d" % [
+			_road_queue.size(), _terrain_objects_queue.size(), _infrastructure_queue.size(),
+			_building_results.size(), _curb_queue.size() + _curb_smoothed_queue.size()])
+		# Loaded chunks
+		print("  Chunks loaded: %d, loading: %d" % [_loaded_chunks.size(), _loading_chunks.size()])
+		# Draw call breakdown по категориям (если есть)
+		if _draw_call_logging_enabled:
+			var dc_parts: PackedStringArray = []
+			for cat in _draw_call_stats:
+				if _draw_call_stats[cat] > 0:
+					dc_parts.append("%s=%d" % [cat, _draw_call_stats[cat]])
+			if dc_parts.size() > 0:
+				print("  Draw calls by type: %s" % " ".join(dc_parts))
+		print("===========================================")
 
 	_perf_frame_count += 1
 	if _perf_enabled and _perf_frame_count % 600 == 0:  # Каждые 10 сек при 60fps
@@ -1276,7 +1347,7 @@ func _check_initial_load_complete() -> void:
 	var chunk_progress: float = float(loaded_count) / float(max(1, total_chunks))  # 0.0-1.0
 
 	# Считаем размер всех очередей
-	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + _pending_road_tasks + _pending_veg_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size()
+	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + _pending_road_tasks + _pending_veg_tasks + _pending_terrain_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size()
 
 	# DEBUG: Детальное логирование очередей
 	if loaded_count >= total_chunks and total_queued > 0:
@@ -1859,6 +1930,20 @@ func _unload_chunk(chunk_key: String) -> void:
 		var pending_idx := _pending_batch_chunks.find(chunk_key)
 		if pending_idx >= 0:
 			_pending_batch_chunks.remove_at(pending_idx)
+
+		# Clean up terrain roads data for this chunk
+		_chunk_terrain_roads.erase(chunk_key)
+
+		# Clean up pending terrain thread results for this chunk
+		_terrain_thread_mutex.lock()
+		var filtered_terrain: Array = []
+		for tr in _terrain_thread_results:
+			if tr.chunk_key != chunk_key:
+				filtered_terrain.append(tr)
+			else:
+				_pending_terrain_tasks -= 1
+		_terrain_thread_results = filtered_terrain
+		_terrain_thread_mutex.unlock()
 
 		# Prune invalid window batch materials (freed with chunk node)
 		var valid_mats: Array[ShaderMaterial] = []
@@ -3653,23 +3738,55 @@ func _apply_road_result(result: Dictionary) -> void:
 			else:
 				batch["indices"].append_array(src_indices)
 
-	# Строим коридор-полигон напрямую из вершин дороги для выреза террейна
-	# Вершины идут парами: [left0, right0, left1, right1, ...]
-	var road_verts: PackedVector3Array = result.vertices
-	if not is_bridge and highway_type not in ["footway", "path", "cycleway", "track", "steps"] and road_verts.size() >= 4:
-		var n_pairs: int = road_verts.size() / 2
-		var corridor := PackedVector2Array()
-		# Left edge forward
-		for i in range(n_pairs):
-			var v: Vector3 = road_verts[i * 2]
-			corridor.append(Vector2(v.x, v.z))
-		# Right edge backward
-		for i in range(n_pairs - 1, -1, -1):
-			var v: Vector3 = road_verts[i * 2 + 1]
-			corridor.append(Vector2(v.x, v.z))
-		if not _chunk_terrain_roads.has(chunk_key):
-			_chunk_terrain_roads[chunk_key] = []
-		_chunk_terrain_roads[chunk_key].append(corridor)
+	# Строим коридор-полигон из НЕОБРЕЗАННЫХ сглаженных точек дороги для выреза террейна
+	# Используем smoothed_points + width → перпендикуляры → left edge + right edge
+	# Это гарантирует что коридор покрывает всю длину дороги и совпадает с мешем
+	if not is_bridge and highway_type not in ["footway", "path", "cycleway", "track", "steps"] and smoothed_points.size() >= 2:
+		var validated: PackedVector2Array = _validate_road_direction(smoothed_points)
+		if validated.size() >= 2:
+			var half_w: float = width * 0.5
+			var n_pts: int = validated.size()
+			# Вычисляем перпендикуляры (аналогично _add_road_to_batch_fast)
+			var perps := PackedVector2Array()
+			perps.resize(n_pts)
+			for i in range(n_pts):
+				var perp: Vector2
+				if i == 0:
+					var d: Vector2 = (validated[1] - validated[0]).normalized()
+					perp = Vector2(-d.y, d.x)
+				elif i == n_pts - 1:
+					var d: Vector2 = (validated[i] - validated[i - 1]).normalized()
+					perp = Vector2(-d.y, d.x)
+				else:
+					var d: Vector2 = (validated[i + 1] - validated[i]).normalized()
+					perp = Vector2(-d.y, d.x)
+				perps[i] = perp
+			# Коридор: left edge forward, right edge backward
+			var corridor := PackedVector2Array()
+			for i in range(n_pts):
+				corridor.append(validated[i] - perps[i] * half_w)
+			for i in range(n_pts - 1, -1, -1):
+				corridor.append(validated[i] + perps[i] * half_w)
+			# Регистрируем во ВСЕХ чанках, которые коридор пересекает
+			var corr_min_x := corridor[0].x
+			var corr_max_x := corridor[0].x
+			var corr_min_z := corridor[0].y
+			var corr_max_z := corridor[0].y
+			for ci in range(1, corridor.size()):
+				corr_min_x = minf(corr_min_x, corridor[ci].x)
+				corr_max_x = maxf(corr_max_x, corridor[ci].x)
+				corr_min_z = minf(corr_min_z, corridor[ci].y)
+				corr_max_z = maxf(corr_max_z, corridor[ci].y)
+			var ck0_x := int(floorf(corr_min_x / chunk_size))
+			var ck1_x := int(floorf(corr_max_x / chunk_size))
+			var ck0_z := int(floorf(corr_min_z / chunk_size))
+			var ck1_z := int(floorf(corr_max_z / chunk_size))
+			for cx in range(ck0_x, ck1_x + 1):
+				for cz in range(ck0_z, ck1_z + 1):
+					var ck := "%d,%d" % [cx, cz]
+					if not _chunk_terrain_roads.has(ck):
+						_chunk_terrain_roads[ck] = []
+					_chunk_terrain_roads[ck].append(corridor)
 
 	# Curbs
 	if curb_height > 0.0:
@@ -4577,7 +4694,8 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		if total_time_ms > 8.0:
 			print("⚠️ SLOW: road batch finalization took %.1f ms for chunk %s" % [total_time_ms, chunk_key])
 
-## Создаёт террейн чанка используя сглажённые точки из road rendering thread
+## Создаёт террейн чанка используя сглажённые точки из road rendering thread.
+## Теперь НЕ выполняет тяжёлый клиппинг синхронно, а ставит задачу в инкрементальную очередь.
 func _create_deferred_terrain(chunk_key: String) -> void:
 	if chunk_key == "" or chunk_key == "initial":
 		return
@@ -4585,7 +4703,8 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 	if not parent_node or not is_instance_valid(parent_node):
 		return
 	var elev_data: Dictionary = _chunk_elevations.get(chunk_key, {})
-	# Собираем коридоры из текущего чанка И соседних (дороги могут проходить через чанк без узлов в нём)
+	# Собираем сглажённые коридоры из текущего чанка И соседних
+	# Коридоры хранятся во всех чанках которые пересекают (см. _apply_road_result)
 	var terrain_roads: Array = []
 	var ck_parts: PackedStringArray = chunk_key.split(",")
 	var ck_x := int(ck_parts[0])
@@ -4595,35 +4714,55 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 			var nk := "%d,%d" % [ck_x + dx, ck_z + dz]
 			if _chunk_terrain_roads.has(nk):
 				terrain_roads.append_array(_chunk_terrain_roads[nk])
-	# Дополнительно: строим коридоры из spatial hash для дорог без узлов в чанке
-	# (длинные шоссе проходят через чанк, но все узлы — в соседних)
 	var ch_min_x := float(ck_x) * chunk_size
 	var ch_max_x := ch_min_x + chunk_size
 	var ch_min_z := float(ck_z) * chunk_size
 	var ch_max_z := ch_min_z + chunk_size
-	var cell_x0 := int(floor(ch_min_x / ROAD_CELL_SIZE))
-	var cell_x1 := int(floor(ch_max_x / ROAD_CELL_SIZE))
-	var cell_z0 := int(floor(ch_min_z / ROAD_CELL_SIZE))
-	var cell_z1 := int(floor(ch_max_z / ROAD_CELL_SIZE))
-	for cx in range(cell_x0, cell_x1 + 1):
-		for cz in range(cell_z0, cell_z1 + 1):
-			var key := Vector2i(cx, cz)
-			if not _road_spatial_hash.has(key):
-				continue
-			for seg in _road_spatial_hash[key]:
-				if seg.width < 4.0:
-					continue
-				var hw: float = seg.width * 0.5
-				# Простой коридор-прямоугольник из сегмента
-				var dir: Vector2 = (seg.p2 - seg.p1).normalized()
-				var perp := Vector2(-dir.y, dir.x)
-				var corridor := PackedVector2Array([
-					seg.p1 + perp * hw, seg.p2 + perp * hw,
-					seg.p2 - perp * hw, seg.p1 - perp * hw,
-				])
-				terrain_roads.append(corridor)
-	_create_chunk_ground_terrain(chunk_key, elev_data, parent_node, terrain_roads)
-	_chunk_terrain_roads.erase(chunk_key)
+
+	# Собираем перекрёстки и парковки, относящиеся к этому чанку (предфильтрация)
+	var relevant_contours: Array[PackedVector2Array] = []
+	var relevant_contour_positions: Array[Vector2] = []
+	for i in range(_intersection_contours.size()):
+		var ipos: Vector2 = _intersection_positions[i]
+		if ipos.x >= ch_min_x - 30.0 and ipos.x <= ch_max_x + 30.0 and ipos.y >= ch_min_z - 30.0 and ipos.y <= ch_max_z + 30.0:
+			var contour: PackedVector2Array = _intersection_contours[i]
+			if contour.size() >= 3:
+				relevant_contours.append(contour)
+				relevant_contour_positions.append(ipos)
+
+	var relevant_parking: Array[PackedVector2Array] = []
+	for parking_poly in _parking_polygons:
+		if parking_poly.size() < 3:
+			continue
+		var in_chunk := false
+		for pp in parking_poly:
+			if pp.x >= ch_min_x - 5.0 and pp.x <= ch_max_x + 5.0 and pp.y >= ch_min_z - 5.0 and pp.y <= ch_max_z + 5.0:
+				in_chunk = true
+				break
+		if in_chunk:
+			relevant_parking.append(parking_poly)
+
+	# Отправляем клиппинг в worker thread (тяжёлая операция O(n²))
+	var chunk_rect := PackedVector2Array([
+		Vector2(ch_min_x, ch_min_z),
+		Vector2(ch_max_x, ch_min_z),
+		Vector2(ch_max_x, ch_max_z),
+		Vector2(ch_min_x, ch_max_z),
+	])
+	var task_data := {
+		"chunk_key": chunk_key,
+		"elev_data": elev_data,
+		"road_polylines": terrain_roads,
+		"contours": relevant_contours,
+		"parking": relevant_parking,
+		"chunk_rect": chunk_rect,
+		"chunk_size": chunk_size,
+	}
+	_pending_terrain_tasks += 1
+	WorkerThreadPool.add_task(_compute_terrain_clipping_thread.bind(task_data))
+	# NOTE: НЕ удаляем _chunk_terrain_roads[chunk_key] здесь — соседние чанки
+	# могут ещё не получить свой террейн и будут ссылаться на наши коридоры.
+	# Очистка произойдёт при _unload_chunk.
 
 
 # Обновляет высоту всех объектов в чанке после загрузки elevation.
@@ -7286,19 +7425,95 @@ func _update_debug_stats(delta: float) -> void:
 	var p1_idx := int(sorted_fps.size() * 0.01)
 	var fps_1pct: float = sorted_fps[p1_idx] if p1_idx < sorted_fps.size() else 0.0
 
+	# CPU/GPU render time
+	if not _viewport_rid.is_valid():
+		_viewport_rid = get_viewport().get_viewport_rid()
+	var render_cpu := RenderingServer.viewport_get_measured_render_time_cpu(_viewport_rid)
+	var render_gpu := RenderingServer.viewport_get_measured_render_time_gpu(_viewport_rid)
+
+	# Godot process + physics
+	var process_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+	var physics_ms := Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+
+	# Render stats
+	var draw_calls := int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
+	var vertices := Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)
+	var vertices_str := "%.1fM" % (vertices / 1_000_000.0) if vertices >= 1_000_000 else "%.0fK" % (vertices / 1000.0)
+
+	# Frame time
+	var frame_ms := 1000.0 / fps if fps > 0 else 0.0
+
+	# Physics stats
+	var phys_bodies := int(Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS))
+	var phys_pairs := int(Performance.get_monitor(Performance.PHYSICS_3D_COLLISION_PAIRS))
+	var nodes := int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
+	var vram := Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0
+
 	# Размеры очередей
 	var road_q := _road_queue.size()
 	var terrain_q := _terrain_objects_queue.size()
 	var infra_q := _infrastructure_queue.size()
 	var building_q := _building_results.size()
+	var curb_q := _curb_queue.size() + _curb_smoothed_queue.size()
 
-	_debug_label.text = """FPS: %.0f (avg: %.0f, 1%%: %.0f, min: %.0f)
-Queues:
-  Roads: %d
-  Terrain: %d
-  Infra: %d
-  Buildings: %d
-Chunks: %d loaded""" % [fps, avg_fps, fps_1pct, min_fps, road_q, terrain_q, infra_q, building_q, _loaded_chunks.size()]
+	# Определяем bottleneck (GPU timing на macOS/Metal может возвращать 0)
+	var bottleneck: String
+	if render_gpu < 0.01 and render_cpu < 0.01:
+		bottleneck = "N/A"
+	elif render_cpu > render_gpu:
+		bottleneck = "CPU"
+	else:
+		bottleneck = "GPU"
+
+	# Собираем per-function breakdown из скользящего окна
+	var func_lines := ""
+	# Порядок функций для отображения (от самых тяжёлых)
+	var func_order: Array[String] = [
+		"building_results", "road_queue", "terrain_queue",
+		"infra_queue", "vegetation_queue", "veg_results_apply",
+		"curb_collisions", "terrain_gen", "chunk_culling", "total_frame"
+	]
+	var short_names: Dictionary = {
+		"building_results": "bld",
+		"road_queue": "road",
+		"terrain_queue": "ter",
+		"infra_queue": "inf",
+		"vegetation_queue": "veg",
+		"veg_results_apply": "veg_ap",
+		"curb_collisions": "curb",
+		"terrain_gen": "tgen",
+		"chunk_culling": "cull",
+		"total_frame": "TOTAL"
+	}
+	for fn in func_order:
+		if not _perf_window.has(fn):
+			continue
+		var win: Array = _perf_window[fn]
+		if win.is_empty():
+			continue
+		var w_avg := 0.0
+		var w_max := 0.0
+		for v in win:
+			w_avg += v
+			if v > w_max:
+				w_max = v
+		w_avg /= win.size()
+		if fn == "total_frame":
+			func_lines += "\n  %s: %.1f/%.1f" % [short_names[fn], w_avg, w_max]
+		elif w_avg >= 0.05 or w_max >= 0.5:  # Показываем если avg > 0.05ms или max > 0.5ms
+			func_lines += " %s:%.1f/%.1f" % [short_names[fn], w_avg, w_max]
+
+	var tgen_q := _pending_terrain_tasks
+
+	_debug_label.text = "FPS: %.0f (avg:%.0f 1%%:%.0f min:%.0f)\nFrame: %.1fms [%s] CPU:%.1f GPU:%.1f\nProcess: %.1fms | Physics: %.1fms\nDraw: %d | Verts: %s | VRAM: %.0fMB\nBodies: %d | Pairs: %d | Nodes: %d\nQueues: R:%d T:%d I:%d B:%d C:%d TG:%d | Chunks: %d\n_process avg/max (ms):%s" % [
+		fps, avg_fps, fps_1pct, min_fps,
+		frame_ms, bottleneck, render_cpu, render_gpu,
+		process_ms, physics_ms,
+		draw_calls, vertices_str, vram,
+		phys_bodies, phys_pairs, nodes,
+		road_q, terrain_q, infra_q, building_q, curb_q, tgen_q, _loaded_chunks.size(),
+		func_lines
+	]
 
 
 ## Обрабатывает очередь дорог (3 дороги за кадр)
@@ -7329,6 +7544,10 @@ func _process_road_queue() -> void:
 		if (Time.get_ticks_usec() - queue_start) > 3000:
 			break
 		var item: Dictionary = _deferred_lamp_queue[0]
+		# Проверяем что parent (чанк) ещё существует — мог быть выгружен
+		if not is_instance_valid(item.parent):
+			_deferred_lamp_queue.pop_front()
+			continue
 		# Process incrementally — only process a portion of the road per frame
 		var start_idx: int = item.get("_lamp_seg_idx", 0)
 		var processed: int = _generate_street_lamps_incremental(item.points, item.width, item.parent, start_idx, queue_start, 3000)
@@ -7339,7 +7558,11 @@ func _process_road_queue() -> void:
 	while not _deferred_manhole_queue.is_empty():
 		if (Time.get_ticks_usec() - queue_start) > 3000:
 			break
-		var item: Dictionary = _deferred_manhole_queue.pop_front()
+		var item: Dictionary = _deferred_manhole_queue[0]
+		if not is_instance_valid(item.parent):
+			_deferred_manhole_queue.pop_front()
+			continue
+		_deferred_manhole_queue.pop_front()
 		_generate_manholes_fast(item.points, item.width, {}, item.parent)
 	while not _deferred_traffic_queue.is_empty():
 		if (Time.get_ticks_usec() - queue_start) > 3500:
@@ -10356,6 +10579,273 @@ func _create_chunk_ground_terrain(chunk_key: String, elev_data: Dictionary, pare
 
 	if _draw_call_logging_enabled:
 		_draw_call_stats["terrain"] += 1
+
+
+## Worker thread: выполняет тяжёлый полигон-клиппинг террейна вне main thread.
+## Geometry2D thread-safe в Godot 4.x (утилитарный класс без state).
+func _compute_terrain_clipping_thread(task_data: Dictionary) -> void:
+	var chunk_key: String = task_data.chunk_key
+	var roads: Array = task_data.road_polylines
+	var contours: Array = task_data.contours
+	var parking: Array = task_data.parking
+	var chunk_rect: PackedVector2Array = task_data.chunk_rect
+
+	var terrain_polys: Array[PackedVector2Array] = [chunk_rect]
+
+	# 1. Вырезаем дорожные коридоры
+	for corridor in roads:
+		if corridor.size() < 4:
+			continue
+		var new_polys: Array[PackedVector2Array] = []
+		for poly in terrain_polys:
+			var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, corridor)
+			for cp in clipped:
+				if cp.size() >= 3:
+					new_polys.append(cp)
+		terrain_polys = new_polys
+		if terrain_polys.is_empty():
+			break
+
+	# 2. Вырезаем контуры перекрёстков
+	if not terrain_polys.is_empty():
+		for contour in contours:
+			if contour.size() < 3:
+				continue
+			var new_polys: Array[PackedVector2Array] = []
+			for poly in terrain_polys:
+				var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, contour)
+				for cp in clipped:
+					if cp.size() >= 3:
+						new_polys.append(cp)
+			terrain_polys = new_polys
+			if terrain_polys.is_empty():
+				break
+
+	# 3. Вырезаем парковки
+	if not terrain_polys.is_empty():
+		for parking_poly in parking:
+			if parking_poly.size() < 3:
+				continue
+			var new_polys: Array[PackedVector2Array] = []
+			for poly in terrain_polys:
+				var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, parking_poly)
+				for cp in clipped:
+					if cp.size() >= 3:
+						new_polys.append(cp)
+			terrain_polys = new_polys
+			if terrain_polys.is_empty():
+				break
+
+	# 4. Финальная фильтрация мелких осколков
+	var filtered_polys: Array[PackedVector2Array] = []
+	for poly in terrain_polys:
+		if poly.size() >= 3 and absf(_polygon_area(poly)) >= 2.0:
+			filtered_polys.append(poly)
+
+	# Отправляем результат в main thread через mutex-protected массив
+	var result := {
+		"chunk_key": chunk_key,
+		"terrain_polys": filtered_polys,
+		"elev_data": task_data.elev_data,
+	}
+	_terrain_thread_mutex.lock()
+	_terrain_thread_results.append(result)
+	_terrain_thread_mutex.unlock()
+
+
+## Применяет готовые результаты клиппинга террейна из worker threads (main thread).
+func _apply_terrain_thread_results() -> void:
+	_terrain_thread_mutex.lock()
+	if _terrain_thread_results.is_empty():
+		_terrain_thread_mutex.unlock()
+		return
+	# Забираем все готовые результаты
+	var results := _terrain_thread_results.duplicate()
+	_terrain_thread_results.clear()
+	_terrain_thread_mutex.unlock()
+
+	for result in results:
+		_pending_terrain_tasks -= 1
+		var chunk_key: String = result.chunk_key
+		var terrain_polys: Array[PackedVector2Array] = result.terrain_polys
+		var elev_data: Dictionary = result.elev_data
+
+		var parent: Node3D = _loaded_chunks.get(chunk_key, null)
+		if not parent or not is_instance_valid(parent):
+			continue
+
+		if terrain_polys.is_empty():
+			print("OSM: ChunkTerrain %s: no polygons after clipping" % chunk_key)
+			continue
+
+		_finalize_terrain_mesh(chunk_key, elev_data, parent, terrain_polys)
+
+
+## Финализация террейн меша: триангуляция + бордюры + ArrayMesh + коллизия.
+## Вызывается из _process_terrain_gen_queue после завершения клиппинга.
+func _finalize_terrain_mesh(chunk_key: String, elev_data: Dictionary, parent: Node3D, terrain_polys: Array[PackedVector2Array]) -> void:
+	if not is_instance_valid(parent):
+		return
+
+	var coords: Array = chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+	var min_x := float(chunk_x) * chunk_size
+	var max_x := min_x + chunk_size
+	var min_z := float(chunk_z) * chunk_size
+	var max_z := min_z + chunk_size
+	var sidewalk_height := 0.22
+
+	# Бордюры по внутренним краям (где террейн граничит с дорогой)
+	var curb_verts := PackedVector3Array()
+	var curb_norms := PackedVector3Array()
+	var curb_idxs := PackedInt32Array()
+	var boundary_eps := 0.1
+
+	for poly in terrain_polys:
+		var pn := poly.size()
+		for ei in range(pn):
+			var p1: Vector2 = poly[ei]
+			var p2: Vector2 = poly[(ei + 1) % pn]
+			var p1_on_boundary := absf(p1.x - min_x) < boundary_eps or absf(p1.x - max_x) < boundary_eps or absf(p1.y - min_z) < boundary_eps or absf(p1.y - max_z) < boundary_eps
+			var p2_on_boundary := absf(p2.x - min_x) < boundary_eps or absf(p2.x - max_x) < boundary_eps or absf(p2.y - min_z) < boundary_eps or absf(p2.y - max_z) < boundary_eps
+			if p1_on_boundary and p2_on_boundary:
+				continue
+			var curb_w := 0.15
+			var curb_h := 0.15
+			var h1 := _get_elevation_at_point(p1, elev_data)
+			var h2 := _get_elevation_at_point(p2, elev_data)
+			var top1 := h1 + sidewalk_height
+			var top2 := h2 + sidewalk_height
+			var bot1 := top1 - curb_h
+			var bot2 := top2 - curb_h
+			var dir := (p2 - p1).normalized()
+			var outward := Vector2(dir.y, -dir.x)
+			var p1_out := p1 + outward * curb_w
+			var p2_out := p2 + outward * curb_w
+			var n_front := Vector3(outward.x, 0.0, outward.y)
+			var ci := curb_verts.size()
+			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))
+			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))
+			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))
+			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))
+			for _j in 4: curb_norms.append(n_front)
+			curb_verts.append(Vector3(p1.x, top1, p1.y))
+			curb_verts.append(Vector3(p2.x, top2, p2.y))
+			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))
+			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))
+			for _j in 4: curb_norms.append(Vector3.UP)
+			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))
+			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))
+			curb_verts.append(Vector3(p2.x, bot2, p2.y))
+			curb_verts.append(Vector3(p1.x, bot1, p1.y))
+			for _j in 4: curb_norms.append(Vector3.DOWN)
+			for face_off in [0, 4, 8]:
+				var f: int = ci + face_off
+				curb_idxs.append(f + 0)
+				curb_idxs.append(f + 1)
+				curb_idxs.append(f + 2)
+				curb_idxs.append(f + 0)
+				curb_idxs.append(f + 2)
+				curb_idxs.append(f + 3)
+
+	if curb_verts.size() > 0:
+		var curb_arrays := []
+		curb_arrays.resize(Mesh.ARRAY_MAX)
+		curb_arrays[Mesh.ARRAY_VERTEX] = curb_verts
+		curb_arrays[Mesh.ARRAY_NORMAL] = curb_norms
+		curb_arrays[Mesh.ARRAY_INDEX] = curb_idxs
+		var curb_mesh := ArrayMesh.new()
+		curb_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, curb_arrays)
+		var curb_inst := MeshInstance3D.new()
+		curb_inst.name = "ChunkCurbs"
+		curb_inst.mesh = curb_mesh
+		curb_inst.material_override = _curb_material
+		curb_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		if not elev_data.is_empty():
+			curb_inst.set_meta("_elevation_applied", true)
+		parent.add_child(curb_inst)
+
+	# Триангулируем полигоны
+	var all_vertices := PackedVector3Array()
+	var all_uvs := PackedVector2Array()
+	var all_normals := PackedVector3Array()
+	var all_indices := PackedInt32Array()
+	var uv_scale := 0.05
+	var total_tris := 0
+
+	for poly in terrain_polys:
+		var indices := Geometry2D.triangulate_polygon(poly)
+		if indices.size() < 3:
+			continue
+		var base_idx: int = all_vertices.size()
+		for p in poly:
+			var h := _get_elevation_at_point(p, elev_data) + sidewalk_height
+			all_vertices.append(Vector3(p.x, h, p.y))
+			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
+			all_normals.append(Vector3.UP)
+		for idx in indices:
+			all_indices.append(base_idx + idx)
+		total_tris += indices.size() / 3
+
+	if all_indices.is_empty():
+		return
+
+	print("OSM: ChunkTerrain %s: %d polys, %d verts, %d tris" % [chunk_key, terrain_polys.size(), all_vertices.size(), total_tris])
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = all_vertices
+	arrays[Mesh.ARRAY_TEX_UV] = all_uvs
+	arrays[Mesh.ARRAY_NORMAL] = all_normals
+	arrays[Mesh.ARRAY_INDEX] = all_indices
+
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.name = "ChunkTerrain"
+	mesh_inst.mesh = arr_mesh
+
+	var material := StandardMaterial3D.new()
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if _ground_textures.has("grass"):
+		material.albedo_texture = _ground_textures["grass"]
+		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	else:
+		material.albedo_color = Color(0.3, 0.5, 0.2)
+	mesh_inst.material_override = material
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	if not elev_data.is_empty():
+		mesh_inst.set_meta("_elevation_applied", true)
+
+	parent.add_child(mesh_inst)
+
+	# Коллизия
+	var faces := PackedVector3Array()
+	for ti in range(0, all_indices.size(), 3):
+		faces.append(all_vertices[all_indices[ti]])
+		faces.append(all_vertices[all_indices[ti + 1]])
+		faces.append(all_vertices[all_indices[ti + 2]])
+
+	var shape := ConcavePolygonShape3D.new()
+	shape.set_faces(faces)
+
+	var body := StaticBody3D.new()
+	body.name = "TerrainCollision"
+	body.collision_layer = 1
+	var col_shape := CollisionShape3D.new()
+	col_shape.shape = shape
+	body.add_child(col_shape)
+	parent.add_child(body)
+
+	if _draw_call_logging_enabled:
+		_draw_call_stats["terrain"] += 1
+
+	# Применяем elevation если уже готов
+	if _elevation_finalized.has(chunk_key) and _base_elevation != 0.0:
+		_update_chunk_heights(chunk_key, parent, elev_data)
 
 
 # Генерация деревьев по всему чанку (на обычной земле, вне дорог и зданий)
@@ -13596,6 +14086,18 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 
 ## Записывает метрику времени
 func _record_perf(name: String, time_usec: int) -> void:
+	var time_ms := time_usec / 1000.0
+	# Данные текущего кадра для slow-frame лога
+	_current_frame_perf[name] = time_ms
+
+	# Скользящее окно для on-screen display
+	if not _perf_window.has(name):
+		_perf_window[name] = [] as Array[float]
+	var win: Array = _perf_window[name]
+	win.append(time_ms)
+	if win.size() > PERF_WINDOW_SIZE:
+		win.pop_front()
+
 	if not _perf_enabled:
 		return
 	if not _perf_metrics.has(name):
