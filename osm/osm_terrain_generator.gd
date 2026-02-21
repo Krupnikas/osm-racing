@@ -18,6 +18,7 @@ const PINE_TREE_SCENE = preload("res://models/trees/pine/scene.gltf")
 const TreeBillboardShader = preload("res://shaders/tree_billboard.gdshader")
 const BUS_STOP_SCENE = preload("res://models/bus_stop/scene.gltf")
 const GARBAGE_CONTAINER_SCENE = preload("res://models/garbage_container/scene.gltf")
+const STREET_LAMP_SCENE = preload("res://models/street_lamp/Lone_Street_Lamp_on_Hex_post.glb")
 const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
 
 
@@ -228,11 +229,9 @@ var _lamp_batch_data: Dictionary = {}  # key: chunk_key -> batch data
 #   parent: Node3D
 var _lamp_batches_to_finalize: Array[String] = []  # Chunk keys ready for finalization
 
-# Pre-generated lamp meshes for batching
-var _lamp_pole_mesh: Mesh
-var _lamp_arm_mesh: Mesh
-var _lamp_globe_mesh: Mesh
-var _lamp_materials: Dictionary = {}  # {pole, arm, globe}
+# Street lamp model mesh (loaded from GLB, decimated)
+var _lamp_model_mesh: ArrayMesh
+var _lamp_light_offset := Vector3(0, 6.0, 0)  # Позиция OmniLight3D относительно основания
 
 # Keep for night mode updates and chunk association
 var _lamp_lights_by_chunk: Dictionary = {}  # chunk_key -> Array[OmniLight3D]
@@ -1019,48 +1018,25 @@ static func _get_node_transform_recursive(node: Node3D) -> Transform3D:
 	return xform
 
 func _init_lamp_meshes() -> void:
-	"""Initialize lamp component meshes for MultiMesh batching"""
-	print("OSM: Initializing lamp meshes for batching...")
+	"""Load street lamp GLB model, normalize pivot, decimate for performance"""
+	print("OSM: Loading street lamp model from GLB...")
 
-	# POLE - cylinder mesh
-	_lamp_pole_mesh = CylinderMesh.new()
-	_lamp_pole_mesh.top_radius = 0.05
-	_lamp_pole_mesh.bottom_radius = 0.08
-	_lamp_pole_mesh.height = 5.5
-	_lamp_pole_mesh.radial_segments = 8  # Low poly for performance
-	_lamp_pole_mesh.rings = 1
+	# Загружаем модель с нормализацией (Y=0 у основания, масштаб до 6м)
+	var target_height := 6.0
+	_lamp_model_mesh = _load_tree_mesh_normalized(STREET_LAMP_SCENE, target_height)
 
-	# ARM - cylinder mesh (will be rotated per instance)
-	_lamp_arm_mesh = CylinderMesh.new()
-	_lamp_arm_mesh.top_radius = 0.03
-	_lamp_arm_mesh.bottom_radius = 0.04
-	_lamp_arm_mesh.height = 2.0
-	_lamp_arm_mesh.radial_segments = 6  # Very low poly
-	_lamp_arm_mesh.rings = 1
+	# Определяем позицию света — верхняя точка модели
+	var aabb := _lamp_model_mesh.get_aabb()
+	_lamp_light_offset = Vector3(0, aabb.end.y, 0)
 
-	# GLOBE - sphere mesh
-	_lamp_globe_mesh = SphereMesh.new()
-	_lamp_globe_mesh.radius = 0.2
-	_lamp_globe_mesh.height = 0.35
-	_lamp_globe_mesh.radial_segments = 8  # Low poly
-	_lamp_globe_mesh.rings = 4
-
-	# MATERIALS
-	# Pole/Arm material (shared)
-	var metal_mat := StandardMaterial3D.new()
-	metal_mat.albedo_color = Color(0.25, 0.25, 0.25)  # Dark gray
-	metal_mat.metallic = 0.9
-	metal_mat.roughness = 0.3
-	_lamp_materials["pole"] = metal_mat
-	_lamp_materials["arm"] = metal_mat  # Share same material
-
-	# Globe material (uses vertex colors for day/night)
-	var globe_mat := StandardMaterial3D.new()
-	globe_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED  # Self-illuminated
-	globe_mat.vertex_color_use_as_albedo = true  # Use MultiMesh instance colors
-	_lamp_materials["globe"] = globe_mat
-
-	print("OSM: Lamp meshes initialized (pole/arm/globe)")
+	var total_tris := 0
+	for s in range(_lamp_model_mesh.get_surface_count()):
+		var idx = _lamp_model_mesh.surface_get_arrays(s)[Mesh.ARRAY_INDEX]
+		if idx:
+			total_tris += idx.size() / 3
+	print("OSM: Street lamp model loaded: %d surfaces, %d tris, light at Y=%.1f" % [
+		_lamp_model_mesh.get_surface_count(), total_tris, _lamp_light_offset.y
+	])
 
 func _process(delta: float) -> void:
 	var _frame_start := Time.get_ticks_usec()
@@ -8983,69 +8959,25 @@ func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3,
 	# Initialize batch if needed
 	if not _lamp_batch_data.has(chunk_key):
 		_lamp_batch_data[chunk_key] = {
-			"pole_transforms": [],
-			"arm_transforms": [],
-			"globe_transforms": [],
-			"globe_colors": [],
+			"transforms": [],
 			"light_data": [],
 			"parent": parent
 		}
 
-	# Calculate lamp orientation (face toward road) - matches original _create_street_lamp_immediate
-	# Original uses: lamp.rotation.y = atan2(dir.x, dir.y) - PI/2
+	# Calculate lamp orientation (face toward road)
 	var lamp_forward := road_dir.normalized()
-	var yaw := atan2(lamp_forward.x, lamp_forward.z) - PI / 2.0
+	var yaw := atan2(lamp_forward.x, lamp_forward.z) + PI / 2.0
 	var lamp_basis := Basis(Vector3.UP, yaw)
 
-	# POLE transform: cylinder centered at y=2.75 (half of 5.5m height)
-	var pole_transform := Transform3D(lamp_basis, lamp_pos + Vector3(0, 2.75, 0))
-	_lamp_batch_data[chunk_key]["pole_transforms"].append(pole_transform)
+	# Model transform: pivot at base (Y=0), rotated by yaw
+	var model_transform := Transform3D(lamp_basis, lamp_pos)
+	_lamp_batch_data[chunk_key]["transforms"].append(model_transform)
 
-	# ARM transform - reproduce original geometry exactly:
-	# Original: arm_angle = PI/6, arm_length = 2.0
-	# arm_start_y = 5.0 (attachment point on pole)
-	# arm_end_x = arm_length * cos(arm_angle) = 1.732
-	# arm_end_y = arm_start_y + arm_length * sin(arm_angle) = 6.0
-	# arm.position = center of arm = (arm_end_x/2, (start_y+end_y)/2, 0)
-	# arm.rotation.z = PI/2 + arm_angle
-	var arm_angle := PI / 6.0  # 30° upward from horizontal
-	var arm_length := 2.0
-	var arm_start_y := 5.0
-	var arm_end_local_x := arm_length * cos(arm_angle)  # ~1.732
-	var arm_end_local_y := arm_start_y + arm_length * sin(arm_angle)  # ~6.0
-
-	# Arm center in local lamp space (before yaw rotation)
-	var arm_center_local := Vector3(arm_end_local_x / 2.0, (arm_start_y + arm_end_local_y) / 2.0, 0.0)
-
-	# Arm rotation: local Z rotation = PI/2 + arm_angle, then apply lamp yaw
-	# Vector3.BACK = (0,0,1) = +Z axis, matching Godot's rotation.z convention
-	var arm_local_basis := Basis(Vector3.BACK, PI / 2.0 + arm_angle)  # Z rotation in local space
-	var arm_world_basis := lamp_basis * arm_local_basis  # Apply lamp yaw
-
-	# Transform arm center from local to world
-	var arm_world_pos := lamp_pos + lamp_basis * arm_center_local
-	var arm_transform := Transform3D(arm_world_basis, arm_world_pos)
-	_lamp_batch_data[chunk_key]["arm_transforms"].append(arm_transform)
-
-	# GLOBE transform: at end of arm in local space (arm_end_x, arm_end_y, 0)
-	var globe_local := Vector3(arm_end_local_x, arm_end_local_y, 0.0)
-	var globe_world_pos := lamp_pos + lamp_basis * globe_local
-	var globe_transform := Transform3D(Basis(), globe_world_pos)
-	_lamp_batch_data[chunk_key]["globe_transforms"].append(globe_transform)
-
-	# GLOBE color (5% chance broken)
+	# Light position: top of model, in world space
+	var light_world_pos := lamp_pos + lamp_basis * _lamp_light_offset
 	var is_broken := randf() < 0.05
-	var globe_color: Color
-	if is_broken:
-		globe_color = Color(0.3, 0.3, 0.3)  # Dark gray
-	else:
-		# Color will be updated by night mode later
-		globe_color = Color(1.0, 0.75, 0.3)  # Warm orange (default night)
-	_lamp_batch_data[chunk_key]["globe_colors"].append(globe_color)
-
-	# LIGHT data (for creating separate OmniLight3D nodes)
 	_lamp_batch_data[chunk_key]["light_data"].append({
-		"position": globe_world_pos,
+		"position": light_world_pos,
 		"broken": is_broken
 	})
 
@@ -9060,95 +8992,59 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 
 	var batch: Dictionary = _lamp_batch_data[chunk_key]
 
-	# Validate batch structure
-	if not batch.has("parent") or not batch.has("pole_transforms"):
-		print("OSM: ERROR - Invalid lamp batch structure for chunk %s" % chunk_key)
+	if not batch.has("parent") or not batch.has("transforms"):
 		_lamp_batch_data.erase(chunk_key)
 		return
 
 	var parent: Node3D = batch.parent
-
 	if not is_instance_valid(parent):
 		_lamp_batch_data.erase(chunk_key)
 		return
 
-	var lamp_count: int = batch.get("pole_transforms", []).size()
+	var lamp_count: int = batch.transforms.size()
 	if lamp_count == 0:
 		_lamp_batch_data.erase(chunk_key)
 		return
 
-	# Validate all arrays have consistent sizes
-	if batch.get("arm_transforms", []).size() != lamp_count or \
-	   batch.get("globe_transforms", []).size() != lamp_count or \
-	   batch.get("globe_colors", []).size() != lamp_count or \
-	   batch.get("light_data", []).size() != lamp_count:
-		print("OSM: ERROR - Lamp batch for chunk %s has mismatched array sizes!" % chunk_key)
-		_lamp_batch_data.erase(chunk_key)
-		return
-
-	# Create container for all lamp components in this chunk
+	# Create container
 	var lamp_container := Node3D.new()
 	lamp_container.name = "LampBatches"
-
-	# Re-validate parent before adding child (could be freed during batch creation)
 	if not is_instance_valid(parent):
 		_lamp_batch_data.erase(chunk_key)
 		lamp_container.queue_free()
 		return
-
 	parent.add_child(lamp_container)
 
-	# 1. POLE MultiMesh
-	var pole_mm_inst := MultiMeshInstance3D.new()
-	pole_mm_inst.name = "Lamps_Poles"
-	var pole_mm := MultiMesh.new()
-	pole_mm.transform_format = MultiMesh.TRANSFORM_3D
-	pole_mm.mesh = _lamp_pole_mesh
-	pole_mm.instance_count = lamp_count
+	# Single MultiMesh for lamp model
+	var mm_inst := MultiMeshInstance3D.new()
+	mm_inst.name = "Lamps"
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = _lamp_model_mesh
+	mm.instance_count = lamp_count
 	for i in range(lamp_count):
-		pole_mm.set_instance_transform(i, batch.pole_transforms[i])
-	pole_mm_inst.multimesh = pole_mm
-	pole_mm_inst.material_override = _lamp_materials["pole"]
-	pole_mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	lamp_container.add_child(pole_mm_inst)
+		mm.set_instance_transform(i, batch.transforms[i])
+	mm_inst.multimesh = mm
+	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	lamp_container.add_child(mm_inst)
 
-	# 2. ARM MultiMesh
-	var arm_mm_inst := MultiMeshInstance3D.new()
-	arm_mm_inst.name = "Lamps_Arms"
-	var arm_mm := MultiMesh.new()
-	arm_mm.transform_format = MultiMesh.TRANSFORM_3D
-	arm_mm.mesh = _lamp_arm_mesh
-	arm_mm.instance_count = lamp_count
-	for i in range(lamp_count):
-		arm_mm.set_instance_transform(i, batch.arm_transforms[i])
-	arm_mm_inst.multimesh = arm_mm
-	arm_mm_inst.material_override = _lamp_materials["arm"]
-	arm_mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	lamp_container.add_child(arm_mm_inst)
-
-	# 3. GLOBE MultiMesh (with vertex colors)
-	var globe_mm_inst := MultiMeshInstance3D.new()
-	globe_mm_inst.name = "Lamps_Globes"
-	var globe_mm := MultiMesh.new()
-	globe_mm.transform_format = MultiMesh.TRANSFORM_3D
-	globe_mm.use_colors = true  # Enable per-instance colors
-	globe_mm.mesh = _lamp_globe_mesh
-	globe_mm.instance_count = lamp_count
-	for i in range(lamp_count):
-		globe_mm.set_instance_transform(i, batch.globe_transforms[i])
-		globe_mm.set_instance_color(i, batch.globe_colors[i])
-	globe_mm_inst.multimesh = globe_mm
-	globe_mm_inst.material_override = _lamp_materials["globe"]
-	globe_mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	lamp_container.add_child(globe_mm_inst)
-
-	# 4. LIGHTS (separate OmniLight3D nodes)
+	# LIGHTS (separate OmniLight3D nodes)
 	var lights_container := Node3D.new()
 	lights_container.name = "Lights"
 	lamp_container.add_child(lights_container)
 
-	# Initialize chunk lights array
 	_lamp_lights_by_chunk[chunk_key] = []
+
+	var is_night: bool = false
+	if _night_mode_manager and is_instance_valid(_night_mode_manager):
+		is_night = _night_mode_manager.is_night
+	else:
+		var night_mgr := get_tree().get_first_node_in_group("night_mode_manager")
+		if night_mgr:
+			_night_mode_manager = night_mgr
+			is_night = night_mgr.is_night
+		else:
+			is_night = _is_night_mode
 
 	for light_data in batch.light_data:
 		var light := OmniLight3D.new()
@@ -9156,45 +9052,20 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 		light.omni_range = 12.0
 		light.omni_attenuation = 1.2
 		light.light_energy = 1.5
-		light.light_color = Color(1.0, 0.65, 0.2)  # Warm orange
+		light.light_color = Color(1.0, 0.65, 0.2)
 		light.shadow_enabled = false
 		light.light_bake_mode = Light3D.BAKE_DISABLED
-
-		# Visibility based on night mode and broken state
-		# Check night mode from manager if available, otherwise check _is_night_mode flag
-		var is_night: bool = false
-		if _night_mode_manager and is_instance_valid(_night_mode_manager):
-			is_night = _night_mode_manager.is_night
-		else:
-			# Fallback: try to find and re-cache NightModeManager
-			var night_mgr := get_tree().get_first_node_in_group("night_mode_manager")
-			if night_mgr:
-				_night_mode_manager = night_mgr  # Re-cache for next time
-				is_night = night_mgr.is_night
-			else:
-				is_night = _is_night_mode
-
 		light.visible = is_night and not light_data.broken
-
-		# Store broken state as metadata for night mode updates
 		light.set_meta("broken", light_data.broken)
-
 		lights_container.add_child(light)
 		_lamp_lights_by_chunk[chunk_key].append(light)
 
-	# Draw call tracking
 	if _draw_call_logging_enabled:
-		_draw_call_stats["lamps"] += 3  # pole + arm + globe
+		_draw_call_stats["lamps"] += 1  # Single MultiMesh per chunk
 
-	print("OSM: Finalized lamp batch for chunk %s: %d lamps, 3 batches (was %d draw calls)" % [
-		chunk_key, lamp_count, lamp_count * 3
-	])
+	print("OSM: Finalized lamp batch for chunk %s: %d lamps, 1 draw call" % [chunk_key, lamp_count])
 
-	# Clear batch data
 	_lamp_batch_data.erase(chunk_key)
-
-	# Фонари создаются плоскими (elevation=0 из flat_elev), elevation через _update_chunk_heights.
-	# НЕ помечаем _elevation_applied — пусть _update_chunk_heights применит высоты.
 
 ## Update lamp globe colors and light visibility for night mode
 func _update_lamp_night_mode(is_night: bool) -> void:
@@ -9512,104 +9383,39 @@ func _create_street_lamp(pos: Vector2, elevation: float, parent: Node3D, directi
 	})
 
 
-# Немедленное создание фонаря (вызывается из очереди) - PHASE 2: MultiMesh для ОДНОГО фонаря
+# Немедленное создание фонаря (вызывается из очереди инфраструктуры)
 func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3D, direction_to_road: Vector2 = Vector2.ZERO) -> void:
-	if not is_instance_valid(parent):
+	if not is_instance_valid(parent) or not _lamp_model_mesh:
 		return
 
-	# Вычисляем параметры фонаря
 	var angle_to_road := 0.0
 	if direction_to_road.length() > 0.1:
 		angle_to_road = atan2(direction_to_road.x, direction_to_road.y) - PI / 2
 
-	var arm_length := 2.0
-	var arm_angle := PI / 6.0
-	var arm_start_y := 5.0
-	var arm_end_x := arm_length * cos(arm_angle)
-	var arm_end_y := arm_start_y + arm_length * sin(arm_angle)
-
-	# Позиция фонаря
 	var lamp_pos := Vector3(pos.x, elevation, pos.y)
 
-	# PHASE 2: Создаем контейнер для ОДНОГО фонаря с MultiMesh
 	var lamp_root := Node3D.new()
 	lamp_root.name = "StreetLamp"
 	lamp_root.position = lamp_pos
 	lamp_root.rotation.y = angle_to_road
 
-	# === MultiMesh для столба (1 instance) ===
-	var pole_mm := MultiMesh.new()
-	pole_mm.transform_format = MultiMesh.TRANSFORM_3D
-	pole_mm.mesh = CylinderMesh.new()
-	pole_mm.mesh.top_radius = 0.05
-	pole_mm.mesh.bottom_radius = 0.08
-	pole_mm.mesh.height = 5.5
-	pole_mm.instance_count = 1
-	pole_mm.set_instance_transform(0, Transform3D(Basis.IDENTITY, Vector3(0, 2.75, 0)))
+	# Single MultiMesh with lamp model (1 instance)
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = _lamp_model_mesh
+	mm.instance_count = 1
+	mm.set_instance_transform(0, Transform3D.IDENTITY)
 
-	var pole_mi := MultiMeshInstance3D.new()
-	pole_mi.multimesh = pole_mm
-	var pole_mat := StandardMaterial3D.new()
-	pole_mat.albedo_color = Color(0.25, 0.25, 0.25)
-	pole_mat.metallic = 0.9
-	pole_mi.material_override = pole_mat
-	pole_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	lamp_root.add_child(pole_mi)
+	var mm_inst := MultiMeshInstance3D.new()
+	mm_inst.multimesh = mm
+	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	lamp_root.add_child(mm_inst)
 
-	# === MultiMesh для кронштейна (1 instance) ===
-	var arm_mm := MultiMesh.new()
-	arm_mm.transform_format = MultiMesh.TRANSFORM_3D
-	arm_mm.mesh = CylinderMesh.new()
-	arm_mm.mesh.top_radius = 0.03
-	arm_mm.mesh.bottom_radius = 0.04
-	arm_mm.mesh.height = 2.0
-	arm_mm.instance_count = 1
-
-	# Кронштейн: цилиндр повернутый под углом arm_angle ВВЕРХ
-	# Цилиндр по умолчанию вертикальный (Y), поворачиваем вокруг Z на (PI/2 - arm_angle)
-	# чтобы он шел от столба вбок и ВВЕРХ к плафону
-	var arm_basis := Basis()
-	arm_basis = arm_basis.rotated(Vector3.FORWARD, PI / 2.0 - arm_angle)
-	var arm_transform := Transform3D(arm_basis, Vector3(arm_end_x / 2.0, (arm_start_y + arm_end_y) / 2.0, 0))
-	arm_mm.set_instance_transform(0, arm_transform)
-
-	var arm_mi := MultiMeshInstance3D.new()
-	arm_mi.multimesh = arm_mm
-	arm_mi.material_override = pole_mat
-	arm_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	lamp_root.add_child(arm_mi)
-
-	# === MultiMesh для плафона (1 instance) ===
-	var globe_mm := MultiMesh.new()
-	globe_mm.transform_format = MultiMesh.TRANSFORM_3D
-	globe_mm.use_colors = true
-	globe_mm.mesh = SphereMesh.new()
-	globe_mm.mesh.radius = 0.2
-	globe_mm.mesh.height = 0.35
-	globe_mm.instance_count = 1
-	globe_mm.set_instance_transform(0, Transform3D(Basis.IDENTITY, Vector3(arm_end_x, arm_end_y, 0)))
-
-	# 5% шанс что фонарь сломан
+	# OmniLight3D
 	var is_broken := randf() < 0.05
 	var is_night := _is_night_mode
-	var globe_color: Color
-	if is_night and not is_broken:
-		globe_color = Color(1.0, 0.75, 0.3)
-	else:
-		globe_color = Color(0.3, 0.3, 0.3)
-	globe_mm.set_instance_color(0, globe_color)
-
-	var globe_mat := StandardMaterial3D.new()
-	globe_mat.vertex_color_use_as_albedo = true
-	var globe_mi := MultiMeshInstance3D.new()
-	globe_mi.multimesh = globe_mm
-	globe_mi.material_override = globe_mat
-	globe_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	lamp_root.add_child(globe_mi)
-
-	# === OmniLight3D ===
 	var lamp_light := OmniLight3D.new()
-	lamp_light.position = Vector3(arm_end_x, arm_end_y, 0)
+	lamp_light.position = _lamp_light_offset
 	lamp_light.omni_range = 12.0
 	lamp_light.omni_attenuation = 1.2
 	lamp_light.light_energy = 1.5
@@ -9623,17 +9429,8 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 
 	parent.add_child(lamp_root)
 
-	# PHASE 2: 3 MultiMeshes + 1 light = 4 draw calls вместо 3+light (старая версия)
-	# НО создаем по одному фонарю за кадр (без батчинга чанков)
 	if _draw_call_logging_enabled:
-		_draw_call_stats["lamps"] += 3  # 3 MultiMeshes
-
-
-## Legacy метод создания одиночного фонаря (НЕ ИСПОЛЬЗУЕТСЯ - заменен на MultiMesh выше)
-func _create_street_lamp_immediate_legacy(pos: Vector2, elevation: float, parent: Node3D, direction_to_road: Vector2 = Vector2.ZERO) -> void:
-	# Старая реализация (создаёт отдельные меши) - используется только для специальных случаев
-	# В текущей версии не используется - все фонари батчатся
-	pass
+		_draw_call_stats["lamps"] += 1
 
 
 # Создание автобусной остановки
