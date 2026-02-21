@@ -294,6 +294,11 @@ var _deferred_road_collisions: Array = []  # [{body, vertices, indices}]
 var _deferred_terrain_collisions: Array = []  # [{parent, vertices, indices}]
 var _finalize_phase: int = 0  # Round-robin: 0=roads, 1=curbs, 2=lamps, 3=buildings, 4=windows, 5=trees, 6=billboards
 
+# Global add_child budget — limits scene tree insertions per frame
+const ADD_CHILD_BUDGET_PER_FRAME := 2
+var _add_child_count: int = 0
+var _deferred_add_child_queue: Array = []  # [{parent: Node, child: Node}]
+
 # Debug визуализация границ чанков
 var _show_chunk_boundaries := false
 var _chunk_boundary_meshes: Dictionary = {}  # chunk_key -> MeshInstance3D
@@ -1068,6 +1073,15 @@ func _process(delta: float) -> void:
 	var _frame_start := Time.get_ticks_usec()
 	_current_frame_perf.clear()
 	_slow_frame_cooldown -= delta
+
+	# Reset add_child budget and drain deferred queue
+	_add_child_count = 0
+	while not _deferred_add_child_queue.is_empty() and _add_child_count < ADD_CHILD_BUDGET_PER_FRAME:
+		var ac_item: Dictionary = _deferred_add_child_queue[0]
+		if is_instance_valid(ac_item["parent"]) and is_instance_valid(ac_item["child"]):
+			ac_item["parent"].add_child(ac_item["child"])
+			_add_child_count += 1
+		_deferred_add_child_queue.pop_front()
 
 	# Обрабатываем готовые здания из worker threads (даже на паузе)
 	var t0 := Time.get_ticks_usec()
@@ -1899,6 +1913,8 @@ func _unload_chunk(chunk_key: String) -> void:
 			func(item): return is_instance_valid(item.get("body")))
 		_deferred_terrain_collisions = _deferred_terrain_collisions.filter(
 			func(item): return is_instance_valid(item.get("parent")))
+		_deferred_add_child_queue = _deferred_add_child_queue.filter(
+			func(item): return is_instance_valid(item.get("parent")) and is_instance_valid(item.get("child")))
 
 		# Prune invalid window batch materials (freed with chunk node)
 		var valid_mats: Array[ShaderMaterial] = []
@@ -4170,7 +4186,7 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 			_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
 		return
 
-	parent.add_child(road_body)
+	_budgeted_add_child(parent, road_body)
 
 	# Collision shape — отложенное создание (ConcavePolygonShape3D ~5-26ms)
 	_deferred_road_collisions.append({
@@ -4396,7 +4412,7 @@ func _progress_window_finalize(budget_end_usec: int) -> bool:
 	if end >= total:
 		# Done - assign buffer and add to scene
 		mm.buffer = buf
-		parent.add_child(mm_instance)
+		_budgeted_add_child(parent, mm_instance)
 		_window_finalize_progress.erase(chunk_key)
 		_window_finalize_queue.remove_at(0)
 		return true  # Completed this chunk
@@ -4864,6 +4880,8 @@ func _process_deferred_nodes() -> void:
 
 	# 1. Road/terrain collisions (тяжёлые — 1 за кадр, ConcavePolygonShape3D ~5-15ms)
 	if not _deferred_road_collisions.is_empty():
+		if _add_child_count >= ADD_CHILD_BUDGET_PER_FRAME:
+			return
 		var item: Dictionary = _deferred_road_collisions.pop_front()
 		if is_instance_valid(item["body"]):
 			var verts: PackedVector3Array = item["vertices"]
@@ -4876,11 +4894,13 @@ func _process_deferred_nodes() -> void:
 			shape.set_faces(faces)
 			var col_shape := CollisionShape3D.new()
 			col_shape.shape = shape
-			item["body"].add_child(col_shape)
+			_budgeted_add_child(item["body"], col_shape)
 		_record_perf("deferred_road_coll", Time.get_ticks_usec() - start)
 		return  # 1 heavy collision за кадр
 
 	if not _deferred_terrain_collisions.is_empty():
+		if _add_child_count >= ADD_CHILD_BUDGET_PER_FRAME:
+			return
 		var item: Dictionary = _deferred_terrain_collisions.pop_front()
 		var t_parent: Node3D = item["parent"]
 		if is_instance_valid(t_parent):
@@ -4899,13 +4919,13 @@ func _process_deferred_nodes() -> void:
 			var col_shape := CollisionShape3D.new()
 			col_shape.shape = shape
 			body.add_child(col_shape)
-			t_parent.add_child(body)
+			_budgeted_add_child(t_parent, body)
 		_record_perf("deferred_terrain_coll", Time.get_ticks_usec() - start)
 		return  # 1 heavy collision за кадр
 
-	# 2. Building collisions (5 зданий за кадр)
+	# 2. Building collisions (budgeted)
 	while not _deferred_building_collisions.is_empty():
-		if (Time.get_ticks_usec() - start) > BUDGET_USEC:
+		if _add_child_count >= ADD_CHILD_BUDGET_PER_FRAME or (Time.get_ticks_usec() - start) > BUDGET_USEC:
 			return
 		var item: Dictionary = _deferred_building_collisions[0]
 		var parent: Node3D = item["parent"]
@@ -4914,8 +4934,7 @@ func _process_deferred_nodes() -> void:
 			continue
 		var collisions: Array = item["collisions"]
 		var idx: int = item["idx"]
-		var count := 0
-		while idx < collisions.size() and count < 5:
+		while idx < collisions.size() and _add_child_count < ADD_CHILD_BUDGET_PER_FRAME:
 			if (Time.get_ticks_usec() - start) > BUDGET_USEC:
 				item["idx"] = idx
 				return
@@ -4923,20 +4942,19 @@ func _process_deferred_nodes() -> void:
 			var body := StaticBody3D.new()
 			body.collision_layer = 2
 			body.collision_mask = 0
-			parent.add_child(body)
+			_budgeted_add_child(parent, body)
 			_create_building_collisions_deferred.call_deferred(
 				body, coll_data["points"], coll_data["base_elev"], coll_data["building_height"])
 			idx += 1
-			count += 1
 		if idx >= collisions.size():
 			_deferred_building_collisions.pop_front()
 		else:
 			item["idx"] = idx
 			return
 
-	# 3. Tree collisions (10 деревьев за кадр)
+	# 3. Tree collisions (budgeted)
 	while not _deferred_tree_collisions.is_empty():
-		if (Time.get_ticks_usec() - start) > BUDGET_USEC:
+		if _add_child_count >= ADD_CHILD_BUDGET_PER_FRAME or (Time.get_ticks_usec() - start) > BUDGET_USEC:
 			return
 		var item: Dictionary = _deferred_tree_collisions[0]
 		var parent_node: Node3D = item["parent"]
@@ -4945,8 +4963,7 @@ func _process_deferred_nodes() -> void:
 			continue
 		var collisions: Array = item["collisions"]
 		var idx: int = item["idx"]
-		var count := 0
-		while idx < collisions.size() and count < 10:
+		while idx < collisions.size() and _add_child_count < ADD_CHILD_BUDGET_PER_FRAME:
 			var collision_data: Dictionary = collisions[idx]
 			var coll_pos: Vector3 = collision_data["position"]
 			if _is_point_near_road(Vector2(coll_pos.x, coll_pos.z), 60.0):
@@ -4961,18 +4978,17 @@ func _process_deferred_nodes() -> void:
 				collision.position = Vector3(0, 4.0, 0)
 				collision.shape = cyl_shape
 				body.add_child(collision)
-				parent_node.add_child(body)
+				_budgeted_add_child(parent_node, body)
 			idx += 1
-			count += 1
 		if idx >= collisions.size():
 			_deferred_tree_collisions.pop_front()
 		else:
 			item["idx"] = idx
 			return
 
-	# 4. Lamp lights (10 ламп за кадр)
+	# 4. Lamp lights (budgeted)
 	while not _deferred_lamp_lights.is_empty():
-		if (Time.get_ticks_usec() - start) > BUDGET_USEC:
+		if _add_child_count >= ADD_CHILD_BUDGET_PER_FRAME or (Time.get_ticks_usec() - start) > BUDGET_USEC:
 			return
 		var item: Dictionary = _deferred_lamp_lights[0]
 		var container: Node3D = item["container"]
@@ -4983,8 +4999,7 @@ func _process_deferred_nodes() -> void:
 		var idx: int = item["idx"]
 		var chunk_key: String = item["chunk_key"]
 		var is_night: bool = item["is_night"]
-		var count := 0
-		while idx < lights.size() and count < 10:
+		while idx < lights.size() and _add_child_count < ADD_CHILD_BUDGET_PER_FRAME:
 			var light_data: Dictionary = lights[idx]
 			var light := OmniLight3D.new()
 			light.position = light_data.position
@@ -4996,11 +5011,10 @@ func _process_deferred_nodes() -> void:
 			light.light_bake_mode = Light3D.BAKE_DISABLED
 			light.visible = is_night and not light_data.broken
 			light.set_meta("broken", light_data.broken)
-			container.add_child(light)
+			_budgeted_add_child(container, light)
 			if _lamp_lights_by_chunk.has(chunk_key):
 				_lamp_lights_by_chunk[chunk_key].append(light)
 			idx += 1
-			count += 1
 		if idx >= lights.size():
 			_deferred_lamp_lights.pop_front()
 		else:
@@ -6616,7 +6630,7 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		mesh_inst.cast_shadow = shadow_setting
 		mesh_inst.visibility_range_end = render_distance
 		mesh_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
-		parent.add_child(mesh_inst)
+		_budgeted_add_child(parent, mesh_inst)
 
 		if _draw_call_logging_enabled:
 			_draw_call_stats["buildings"] += 1
@@ -6641,7 +6655,7 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		roof_inst.cast_shadow = shadow_setting
 		roof_inst.visibility_range_end = render_distance
 		roof_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
-		parent.add_child(roof_inst)
+		_budgeted_add_child(parent, roof_inst)
 
 		if _draw_call_logging_enabled:
 			_draw_call_stats["buildings"] += 1
@@ -7446,7 +7460,7 @@ func _finalize_curb_geo_batch(chunk_key: String) -> void:
 	if _draw_call_logging_enabled:
 		_draw_call_stats["curbs"] += 1
 
-	parent.add_child(mesh)
+	_budgeted_add_child(parent, mesh)
 	_curb_geo_batch.erase(chunk_key)
 
 
@@ -8585,14 +8599,9 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 		_lamp_batch_data.erase(chunk_key)
 		return
 
-	# Create container
+	# Create container (build subtree BEFORE adding to scene tree)
 	var lamp_container := Node3D.new()
 	lamp_container.name = "LampBatches"
-	if not is_instance_valid(parent):
-		_lamp_batch_data.erase(chunk_key)
-		lamp_container.queue_free()
-		return
-	parent.add_child(lamp_container)
 
 	# Single MultiMesh for lamp model
 	var mm_inst := MultiMeshInstance3D.new()
@@ -8607,10 +8616,13 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	lamp_container.add_child(mm_inst)
 
-	# LIGHTS (separate OmniLight3D nodes)
+	# LIGHTS container (separate OmniLight3D nodes — deferred)
 	var lights_container := Node3D.new()
 	lights_container.name = "Lights"
 	lamp_container.add_child(lights_container)
+
+	# Add entire subtree to scene tree in one budgeted call
+	_budgeted_add_child(parent, lamp_container)
 
 	_lamp_lights_by_chunk[chunk_key] = []
 
@@ -8749,7 +8761,7 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		for i in range(transforms.size()):
 			mm.set_instance_transform(i, transforms[i])
 		mm_inst.multimesh = mm
-		parent.add_child(mm_inst)
+		_budgeted_add_child(parent, mm_inst)
 
 		draw_calls += config["mesh_lod0"].get_surface_count()
 
@@ -8805,7 +8817,7 @@ func _finalize_billboard_batch_for_chunk(chunk_key: String) -> void:
 		var elevation: float = 0.0
 
 		var billboard_mesh: Node3D = _decoration_layer.create_billboard_mesh(billboard, elevation)
-		parent.add_child(billboard_mesh)
+		_budgeted_add_child(parent, billboard_mesh)
 
 	print("OSM: Created %d billboards for chunk %s" % [billboards.size(), chunk_key])
 
@@ -9891,7 +9903,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 		curb_inst.mesh = curb_mesh
 		curb_inst.material_override = _curb_material
 		curb_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		parent.add_child(curb_inst)
+		_budgeted_add_child(parent, curb_inst)
 
 	# Триангулируем полигоны
 	var all_vertices := PackedVector3Array()
@@ -9945,7 +9957,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
-	parent.add_child(mesh_inst)
+	_budgeted_add_child(parent, mesh_inst)
 
 	# Коллизия — отложенная (ConcavePolygonShape3D тяжёлая)
 	_deferred_terrain_collisions.append({
@@ -13227,6 +13239,18 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 
 
 ## Записывает метрику времени
+## Budgeted add_child — limits scene tree insertions per frame.
+## Returns true if added immediately, false if deferred.
+func _budgeted_add_child(parent_node: Node, child_node: Node) -> bool:
+	if _add_child_count < ADD_CHILD_BUDGET_PER_FRAME:
+		parent_node.add_child(child_node)
+		_add_child_count += 1
+		return true
+	else:
+		_deferred_add_child_queue.append({"parent": parent_node, "child": child_node})
+		return false
+
+
 func _record_perf(name: String, time_usec: int) -> void:
 	var time_ms := time_usec / 1000.0
 	# Данные текущего кадра для slow-frame лога
