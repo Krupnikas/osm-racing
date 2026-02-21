@@ -292,7 +292,10 @@ var _deferred_lamp_lights: Array = []  # [{container, lights, idx, chunk_key, is
 var _deferred_tree_collisions: Array = []  # [{parent, collisions, idx}]
 var _deferred_road_collisions: Array = []  # [{body, vertices, indices}]
 var _deferred_terrain_collisions: Array = []  # [{parent, vertices, indices}]
+var _deferred_footway_queue: Array = []  # [{smoothed_points, width, tags, parent}]
+var _deferred_billboard_queue: Array = []  # [{billboard, elevation, parent}]
 var _finalize_phase: int = 0  # Round-robin: 0=roads, 1=curbs, 2=lamps, 3=buildings, 4=windows, 5=trees, 6=billboards
+var _chunk_activation_pending: Dictionary = {}  # chunk_key -> state (-1=waiting, >=0=RS activation index)
 
 # Global add_child budget — limits scene tree insertions per frame
 const ADD_CHILD_BUDGET_PER_FRAME := 2
@@ -1151,6 +1154,9 @@ func _process(delta: float) -> void:
 	var t_terrain_gen := Time.get_ticks_usec() - t0
 	_record_perf("terrain_gen", t_terrain_gen)
 
+	# Lazy chunk activation — включаем видимость через N кадров после финализации
+	_process_chunk_activation()
+
 	# Camera-based frustum culling для чанков (каждые 200ms)
 	_culling_update_timer += delta
 	if _culling_update_timer >= CULLING_UPDATE_INTERVAL:
@@ -1297,6 +1303,8 @@ func start_loading() -> void:
 	_deferred_lamp_queue.clear()
 	_deferred_manhole_queue.clear()
 	_deferred_traffic_queue.clear()
+	_deferred_billboard_queue.clear()
+	_chunk_activation_pending.clear()
 	_lamps_created = false  # Сбрасываем флаг
 	_intersection_positions.clear()  # Очищаем перекрёстки
 	_intersection_radii.clear()
@@ -1376,7 +1384,7 @@ func _check_initial_load_complete() -> void:
 
 	# Считаем размер всех очередей (включая финализацию визуала)
 	# Deferred collisions/lights НЕ учитываем — они продолжают работу после загрузки
-	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + _pending_road_tasks + _pending_veg_tasks + _pending_terrain_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size()
+	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + _pending_road_tasks + _pending_veg_tasks + _pending_terrain_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_footway_queue.size() + _deferred_billboard_queue.size() + _chunk_activation_pending.size()
 
 	# DEBUG: Детальное логирование очередей
 	if loaded_count >= total_chunks and total_queued > 0:
@@ -1436,7 +1444,7 @@ func _check_initial_load_complete() -> void:
 		# Проверяем что все очереди обработаны (для плавности старта)
 		# Visual queues: must be empty before hiding loading screen
 		# Deferred collisions/lights are NOT blocking — they continue in background
-		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and _pending_road_tasks <= 0 and _pending_veg_tasks <= 0 and _pending_batch_chunks.is_empty() and _building_geo_finalize_queue.is_empty() and _curb_geo_batch.is_empty() and _lamp_batches_to_finalize.is_empty() and _tree_batches_to_finalize.is_empty() and _billboard_batches_to_finalize.is_empty() and _window_finalize_queue.is_empty()
+		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and _pending_road_tasks <= 0 and _pending_veg_tasks <= 0 and _pending_batch_chunks.is_empty() and _building_geo_finalize_queue.is_empty() and _curb_geo_batch.is_empty() and _lamp_batches_to_finalize.is_empty() and _tree_batches_to_finalize.is_empty() and _billboard_batches_to_finalize.is_empty() and _window_finalize_queue.is_empty() and _deferred_footway_queue.is_empty() and _deferred_billboard_queue.is_empty() and _chunk_activation_pending.is_empty()
 		if not queues_empty:
 			# Отслеживаем зависание очереди
 			if total_queued == _last_queue_size:
@@ -1919,6 +1927,10 @@ func _unload_chunk(chunk_key: String) -> void:
 			func(item): return is_instance_valid(item.get("body")))
 		_deferred_terrain_collisions = _deferred_terrain_collisions.filter(
 			func(item): return is_instance_valid(item.get("parent")))
+		_deferred_footway_queue = _deferred_footway_queue.filter(
+			func(item): return is_instance_valid(item.get("parent")))
+		_deferred_billboard_queue = _deferred_billboard_queue.filter(
+			func(item): return is_instance_valid(item.get("parent")))
 		_deferred_add_child_queue = _deferred_add_child_queue.filter(
 			func(item): return is_instance_valid(item.get("parent")) and is_instance_valid(item.get("child")))
 
@@ -1928,6 +1940,9 @@ func _unload_chunk(chunk_key: String) -> void:
 			if is_instance_valid(mat):
 				valid_mats.append(mat)
 		_window_batch_materials = valid_mats
+
+		# Clean up lazy activation
+		_chunk_activation_pending.erase(chunk_key)
 
 		# Free RenderingServer instances for this chunk
 		if _chunk_rs_instances.has(chunk_key):
@@ -2069,6 +2084,8 @@ func reset_terrain() -> void:
 	_deferred_lamp_queue.clear()
 	_deferred_manhole_queue.clear()
 	_deferred_traffic_queue.clear()
+	_deferred_billboard_queue.clear()
+	_chunk_activation_pending.clear()
 
 	# Clear ALL batching data on reset
 	_lamp_batch_data.clear()
@@ -2131,11 +2148,13 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	_loading_chunks.erase(chunk_key)
 	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
 
-	# Создаём контейнер для чанка
+	# Создаём контейнер для чанка (невидимый — активируется после финализации)
 	var chunk_node := Node3D.new()
 	chunk_node.name = "Chunk_" + chunk_key
+	chunk_node.visible = false
 	add_child(chunk_node)
 	_loaded_chunks[chunk_key] = chunk_node
+	_chunk_activation_pending[chunk_key] = -1  # -1 = ждём финализации
 
 
 	# Генерируем объекты асинхронно (с frame budgeting)
@@ -2263,13 +2282,17 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 						_parking_spatial_hash[cell_key].append({"idx": pidx, "p1": ep1, "p2": ep2})
 
 		# Все дороги из OSM данных -> spatial hash (для проверки расстояний при генерации деревьев/фонарей)
+		# Используем сглаженные координаты — чтобы spatial hash соответствовал реальной геометрии дорог
 		if tags.has("highway") and nodes.size() >= 2:
 			var highway_type: String = tags.get("highway", "residential")
 			var road_w: float = ROAD_WIDTHS.get(highway_type, 5.0)
-			for j in range(nodes.size() - 1):
-				var rp1 = _latlon_to_local(nodes[j].lat, nodes[j].lon)
-				var rp2 = _latlon_to_local(nodes[j + 1].lat, nodes[j + 1].lon)
-				var rseg := {"p1": rp1, "p2": rp2, "width": road_w}
+			var raw_pts := PackedVector2Array()
+			raw_pts.resize(nodes.size())
+			for j in range(nodes.size()):
+				raw_pts[j] = _latlon_to_local(nodes[j].lat, nodes[j].lon)
+			var smoothed_pts := _smooth_road_corners(raw_pts)
+			for j in range(smoothed_pts.size() - 1):
+				var rseg := {"p1": smoothed_pts[j], "p2": smoothed_pts[j + 1], "width": road_w}
 				# Добавляем только в spatial hash (не в _road_segments чтобы избежать дубликатов)
 				_add_road_segment_to_spatial_hash(rseg)
 
@@ -2832,14 +2855,16 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 	})
 
 	# Сегменты дорог сохраняем сразу (нужны для знаков парковки и проверки фонарей)
+	# Используем сглаженные координаты — чтобы spatial hash соответствовал реальной геометрии дорог
 	var highway_type: String = tags.get("highway", "residential")
-
-	# Пропускаем пешеходные дорожки (не нужны для миникарты)
 	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
-	for i in range(nodes.size() - 1):
-		var p1 = _latlon_to_local(nodes[i].lat, nodes[i].lon)
-		var p2 = _latlon_to_local(nodes[i + 1].lat, nodes[i + 1].lon)
-		var seg := {"p1": p1, "p2": p2, "width": width}
+	var raw_pts := PackedVector2Array()
+	raw_pts.resize(nodes.size())
+	for i in range(nodes.size()):
+		raw_pts[i] = _latlon_to_local(nodes[i].lat, nodes[i].lon)
+	var smoothed_pts := _smooth_road_corners(raw_pts)
+	for i in range(smoothed_pts.size() - 1):
+		var seg := {"p1": smoothed_pts[i], "p2": smoothed_pts[i + 1], "width": width}
 		_road_segments.append(seg)
 		_add_road_segment_to_spatial_hash(seg)
 
@@ -3063,8 +3088,9 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	var normals := PackedVector3Array()
 	var indices := PackedInt32Array()
 
-	if not is_bridge:
+	if not is_bridge and highway_type not in ["footway", "path"]:
 		# Validate + clip (thread-safe: pure math)
+		# Skip vertex gen for footway/path — they get re-split on main thread anyway
 		var points: PackedVector2Array = _validate_road_direction(smoothed_points)
 		if chunk_key != "initial" and chunk_key != "":
 			var ck_parts: PackedStringArray = chunk_key.split(",")
@@ -3173,87 +3199,16 @@ func _apply_road_result(result: Dictionary) -> void:
 	if is_bridge:
 		_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent)
 	elif highway_type in ["footway", "path"] and smoothed_points.size() >= 2:
-		# Пешеходные: crossing на уровне дороги, off-road — elevated тротуар
-		var way_id: int = result.get("way_id", 0)
-		var tags: Dictionary = result.get("tags", {})
-		var is_tagged_crossing: bool = tags.get("footway", "") == "crossing"
-		# Удаляем zigzag (обратный ход) из smoothed_points — причина z-fighting
-		smoothed_points = _remove_polyline_zigzag(smoothed_points)
-		var on_road: Array[bool] = []
-		var in_parking: Array[bool] = []
-		for p in smoothed_points:
-			on_road.append(_is_point_on_vehicle_road(p))
-			var ip := false
-			for poly in _parking_polygons:
-				if poly.size() >= 3 and Geometry2D.is_point_in_polygon(p, poly):
-					ip = true
-					break
-			in_parking.append(ip)
-		# Постобработка: если on_road=true точка между двумя parking-участками,
-		# переводим в off_road (дорога пересекает парковку, footpath остаётся тротуаром)
-		for i in range(on_road.size()):
-			if not on_road[i]:
-				continue
-			var has_parking_before := false
-			for j in range(i - 1, -1, -1):
-				if in_parking[j]:
-					has_parking_before = true
-					break
-				if i - j > 20:
-					break
-			if not has_parking_before:
-				continue
-			var has_parking_after := false
-			for j in range(i + 1, on_road.size()):
-				if in_parking[j]:
-					has_parking_after = true
-					break
-				if j - i > 20:
-					break
-			if has_parking_after:
-				on_road[i] = false
-		var current_pts := PackedVector2Array()
-		current_pts.append(smoothed_points[0])
-		var current_on := on_road[0]
-		var last_off_road_pt := smoothed_points[0]  # fallback: начало пути
-		var has_before_off := true  # smoothed_points[0] всегда годится как reference
-		if not current_on:
-			last_off_road_pt = smoothed_points[0]
-		for i in range(1, smoothed_points.size()):
-			if on_road[i] != current_on:
-				var edge_pt := _find_road_edge_point(smoothed_points[i - 1], current_on, smoothed_points[i])
-				current_pts.append(edge_pt)
-				if current_pts.size() >= 2:
-					if current_on:
-						# on→off: проверяем, полное ли пересечение (или footway=crossing тег)
-						var is_full: bool = is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, smoothed_points[i]))
-						if is_full:
-							_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
-							if enable_crossing_signs:
-								_enqueue_crossing_signs(current_pts, parent)
-						# иначе: частичное касание — тротуар просто обрывается у дороги
-					else:
-						_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
-						last_off_road_pt = smoothed_points[i - 1]
-						has_before_off = true
-				current_pts = PackedVector2Array()
-				current_pts.append(edge_pt)
-				current_on = on_road[i]
-			else:
-				if not current_on:
-					last_off_road_pt = smoothed_points[i]
-					has_before_off = true
-			current_pts.append(smoothed_points[i])
-		if current_pts.size() >= 2:
-			if current_on:
-				# Заканчивается на дороге — используем последнюю точку как after reference
-				var last_pt: Vector2 = smoothed_points[smoothed_points.size() - 1]
-				if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, last_pt)):
-					_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
-					if enable_crossing_signs:
-						_enqueue_crossing_signs(current_pts, parent)
-			else:
-				_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
+		# Defer footway splitting + vertex gen to avoid 10-15ms spikes from
+		# _is_point_on_vehicle_road (spatial hash + intersection contours per point)
+		var cleaned: PackedVector2Array = _remove_polyline_zigzag(smoothed_points)
+		if cleaned.size() >= 2:
+			_deferred_footway_queue.append({
+				"smoothed_points": cleaned,
+				"width": width,
+				"tags": result.get("tags", {}),
+				"parent": parent
+			})
 	else:
 		# Merge geometry into batch data
 		var verts: PackedVector3Array = result.vertices
@@ -3356,6 +3311,7 @@ func _apply_road_result(result: Dictionary) -> void:
 
 	# Road network for NPC - deferred
 	_deferred_traffic_queue.append({"points": smoothed_points, "tags": result.tags, "elevation_info": elevation_info})
+
 
 
 ## Создаёт дорогу-мост с рампами подъёма/спуска и опорами
@@ -4014,6 +3970,95 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 		batch["indices"].append(idx + 0)
 		batch["indices"].append(idx + 2)
 		batch["indices"].append(idx + 3)
+
+## Incremental footway splitting: processes N points per frame to stay under budget.
+## Item dict stores progress state: _pt_idx, _on_road, _in_parking.
+## Returns true when fully processed, false when needs more frames.
+func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
+	var smoothed_points: PackedVector2Array = item.smoothed_points
+	var width: float = item.width
+	var parent: Node3D = item.parent
+
+	# Phase 1: classify points (on_road / in_parking) incrementally
+	var pt_idx: int = item.get("_pt_idx", 0)
+	var on_road: Array = item.get("_on_road", [])
+	var in_parking: Array = item.get("_in_parking", [])
+
+	while pt_idx < smoothed_points.size():
+		if Time.get_ticks_usec() > budget_end:
+			item["_pt_idx"] = pt_idx
+			item["_on_road"] = on_road
+			item["_in_parking"] = in_parking
+			return false  # resume next frame
+		var p: Vector2 = smoothed_points[pt_idx]
+		on_road.append(_is_point_on_vehicle_road(p))
+		var ip := false
+		for poly in _parking_polygons:
+			if poly.size() >= 3 and Geometry2D.is_point_in_polygon(p, poly):
+				ip = true
+				break
+		in_parking.append(ip)
+		pt_idx += 1
+
+	# Phase 2: postprocess parking adjacency + split + vertex gen (fast, no budget needed)
+	for i in range(on_road.size()):
+		if not on_road[i]:
+			continue
+		var has_parking_before := false
+		for j in range(i - 1, -1, -1):
+			if in_parking[j]:
+				has_parking_before = true
+				break
+			if i - j > 20:
+				break
+		if not has_parking_before:
+			continue
+		var has_parking_after := false
+		for j in range(i + 1, on_road.size()):
+			if in_parking[j]:
+				has_parking_after = true
+				break
+			if j - i > 20:
+				break
+		if has_parking_after:
+			on_road[i] = false
+
+	var is_tagged_crossing: bool = item.tags.get("footway", "") == "crossing"
+	var current_pts := PackedVector2Array()
+	current_pts.append(smoothed_points[0])
+	var current_on: bool = on_road[0]
+	var last_off_road_pt := smoothed_points[0]
+	var has_before_off := true
+	for i in range(1, smoothed_points.size()):
+		if on_road[i] != current_on:
+			var edge_pt := _find_road_edge_point(smoothed_points[i - 1], current_on, smoothed_points[i])
+			current_pts.append(edge_pt)
+			if current_pts.size() >= 2:
+				if current_on:
+					var is_full: bool = is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, smoothed_points[i]))
+					if is_full:
+						_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+				else:
+					_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
+					last_off_road_pt = smoothed_points[i - 1]
+					has_before_off = true
+			current_pts = PackedVector2Array()
+			current_pts.append(edge_pt)
+			current_on = on_road[i]
+		else:
+			if not current_on:
+				last_off_road_pt = smoothed_points[i]
+				has_before_off = true
+		current_pts.append(smoothed_points[i])
+	if current_pts.size() >= 2:
+		if current_on:
+			var last_pt: Vector2 = smoothed_points[smoothed_points.size() - 1]
+			if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, last_pt)):
+				_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+		else:
+			_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
+	return true
+
 
 # Fast variant: accepts pre-computed local_points (avoids redundant _latlon_to_local)
 func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, texture_key: String, height_offset: float, parent: Node3D) -> void:
@@ -6606,7 +6651,8 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 	_add_building_night_decorations.call_deferred(null, points, building_height, parent, 0.0)
 
 
-## Создаёт merged ArrayMesh для всех зданий чанка (вызывается при финализации)
+## Создаёт merged ArrayMesh для всех зданий чанка — ONE surface per frame (incremental)
+## Surface order: panel_walls → brick_walls → wall_walls → roofs → cleanup
 func _finalize_building_geo_batch(chunk_key: String) -> void:
 	if not _building_geo_batch.has(chunk_key):
 		return
@@ -6621,56 +6667,61 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 	# Shadow LOD — начальное значение ON; _update_building_shadows переключает по расстоянию каждые 0.5с
 	var shadow_setting: int = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
+	# Incremental: track which surface to process next
+	var step: int = batch.get("_finalize_step", 0)
+	# Steps: 0=panel_walls, 1=brick_walls, 2=wall_walls, 3=roofs, 4=cleanup
+	var surface_keys: Array[String] = ["panel_walls", "brick_walls", "wall_walls", "roofs"]
+
+	if step < 4:
+		var surface_key: String = surface_keys[step]
+		var geo: Dictionary = batch[surface_key]
+		if geo["vertices"].size() > 0:
+			var arrays := []
+			arrays.resize(Mesh.ARRAY_MAX)
+			arrays[Mesh.ARRAY_VERTEX] = geo["vertices"]
+			arrays[Mesh.ARRAY_TEX_UV] = geo["uvs"]
+			arrays[Mesh.ARRAY_NORMAL] = geo["normals"]
+			arrays[Mesh.ARRAY_INDEX] = geo["indices"]
+
+			var arr_mesh := ArrayMesh.new()
+			arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+			var material: Material
+			if step < 3:
+				var tex_type: String = surface_key.replace("_walls", "")
+				material = _building_wall_materials[tex_type]
+			else:
+				material = _building_roof_material
+
+			var rid := _rs_add_mesh(chunk_key, arr_mesh, material,
+				shadow_setting, render_distance)
+			if not _chunk_building_rs.has(chunk_key):
+				_chunk_building_rs[chunk_key] = []
+			_chunk_building_rs[chunk_key].append(rid)
+
+			if _draw_call_logging_enabled:
+				_draw_call_stats["buildings"] += 1
+
+		# Skip empty surfaces — advance to next non-empty or cleanup
+		step += 1
+		# Skip remaining empty surfaces to avoid wasting frames
+		while step < 4:
+			var next_geo: Dictionary = batch[surface_keys[step]]
+			if next_geo["vertices"].size() > 0:
+				break
+			step += 1
+
+		batch["_finalize_step"] = step
+		# Re-enqueue if more surfaces remain
+		if step < 4:
+			if not _building_geo_finalize_queue.has(chunk_key):
+				_building_geo_finalize_queue.push_front(chunk_key)
+			return
+		# Fall through to cleanup (step == 4)
+
+	# === Step 4: Cleanup — collisions, building ranges, erase batch ===
 	var all_baked: bool = batch.get("_all_baked", false)
 
-	# === MERGED СТЕНЫ (по типу текстуры) ===
-	for tex_type in ["panel", "brick", "wall"]:
-		var geo: Dictionary = batch[tex_type + "_walls"]
-		if geo["vertices"].size() == 0:
-			continue
-
-		var arrays := []
-		arrays.resize(Mesh.ARRAY_MAX)
-		arrays[Mesh.ARRAY_VERTEX] = geo["vertices"]
-		arrays[Mesh.ARRAY_TEX_UV] = geo["uvs"]
-		arrays[Mesh.ARRAY_NORMAL] = geo["normals"]
-		arrays[Mesh.ARRAY_INDEX] = geo["indices"]
-
-		var arr_mesh := ArrayMesh.new()
-		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-
-		var rid := _rs_add_mesh(chunk_key, arr_mesh, _building_wall_materials[tex_type],
-			shadow_setting, render_distance)
-		if not _chunk_building_rs.has(chunk_key):
-			_chunk_building_rs[chunk_key] = []
-		_chunk_building_rs[chunk_key].append(rid)
-
-		if _draw_call_logging_enabled:
-			_draw_call_stats["buildings"] += 1
-
-	# === MERGED КРЫШИ ===
-	var roof_geo: Dictionary = batch["roofs"]
-	if roof_geo["vertices"].size() > 0:
-		var roof_arrays := []
-		roof_arrays.resize(Mesh.ARRAY_MAX)
-		roof_arrays[Mesh.ARRAY_VERTEX] = roof_geo["vertices"]
-		roof_arrays[Mesh.ARRAY_TEX_UV] = roof_geo["uvs"]
-		roof_arrays[Mesh.ARRAY_NORMAL] = roof_geo["normals"]
-		roof_arrays[Mesh.ARRAY_INDEX] = roof_geo["indices"]
-
-		var roof_mesh := ArrayMesh.new()
-		roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, roof_arrays)
-
-		var roof_rid := _rs_add_mesh(chunk_key, roof_mesh, _building_roof_material,
-			shadow_setting, render_distance)
-		if not _chunk_building_rs.has(chunk_key):
-			_chunk_building_rs[chunk_key] = []
-		_chunk_building_rs[chunk_key].append(roof_rid)
-
-		if _draw_call_logging_enabled:
-			_draw_call_stats["buildings"] += 1
-
-	# === КОЛЛИЗИИ (per-building) — отложенное создание через очередь ===
 	if not batch["collisions"].is_empty():
 		_deferred_building_collisions.append({
 			"parent": parent,
@@ -6678,7 +6729,6 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 			"idx": 0
 		})
 
-	# Сохраняем building ranges на parent для deferred elevation
 	if not all_baked:
 		parent.set_meta("_building_ranges", batch["_building_ranges"])
 
@@ -6879,8 +6929,6 @@ func _process_road_queue() -> void:
 
 	var applied := 0
 	while applied < n_ready:
-		if applied > 0 and (Time.get_ticks_usec() - queue_start) > 2000:
-			break
 		_road_mutex.lock()
 		if _road_results.is_empty():
 			_road_mutex.unlock()
@@ -6889,7 +6937,22 @@ func _process_road_queue() -> void:
 		_road_mutex.unlock()
 		_apply_road_result(result)
 		applied += 1
+		if (Time.get_ticks_usec() - queue_start) > 2000:
+			break
 	_record_perf("road_apply", Time.get_ticks_usec() - queue_start)
+
+	# Process deferred footway splitting incrementally (N points per frame, budget 2.5ms)
+	var fw_budget_end := queue_start + 2500
+	while not _deferred_footway_queue.is_empty():
+		if Time.get_ticks_usec() > fw_budget_end:
+			break
+		var fw_item: Dictionary = _deferred_footway_queue[0]
+		if not is_instance_valid(fw_item.parent):
+			_deferred_footway_queue.pop_front()
+			continue
+		var done := _process_footway_incremental(fw_item, fw_budget_end)
+		if done:
+			_deferred_footway_queue.pop_front()
 
 	# Process deferred lamp/manhole generation with time budget
 	while not _deferred_lamp_queue.is_empty():
@@ -6922,13 +6985,27 @@ func _process_road_queue() -> void:
 		var item: Dictionary = _deferred_traffic_queue.pop_front()
 		_extract_road_for_traffic_fast(item.points, item.tags, item.elevation_info)
 
+	# Process deferred billboard creation with time budget
+	while not _deferred_billboard_queue.is_empty():
+		if (Time.get_ticks_usec() - queue_start) > 4000:
+			break
+		var item: Dictionary = _deferred_billboard_queue.pop_front()
+		if not is_instance_valid(item.parent):
+			continue
+		var billboard_mesh: Node3D = _decoration_layer.create_billboard_mesh(item.billboard, item.elevation)
+		_budgeted_add_child(item.parent, billboard_mesh)
+
 	if _road_queue.is_empty() and _pending_road_tasks <= 0:
 		# Check if there are still unapplied results or deferred work
 		_road_mutex.lock()
 		var has_pending := not _road_results.is_empty()
 		_road_mutex.unlock()
-		if has_pending or not _deferred_lamp_queue.is_empty() or not _deferred_manhole_queue.is_empty() or not _deferred_traffic_queue.is_empty():
+		if has_pending or not _deferred_lamp_queue.is_empty() or not _deferred_manhole_queue.is_empty() or not _deferred_traffic_queue.is_empty() or not _deferred_footway_queue.is_empty() or not _deferred_billboard_queue.is_empty():
 			return  # Wait for results/deferred to be processed first
+
+		# Budget gate: skip finalization if deferred work already consumed >3ms
+		if (Time.get_ticks_usec() - queue_start) > 3000:
+			return
 
 		# Round-robin: ONE finalization type per frame, ONE chunk per type
 		# This prevents Godot scene tree from processing too many new nodes at once
@@ -6964,7 +7041,7 @@ func _process_road_queue() -> void:
 						_record_perf("fin_lamps", Time.get_ticks_usec() - t_lamp)
 						did_work = true
 
-				3:  # Buildings (1 chunk)
+				3:  # Buildings (1 surface per frame, incremental)
 					_finalize_phase = 4
 					if _pending_building_tasks <= 0 and _building_results.is_empty():
 						# Enqueue building geo batches
@@ -6978,11 +7055,12 @@ func _process_road_queue() -> void:
 							var chunk_key: String = _building_geo_finalize_queue[0]
 							_building_geo_finalize_queue.remove_at(0)
 							_finalize_building_geo_batch(chunk_key)
-							_finalize_entrance_batch(chunk_key)
 							_record_perf("fin_buildings", Time.get_ticks_usec() - t_geo)
-							# Enqueue windows for progressive fill (fast - just sets up state)
-							if _window_batch_data.has(chunk_key):
-								_finalize_window_batches_for_chunk(chunk_key)
+							# Entrance/windows only after ALL building surfaces done
+							if not _building_geo_batch.has(chunk_key):
+								_finalize_entrance_batch(chunk_key)
+								if _window_batch_data.has(chunk_key):
+									_finalize_window_batches_for_chunk(chunk_key)
 							did_work = true
 						elif not _entrance_batch.is_empty():
 							var ent_key: String = _entrance_batch.keys()[0]
@@ -8815,15 +8893,15 @@ func _finalize_billboard_batch_for_chunk(chunk_key: String) -> void:
 	if not is_instance_valid(parent):
 		return
 
-	# Создаём каждый билборд
+	# Складываем билборды в deferred очередь — создаём по N за кадр
 	for billboard in billboards:
-		var pos: Vector2 = billboard.get_local_position(start_lat, start_lon)
-		var elevation: float = 0.0
+		_deferred_billboard_queue.append({
+			"billboard": billboard,
+			"elevation": 0.0,
+			"parent": parent
+		})
 
-		var billboard_mesh: Node3D = _decoration_layer.create_billboard_mesh(billboard, elevation)
-		_budgeted_add_child(parent, billboard_mesh)
-
-	print("OSM: Created %d billboards for chunk %s" % [billboards.size(), chunk_key])
+	print("OSM: Queued %d billboards for chunk %s" % [billboards.size(), chunk_key])
 
 
 # Создание дорожного знака - разрушаемый при столкновении
@@ -9443,6 +9521,7 @@ func _is_point_on_vehicle_road(point: Vector2, margin: float = 1.0) -> bool:
 		if Geometry2D.is_point_in_polygon(point, contour):
 			return true
 	# Парковки НЕ проверяем — пешеходные дорожки должны оставаться тротуарами поверх парковок
+	return false
 	return false
 
 
@@ -13218,6 +13297,9 @@ func _rs_add_mesh(chunk_key: String, mesh: Mesh, material: Material = null,
 	if vis_max > 0.0:
 		RenderingServer.instance_geometry_set_visibility_range(inst, 0.0, vis_max, 0.0, 0.0,
 			RenderingServer.VISIBILITY_RANGE_FADE_DISABLED)
+	# Lazy activation: создаём невидимыми, активируем через N кадров пакетно
+	if _chunk_activation_pending.has(chunk_key):
+		RenderingServer.instance_set_visible(inst, false)
 	if not _chunk_rs_instances.has(chunk_key):
 		_chunk_rs_instances[chunk_key] = []
 		_chunk_rs_meshes[chunk_key] = []
@@ -13229,6 +13311,55 @@ func _rs_add_mesh(chunk_key: String, mesh: Mesh, material: Material = null,
 
 
 ## Записывает метрику времени
+## Lazy chunk activation — даёт Vulkan время подготовить GPU ресурсы перед показом
+func _process_chunk_activation() -> void:
+	if _chunk_activation_pending.is_empty():
+		return
+
+	# Состояния в _chunk_activation_pending:
+	# -1 = ждём финализации
+	# >= 0 = индекс следующего RS instance для активации
+	const RS_PER_FRAME := 4  # RS instances за кадр (размазываем Vulkan upload)
+
+	for chunk_key in _chunk_activation_pending.keys():
+		var state: int = _chunk_activation_pending[chunk_key]
+
+		if state == -1:
+			# Проверяем есть ли ещё finalize очереди для этого чанка
+			var still_pending := _pending_batch_chunks.has(chunk_key) or _lamp_batches_to_finalize.has(chunk_key) or _tree_batches_to_finalize.has(chunk_key) or _billboard_batches_to_finalize.has(chunk_key) or _building_geo_finalize_queue.has(chunk_key)
+			if not still_pending:
+				_chunk_activation_pending[chunk_key] = 0  # начинаем пакетную активацию
+		else:
+			# Пакетная активация RS instances по N за кадр
+			if not _chunk_rs_instances.has(chunk_key):
+				# Нет RS instances — сразу включаем scene tree node
+				if _loaded_chunks.has(chunk_key):
+					var cn: Node3D = _loaded_chunks[chunk_key]
+					if is_instance_valid(cn):
+						cn.visible = true
+				_chunk_activation_pending.erase(chunk_key)
+				print("OSM: Activated chunk %s (lazy, no RS)" % chunk_key)
+				continue
+
+			var instances: Array = _chunk_rs_instances[chunk_key]
+			var end_idx: int = mini(state + RS_PER_FRAME, instances.size())
+			var i := state
+			while i < end_idx:
+				RenderingServer.instance_set_visible(instances[i], true)
+				i += 1
+
+			if end_idx >= instances.size():
+				# Все RS instances активированы — включаем scene tree node
+				if _loaded_chunks.has(chunk_key):
+					var cn: Node3D = _loaded_chunks[chunk_key]
+					if is_instance_valid(cn):
+						cn.visible = true
+				_chunk_activation_pending.erase(chunk_key)
+				print("OSM: Activated chunk %s (lazy, %d RS)" % [chunk_key, instances.size()])
+			else:
+				_chunk_activation_pending[chunk_key] = end_idx
+
+
 ## Budgeted add_child — limits scene tree insertions per frame.
 ## Returns true if added immediately, false if deferred.
 func _budgeted_add_child(parent_node: Node, child_node: Node) -> bool:
@@ -13419,6 +13550,10 @@ func _update_chunk_culling() -> void:
 	var cam_pos := _culling_camera.global_position
 
 	for chunk_key in _loaded_chunks.keys():
+		# Пропускаем чанки в процессе lazy activation
+		if _chunk_activation_pending.has(chunk_key):
+			continue
+
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
 		if not is_instance_valid(chunk_node):
 			continue
