@@ -299,6 +299,12 @@ const ADD_CHILD_BUDGET_PER_FRAME := 2
 var _add_child_count: int = 0
 var _deferred_add_child_queue: Array = []  # [{parent: Node, child: Node}]
 
+# RenderingServer direct instances — bypass scene tree for zero-spike mesh display
+var _chunk_rs_instances: Dictionary = {}  # chunk_key -> Array[RID]
+var _chunk_rs_meshes: Dictionary = {}  # chunk_key -> Array[Mesh] (prevent GC)
+var _chunk_road_materials: Dictionary = {}  # chunk_key -> Array[ShaderMaterial] (wet mode)
+var _chunk_building_rs: Dictionary = {}  # chunk_key -> Array[RID] (shadow LOD)
+
 # Debug визуализация границ чанков
 var _show_chunk_boundaries := false
 var _chunk_boundary_meshes: Dictionary = {}  # chunk_key -> MeshInstance3D
@@ -1368,17 +1374,15 @@ func _check_initial_load_complete() -> void:
 	var total_chunks: int = _initial_chunks_needed.size()
 	var chunk_progress: float = float(loaded_count) / float(max(1, total_chunks))  # 0.0-1.0
 
-	# Считаем размер всех очередей
-	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + _pending_road_tasks + _pending_veg_tasks + _pending_terrain_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size()
+	# Считаем размер всех очередей (включая финализацию визуала)
+	# Deferred collisions/lights НЕ учитываем — они продолжают работу после загрузки
+	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + _pending_road_tasks + _pending_veg_tasks + _pending_terrain_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size()
 
 	# DEBUG: Детальное логирование очередей
 	if loaded_count >= total_chunks and total_queued > 0:
-		print("OSM DEBUG: Chunks loaded %d/%d, but queues not empty:" % [loaded_count, total_chunks])
-		print("  - _building_results: %d" % _building_results.size())
-		print("  - _road_queue: %d (threads: %d)" % [_road_queue.size(), _pending_road_tasks])
-		print("  - _terrain_objects_queue: %d" % _terrain_objects_queue.size())
-		print("  - _infrastructure_queue: %d" % _infrastructure_queue.size())
-		print("  - _pending_building_tasks: %d" % _pending_building_tasks)
+		print("OSM DEBUG: Chunks loaded %d/%d, queues=%d:" % [loaded_count, total_chunks, total_queued])
+		print("  data: bld=%d road=%d(thr:%d) terr=%d infra=%d pBld=%d pRoad=%d pVeg=%d pTerr=%d lamp=%d manhole=%d traffic=%d" % [_building_results.size(), _road_queue.size(), _pending_road_tasks, _terrain_objects_queue.size(), _infrastructure_queue.size(), _pending_building_tasks, _pending_road_tasks, _pending_veg_tasks, _pending_terrain_tasks, _deferred_lamp_queue.size(), _deferred_manhole_queue.size(), _deferred_traffic_queue.size()])
+		print("  finalize: roadBatch=%d bldGeo=%d curb=%d lamp=%d tree=%d billboard=%d window=%d" % [_pending_batch_chunks.size(), _building_geo_finalize_queue.size(), _curb_geo_batch.size(), _lamp_batches_to_finalize.size(), _tree_batches_to_finalize.size(), _billboard_batches_to_finalize.size(), _window_finalize_queue.size()])
 
 	# DEBUG: Проверяем зависшие чанки в _loading_chunks
 	if loaded_count < total_chunks:
@@ -1430,7 +1434,9 @@ func _check_initial_load_complete() -> void:
 	# Все начальные чанки загружены?
 	if loaded_count >= total_chunks:
 		# Проверяем что все очереди обработаны (для плавности старта)
-		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and _pending_road_tasks <= 0 and _pending_veg_tasks <= 0
+		# Visual queues: must be empty before hiding loading screen
+		# Deferred collisions/lights are NOT blocking — they continue in background
+		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and _pending_road_tasks <= 0 and _pending_veg_tasks <= 0 and _pending_batch_chunks.is_empty() and _building_geo_finalize_queue.is_empty() and _curb_geo_batch.is_empty() and _lamp_batches_to_finalize.is_empty() and _tree_batches_to_finalize.is_empty() and _billboard_batches_to_finalize.is_empty() and _window_finalize_queue.is_empty()
 		if not queues_empty:
 			# Отслеживаем зависание очереди
 			if total_queued == _last_queue_size:
@@ -1922,6 +1928,15 @@ func _unload_chunk(chunk_key: String) -> void:
 			if is_instance_valid(mat):
 				valid_mats.append(mat)
 		_window_batch_materials = valid_mats
+
+		# Free RenderingServer instances for this chunk
+		if _chunk_rs_instances.has(chunk_key):
+			for rid in _chunk_rs_instances[chunk_key]:
+				RenderingServer.free_rid(rid)
+			_chunk_rs_instances.erase(chunk_key)
+		_chunk_rs_meshes.erase(chunk_key)
+		_chunk_road_materials.erase(chunk_key)
+		_chunk_building_rs.erase(chunk_key)
 
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
 		chunk_node.queue_free()
@@ -4150,12 +4165,6 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	var arr_mesh: ArrayMesh = ArrayMesh.new()
 	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
-	# Создаём MeshInstance3D
-	var mesh_instance := MeshInstance3D.new()
-	mesh_instance.mesh = arr_mesh
-	mesh_instance.name = "RoadBatch_" + texture_key
-	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-
 	# Track draw calls
 	if _draw_call_logging_enabled:
 		_draw_call_stats["roads"] += 1
@@ -4166,15 +4175,6 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	var material: Material = WetRoadMaterial.create_road_shader_material(
 		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode
 	)
-	mesh_instance.material_override = material
-
-	# Создаём road body (визуально появляется сразу, collision — отложенно)
-	var road_body := StaticBody3D.new()
-	road_body.name = "RoadBatchCollision_" + texture_key
-	road_body.collision_layer = 1
-	road_body.collision_mask = 1
-	road_body.add_to_group("Road")  # GEVP - дорога
-	road_body.add_child(mesh_instance)
 
 	# Добавляем в parent (chunk node)
 	var parent: Node3D = batch["parent"]
@@ -4185,6 +4185,22 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		if _profiler:
 			_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
 		return
+
+	# Road visual — RenderingServer (no scene tree overhead)
+	_rs_add_mesh(chunk_key, arr_mesh, material)
+
+	# Track material for wet mode toggle
+	if material is ShaderMaterial:
+		if not _chunk_road_materials.has(chunk_key):
+			_chunk_road_materials[chunk_key] = []
+		_chunk_road_materials[chunk_key].append(material)
+
+	# Road collision — StaticBody3D (deferred shape creation)
+	var road_body := StaticBody3D.new()
+	road_body.name = "RoadBatchCollision_" + texture_key
+	road_body.collision_layer = 1
+	road_body.collision_mask = 1
+	road_body.add_to_group("Road")  # GEVP - дорога
 
 	_budgeted_add_child(parent, road_body)
 
@@ -6623,14 +6639,11 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		var arr_mesh := ArrayMesh.new()
 		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
-		var mesh_inst := MeshInstance3D.new()
-		mesh_inst.mesh = arr_mesh
-		mesh_inst.name = "BuildingWalls_" + tex_type
-		mesh_inst.material_override = _building_wall_materials[tex_type]
-		mesh_inst.cast_shadow = shadow_setting
-		mesh_inst.visibility_range_end = render_distance
-		mesh_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
-		_budgeted_add_child(parent, mesh_inst)
+		var rid := _rs_add_mesh(chunk_key, arr_mesh, _building_wall_materials[tex_type],
+			shadow_setting, render_distance)
+		if not _chunk_building_rs.has(chunk_key):
+			_chunk_building_rs[chunk_key] = []
+		_chunk_building_rs[chunk_key].append(rid)
 
 		if _draw_call_logging_enabled:
 			_draw_call_stats["buildings"] += 1
@@ -6648,14 +6661,11 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		var roof_mesh := ArrayMesh.new()
 		roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, roof_arrays)
 
-		var roof_inst := MeshInstance3D.new()
-		roof_inst.mesh = roof_mesh
-		roof_inst.name = "BuildingRoofs"
-		roof_inst.material_override = _building_roof_material
-		roof_inst.cast_shadow = shadow_setting
-		roof_inst.visibility_range_end = render_distance
-		roof_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
-		_budgeted_add_child(parent, roof_inst)
+		var roof_rid := _rs_add_mesh(chunk_key, roof_mesh, _building_roof_material,
+			shadow_setting, render_distance)
+		if not _chunk_building_rs.has(chunk_key):
+			_chunk_building_rs[chunk_key] = []
+		_chunk_building_rs[chunk_key].append(roof_rid)
 
 		if _draw_call_logging_enabled:
 			_draw_call_stats["buildings"] += 1
@@ -7451,16 +7461,10 @@ func _finalize_curb_geo_batch(chunk_key: String) -> void:
 	var arr_mesh := ArrayMesh.new()
 	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
-	var mesh := MeshInstance3D.new()
-	mesh.mesh = arr_mesh
-	mesh.name = "CurbsMerged"
-	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mesh.material_override = _curb_material
-
 	if _draw_call_logging_enabled:
 		_draw_call_stats["curbs"] += 1
 
-	_budgeted_add_child(parent, mesh)
+	_rs_add_mesh(chunk_key, arr_mesh, _curb_material)
 	_curb_geo_batch.erase(chunk_key)
 
 
@@ -9898,12 +9902,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 		curb_arrays[Mesh.ARRAY_INDEX] = curb_idxs
 		var curb_mesh := ArrayMesh.new()
 		curb_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, curb_arrays)
-		var curb_inst := MeshInstance3D.new()
-		curb_inst.name = "ChunkCurbs"
-		curb_inst.mesh = curb_mesh
-		curb_inst.material_override = _curb_material
-		curb_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		_budgeted_add_child(parent, curb_inst)
+		_rs_add_mesh(chunk_key, curb_mesh, _curb_material)
 
 	# Триангулируем полигоны
 	var all_vertices := PackedVector3Array()
@@ -9942,10 +9941,6 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	var arr_mesh := ArrayMesh.new()
 	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
-	var mesh_inst := MeshInstance3D.new()
-	mesh_inst.name = "ChunkTerrain"
-	mesh_inst.mesh = arr_mesh
-
 	var material := StandardMaterial3D.new()
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	if _ground_textures.has("grass"):
@@ -9953,11 +9948,8 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	else:
 		material.albedo_color = Color(0.3, 0.5, 0.2)
-	mesh_inst.material_override = material
-	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
-
-	_budgeted_add_child(parent, mesh_inst)
+	_rs_add_mesh(chunk_key, arr_mesh, material)
 
 	# Коллизия — отложенная (ConcavePolygonShape3D тяжёлая)
 	_deferred_terrain_collisions.append({
@@ -11079,35 +11071,18 @@ func set_wet_mode(enabled: bool, is_night: bool = true) -> void:
 	if _is_wet_mode == enabled:
 		# Даже если состояние не изменилось, нужно обновить материалы если изменился день/ночь
 		if enabled:
-			for chunk_key in _loaded_chunks.keys():
-				var chunk: Node3D = _loaded_chunks[chunk_key]
-				_update_chunk_road_wetness(chunk, enabled, is_night)
+			for chunk_key in _chunk_road_materials:
+				for mat in _chunk_road_materials[chunk_key]:
+					_apply_wet_material(mat, enabled, is_night)
 		return
 
 	_is_wet_mode = enabled
 	print("OSM: Wet mode ", "enabled" if enabled else "disabled")
 
-	# Обновляем материалы всех загруженных дорог
-	for chunk_key in _loaded_chunks.keys():
-		var chunk: Node3D = _loaded_chunks[chunk_key]
-		_update_chunk_road_wetness(chunk, enabled, is_night)
-
-
-func _update_chunk_road_wetness(chunk: Node3D, is_wet: bool, is_night: bool = true) -> void:
-	"""Обновляет материалы дорог в чанке для мокрого/сухого состояния"""
-	for child in chunk.get_children():
-		# Дороги добавляются как MeshInstance3D прямо в чанк
-		if child is MeshInstance3D:
-			var mat: Material = child.material_override
-			if mat and _is_road_material(mat):
-				_apply_wet_material(mat, is_wet, is_night)
-		# Также проверяем внутри StaticBody3D (бордюры и коллизии)
-		elif child is StaticBody3D:
-			for mesh_child in child.get_children():
-				if mesh_child is MeshInstance3D:
-					var mat: Material = mesh_child.material_override
-					if mat and _is_road_material(mat):
-						_apply_wet_material(mat, is_wet, is_night)
+	# Обновляем материалы всех загруженных дорог (tracked via _chunk_road_materials)
+	for chunk_key in _chunk_road_materials:
+		for mat in _chunk_road_materials[chunk_key]:
+			_apply_wet_material(mat, enabled, is_night)
 
 
 func _is_road_material(mat: Material) -> bool:
@@ -11154,10 +11129,7 @@ func _connect_to_night_mode() -> void:
 
 func _update_building_shadows(player_pos: Vector3) -> void:
 	var shadow_dist_sq: float = _building_shadow_lod_distance * _building_shadow_lod_distance
-	for chunk_key: String in _loaded_chunks:
-		var chunk_node: Node3D = _loaded_chunks[chunk_key]
-		if not is_instance_valid(chunk_node):
-			continue
+	for chunk_key: String in _chunk_building_rs:
 		var parts: PackedStringArray = chunk_key.split(",")
 		var cx: float = float(parts[0]) * chunk_size + chunk_size * 0.5
 		var cz: float = float(parts[1]) * chunk_size + chunk_size * 0.5
@@ -11166,16 +11138,11 @@ func _update_building_shadows(player_pos: Vector3) -> void:
 		var dist_sq: float = dx * dx + dz * dz
 		var want_shadow: int
 		if dist_sq < shadow_dist_sq:
-			want_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			want_shadow = RenderingServer.SHADOW_CASTING_SETTING_ON
 		else:
-			want_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		for child in chunk_node.get_children():
-			if child is GeometryInstance3D:
-				var cname: String = child.name
-				if cname.begins_with("BuildingWalls_") or cname == "BuildingRoofs":
-					var gi: GeometryInstance3D = child as GeometryInstance3D
-					if gi.cast_shadow != want_shadow:
-						gi.cast_shadow = want_shadow
+			want_shadow = RenderingServer.SHADOW_CASTING_SETTING_OFF
+		for rid in _chunk_building_rs[chunk_key]:
+			RenderingServer.instance_geometry_set_cast_shadows_setting(rid, want_shadow)
 
 
 func _setup_render_distance() -> void:
@@ -13236,6 +13203,29 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 	parent.add_child(mesh_instance)
+
+
+## RenderingServer mesh instance — bypasses scene tree entirely.
+## Returns the instance RID. Mesh ref stored to prevent GC.
+func _rs_add_mesh(chunk_key: String, mesh: Mesh, material: Material = null,
+		shadow: int = RenderingServer.SHADOW_CASTING_SETTING_OFF,
+		vis_max: float = 0.0) -> RID:
+	var inst := RenderingServer.instance_create2(mesh.get_rid(), get_world_3d().scenario)
+	RenderingServer.instance_set_transform(inst, Transform3D.IDENTITY)
+	RenderingServer.instance_geometry_set_cast_shadows_setting(inst, shadow)
+	if material:
+		RenderingServer.instance_geometry_set_material_override(inst, material.get_rid())
+	if vis_max > 0.0:
+		RenderingServer.instance_geometry_set_visibility_range(inst, 0.0, vis_max, 0.0, 0.0,
+			RenderingServer.VISIBILITY_RANGE_FADE_DISABLED)
+	if not _chunk_rs_instances.has(chunk_key):
+		_chunk_rs_instances[chunk_key] = []
+		_chunk_rs_meshes[chunk_key] = []
+	_chunk_rs_instances[chunk_key].append(inst)
+	_chunk_rs_meshes[chunk_key].append(mesh)
+	if material:
+		_chunk_rs_meshes[chunk_key].append(material)  # prevent GC for dynamic materials
+	return inst
 
 
 ## Записывает метрику времени
