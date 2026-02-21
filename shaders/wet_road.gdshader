@@ -5,6 +5,10 @@ render_mode cull_disabled;
 uniform sampler2D albedo_texture : source_color, filter_linear_mipmap, repeat_enable;
 uniform sampler2D normal_texture : hint_normal, filter_linear_mipmap, repeat_enable;
 
+// Noise текстуры (tileable)
+uniform sampler2D noise_micro_tex : filter_linear_mipmap, repeat_enable;
+uniform sampler2D noise_macro_tex : filter_linear_mipmap, repeat_enable;
+
 // Параметры материала
 uniform vec4 base_color : source_color = vec4(0.25, 0.25, 0.25, 1.0);
 uniform float normal_strength : hint_range(0.0, 2.0) = 0.3;
@@ -17,7 +21,6 @@ uniform bool is_night = false;
 // Roughness настройки
 uniform float dry_roughness : hint_range(0.0, 1.0) = 0.85;
 uniform float wet_roughness : hint_range(0.0, 1.0) = 0.15;
-uniform float roughness_variation : hint_range(0.0, 0.3) = 0.1;
 
 // Лужи
 uniform float puddle_threshold : hint_range(0.0, 1.0) = 0.65;
@@ -33,48 +36,25 @@ uniform float puddle_metallic : hint_range(0.0, 1.0) = 0.5;
 uniform float dry_specular : hint_range(0.0, 1.0) = 0.5;
 uniform float wet_specular : hint_range(0.0, 1.0) = 0.8;
 
-// Noise масштаб для вариации
-uniform float noise_scale : hint_range(0.1, 10.0) = 2.0;
-uniform float noise_scale_large : hint_range(0.01, 1.0) = 0.15;
+// Масштабы UV для noise
+uniform float micro_scale : hint_range(1.0, 50.0) = 12.0;
+uniform float macro_scale : hint_range(0.1, 5.0) = 0.8;
 
-// Простой хэш для процедурного noise
-float hash(vec2 p) {
-	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
+// Интенсивности (dry)
+uniform float macro_roughness_dry : hint_range(0.0, 0.2) = 0.08;
+uniform float macro_albedo_dry : hint_range(0.0, 0.1) = 0.03;
+uniform float micro_roughness_dry : hint_range(0.0, 0.15) = 0.06;
 
-// Smooth noise (value noise)
-float noise(vec2 p) {
-	vec2 i = floor(p);
-	vec2 f = fract(p);
+// Интенсивности (wet)
+uniform float macro_roughness_wet : hint_range(0.0, 0.3) = 0.15;
+uniform float micro_roughness_wet : hint_range(0.0, 0.1) = 0.04;
 
-	// Smooth interpolation
-	vec2 u = f * f * (3.0 - 2.0 * f);
+// Curb puddle bias (0 = равномерно, >0 = чаще у краёв)
+uniform float curb_puddle_bias : hint_range(0.0, 1.0) = 0.3;
 
-	float a = hash(i);
-	float b = hash(i + vec2(1.0, 0.0));
-	float c = hash(i + vec2(0.0, 1.0));
-	float d = hash(i + vec2(1.0, 1.0));
-
-	return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-// FBM (Fractal Brownian Motion) для более интересного шума
-float fbm(vec2 p) {
-	float value = 0.0;
-	float amplitude = 0.5;
-	float frequency = 1.0;
-
-	for (int i = 0; i < 4; i++) {
-		value += amplitude * noise(p * frequency);
-		amplitude *= 0.5;
-		frequency *= 2.0;
-	}
-
-	return value;
-}
 
 void fragment() {
-	// Получаем albedo
+	// Albedo
 	vec3 albedo;
 	if (use_texture) {
 		albedo = texture(albedo_texture, UV).rgb;
@@ -82,42 +62,36 @@ void fragment() {
 		albedo = base_color.rgb;
 	}
 
-	// Получаем noise для вариации
-	float noise_fine = fbm(UV * noise_scale * 10.0);  // Мелкий шум
-	float noise_large = fbm(UV * noise_scale_large * 10.0);  // Крупный шум для луж
+	// Noise samples (2 texture fetches вместо FBM)
+	float n_micro = texture(noise_micro_tex, UV * micro_scale).r;
+	float n_macro = texture(noise_macro_tex, UV * macro_scale).r;
 
-	// Комбинируем noise для естественного вида
-	float combined_noise = noise_fine * 0.4 + noise_large * 0.6;
+	// Curb bias: усиление луж у краёв дороги (UV.x: 0=left, 1=right)
+	float edge_dist = abs(UV.x - 0.5) * 2.0;
+	float curb_factor = mix(1.0, 1.0 + edge_dist * 0.5, curb_puddle_bias);
 
-	// Базовые значения
 	float roughness;
 	float metallic;
 	float specular;
 
 	if (is_wet) {
 		// === МОКРАЯ ДОРОГА ===
+		float base_rough = wet_roughness;
+		base_rough += (n_micro - 0.5) * micro_roughness_wet;
+		base_rough += (n_macro - 0.5) * macro_roughness_wet;
 
-		// Базовый roughness с вариацией
-		roughness = wet_roughness + (combined_noise - 0.5) * roughness_variation * 2.0;
-
-		// Проверяем лужи (области с очень низким roughness)
-		bool is_puddle = noise_large > puddle_threshold;
+		// Puddle detection через macro noise + curb bias
+		float puddle_value = n_macro * curb_factor;
+		bool is_puddle = puddle_value > puddle_threshold;
 
 		if (is_puddle) {
-			// ЛУЖА - очень гладкая, отражающая
 			roughness = puddle_roughness;
 			metallic = puddle_metallic;
-
-			// Затемняем в лужах
 			albedo *= (1.0 - puddle_darkness);
-
-			// Добавляем лёгкий синий оттенок воды
 			albedo = mix(albedo, vec3(0.1, 0.15, 0.2), 0.15);
 		} else {
-			// Обычная мокрая дорога
+			roughness = base_rough;
 			metallic = wet_metallic;
-
-			// Небольшое затемнение мокрой поверхности
 			albedo *= 0.9;
 		}
 
@@ -127,17 +101,20 @@ void fragment() {
 		float fresnel = pow(1.0 - abs(dot(NORMAL, VIEW)), 3.0);
 		metallic = mix(metallic, metallic + 0.2, fresnel);
 
-		// Ночью усиливаем эффект
 		if (is_night) {
 			metallic += 0.1;
-			roughness *= 0.8;  // Ещё более гладкая ночью
+			roughness *= 0.8;
 		}
 
 	} else {
 		// === СУХАЯ ДОРОГА ===
+		roughness = dry_roughness;
+		roughness += (n_micro - 0.5) * micro_roughness_dry;
+		roughness += (n_macro - 0.5) * macro_roughness_dry;
 
-		// Небольшая вариация roughness даже на сухой дороге
-		roughness = dry_roughness + (noise_fine - 0.5) * 0.1;
+		// Macro variation для albedo (мягкие пятна)
+		albedo += (n_macro - 0.5) * macro_albedo_dry;
+
 		metallic = dry_metallic;
 		specular = dry_specular;
 	}

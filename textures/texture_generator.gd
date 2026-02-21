@@ -768,3 +768,41 @@ static func create_panel_building_normal(size: int = 512, floors: int = 5, windo
 
 	var normal_image := _generate_normal_from_height(height_image, 2.5)
 	return ImageTexture.create_from_image(normal_image)
+
+
+# ============ NOISE TEXTURES ============
+
+static func create_noise_micro(size: int = 256) -> NoiseTexture2D:
+	var noise := FastNoiseLite.new()
+	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	noise.seed = 42
+	noise.frequency = 0.05
+	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	noise.fractal_octaves = 3
+	noise.fractal_lacunarity = 2.0
+	noise.fractal_gain = 0.5
+	var tex := NoiseTexture2D.new()
+	tex.width = size
+	tex.height = size
+	tex.seamless = true
+	tex.noise = noise
+	tex.normalize = true
+	return tex
+
+
+static func create_noise_macro(size: int = 512) -> NoiseTexture2D:
+	var noise := FastNoiseLite.new()
+	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	noise.seed = 137
+	noise.frequency = 0.008
+	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	noise.fractal_octaves = 2
+	noise.fractal_lacunarity = 2.0
+	noise.fractal_gain = 0.5
+	var tex := NoiseTexture2D.new()
+	tex.width = size
+	tex.height = size
+	tex.seamless = true
+	tex.noise = noise
+	tex.normalize = true
+	return tex

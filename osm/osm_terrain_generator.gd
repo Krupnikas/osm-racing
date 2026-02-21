@@ -32,6 +32,7 @@ var _window_shader: Shader = null  # Кэш шейдера окон (созда�
 var _shop_back_wall_shader: Shader = null  # Кэш шейдера задней стенки магазина
 var _ground_textures: Dictionary = {}
 var _normal_textures: Dictionary = {}  # Normal maps
+var _noise_textures: Dictionary = {}  # Noise textures for road shader
 var _textures_initialized := false
 
 # Текстуры люков
@@ -550,6 +551,10 @@ func _init_textures() -> void:
 	_normal_textures["brick"] = TextureGeneratorScript.create_brick_normal(256)
 	_normal_textures["concrete"] = TextureGeneratorScript.create_concrete_normal(256)
 	_normal_textures["panel"] = TextureGeneratorScript.create_panel_building_normal(256, 5, 4)  # Было 512
+
+	# Noise текстуры для дорожного шейдера
+	_noise_textures["micro"] = TextureGeneratorScript.create_noise_micro(256)
+	_noise_textures["macro"] = TextureGeneratorScript.create_noise_macro(512)
 
 	_textures_initialized = true
 	var elapsed := Time.get_ticks_msec() - start_time
@@ -3438,9 +3443,12 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 	var material: Material = WetRoadMaterial.create_road_shader_material(
 		_road_textures.get(texture_key, null),
 		_normal_textures.get("asphalt", null),
-		_is_wet_mode,
-		_is_night_mode
+		_is_wet_mode, _is_night_mode,
+		_noise_textures.get("micro", null),
+		_noise_textures.get("macro", null)
 	)
+	if material is ShaderMaterial:
+		WetRoadMaterial.apply_road_type_params(material, texture_key)
 
 	# Создаём MeshInstance3D
 	var mesh_instance := MeshInstance3D.new()
@@ -3825,8 +3833,12 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 	var albedo_tex: Texture2D = _road_textures.get(texture_key, null)
 	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
 	var material: Material = WetRoadMaterial.create_road_shader_material(
-		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode
+		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode,
+		_noise_textures.get("micro", null),
+		_noise_textures.get("macro", null)
 	)
+	if material is ShaderMaterial:
+		WetRoadMaterial.apply_road_type_params(material, texture_key)
 	mesh.material_override = material
 
 	# Создаём коллизию дороги с группой Road для GEVP
@@ -4218,8 +4230,12 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	var albedo_tex: Texture2D = _road_textures.get(texture_key, null)
 	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
 	var material: Material = WetRoadMaterial.create_road_shader_material(
-		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode
+		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode,
+		_noise_textures.get("micro", null),
+		_noise_textures.get("macro", null)
 	)
+	if material is ShaderMaterial:
+		WetRoadMaterial.apply_road_type_params(material, texture_key)
 
 	# Добавляем в parent (chunk node)
 	var parent: Node3D = batch["parent"]
@@ -13276,8 +13292,12 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 	var albedo_tex: Texture2D = _road_textures.get("intersection", null)
 	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
 	var material: Material = WetRoadMaterial.create_road_shader_material(
-		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode
+		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode,
+		_noise_textures.get("micro", null),
+		_noise_textures.get("macro", null)
 	)
+	if material is ShaderMaterial:
+		WetRoadMaterial.apply_road_type_params(material, "intersection")
 	mesh_instance.material_override = material
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 

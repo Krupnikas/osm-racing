@@ -44,7 +44,7 @@ static func has_shader() -> bool:
 	return _road_shader != null
 
 
-static func create_road_shader_material(albedo_texture: Texture2D = null, normal_texture: Texture2D = null, is_wet: bool = false, is_night: bool = false) -> Material:
+static func create_road_shader_material(albedo_texture: Texture2D = null, normal_texture: Texture2D = null, is_wet: bool = false, is_night: bool = false, noise_micro: Texture2D = null, noise_macro: Texture2D = null) -> Material:
 	"""Создаёт ShaderMaterial для дороги с поддержкой wet mode и noise variation"""
 	_load_shader()
 
@@ -67,6 +67,11 @@ static func create_road_shader_material(albedo_texture: Texture2D = null, normal
 		mat.set_shader_parameter("normal_texture", normal_texture)
 		mat.set_shader_parameter("normal_strength", 0.3)
 
+	if noise_micro:
+		mat.set_shader_parameter("noise_micro_tex", noise_micro)
+	if noise_macro:
+		mat.set_shader_parameter("noise_macro_tex", noise_macro)
+
 	# Wet/Night state
 	mat.set_shader_parameter("is_wet", is_wet)
 	mat.set_shader_parameter("is_night", is_night)
@@ -83,9 +88,6 @@ static func create_road_shader_material(albedo_texture: Texture2D = null, normal
 	mat.set_shader_parameter("dry_metallic", DRY_METALLIC)
 	mat.set_shader_parameter("wet_metallic", WET_NIGHT_METALLIC if is_night else WET_DAY_METALLIC)
 	mat.set_shader_parameter("puddle_metallic", 0.5)
-
-	mat.set_shader_parameter("noise_scale", 2.0)
-	mat.set_shader_parameter("noise_scale_large", 0.15)
 
 	return mat
 
@@ -173,3 +175,19 @@ static func create_dry_road_material(base_color: Color = Color(0.2, 0.2, 0.22)) 
 	mat.metallic_specular = DRY_SPECULAR
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	return mat
+
+
+static func apply_road_type_params(mat: ShaderMaterial, road_type: String) -> void:
+	match road_type:
+		"intersection", "crossing":
+			mat.set_shader_parameter("macro_roughness_dry", 0.05)
+			mat.set_shader_parameter("macro_albedo_dry", 0.02)
+		"highway":
+			mat.set_shader_parameter("macro_roughness_dry", 0.06)
+			mat.set_shader_parameter("macro_albedo_dry", 0.02)
+			mat.set_shader_parameter("micro_scale", 15.0)
+		"path":
+			mat.set_shader_parameter("macro_roughness_dry", 0.04)
+			mat.set_shader_parameter("micro_roughness_dry", 0.03)
+		_:
+			pass
