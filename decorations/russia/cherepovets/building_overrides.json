@@ -102,6 +102,15 @@
       "rotation_y": 170,
       "scale": 4.0,
       "y_offset": 1.56
+    },
+    {
+      "comment": "Гараж/веранда у дома (2)",
+      "model": "res://models/Brick_Garage_texture.glb",
+      "lat": 59.148339,
+      "lon": 37.945686,
+      "rotation_y": 170,
+      "scale": 4.0,
+      "y_offset": 1.56
     }
   ],
   "landuse_overrides": [
