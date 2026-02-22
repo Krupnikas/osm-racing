@@ -3,27 +3,27 @@ extends Camera3D
 ## Кинематографическая камера - выше, плавнее, эпичный вид
 
 @export var target: NodePath
-@export var distance := 3.0
+@export var distance := 4.0
 @export var height := 1.3
-@export var smooth_speed := 10.0  # Жёсткое следование как у Chase (было 8)
+@export var smooth_speed := 8.0
 @export var rotation_smooth := 4.0  # Быстрое следование за поворотом
 @export var look_ahead := 3.0  # Смотрим чуть вперёд по движению (было 8 — слишком далеко)
 
 var _target_node: Node3D
 var _car: RigidBody3D
 var _yaw := 0.0
-var _pitch := 0.4  # Наклон вниз
+var _pitch := 0.5  # Наклон вниз
 
 func _ready() -> void:
 	if target:
 		_target_node = get_node(target)
 		if _target_node is VehicleBody3D or _target_node is RigidBody3D:
 			_car = _target_node
-	fov = 60.0
+	fov = 65.0
 
 func reset_camera() -> void:
 	_yaw = 0.0
-	_pitch = 0.4
+	_pitch = 0.5
 
 
 func teleport_to_target() -> void:
