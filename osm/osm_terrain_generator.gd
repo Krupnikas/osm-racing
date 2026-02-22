@@ -238,6 +238,11 @@ var _building_shadow_lod_distance: float = 300.0  # Chunk center distance for sh
 var _curb_collision_results: Array = []  # Результаты расчёта коллизий из worker threads
 var _curb_collision_mutex: Mutex  # Для синхронизации доступа к результатам коллизий
 
+# Iron bar fence batching (per-chunk ArrayMesh with LOD)
+var _fence_geo_batch: Dictionary = {}  # chunk_key -> {parent, lod0:{vertices,normals,indices}, lod1:{...}}
+var _fence_batches_to_finalize: Array[String] = []
+var _fence_material: StandardMaterial3D = null
+
 # Метрики времени для профилирования
 var _perf_metrics: Dictionary = {}
 var _perf_frame_count: int = 0
@@ -536,6 +541,13 @@ func _init_textures() -> void:
 	_curb_material.albedo_color = Color(0.78, 0.76, 0.72)
 	_curb_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_curb_material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
+
+	# Shared material for iron bar fences
+	_fence_material = StandardMaterial3D.new()
+	_fence_material.albedo_color = Color(0.25, 0.25, 0.28)
+	_fence_material.metallic = 0.35
+	_fence_material.roughness = 0.85
+	_fence_material.cull_mode = BaseMaterial3D.CULL_BACK
 
 	# Текстуры земли - загружаем PBR текстуру травы
 	var grass_img := Image.load_from_file("res://textures/Grass004_1K-JPG_Color.jpg")
@@ -2104,6 +2116,8 @@ func reset_terrain() -> void:
 	_window_finalize_queue.clear()
 	_window_finalize_progress.clear()
 	_curb_geo_batch.clear()
+	_fence_geo_batch.clear()
+	_fence_batches_to_finalize.clear()
 	_window_batch_data.clear()
 	_window_batch_materials.clear()
 	_pending_batch_chunks.clear()
@@ -5978,7 +5992,7 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 
 	# Индустриальные и коммерческие зоны - рисуем забор и генерируем здания внутри
 	if landuse_type in ["industrial", "commercial"]:
-		_create_fence(points, parent)
+		_add_fence_to_batch(points, parent)
 		_generate_industrial_buildings(points, parent)
 		return
 
@@ -6081,7 +6095,7 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 	# Здание внутри рисуется отдельно если есть building тег
 	var territory_types := ["school", "kindergarten", "college", "university", "fire_station", "police"]
 	if amenity_type in territory_types:
-		_create_fence(points, parent)
+		_add_fence_to_batch(points, parent)
 		return
 
 	# Заправки не создаём как здания
@@ -6136,6 +6150,219 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 			color = Color(0.6, 0.5, 0.5)
 
 	_create_3d_building(points, color, building_height, parent, 0.0)
+
+## ─── Iron bar fence system ───────────────────────────────────────────
+
+## Append a box (24 verts, 36 indices) to geometry arrays.
+## center: world-space center of box
+## hs: Vector3(half_width, half_height, half_depth)
+## fwd/right: orientation vectors (unit length, XZ plane)
+static func _append_fence_box(verts: PackedVector3Array, norms: PackedVector3Array,
+		idxs: PackedInt32Array, center: Vector3, hs: Vector3,
+		fwd: Vector3, right: Vector3) -> void:
+	var up := Vector3.UP
+	var r := right * hs.x
+	var u := up * hs.y
+	var f := fwd * hs.z
+	# 6 faces × 4 verts = 24 verts, 6 faces × 6 indices = 36 indices
+	var faces := [
+		[f, r, u, fwd],       # front
+		[-f, -r, u, -fwd],    # back
+		[r, -f, u, right],    # right
+		[-r, f, u, -right],   # left
+		[u, r, f, up],        # top
+		[-u, -r, f, -up],     # bottom
+	]
+	for face in faces:
+		var n: Vector3 = face[3]
+		var o: Vector3 = center + face[0]   # face center offset
+		var a: Vector3 = face[1]            # axis 1 (half-extent)
+		var b: Vector3 = face[2]            # axis 2 (half-extent)
+		var bi := verts.size()
+		verts.append(o - a - b)
+		verts.append(o + a - b)
+		verts.append(o + a + b)
+		verts.append(o - a + b)
+		norms.append(n); norms.append(n); norms.append(n); norms.append(n)
+		idxs.append(bi); idxs.append(bi + 1); idxs.append(bi + 2)
+		idxs.append(bi); idxs.append(bi + 2); idxs.append(bi + 3)
+
+
+## Generate one fence section between p1 and p2, appending geometry to lod0/lod1 batch dicts.
+func _generate_fence_segment(p1: Vector2, p2: Vector2,
+		lod0: Dictionary, lod1: Dictionary, rng_seed: int) -> void:
+	const FENCE_HEIGHT := 2.2
+	const POST_HS := Vector3(0.04, 1.1, 0.04)       # 80×2200×80 mm
+	const BAR_HS := Vector3(0.0125, 1.1, 0.0125)     # 25×2200×25 mm
+	const RAIL_HS_Y := 0.02                           # rail half-height (40mm)
+	const RAIL_HS_Z := 0.015                          # rail half-depth (30mm)
+	const BAR_SPACING := 0.12
+	const BOTTOM_RAIL_Y := 0.15
+	const TOP_RAIL_Y := 2.0
+	const BASE_Y := 0.12  # ground offset
+
+	var seg_dir := (p2 - p1).normalized()
+	var seg_len := p1.distance_to(p2)
+	var fwd := Vector3(seg_dir.x, 0.0, seg_dir.y)
+	var right := Vector3(-seg_dir.y, 0.0, seg_dir.x)
+
+	# Height variation from seed
+	var h_var := 1.0 + (float((rng_seed * 2654435761) & 0xFFFF) / 65535.0 - 0.5) * 0.06  # ±3%
+	var fence_h := FENCE_HEIGHT * h_var
+	var post_hs := Vector3(POST_HS.x, fence_h * 0.5, POST_HS.z)
+	var bar_hs := Vector3(BAR_HS.x, fence_h * 0.5, BAR_HS.z)
+
+	var center_y := BASE_Y + fence_h * 0.5
+
+	# Posts at both ends — into both LODs
+	var p1_c := Vector3(p1.x, center_y, p1.y)
+	var p2_c := Vector3(p2.x, center_y, p2.y)
+	_append_fence_box(lod0.vertices, lod0.normals, lod0.indices, p1_c, post_hs, fwd, right)
+	_append_fence_box(lod0.vertices, lod0.normals, lod0.indices, p2_c, post_hs, fwd, right)
+	_append_fence_box(lod1.vertices, lod1.normals, lod1.indices, p1_c, post_hs, fwd, right)
+	_append_fence_box(lod1.vertices, lod1.normals, lod1.indices, p2_c, post_hs, fwd, right)
+
+	# Vertical bars
+	var num_bars := int(seg_len / BAR_SPACING)
+	if num_bars > 1:
+		for i in range(1, num_bars):
+			var t := float(i) / float(num_bars)
+			var bp := p1.lerp(p2, t)
+			var bc := Vector3(bp.x, center_y, bp.y)
+			_append_fence_box(lod0.vertices, lod0.normals, lod0.indices, bc, bar_hs, fwd, right)
+			if i % 2 == 0:
+				_append_fence_box(lod1.vertices, lod1.normals, lod1.indices, bc, bar_hs, fwd, right)
+
+	# Horizontal rails (both LODs)
+	var mid := p1.lerp(p2, 0.5)
+	var rail_hs := Vector3(RAIL_HS_Z, RAIL_HS_Y, seg_len * 0.5)
+	# Bottom rail
+	var rc_bot := Vector3(mid.x, BASE_Y + BOTTOM_RAIL_Y, mid.y)
+	_append_fence_box(lod0.vertices, lod0.normals, lod0.indices, rc_bot, rail_hs, fwd, right)
+	_append_fence_box(lod1.vertices, lod1.normals, lod1.indices, rc_bot, rail_hs, fwd, right)
+	# Top rail
+	var rc_top := Vector3(mid.x, BASE_Y + TOP_RAIL_Y, mid.y)
+	_append_fence_box(lod0.vertices, lod0.normals, lod0.indices, rc_top, rail_hs, fwd, right)
+	_append_fence_box(lod1.vertices, lod1.normals, lod1.indices, rc_top, rail_hs, fwd, right)
+
+
+## Add iron bar fence along polyline to chunk batch
+func _add_fence_to_batch(points: PackedVector2Array, parent: Node3D) -> void:
+	if points.size() < 3:
+		return
+
+	var chunk_key := _get_chunk_key_from_node(parent)
+	if chunk_key.is_empty():
+		chunk_key = "default"
+
+	if not _fence_geo_batch.has(chunk_key):
+		_fence_geo_batch[chunk_key] = {
+			"parent": parent,
+			"lod0": {"vertices": PackedVector3Array(), "normals": PackedVector3Array(), "indices": PackedInt32Array()},
+			"lod1": {"vertices": PackedVector3Array(), "normals": PackedVector3Array(), "indices": PackedInt32Array()},
+			"edges": []  # Array of {p1: Vector2, p2: Vector2} for collision
+		}
+
+	var batch: Dictionary = _fence_geo_batch[chunk_key]
+	var fence_offset := 0.3  # Match existing fence offset from contour
+
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
+
+		# Apply outward offset (same as old _create_fence)
+		var dir := (p2 - p1).normalized()
+		var outward := Vector2(-dir.y, dir.x) * fence_offset
+		p1 = p1 + outward
+		p2 = p2 + outward
+
+		var seg_len := p1.distance_to(p2)
+		if seg_len < 0.5:
+			continue
+
+		# Store edge for collision (one box per full edge, not per subdivision)
+		batch.edges.append({"p1": p1, "p2": p2})
+
+		# Subdivide into ~2.25m sections
+		var num_sections := maxi(1, int(round(seg_len / 2.25)))
+		for j in range(num_sections):
+			var t1 := float(j) / float(num_sections)
+			var t2 := float(j + 1) / float(num_sections)
+			var sp1 := p1.lerp(p2, t1)
+			var sp2 := p1.lerp(p2, t2)
+			var seed_val := int(sp1.x * 1000.0) ^ int(sp1.y * 1000.0) ^ (i * 997 + j)
+			_generate_fence_segment(sp1, sp2, batch.lod0, batch.lod1, seed_val)
+
+	if not _fence_batches_to_finalize.has(chunk_key):
+		_fence_batches_to_finalize.append(chunk_key)
+
+
+## Finalize fence batch: create two RS instances (LOD0 + LOD1) per chunk
+func _finalize_fence_batches_for_chunk(chunk_key: String) -> void:
+	if not _fence_geo_batch.has(chunk_key):
+		return
+	var batch: Dictionary = _fence_geo_batch[chunk_key]
+	if not is_instance_valid(batch.parent):
+		_fence_geo_batch.erase(chunk_key)
+		return
+
+	var lod0: Dictionary = batch.lod0
+	var lod1: Dictionary = batch.lod1
+	var lod0_verts: PackedVector3Array = lod0.vertices
+	var lod1_verts: PackedVector3Array = lod1.vertices
+	var lod0_count: int = lod0_verts.size()
+	var lod1_count: int = lod1_verts.size()
+
+	if lod0_count > 0:
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = lod0_verts
+		arrays[Mesh.ARRAY_NORMAL] = lod0.normals
+		arrays[Mesh.ARRAY_INDEX] = lod0.indices
+		var mesh := ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		_rs_add_mesh(chunk_key, mesh, _fence_material,
+			RenderingServer.SHADOW_CASTING_SETTING_OFF, 50.0)
+
+	if lod1_count > 0:
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = lod1_verts
+		arrays[Mesh.ARRAY_NORMAL] = lod1.normals
+		arrays[Mesh.ARRAY_INDEX] = lod1.indices
+		var mesh := ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		_rs_add_mesh(chunk_key, mesh, _fence_material,
+			RenderingServer.SHADOW_CASTING_SETTING_OFF, 150.0, 50.0)
+
+	# Collision: one StaticBody3D per chunk with box per edge
+	var edges: Array = batch.edges
+	if not edges.is_empty():
+		var body := StaticBody3D.new()
+		body.collision_layer = 1
+		body.collision_mask = 0
+		for edge in edges:
+			var ep1: Vector2 = edge.p1
+			var ep2: Vector2 = edge.p2
+			var mid := ep1.lerp(ep2, 0.5)
+			var elen := ep1.distance_to(ep2)
+			var edir := (ep2 - ep1).normalized()
+			var angle := atan2(edir.y, edir.x)
+
+			var collision := CollisionShape3D.new()
+			var box := BoxShape3D.new()
+			box.size = Vector3(elen, 2.2, 0.08)  # length × fence height × thin wall
+			collision.shape = box
+			collision.position = Vector3(mid.x, 0.12 + 1.1, mid.y)  # BASE_Y + half height
+			collision.rotation.y = -angle
+			body.add_child(collision)
+		_budgeted_add_child(batch.parent, body)
+
+	print("OSM: Finalized fence batch %s: LOD0 %d verts, LOD1 %d verts, %d collision edges" % [chunk_key, lod0_count, lod1_count, edges.size()])
+	_fence_geo_batch.erase(chunk_key)
+
+
+## ─── End iron bar fence system ──────────────────────────────────────
 
 func _create_fence(points: PackedVector2Array, parent: Node3D) -> void:
 	# Создаём забор по контуру территории
@@ -7031,7 +7258,7 @@ func _process_road_queue() -> void:
 		# This prevents Godot scene tree from processing too many new nodes at once
 		var did_work := false
 		var phases_checked := 0
-		while not did_work and phases_checked < 7:
+		while not did_work and phases_checked < 8:
 			phases_checked += 1
 			match _finalize_phase:
 				0:  # Roads (1 chunk)
@@ -7112,13 +7339,23 @@ func _process_road_queue() -> void:
 						did_work = true
 
 				6:  # Billboards (1 chunk)
-					_finalize_phase = 0
+					_finalize_phase = 7
 					if not _billboard_batches_to_finalize.is_empty():
 						var t_bill := Time.get_ticks_usec()
 						var chunk_key: String = _billboard_batches_to_finalize[0]
 						_billboard_batches_to_finalize.remove_at(0)
 						_finalize_billboard_batch_for_chunk(chunk_key)
 						_record_perf("fin_billboards", Time.get_ticks_usec() - t_bill)
+						did_work = true
+
+				7:  # Fences (1 chunk)
+					_finalize_phase = 0
+					if not _fence_batches_to_finalize.is_empty():
+						var t_fence := Time.get_ticks_usec()
+						var chunk_key: String = _fence_batches_to_finalize[0]
+						_fence_batches_to_finalize.remove_at(0)
+						_finalize_fence_batches_for_chunk(chunk_key)
+						_record_perf("fin_fences", Time.get_ticks_usec() - t_fence)
 						did_work = true
 
 		return
@@ -13312,14 +13549,14 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 ## Returns the instance RID. Mesh ref stored to prevent GC.
 func _rs_add_mesh(chunk_key: String, mesh: Mesh, material: Material = null,
 		shadow: int = RenderingServer.SHADOW_CASTING_SETTING_OFF,
-		vis_max: float = 0.0) -> RID:
+		vis_max: float = 0.0, vis_min: float = 0.0) -> RID:
 	var inst := RenderingServer.instance_create2(mesh.get_rid(), get_world_3d().scenario)
 	RenderingServer.instance_set_transform(inst, Transform3D.IDENTITY)
 	RenderingServer.instance_geometry_set_cast_shadows_setting(inst, shadow)
 	if material:
 		RenderingServer.instance_geometry_set_material_override(inst, material.get_rid())
-	if vis_max > 0.0:
-		RenderingServer.instance_geometry_set_visibility_range(inst, 0.0, vis_max, 0.0, 0.0,
+	if vis_max > 0.0 or vis_min > 0.0:
+		RenderingServer.instance_geometry_set_visibility_range(inst, vis_min, vis_max, 0.0, 0.0,
 			RenderingServer.VISIBILITY_RANGE_FADE_DISABLED)
 	# Lazy activation: создаём невидимыми, активируем через N кадров пакетно
 	if _chunk_activation_pending.has(chunk_key):
@@ -13350,7 +13587,7 @@ func _process_chunk_activation() -> void:
 
 		if state == -1:
 			# Проверяем есть ли ещё finalize очереди для этого чанка
-			var still_pending := _pending_batch_chunks.has(chunk_key) or _lamp_batches_to_finalize.has(chunk_key) or _tree_batches_to_finalize.has(chunk_key) or _billboard_batches_to_finalize.has(chunk_key) or _building_geo_finalize_queue.has(chunk_key)
+			var still_pending := _pending_batch_chunks.has(chunk_key) or _lamp_batches_to_finalize.has(chunk_key) or _tree_batches_to_finalize.has(chunk_key) or _billboard_batches_to_finalize.has(chunk_key) or _building_geo_finalize_queue.has(chunk_key) or _fence_batches_to_finalize.has(chunk_key)
 			if not still_pending:
 				_chunk_activation_pending[chunk_key] = 0  # начинаем пакетную активацию
 		else:
