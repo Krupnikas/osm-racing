@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode cull_disabled;
+render_mode cull_disabled, diffuse_lambert_wrap, specular_schlick_ggx;
 
 // Текстура стены
 uniform sampler2D albedo_texture : source_color, filter_linear_mipmap;
@@ -9,7 +9,7 @@ uniform bool use_texture = false;
 uniform bool use_normal = false;
 uniform float normal_strength : hint_range(0.0, 2.0) = 0.8;
 uniform float ao_strength : hint_range(0.0, 1.0) = 0.4;
-uniform float roughness_base : hint_range(0.0, 1.0) = 0.85;
+uniform float roughness_base : hint_range(0.0, 1.0) = 0.7;
 
 void fragment() {
 	// Получаем цвет из текстуры или используем albedo_color
@@ -43,9 +43,10 @@ void fragment() {
 
 	// Для кастомных текстур: меньше roughness = ярче отражения света
 	if (use_texture) {
-		ROUGHNESS = 0.6;  // Гладче, лучше отражает свет
+		ROUGHNESS = 0.55;
 	} else {
-		ROUGHNESS = roughness_base;  // Процедурные текстуры - матовые
+		ROUGHNESS = roughness_base;
 	}
 	METALLIC = 0.0;
+	SPECULAR = 0.5;
 }

@@ -6314,6 +6314,10 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 			im.surface_add_vertex(Vector3(p2.x, roof_y, p2.y))
 			im.surface_add_vertex(Vector3(p3.x, roof_y, p3.y))
 
+	# Определяем направление обхода для корректных нормалей наружу
+	var is_ccw := _is_polygon_ccw(points)
+	var normal_sign := -1.0 if is_ccw else 1.0
+
 	# Стены
 	for i in range(points.size()):
 		var p1 := points[i]
@@ -6324,9 +6328,9 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 		var v3 := Vector3(p2.x, roof_y, p2.y)
 		var v4 := Vector3(p1.x, roof_y, p1.y)
 
-		# Вычисляем нормаль стены (наружу)
+		# Вычисляем нормаль стены (наружу) — учитываем направление обхода полигона
 		var wall_dir := Vector2(p2.x - p1.x, p2.y - p1.y).normalized()
-		var wall_normal := Vector3(-wall_dir.y, 0, wall_dir.x)  # Перпендикуляр
+		var wall_normal := Vector3(-wall_dir.y * normal_sign, 0, wall_dir.x * normal_sign)
 		im.surface_set_normal(wall_normal)
 
 		# Внешняя сторона
@@ -6463,7 +6467,7 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 
 	# Определяем направление полигона для корректных нормалей
 	var is_ccw := _is_polygon_ccw(points)
-	var normal_sign := 1.0 if is_ccw else -1.0
+	var normal_sign := -1.0 if is_ccw else 1.0
 
 	for i in range(points.size()):
 		var p1 := points[i]
@@ -7891,7 +7895,7 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 
 	# Определяем направление полигона для корректных нормалей
 	var is_ccw := _is_polygon_ccw(points)
-	var normal_sign := 1.0 if is_ccw else -1.0
+	var normal_sign := -1.0 if is_ccw else 1.0
 
 	var accumulated_width := 0.0
 	for i in range(points.size()):
@@ -8187,7 +8191,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	var uv_scale_x := texture_repeat_x / perimeter if texture_repeat_x > 0 else 0.1
 
 	var is_ccw := _is_polygon_ccw(points)
-	var normal_sign := 1.0 if is_ccw else -1.0
+	var normal_sign := -1.0 if is_ccw else 1.0
 
 	var accumulated_width := 0.0
 	for i in range(points.size()):
