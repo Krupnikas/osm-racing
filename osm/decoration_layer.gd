@@ -17,6 +17,7 @@ var _terrain_generator: Node = null
 var _billboards: Array = []  # Array[BillboardDecoration]
 var _building_overrides: Array = []  # Array[BuildingOverride]
 var _landuse_tree_overrides: Dictionary = {}  # way_id -> {dense: bool}
+var _custom_models: Array = []  # Array of {model, lat, lon, rotation_y, scale}
 
 # Spatial index для быстрого поиска
 var _billboard_spatial_hash: Dictionary = {}  # cell_key -> Array[int] (индексы)
@@ -57,8 +58,8 @@ func _load_decorations_from_json() -> void:
 		var source_path: String = DECORATIONS_PATH + source.get("path", "")
 		_load_city_decorations(source_path, source.get("id", "unknown"))
 
-	print("DecorationLayer: Loaded %d billboards, %d building overrides from JSON" % [
-		_billboards.size(), _building_overrides.size()
+	print("DecorationLayer: Loaded %d billboards, %d building overrides, %d custom models from JSON" % [
+		_billboards.size(), _building_overrides.size(), _custom_models.size()
 	])
 
 
@@ -177,6 +178,18 @@ func _load_building_overrides_json(path: String) -> void:
 
 		_building_overrides.append(override)
 
+	# Custom models (гаражи, веранды и т.д. по координатам)
+	var models_data: Array = data.get("custom_models", [])
+	for md in models_data:
+		_custom_models.append({
+			"model": md.get("model", ""),
+			"lat": md.get("lat", 0.0),
+			"lon": md.get("lon", 0.0),
+			"rotation_y": md.get("rotation_y", 0.0),
+			"scale": md.get("scale", 1.0),
+			"y_offset": md.get("y_offset", 0.0)
+		})
+
 	# Landuse overrides (деревья на конкретных landuse зонах)
 	var landuse_data: Array = data.get("landuse_overrides", [])
 	for lo in landuse_data:
@@ -236,6 +249,10 @@ func get_building_override_for_way(way_id: int):
 func get_landuse_tree_override(way_id: int):
 	"""Возвращает оверрайд деревьев для landuse зоны по OSM way ID"""
 	return _landuse_tree_overrides.get(way_id, null)
+
+
+func get_custom_models() -> Array:
+	return _custom_models
 
 
 func get_billboards_in_chunk(chunk_min: Vector2, chunk_max: Vector2) -> Array:

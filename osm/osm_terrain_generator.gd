@@ -112,6 +112,7 @@ const INTERSECTION_CELL_SIZE := 50.0  # Размер ячейки spatial hash �
 var _created_lamp_positions: Dictionary = {}  # Позиции созданных фонарей для избежания дубликатов (ключ: chunk_key)
 var _created_sign_positions: Dictionary = {}  # Позиции созданных знаков для избежания дубликатов
 var _created_bus_stop_positions: Dictionary = {}  # Позиции созданных остановок для избежания дубликатов
+var _custom_model_cache: Dictionary = {}  # path -> PackedScene
 var _pending_lamps: Array = []  # Отложенные фонари (создаются после загрузки всех парковок)
 var _lamps_created := false  # Флаг что фонари уже созданы
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
@@ -2759,6 +2760,10 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 
 	if bus_stop_count > 0:
 		print("OSM: Created %d bus stops" % bus_stop_count)
+
+	# Custom models (гаражи, веранды и т.д. из JSON)
+	if chunk_key != "":
+		_place_custom_models_for_chunk(chunk_key, target)
 
 	# Деревья по площади чанка (террейн создаётся позже в _finalize_road_batches_for_chunk)
 	if chunk_key != "":
@@ -9176,6 +9181,55 @@ func _create_garbage_container(pos: Vector2, elevation: float, parent: Node3D) -
 	for child in instance.get_children():
 		_set_no_shadow_recursive(child)
 	parent.add_child(instance)
+
+
+func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
+	if not _decoration_layer:
+		return
+	for entry in _decoration_layer.get_custom_models():
+		var model_path: String = entry.model
+		if model_path.is_empty():
+			continue
+		var lat: float = entry.lat
+		var lon: float = entry.lon
+		if lat == 0.0 or lon == 0.0:
+			continue
+		var pos := _latlon_to_local(lat, lon)
+		# Check if position belongs to this chunk
+		var cx := int(floor(pos.x / chunk_size))
+		var cz := int(floor(pos.y / chunk_size))
+		var pos_chunk_key := "%d,%d" % [cx, cz]
+		if pos_chunk_key != chunk_key:
+			continue
+		# Load and cache PackedScene
+		if not _custom_model_cache.has(model_path):
+			if ResourceLoader.exists(model_path):
+				_custom_model_cache[model_path] = load(model_path)
+			else:
+				push_warning("Custom model not found: " + model_path)
+				continue
+		var scene: PackedScene = _custom_model_cache[model_path]
+		if not scene:
+			continue
+		var inst: Node3D = scene.instantiate()
+		var scale_val: float = entry.scale
+		var y_offset: float = entry.get("y_offset", 0.0)
+		inst.position = Vector3(pos.x, y_offset, pos.y)
+		inst.scale = Vector3.ONE * scale_val
+		inst.rotation_degrees.y = entry.rotation_y
+		# Visibility range 150m (like traffic signs)
+		_set_visibility_range_recursive(inst, 150.0)
+		_set_no_shadow_recursive(inst)
+		parent.add_child(inst)
+		print("OSM: Placed custom model '%s' at (%.1f, %.1f) in chunk %s, scale=%.1f" % [
+			model_path.get_file(), pos.x, pos.y, chunk_key, scale_val])
+
+
+func _set_visibility_range_recursive(node: Node, range_end: float) -> void:
+	if node is GeometryInstance3D:
+		node.visibility_range_end = range_end
+	for child in node.get_children():
+		_set_visibility_range_recursive(child, range_end)
 
 
 func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, parent: Node3D) -> void:

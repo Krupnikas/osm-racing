@@ -93,6 +93,17 @@
       ]
     }
   ],
+  "custom_models": [
+    {
+      "comment": "Гараж/веранда у дома",
+      "model": "res://models/Brick_Garage_texture.glb",
+      "lat": 59.148284,
+      "lon": 37.946302,
+      "rotation_y": 170,
+      "scale": 4.0,
+      "y_offset": 1.56
+    }
+  ],
   "landuse_overrides": [
     {
       "osm_way_id": 694466407,
