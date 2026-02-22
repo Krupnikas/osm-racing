@@ -109,13 +109,12 @@ script = ExtResource("11_traffic")
 script = ExtResource("6_cam_mgr")
 car_path = NodePath("../Car")
 
-[node name="FollowCamera" type="Camera3D" parent="CameraManager"]
-transform = Transform3D(1, 0, 0, 0, 0.9, 0.44, 0, -0.44, 0.9, 0, 7, -10)
-script = ExtResource("3_camera")
+[node name="ChaseCamera" type="Camera3D" parent="CameraManager"]
+current = true
+script = ExtResource("17_chase_cam")
 target = NodePath("../../Car")
 
 [node name="CinematicCamera" type="Camera3D" parent="CameraManager"]
-current = true
 script = ExtResource("15_cinematic_cam")
 target = NodePath("../../Car")
 
@@ -168,7 +167,7 @@ race_manager_path = NodePath("../../RaceManager")
 script = ExtResource("20_race_mgr")
 terrain_generator_path = NodePath("../OSMTerrain")
 car_path = NodePath("../Car")
-camera_path = NodePath("../CameraManager/FollowCamera")
+camera_path = NodePath("../CameraManager/ChaseCamera")
 
 [node name="NightModeManager" type="Node" parent="."]
 script = ExtResource("12_night")

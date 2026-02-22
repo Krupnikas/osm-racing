@@ -13,11 +13,15 @@ func _ready() -> void:
 		_target_node = get_node(target)
 
 func _physics_process(delta: float) -> void:
-	if not _target_node or not current:
+	if not _target_node:
 		return
 
 	var target_pos := _target_node.global_position
 	var desired_pos := Vector3(target_pos.x, height, target_pos.z)
 
 	global_position = global_position.lerp(desired_pos, smooth_speed * delta)
+
+	if not current:
+		return
+
 	rotation_degrees = Vector3(-90, 0, 0)  # Смотрим вниз

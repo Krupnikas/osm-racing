@@ -59,6 +59,18 @@ func _ready() -> void:
 	print("GraphicsSettings: Ready")
 	# Автосохранение при изменении настроек
 	settings_changed.connect(_on_settings_changed)
+	# Подписываемся на смену камеры — нужно переприменить far/DOF к новой камере
+	var cam_mgr := get_tree().current_scene.find_child("CameraManager", true, false)
+	if cam_mgr and cam_mgr.has_signal("camera_changed"):
+		cam_mgr.camera_changed.connect(_on_camera_changed)
+
+
+func _on_camera_changed(_index: int, _name: String) -> void:
+	# Камера сменилась — переприменяем настройки к новой камере
+	_find_camera()
+	if _camera:
+		_apply_render_distance()
+		_apply_dof()
 
 
 func _on_settings_changed() -> void:
@@ -75,24 +87,11 @@ func _find_environment() -> void:
 
 
 func _find_camera() -> void:
-	# Ищем камеру в сцене
-	_camera = get_tree().current_scene.find_child("Camera3D", true, false) as Camera3D
+	# Всегда получаем текущую активную камеру (может смениться через CameraManager)
+	var viewport := get_viewport()
+	if viewport:
+		_camera = viewport.get_camera_3d()
 	if not _camera:
-		# Пробуем найти OrbitCamera
-		_camera = get_tree().current_scene.find_child("OrbitCamera", true, false) as Camera3D
-	if not _camera:
-		# Пробуем найти любую Camera3D в группе
-		var cameras := get_tree().get_nodes_in_group("camera")
-		if cameras.size() > 0:
-			_camera = cameras[0] as Camera3D
-	if not _camera:
-		# Последняя попытка - найти любую активную Camera3D
-		var viewport := get_viewport()
-		if viewport:
-			_camera = viewport.get_camera_3d()
-	if _camera:
-		print("GraphicsSettings: Found Camera3D: ", _camera.name)
-	else:
 		print("GraphicsSettings: WARNING - Camera3D not found")
 
 
@@ -165,7 +164,8 @@ func set_render_distance(distance: float) -> void:
 
 
 func _apply_render_distance() -> void:
-	# Настраиваем камеру
+	# Настраиваем камеру (обновляем ссылку — камера могла смениться)
+	_find_camera()
 	if _camera:
 		_camera.far = render_distance * 1.5
 
@@ -331,9 +331,8 @@ func _apply_motion_blur() -> void:
 
 
 func _apply_dof() -> void:
-	# DOF через CameraAttributes
-	if not _camera:
-		_find_camera()
+	# DOF через CameraAttributes (обновляем ссылку — камера могла смениться)
+	_find_camera()
 
 	if _camera:
 		if not _camera.attributes:
