@@ -3,10 +3,10 @@ extends Camera3D
 ## Орбитальная камера - можно вращать мышкой и она остаётся в заданном положении
 
 @export var target: NodePath
-@export var distance := 8.0
-@export var min_distance := 3.0
-@export var max_distance := 30.0
-@export var smooth_speed := 2.0  # Медленное плавное следование
+@export var distance := 5.0
+@export var min_distance := 2.0
+@export var max_distance := 5.0
+@export var smooth_speed := 8.0
 @export var mouse_sensitivity := 0.005
 @export var zoom_speed := 1.0
 
@@ -82,7 +82,7 @@ func _input(event: InputEvent) -> void:
 		_pitch = clamp(_pitch, -1.0, 1.4)  # Ограничиваем наклон
 
 func _physics_process(delta: float) -> void:
-	if not _target_node or not current:
+	if not _target_node:
 		return
 
 	# Целевая позиция - центр машины
@@ -99,6 +99,14 @@ func _physics_process(delta: float) -> void:
 
 	# Плавное перемещение
 	global_position = global_position.lerp(desired_pos, smooth_speed * delta)
+
+	# Жёсткий лимит — камера не дальше 5м от машины
+	var to_cam := global_position - _target_node.global_position
+	if to_cam.length() > 5.0:
+		global_position = _target_node.global_position + to_cam.normalized() * 5.0
+
+	if not current:
+		return
 
 	# Смотрим на машину
 	look_at(target_pos)

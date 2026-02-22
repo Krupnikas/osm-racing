@@ -1,4 +1,4 @@
-[gd_scene load_steps=22 format=3 uid="uid://ctest_track_001"]
+[gd_scene load_steps=23 format=3 uid="uid://ctest_track_001"]
 
 [ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://race/test_track_scene.gd" id="1_scene"]
@@ -9,6 +9,7 @@
 [ext_resource type="Script" path="res://camera/top_down_camera.gd" id="8_top_cam"]
 [ext_resource type="Script" path="res://camera/cinematic_camera.gd" id="15_cinematic_cam"]
 [ext_resource type="Script" path="res://camera/orbit_camera.gd" id="16_orbit_cam"]
+[ext_resource type="Script" path="res://camera/chase_camera.gd" id="14_chase_cam"]
 [ext_resource type="PackedScene" uid="uid://hud123" path="res://ui/hud.tscn" id="10_hud"]
 [ext_resource type="Script" path="res://settings/graphics_settings.gd" id="16_graphics"]
 [ext_resource type="Script" path="res://textures/ground_setup.gd" id="17_ground"]
@@ -87,13 +88,12 @@ script = ExtResource("30_lane_assist")
 script = ExtResource("6_cam_mgr")
 car_path = NodePath("../Car")
 
-[node name="FollowCamera" type="Camera3D" parent="CameraManager"]
-transform = Transform3D(1, 0, 0, 0, 0.9, 0.44, 0, -0.44, 0.9, 0, 7, -10)
-script = ExtResource("3_camera")
+[node name="ChaseCamera" type="Camera3D" parent="CameraManager"]
+current = true
+script = ExtResource("14_chase_cam")
 target = NodePath("../../Car")
 
 [node name="CinematicCamera" type="Camera3D" parent="CameraManager"]
-current = true
 script = ExtResource("15_cinematic_cam")
 target = NodePath("../../Car")
 

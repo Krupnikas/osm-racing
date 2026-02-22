@@ -109,7 +109,7 @@ func _update_car_references(new_car: Node3D) -> void:
 		cam_manager.car_path = cam_manager.get_path_to(new_car)
 
 	# Камеры - обновляем и NodePath и кешированный _target_node
-	for cam_name in ["FollowCamera", "CinematicCamera", "TopDownCamera", "OrbitCamera"]:
+	for cam_name in ["ChaseCamera", "CinematicCamera", "TopDownCamera", "OrbitCamera"]:
 		var cam := get_node_or_null("CameraManager/" + cam_name)
 		if cam:
 			if cam.get("target") != null:

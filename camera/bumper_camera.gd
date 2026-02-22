@@ -22,12 +22,15 @@ func _ready() -> void:
 	fov = fov_base
 
 func _physics_process(delta: float) -> void:
-	if not _target_node or not current:
+	if not _target_node:
 		return
 
 	# Позиция относительно машины
 	var car_transform := _target_node.global_transform
 	global_position = car_transform * offset
+
+	if not current:
+		return
 
 	# Смотрим вперёд (инвертируем направление чтобы камера была сзади)
 	var forward := -car_transform.basis.z

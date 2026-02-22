@@ -13,12 +13,15 @@ func _ready() -> void:
 		_target_node = get_node(target)
 
 func _physics_process(_delta: float) -> void:
-	if not _target_node or not current:
+	if not _target_node:
 		return
 
 	# Позиция относительно машины
 	var car_transform := _target_node.global_transform
 	global_position = car_transform * offset
+
+	if not current:
+		return
 
 	# Смотрим в направлении движения машины (вперёд по +Z локально)
 	var forward := car_transform.basis.z

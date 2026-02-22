@@ -1259,17 +1259,16 @@ func _process(delta: float) -> void:
 	_check_timer = 0.0
 
 	# Определяем позицию для загрузки чанков
-	# Используем текущую активную камеру
+	# Всегда используем позицию машины — камера может быть далеко (fly mode, cinematic)
 	var player_pos := Vector3.ZERO
-	var viewport := get_viewport()
-	if viewport:
-		var current_cam := viewport.get_camera_3d()
-		if current_cam:
-			player_pos = current_cam.global_position
-		elif _car:
-			player_pos = _car.global_position
-	elif _car:
+	if _car:
 		player_pos = _car.global_position
+	else:
+		var viewport := get_viewport()
+		if viewport:
+			var current_cam := viewport.get_camera_3d()
+			if current_cam:
+				player_pos = current_cam.global_position
 
 	# Проверяем нужны ли новые чанки
 	_update_chunks(player_pos)
@@ -6910,8 +6909,16 @@ func _update_debug_stats(delta: float) -> void:
 
 	var tgen_q := _pending_terrain_tasks
 
-	_debug_label.text = "FPS: %.0f (avg:%.0f 1%%:%.0f min:%.0f)\nFrame: %.1fms [%s] CPU:%.1f GPU:%.1f\nProcess: %.1fms | Physics: %.1fms\nDraw: %d | Verts: %s | VRAM: %.0fMB\nBodies: %d | Pairs: %d | Nodes: %d\nQueues: R:%d T:%d I:%d B:%d C:%d TG:%d | Chunks: %d\n_process avg/max (ms):%s" % [
-		fps, avg_fps, fps_1pct, min_fps,
+	# Название текущей камеры
+	var cam_name := ""
+	var vp := get_viewport()
+	if vp:
+		var cam := vp.get_camera_3d()
+		if cam:
+			cam_name = cam.name
+
+	_debug_label.text = "FPS: %.0f (avg:%.0f 1%%:%.0f min:%.0f) | Cam: %s\nFrame: %.1fms [%s] CPU:%.1f GPU:%.1f\nProcess: %.1fms | Physics: %.1fms\nDraw: %d | Verts: %s | VRAM: %.0fMB\nBodies: %d | Pairs: %d | Nodes: %d\nQueues: R:%d T:%d I:%d B:%d C:%d TG:%d | Chunks: %d\n_process avg/max (ms):%s" % [
+		fps, avg_fps, fps_1pct, min_fps, cam_name,
 		frame_ms, bottleneck, render_cpu, render_gpu,
 		process_ms, physics_ms,
 		draw_calls, vertices_str, vram,
@@ -13522,10 +13529,10 @@ func _update_chunk_culling() -> void:
 				chunk_node.visible = true
 		return
 
+	# Всегда получаем актуальную камеру (может смениться через CameraManager)
+	_culling_camera = get_viewport().get_camera_3d()
 	if not _culling_camera:
-		_culling_camera = get_viewport().get_camera_3d()
-		if not _culling_camera:
-			return
+		return
 
 	if not _car:
 		return
