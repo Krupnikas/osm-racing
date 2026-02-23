@@ -58,7 +58,7 @@ script = ExtResource("test_script")
 test_duration = 60.0
 spike_threshold_ms = 25.0
 fly_speed = 27.78
-fly_height = 50.0
+fly_height = 38.0
 test_location = Vector2(59.150406, 37.948805)
 auto_quit_after_test = true
 
