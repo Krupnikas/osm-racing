@@ -11,7 +11,7 @@ class_name CarLights
 ## 5. Добавить позиции в _create_light_meshes() - визуальные меши фар (2 места: headlight и taillight)
 
 # Настройки неона
-@export var underglow_enabled := true  # По умолчанию включен (тусклый)
+@export var underglow_enabled := false  # По умолчанию выключен днём, включается ночью
 @export var underglow_color := Color(0.0, 1.0, 0.9)  # Cyan
 
 # Цвета неона для переключения (G key)
@@ -492,9 +492,10 @@ func enable_lights() -> void:
 	if taillight_mesh_right:
 		taillight_mesh_right.visible = true
 
-	if underglow_enabled:
-		for light in underglow_lights:
-			light.visible = true
+	# Автоматически включаем underglow ночью
+	underglow_enabled = true
+	for light in underglow_lights:
+		light.visible = true
 
 
 func disable_lights() -> void:
@@ -520,6 +521,8 @@ func disable_lights() -> void:
 	if taillight_mesh_right:
 		taillight_mesh_right.visible = false
 
+	# Автоматически выключаем underglow днём
+	underglow_enabled = false
 	for light in underglow_lights:
 		light.visible = false
 

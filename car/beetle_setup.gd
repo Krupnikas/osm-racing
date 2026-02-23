@@ -19,7 +19,7 @@ var _brake_lights: Array[SpotLight3D] = []
 var _headlights: Array[SpotLight3D] = []
 var _underglow_lights: Array[SpotLight3D] = []
 var _underglow_material: StandardMaterial3D
-var _underglow_enabled := true
+var _underglow_enabled := false  # По умолчанию выключен днём, включается ночью
 var _underglow_color_index := 0
 var _is_night := false
 var _vehicle: Node
@@ -65,6 +65,7 @@ func _process(_delta: float) -> void:
 			_is_night = current_night
 			_update_glass_materials()
 			_update_headlights()
+			_update_underglow_for_night()
 
 	_update_taillight_brightness()
 
@@ -431,6 +432,14 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_G:
 			_toggle_underglow()
+
+
+func _update_underglow_for_night() -> void:
+	"""Включает/выключает underglow при смене дня/ночи"""
+	_underglow_enabled = _is_night
+	for light in _underglow_lights:
+		if is_instance_valid(light):
+			light.visible = _underglow_enabled
 
 
 func _toggle_underglow() -> void:
