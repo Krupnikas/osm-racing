@@ -208,6 +208,9 @@ var _tree_billboard_leaf: ArrayMesh  # Billboard cross-plane для leaf
 var _tree_billboard_pine: ArrayMesh  # Billboard cross-plane для pine
 var _tree_billboard_mat_leaf: ShaderMaterial  # Billboard материал leaf
 var _tree_billboard_mat_pine: ShaderMaterial  # Billboard материал pine
+# Shadow-only cross meshes (simplified geometry for shadow pass)
+var _tree_shadow_mesh_leaf: ArrayMesh
+var _tree_shadow_mesh_pine: ArrayMesh
 
 # LOD distances for trees
 const TREE_LOD0_END := 50.0    # Full mesh: 0-50m
@@ -241,6 +244,9 @@ var _billboard_batches_to_finalize: Array[String] = []  # Chunk keys ready for b
 
 # Building shadow LOD - only cast shadows for close buildings
 var _building_shadow_lod_distance: float = 300.0  # Chunk center distance for shadow LOD
+# Tree shadow LOD - track shadow MultiMesh nodes per chunk
+var _chunk_tree_shadow_nodes: Dictionary = {}  # chunk_key -> Array[MultiMeshInstance3D]
+var _tree_shadow_lod_distance: float = 300.0
 
 var _curb_collision_results: Array = []  # Результаты расчёта коллизий из worker threads
 var _curb_collision_mutex: Mutex  # Для синхронизации доступа к результатам коллизий
@@ -1052,6 +1058,32 @@ func _init_tree_billboards() -> void:
 	_tree_billboard_leaf.surface_set_material(0, _tree_billboard_mat_leaf)
 	_tree_billboard_pine.surface_set_material(0, _tree_billboard_mat_pine)
 
+	# Shadow-only cross meshes with alpha silhouette for realistic shadow shape
+	_tree_shadow_mesh_leaf = _create_billboard_cross_mesh(6.0, 10.0)
+	_tree_shadow_mesh_pine = _create_billboard_cross_mesh(4.0, 12.0)
+
+	# Shadow materials with tree silhouette alpha textures
+	var shadow_leaf_tex := _generate_tree_billboard_texture(
+		Color(1.0, 1.0, 1.0), Color(1.0, 1.0, 1.0), false)
+	var shadow_pine_tex := _generate_tree_billboard_texture(
+		Color(1.0, 1.0, 1.0), Color(1.0, 1.0, 1.0), true)
+
+	var shadow_mat_leaf := StandardMaterial3D.new()
+	shadow_mat_leaf.albedo_texture = shadow_leaf_tex
+	shadow_mat_leaf.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	shadow_mat_leaf.alpha_scissor_threshold = 0.5
+	shadow_mat_leaf.cull_mode = BaseMaterial3D.CULL_DISABLED
+	shadow_mat_leaf.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_tree_shadow_mesh_leaf.surface_set_material(0, shadow_mat_leaf)
+
+	var shadow_mat_pine := StandardMaterial3D.new()
+	shadow_mat_pine.albedo_texture = shadow_pine_tex
+	shadow_mat_pine.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	shadow_mat_pine.alpha_scissor_threshold = 0.5
+	shadow_mat_pine.cull_mode = BaseMaterial3D.CULL_DISABLED
+	shadow_mat_pine.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_tree_shadow_mesh_pine.surface_set_material(0, shadow_mat_pine)
+
 	call_deferred("_render_billboard_textures_async")
 
 	print("OSM: Tree billboard meshes ready (SubViewport render deferred)")
@@ -1345,8 +1377,9 @@ func _process(delta: float) -> void:
 	# Проверяем нужны ли новые чанки
 	_update_chunks(player_pos)
 
-	# Обновляем тени зданий по расстоянию до игрока
+	# Обновляем тени зданий и деревьев по расстоянию до игрока
 	_update_building_shadows(player_pos)
+	_update_tree_shadows(player_pos)
 
 # Начать загрузку карты
 func start_loading() -> void:
@@ -2023,6 +2056,7 @@ func _unload_chunk(chunk_key: String) -> void:
 		_chunk_rs_meshes.erase(chunk_key)
 		_chunk_road_materials.erase(chunk_key)
 		_chunk_building_rs.erase(chunk_key)
+		_chunk_tree_shadow_nodes.erase(chunk_key)
 
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
 		chunk_node.queue_free()
@@ -9686,7 +9720,8 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 			"transforms": leaf_transforms,
 			"mesh_lod0": _tree_mesh_leaf,
 			"mesh_lod1": _tree_mesh_leaf_lod1,
-			"mesh_lod2": _tree_billboard_leaf
+			"mesh_lod2": _tree_billboard_leaf,
+			"shadow_mesh": _tree_shadow_mesh_leaf,
 		})
 	if pine_transforms.size() > 0:
 		tree_configs.append({
@@ -9694,7 +9729,8 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 			"transforms": pine_transforms,
 			"mesh_lod0": _tree_mesh_pine,
 			"mesh_lod1": _tree_mesh_pine_lod1,
-			"mesh_lod2": _tree_billboard_pine
+			"mesh_lod2": _tree_billboard_pine,
+			"shadow_mesh": _tree_shadow_mesh_pine,
 		})
 
 	for config in tree_configs:
@@ -9713,6 +9749,25 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 			mm.set_instance_transform(i, transforms[i])
 		mm_inst.multimesh = mm
 		_budgeted_add_child(parent, mm_inst)
+
+		# Shadow-only MultiMesh (simplified cross mesh for shadow pass)
+		var shadow_mesh: ArrayMesh = config["shadow_mesh"]
+		if shadow_mesh:
+			var shadow_inst := MultiMeshInstance3D.new()
+			shadow_inst.name = "TreesShadow%s" % name_prefix
+			shadow_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+			var shadow_mm := MultiMesh.new()
+			shadow_mm.transform_format = MultiMesh.TRANSFORM_3D
+			shadow_mm.mesh = shadow_mesh
+			shadow_mm.instance_count = transforms.size()
+			for i in range(transforms.size()):
+				shadow_mm.set_instance_transform(i, transforms[i])
+			shadow_inst.multimesh = shadow_mm
+			_budgeted_add_child(parent, shadow_inst)
+			# Track node for distance-based shadow LOD
+			if not _chunk_tree_shadow_nodes.has(chunk_key):
+				_chunk_tree_shadow_nodes[chunk_key] = []
+			_chunk_tree_shadow_nodes[chunk_key].append(shadow_inst)
 
 		draw_calls += config["mesh_lod0"].get_surface_count()
 
@@ -12155,6 +12210,25 @@ func _update_building_shadows(player_pos: Vector3) -> void:
 			want_shadow = RenderingServer.SHADOW_CASTING_SETTING_OFF
 		for rid in _chunk_building_rs[chunk_key]:
 			RenderingServer.instance_geometry_set_cast_shadows_setting(rid, want_shadow)
+
+
+func _update_tree_shadows(player_pos: Vector3) -> void:
+	var shadow_dist_sq: float = _tree_shadow_lod_distance * _tree_shadow_lod_distance
+	for chunk_key: String in _chunk_tree_shadow_nodes:
+		var parts: PackedStringArray = chunk_key.split(",")
+		var cx: float = float(parts[0]) * chunk_size + chunk_size * 0.5
+		var cz: float = float(parts[1]) * chunk_size + chunk_size * 0.5
+		var dx: float = player_pos.x - cx
+		var dz: float = player_pos.z - cz
+		var dist_sq: float = dx * dx + dz * dz
+		var want_shadow: int
+		if dist_sq < shadow_dist_sq:
+			want_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+		else:
+			want_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		for node: MultiMeshInstance3D in _chunk_tree_shadow_nodes[chunk_key]:
+			if is_instance_valid(node):
+				node.cast_shadow = want_shadow
 
 
 func _setup_render_distance() -> void:
