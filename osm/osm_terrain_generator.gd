@@ -577,6 +577,9 @@ func _init_textures() -> void:
 		var fm := StandardMaterial3D.new()
 		fm.cull_mode = BaseMaterial3D.CULL_DISABLED
 		fm.albedo_color = fc
+		fm.roughness = 0.7  # Дешёвая краска — не гладкая, но слегка блестит
+		fm.metallic = 0.05
+		fm.metallic_specular = 0.3
 		_building_foundation_materials.append(fm)
 
 	# Shared material бордюров
@@ -641,6 +644,7 @@ func _init_window_shader() -> void:
 	_window_shader = Shader.new()
 	_window_shader.code = """
 shader_type spatial;
+render_mode specular_schlick_ggx;
 
 uniform bool is_night = false;
 
@@ -648,15 +652,20 @@ void fragment() {
 	// Проверяем, выключено ли окно (чёрный цвет = выключено)
 	bool is_off = (COLOR.r < 0.01 && COLOR.g < 0.01 && COLOR.b < 0.01);
 
+	// Стекло: высокая отражаемость, низкая шероховатость
+	METALLIC = 0.3;
+	ROUGHNESS = 0.05;
+	SPECULAR = 0.8;
+
 	if (is_night && !is_off) {
 		// Ночью включенные окна светятся
-		// Альфа-канал = яркость (0-1)
 		float brightness = COLOR.a;
 		ALBEDO = COLOR.rgb * brightness;
 		EMISSION = COLOR.rgb * brightness;
+		ROUGHNESS = 0.1;
 	} else {
-		// Днём все окна тёмные, ночью выключенные тоже тёмные
-		ALBEDO = vec3(0.08, 0.1, 0.12);
+		// Днём все окна тёмные и отражающие, ночью выключенные тоже
+		ALBEDO = vec3(0.05, 0.07, 0.1);
 		EMISSION = vec3(0.0);
 	}
 }
@@ -6621,8 +6630,9 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
 
 	# Высоты с учётом террейна
-	var floor_y := base_elev + 0.5
-	var foundation_y := base_elev + 0.5
+	var fnd_h := _get_foundation_height(points)
+	var floor_y := base_elev + fnd_h
+	var foundation_y := base_elev + fnd_h
 	var roof_y := base_elev + building_height
 
 	# Крыша - используем триангуляцию для корректной работы с невыпуклыми полигонами
@@ -6677,7 +6687,7 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 	fnd_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	fnd_mat.albedo_color = _building_foundation_materials[fnd_color_idx].albedo_color
 	fnd_mesh.material_override = fnd_mat
-	var fnd_top := base_elev + 0.5
+	var fnd_top := base_elev + fnd_h
 	var fnd_bottom := base_elev
 	fnd_im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
 	for i in range(points.size()):
@@ -6807,8 +6817,9 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		return
 
 	# === ВЫЧИСЛЕНИЕ ГЕОМЕТРИИ СТЕН ===
-	var floor_y := base_elev + 0.5
-	var foundation_y := base_elev + 0.5
+	var fnd_h := _get_foundation_height(points)
+	var floor_y := base_elev + fnd_h
+	var foundation_y := base_elev + fnd_h
 	var roof_y := base_elev + building_height
 
 	var wall_vertices := PackedVector3Array()
@@ -6991,7 +7002,7 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 	var fnd_uvs := PackedVector2Array()
 	var fnd_normals := PackedVector3Array()
 	var fnd_indices := PackedInt32Array()
-	var fnd_top := base_elev + 0.5
+	var fnd_top := base_elev + fnd_h
 	var fnd_bottom := base_elev
 	var fnd_material_idx := int(abs(points[0].x * 73.0 + points[0].y * 137.0)) % 4
 
@@ -7183,7 +7194,7 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 	})
 
 	# === ОКНА — вызываем сразу (они сами накапливаются в _window_batch_data) ===
-	_add_building_night_decorations.call_deferred(null, points, building_height, parent, 0.0)
+	_add_building_night_decorations.call_deferred(null, points, building_height, parent, base_elev)
 
 
 ## Создаёт merged ArrayMesh для всех зданий чанка — ONE surface per frame (incremental)
@@ -8427,8 +8438,9 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 		return
 
 	# Высоты с учётом террейна
-	var floor_y := base_elev + 0.5
-	var foundation_y := base_elev + 0.5
+	var fnd_h := _get_foundation_height(points)
+	var floor_y := base_elev + fnd_h
+	var foundation_y := base_elev + fnd_h
 	var roof_y := base_elev + building_height
 
 	# === СТЕНЫ с ArrayMesh для UV ===
@@ -8694,7 +8706,7 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	var fu := PackedVector2Array()
 	var fn := PackedVector3Array()
 	var fi := PackedInt32Array()
-	var ft := base_elev + 0.5
+	var ft := base_elev + fnd_h
 	var fb := base_elev
 	for i in range(points.size()):
 		var fp1 := points[i]
@@ -8867,8 +8879,9 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 
 	# Высоты с учётом террейна
-	var floor_y := base_elev + 0.5
-	var foundation_y := base_elev + 0.5
+	var fnd_h := _get_foundation_height(points)
+	var floor_y := base_elev + fnd_h
+	var foundation_y := base_elev + fnd_h
 	var roof_y := base_elev + building_height
 
 	# === СТЕНЫ с ArrayMesh для UV ===
@@ -9167,7 +9180,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	var fu2 := PackedVector2Array()
 	var fn2 := PackedVector3Array()
 	var fi2 := PackedInt32Array()
-	var ft2 := base_elev + 0.5
+	var ft2 := base_elev + fnd_h
 	var fb2 := base_elev
 	for i in range(points.size()):
 		var fp1 := points[i]
@@ -9472,6 +9485,12 @@ func _calculate_polygon_area(points: PackedVector2Array) -> float:
 
 
 # Проверка направления полигона (true = против часовой стрелки = нормали наружу)
+## Высота фундамента здания (0.5–1.0м), детерминированная по координатам
+static func _get_foundation_height(points: PackedVector2Array) -> float:
+	var hash_val := abs(points[0].x * 31.0 + points[0].y * 97.0)
+	return 0.5 + fmod(hash_val, 1.0) * 0.5  # 0.5 to 1.0
+
+
 func _is_polygon_ccw(points: PackedVector2Array) -> bool:
 	var signed_area := 0.0
 	var n := points.size()
@@ -12577,8 +12596,8 @@ func _add_building_windows(points: PackedVector2Array, height: float, rng: Rando
 				# Смещение наружу от стены
 				var final_pos := wall_pos + wall_normal * wall_offset
 
-				# Высота окна (building_elev сдвигает окна вместе со зданием)
-				var y_pos := building_elev + floor_height * 0.5 + floor_idx * floor_height
+				# Высота окна (building_elev + фундамент)
+				var y_pos := building_elev + _get_foundation_height(points) + floor_height * 0.5 + floor_idx * floor_height
 
 				var pos := Vector3(final_pos.x, y_pos, final_pos.y)
 				var transform := Transform3D(Basis.from_euler(Vector3(0, rot, 0)), pos)
