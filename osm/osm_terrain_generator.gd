@@ -20,6 +20,7 @@ const GARBAGE_CONTAINER_SCENE = preload("res://models/garbage_container/scene.gl
 const STREET_LAMP_SCENE = preload("res://models/street_lamp/Lone_Street_Lamp_on_Hex_post.glb")
 const TireTrackManagerScript = preload("res://tracks/tire_track_manager.gd")
 const CROSSING_SIGN_TEXTURE = preload("res://textures/signs/pedestrian_crossing.png")
+const PARKING_SIGN_TEXTURE = preload("res://textures/signs/parking.png")
 const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
 
 
@@ -120,6 +121,7 @@ var _lamps_created := false  # Флаг что фонари уже создан�
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
 var _crossing_sign_front_mat: StandardMaterial3D
 var _crossing_sign_back_mat: StandardMaterial3D
+var _parking_sign_front_mat: StandardMaterial3D
 var _deferred_lamp_queue: Array = []  # Deferred lamp generation from road apply
 var _deferred_manhole_queue: Array = []  # Deferred manhole generation from road apply
 var _deferred_traffic_queue: Array = []  # Deferred traffic network extraction
@@ -441,6 +443,11 @@ func _ready() -> void:
 	_crossing_sign_back_mat.albedo_color = Color(0.45, 0.45, 0.42)
 	_crossing_sign_back_mat.metallic = 0.6
 	_crossing_sign_back_mat.roughness = 0.7
+
+	_parking_sign_front_mat = StandardMaterial3D.new()
+	_parking_sign_front_mat.albedo_texture = PARKING_SIGN_TEXTURE
+	_parking_sign_front_mat.metallic = 0.3
+	_parking_sign_front_mat.roughness = 0.5
 
 	# Инициализируем шейдер окон (один раз для всех батчей)
 	_init_window_shader()
@@ -5771,51 +5778,33 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	body.add_child(pole)
 
-	# Track draw calls
+	# Лицевая сторона знака (текстура парковки)
+	var sign_front := MeshInstance3D.new()
+	var front_mesh := QuadMesh.new()
+	front_mesh.size = Vector2(0.6, 0.6)
+	sign_front.mesh = front_mesh
+	sign_front.material_override = _parking_sign_front_mat
+	sign_front.position = Vector3(0, 2.3, -0.051)
+	sign_front.rotation.y = PI
+	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	body.add_child(sign_front)
+
+	# Обратная сторона (серый изношенный металл)
+	var sign_back := MeshInstance3D.new()
+	var back_mesh := QuadMesh.new()
+	back_mesh.size = Vector2(0.6, 0.6)
+	sign_back.mesh = back_mesh
+	sign_back.material_override = _crossing_sign_back_mat
+	sign_back.position = Vector3(0, 2.3, -0.029)
+	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	body.add_child(sign_back)
+
+	pole.visibility_range_end = 150.0
+	sign_front.visibility_range_end = 150.0
+	sign_back.visibility_range_end = 150.0
+
 	if _draw_call_logging_enabled:
-		_draw_call_stats["signs"] += 1
-
-	# Знак - синий квадрат
-	var sign_plate := MeshInstance3D.new()
-	var sign_mesh := BoxMesh.new()
-	sign_mesh.size = Vector3(0.6, 0.6, 0.02)
-	sign_plate.mesh = sign_mesh
-
-	var sign_mat := StandardMaterial3D.new()
-	sign_mat.albedo_color = Color(0.1, 0.3, 0.7)  # Синий
-	sign_plate.material_override = sign_mat
-	sign_plate.position.y = 2.3
-	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	body.add_child(sign_plate)
-
-	# Track draw calls
-	if _draw_call_logging_enabled:
-		_draw_call_stats["signs"] += 1
-
-	# Буква "P" - белый текст
-	var label := Label3D.new()
-	label.text = "P"
-	label.font_size = 200
-	label.modulate = Color.WHITE
-	label.outline_size = 0
-	label.billboard = BaseMaterial3D.BILLBOARD_DISABLED
-	label.no_depth_test = false
-	label.pixel_size = 0.002
-	label.position = Vector3(0, 2.3, 0.02)
-	body.add_child(label)
-
-	# Буква "P" с обратной стороны
-	var label_back := Label3D.new()
-	label_back.text = "P"
-	label_back.font_size = 200
-	label_back.modulate = Color.WHITE
-	label_back.outline_size = 0
-	label_back.billboard = BaseMaterial3D.BILLBOARD_DISABLED
-	label_back.no_depth_test = false
-	label_back.pixel_size = 0.002
-	label_back.position = Vector3(0, 2.3, -0.02)
-	label_back.rotation.y = PI  # Повернуть на 180°
-	body.add_child(label_back)
+		_draw_call_stats["signs"] += 2
 
 	parent.add_child(body)
 
@@ -8929,6 +8918,20 @@ func _get_chunk_key_from_node(node: Node3D) -> String:
 		return node_name.substr(6)  # Возвращаем "x,z" часть
 	return ""
 
+## Create a StaticBody3D collision for a lamp pole at given transform
+func _create_lamp_collision(xform: Transform3D) -> StaticBody3D:
+	var body := StaticBody3D.new()
+	body.name = "LampCol"
+	body.transform = xform
+	var shape := CollisionShape3D.new()
+	var cyl := CylinderShape3D.new()
+	cyl.radius = 0.12
+	cyl.height = 5.5
+	shape.shape = cyl
+	shape.position.y = 2.75  # center of 5.5m pole
+	body.add_child(shape)
+	return body
+
 ## Add lamp to batch for chunk with pre-calculated transforms
 func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3, parent: Node3D) -> void:
 	if not enable_street_lamps:
@@ -9000,6 +9003,11 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 	mm_inst.multimesh = mm
 	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	lamp_container.add_child(mm_inst)
+
+	# Collision bodies for each lamp pole
+	for i in range(lamp_count):
+		var col := _create_lamp_collision(batch.transforms[i])
+		lamp_container.add_child(col)
 
 	# LIGHTS container (separate OmniLight3D nodes — deferred)
 	var lights_container := Node3D.new()
@@ -9401,6 +9409,10 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	mm_inst.multimesh = mm
 	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	lamp_root.add_child(mm_inst)
+
+	# Collision for the pole
+	var col := _create_lamp_collision(Transform3D.IDENTITY)
+	lamp_root.add_child(col)
 
 	# OmniLight3D
 	var is_broken := randf() < 0.05
