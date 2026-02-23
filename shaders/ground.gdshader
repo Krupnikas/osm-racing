@@ -24,8 +24,31 @@ uniform float macro_world_scale : hint_range(0.005, 0.2) = 0.015;
 uniform float macro_albedo_intensity : hint_range(0.0, 0.3) = 0.12;
 uniform float macro_roughness_intensity : hint_range(0.0, 0.3) = 0.15;
 
+// Tire track mask (локальная маска вокруг машины)
+uniform sampler2D track_mask_tex : repeat_disable, filter_linear;
+uniform sampler2D noise_micro_tex : filter_linear_mipmap, repeat_enable;
+uniform vec2 track_origin_world = vec2(0.0);
+uniform float track_world_size = 50.0;
+
+// Mud appearance
+uniform vec3 mud_color : source_color = vec3(0.35, 0.28, 0.18);
+uniform float mud_albedo_strength : hint_range(0.0, 1.0) = 0.45;
+uniform float mud_darken : hint_range(0.0, 0.4) = 0.08;
+uniform float mud_desaturate : hint_range(0.0, 1.0) = 0.3;
+uniform float mud_roughness : hint_range(0.0, 1.0) = 0.92;
+uniform float mud_noise_strength : hint_range(0.0, 0.5) = 0.15;
+uniform float mud_wet_boost : hint_range(0.0, 0.5) = 0.15;
+
+// Varying: мировая позиция вершины (model space → world space)
+varying vec3 world_vertex;
+
+void vertex() {
+	world_vertex = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
 
 void fragment() {
+	vec2 world_xz = world_vertex.xz;
+
 	// Albedo из PBR текстуры
 	vec3 albedo = texture(albedo_tex, UV).rgb;
 
@@ -33,10 +56,35 @@ void fragment() {
 	float tex_rough = texture(roughness_tex, UV).r;
 	float roughness = mix(dry_roughness_base - 0.15, dry_roughness_base + 0.05, tex_rough);
 
-	// Macro noise в world-space (VERTEX = world pos, т.к. transform = IDENTITY)
-	float n_macro = texture(noise_macro_tex, VERTEX.xz * macro_world_scale).r;
+	// Macro noise в world-space
+	float n_macro = texture(noise_macro_tex, world_xz * macro_world_scale).r;
 	albedo += (n_macro - 0.5) * macro_albedo_intensity;
 	roughness += (n_macro - 0.5) * macro_roughness_intensity;
+
+	// === Tire tracks (грязные следы шин) ===
+	vec2 track_local = (world_xz - track_origin_world) / track_world_size;
+	float track = 0.0;
+	if (track_local.x >= 0.0 && track_local.x <= 1.0 && track_local.y >= 0.0 && track_local.y <= 1.0) {
+		track = texture(track_mask_tex, track_local).r;
+		// Рваные края через micro noise
+		float tn = texture(noise_micro_tex, world_xz * 0.8).r;
+		track *= mix(1.0 - mud_noise_strength, 1.0 + mud_noise_strength, tn);
+		track = smoothstep(0.05, 0.3, track);
+		track = clamp(track, 0.0, 1.0);
+	}
+	// В дождь следы заметнее
+	if (is_wet) {
+		track = clamp(track * (1.0 + mud_wet_boost), 0.0, 1.0);
+	}
+	// Десатурация зелени → серый
+	float luma = dot(albedo, vec3(0.299, 0.587, 0.114));
+	albedo = mix(albedo, vec3(luma), track * mud_desaturate);
+	// Примешиваем цвет грязи
+	albedo = mix(albedo, mud_color, track * mud_albedo_strength);
+	// Дополнительное затемнение
+	albedo *= (1.0 - track * mud_darken);
+	// Грязь более матовая
+	roughness = mix(roughness, mud_roughness, track);
 
 	// Wet mode: трава темнеет, roughness снижается (без луж/блеска)
 	if (is_wet) {

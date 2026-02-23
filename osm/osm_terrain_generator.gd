@@ -18,6 +18,7 @@ const TreeBillboardShader = preload("res://shaders/tree_billboard.gdshader")
 const BUS_STOP_SCENE = preload("res://models/bus_stop/scene.gltf")
 const GARBAGE_CONTAINER_SCENE = preload("res://models/garbage_container/scene.gltf")
 const STREET_LAMP_SCENE = preload("res://models/street_lamp/Lone_Street_Lamp_on_Hex_post.glb")
+const TireTrackManagerScript = preload("res://tracks/tire_track_manager.gd")
 const CROSSING_SIGN_TEXTURE = preload("res://textures/signs/pedestrian_crossing.png")
 const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
 
@@ -482,6 +483,14 @@ func _ready() -> void:
 	if camera_path:
 		_camera = get_node(camera_path)
 
+	# Tire track manager (грязные следы на траве)
+	if _car and _ground_shader_material:
+		var track_mgr := TireTrackManagerScript.new()
+		track_mgr.name = "TireTrackManager"
+		add_child(track_mgr)
+		track_mgr.setup(_car, _ground_shader_material)
+		print("OSM: TireTrackManager initialized")
+
 	# Подключаемся к NightModeManager
 	await get_tree().process_frame
 	_connect_to_night_mode()
@@ -585,6 +594,7 @@ func _init_textures() -> void:
 		_ground_shader_material.set_shader_parameter("normal_tex", _ground_textures.get("grass_normal"))
 		_ground_shader_material.set_shader_parameter("roughness_tex", _ground_textures.get("grass_roughness"))
 		_ground_shader_material.set_shader_parameter("noise_macro_tex", _noise_textures.get("macro"))
+		_ground_shader_material.set_shader_parameter("noise_micro_tex", _noise_textures.get("micro"))
 		print("OSM: Ground shader material created")
 
 	_textures_initialized = true
@@ -2692,7 +2702,7 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 
 			# Создаём заплатку без разметки если есть хотя бы 1 дорога (service+)
 			if major_road_count >= 1:
-				_create_intersection_patch(pos, target, intersection_idx, max_height_offset)
+				_create_intersection_patch(pos, target, intersection_idx, max_height_offset, chunk_key)
 
 			# Бордюры перекрёстков теперь генерируются по краям террейна в _create_chunk_ground_terrain
 			if intersection_idx < 0:
@@ -5032,6 +5042,7 @@ func _process_deferred_nodes() -> void:
 			body.name = "TerrainCollision"
 			body.collision_layer = 1
 			body.collision_mask = 0
+			body.add_to_group("Grass")  # GEVP/tire tracks — определение поверхности
 			var col_shape := CollisionShape3D.new()
 			var concave := ConcavePolygonShape3D.new()
 			concave.set_faces(faces)
@@ -13534,7 +13545,7 @@ func _create_intersection_curbs(intersection_idx: int, parent: Node3D, height_of
 ## Создаёт заплатку на перекрёстке (чистый асфальт без разметки)
 ## Использует контур перекрёстка если доступен, иначе fallback на эллипс
 ## Каждая вершина следует за elevation terrain + наклон дороги
-func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: int = -1, height_offset: float = 0.096) -> void:
+func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: int = -1, height_offset: float = 0.096, chunk_key: String = "") -> void:
 	if not _road_textures.has("intersection"):
 		return
 
@@ -13640,6 +13651,12 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 		WetRoadMaterial.apply_road_type_params(material, "intersection")
 	mesh_instance.material_override = material
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	# Регистрируем материал для wet mode
+	if chunk_key != "" and material is ShaderMaterial:
+		if not _chunk_road_materials.has(chunk_key):
+			_chunk_road_materials[chunk_key] = []
+		_chunk_road_materials[chunk_key].append(material)
 
 	parent.add_child(mesh_instance)
 
