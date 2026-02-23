@@ -326,11 +326,11 @@ static func create_roof_texture(size: int = 256) -> ImageTexture:
 			var ax := (x + offset) % tile_size
 
 			var edge := ax < 1 or ty < 1
-			var base := 0.35 + rng.randf() * 0.1
+			var base := 0.12 + rng.randf() * 0.06
 			if edge:
 				base *= 0.7
-			# Красновато-коричневая черепица
-			image.set_pixel(x, y, Color(base * 1.2, base * 0.5, base * 0.4))
+			# Тёмная крыша (рубероид)
+			image.set_pixel(x, y, Color(base, base, base))
 
 	var texture := ImageTexture.create_from_image(image)
 	return texture

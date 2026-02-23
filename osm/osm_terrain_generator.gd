@@ -172,6 +172,7 @@ var _window_finalize_queue: Array[String] = []  # Progressive window finalizatio
 var _window_finalize_progress: Dictionary = {}  # chunk_key -> {buf, offset, mm, transforms, colors, parent, mat, mm_instance}
 var _building_wall_materials: Dictionary = {}  # texture_type -> ShaderMaterial (shared)
 var _building_roof_material: StandardMaterial3D = null  # shared
+var _building_parapet_material: StandardMaterial3D = null  # shared
 
 # ENTRANCE GEOMETRY MERGE: объединяем все подъезды чанка в один ArrayMesh
 var _entrance_batch: Dictionary = {}  # chunk_key -> {parent, concrete: {vertices,normals,indices}, red_metal, ...}
@@ -552,7 +553,11 @@ func _init_textures() -> void:
 		_building_roof_material.albedo_texture = _building_textures["roof"]
 		_building_roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	else:
-		_building_roof_material.albedo_color = Color(0.4, 0.35, 0.3)
+		_building_roof_material.albedo_color = Color(0.15, 0.15, 0.15)
+
+	_building_parapet_material = StandardMaterial3D.new()
+	_building_parapet_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_building_parapet_material.albedo_color = Color(0.5, 0.5, 0.5)
 
 	# Shared material бордюров
 	_curb_material = StandardMaterial3D.new()
@@ -6784,23 +6789,122 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 
 		accumulated_width += wall_width
 
-	# === ТРИАНГУЛЯЦИЯ КРЫШИ (тяжёлая операция) ===
+	# === ТРИАНГУЛЯЦИЯ КРЫШИ (плоская поверхность) ===
 	var roof_vertices := PackedVector3Array()
 	var roof_uvs := PackedVector2Array()
 	var roof_normals := PackedVector3Array()
 	var roof_indices := PackedInt32Array()
+
+	# === ПАРАПЕТ (бордюр по краю крыши) ===
+	var parapet_vertices := PackedVector3Array()
+	var parapet_uvs := PackedVector2Array()
+	var parapet_normals := PackedVector3Array()
+	var parapet_indices := PackedInt32Array()
 
 	# Ограничиваем сложность полигонов (слишком много точек могут вызвать зависание)
 	if points.size() <= 100:
 		var roof_indices_2d := Geometry2D.triangulate_polygon(points)
 
 		if roof_indices_2d.size() >= 3:
+			# Плоская крыша по оригинальным точкам
 			for p in points:
 				roof_vertices.append(Vector3(p.x, roof_y, p.y))
 				roof_uvs.append(Vector2(p.x * 0.1, p.y * 0.1))
 				roof_normals.append(Vector3.UP)
 			for idx in roof_indices_2d:
 				roof_indices.append(idx)
+
+			# Парапет: наружная, нижняя грани + угловые заполнения
+			var n_pts := points.size()
+			var parapet_top := roof_y + 0.50
+			var parapet_bottom := roof_y
+
+			# Предвычисляем offset каждого ребра (normal_sign из signed area — надёжно для любой формы)
+			var edge_offsets := PackedVector2Array()
+			for ei in n_pts:
+				var ei_next := (ei + 1) % n_pts
+				var edir := (points[ei_next] - points[ei]).normalized()
+				edge_offsets.append(Vector2(-edir.y * normal_sign, edir.x * normal_sign) * 0.20)
+
+			for i in n_pts:
+				var i_next := (i + 1) % n_pts
+				var p0 := points[i]
+				var p1 := points[i_next]
+				var off := edge_offsets[i]
+				var dir2 := (p1 - p0).normalized()
+				var out_normal := Vector3(-dir2.y * normal_sign, 0.0, dir2.x * normal_sign)
+
+				var op0 := p0 + off
+				var op1 := p1 + off
+
+				# Наружная грань
+				var vi := parapet_vertices.size()
+				parapet_vertices.append(Vector3(op0.x, parapet_top, op0.y))
+				parapet_vertices.append(Vector3(op1.x, parapet_top, op1.y))
+				parapet_vertices.append(Vector3(op1.x, parapet_bottom, op1.y))
+				parapet_vertices.append(Vector3(op0.x, parapet_bottom, op0.y))
+				parapet_uvs.append(Vector2(0, 0))
+				parapet_uvs.append(Vector2(1, 0))
+				parapet_uvs.append(Vector2(1, 1))
+				parapet_uvs.append(Vector2(0, 1))
+				parapet_normals.append(out_normal)
+				parapet_normals.append(out_normal)
+				parapet_normals.append(out_normal)
+				parapet_normals.append(out_normal)
+				parapet_indices.append(vi + 0)
+				parapet_indices.append(vi + 1)
+				parapet_indices.append(vi + 2)
+				parapet_indices.append(vi + 0)
+				parapet_indices.append(vi + 2)
+				parapet_indices.append(vi + 3)
+
+				# Нижняя грань
+				vi = parapet_vertices.size()
+				parapet_vertices.append(Vector3(op0.x, parapet_bottom, op0.y))
+				parapet_vertices.append(Vector3(op1.x, parapet_bottom, op1.y))
+				parapet_vertices.append(Vector3(p1.x, parapet_bottom, p1.y))
+				parapet_vertices.append(Vector3(p0.x, parapet_bottom, p0.y))
+				parapet_uvs.append(Vector2(0, 0))
+				parapet_uvs.append(Vector2(1, 0))
+				parapet_uvs.append(Vector2(1, 1))
+				parapet_uvs.append(Vector2(0, 1))
+				parapet_normals.append(Vector3.DOWN)
+				parapet_normals.append(Vector3.DOWN)
+				parapet_normals.append(Vector3.DOWN)
+				parapet_normals.append(Vector3.DOWN)
+				parapet_indices.append(vi + 0)
+				parapet_indices.append(vi + 1)
+				parapet_indices.append(vi + 2)
+				parapet_indices.append(vi + 0)
+				parapet_indices.append(vi + 2)
+				parapet_indices.append(vi + 3)
+
+				# Угловое заполнение
+				var next_off := edge_offsets[i_next]
+				var corner_a := p1 + off
+				var corner_b := p1 + next_off
+				if corner_a.distance_squared_to(corner_b) > 0.0001:
+					var mid_dir := (off.normalized() + next_off.normalized()).normalized()
+					var face_normal := Vector3(mid_dir.x, 0.0, mid_dir.y)
+					vi = parapet_vertices.size()
+					parapet_vertices.append(Vector3(corner_a.x, parapet_top, corner_a.y))
+					parapet_vertices.append(Vector3(corner_b.x, parapet_top, corner_b.y))
+					parapet_vertices.append(Vector3(corner_b.x, parapet_bottom, corner_b.y))
+					parapet_vertices.append(Vector3(corner_a.x, parapet_bottom, corner_a.y))
+					parapet_uvs.append(Vector2(0, 0))
+					parapet_uvs.append(Vector2(1, 0))
+					parapet_uvs.append(Vector2(1, 1))
+					parapet_uvs.append(Vector2(0, 1))
+					parapet_normals.append(face_normal)
+					parapet_normals.append(face_normal)
+					parapet_normals.append(face_normal)
+					parapet_normals.append(face_normal)
+					parapet_indices.append(vi + 0)
+					parapet_indices.append(vi + 1)
+					parapet_indices.append(vi + 2)
+					parapet_indices.append(vi + 0)
+					parapet_indices.append(vi + 2)
+					parapet_indices.append(vi + 3)
 
 	# Сохраняем результат
 	var result := {
@@ -6818,7 +6922,11 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		"roof_vertices": roof_vertices,
 		"roof_uvs": roof_uvs,
 		"roof_normals": roof_normals,
-		"roof_indices": roof_indices
+		"roof_indices": roof_indices,
+		"parapet_vertices": parapet_vertices,
+		"parapet_uvs": parapet_uvs,
+		"parapet_normals": parapet_normals,
+		"parapet_indices": parapet_indices
 	}
 
 	_building_mutex.lock()
@@ -6865,6 +6973,7 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 			"brick_walls": _make_empty_geo_batch(),
 			"wall_walls": _make_empty_geo_batch(),
 			"roofs": _make_empty_geo_batch(),
+			"parapets": _make_empty_geo_batch(),
 			"collisions": [],
 			"_building_ranges": [],  # [{wall_key, wall_start, wall_count, roof_start, roof_count, points}]
 		}
@@ -6901,6 +7010,20 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 			roof_batch["indices"].append(result.roof_indices[i] + roof_start)
 		roof_count = roof_verts.size()
 
+	# === НАКАПЛИВАЕМ ПАРАПЕТ ===
+	var parapet_verts: PackedVector3Array = result.parapet_vertices
+	var parapet_start: int = -1
+	var parapet_count: int = 0
+	if result.parapet_indices.size() >= 3:
+		var parapet_batch: Dictionary = batch["parapets"]
+		parapet_start = parapet_batch["vertices"].size()
+		parapet_batch["vertices"].append_array(parapet_verts)
+		parapet_batch["uvs"].append_array(result.parapet_uvs)
+		parapet_batch["normals"].append_array(result.parapet_normals)
+		for i in range(result.parapet_indices.size()):
+			parapet_batch["indices"].append(result.parapet_indices[i] + parapet_start)
+		parapet_count = parapet_verts.size()
+
 	# Сохраняем ranges для deferred elevation
 	batch["_building_ranges"].append({
 		"wall_key": wall_key,
@@ -6908,6 +7031,8 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 		"wall_count": wall_verts.size(),
 		"roof_start": roof_start,
 		"roof_count": roof_count,
+		"parapet_start": parapet_start,
+		"parapet_count": parapet_count,
 		"points": points,
 		"elev_baked": false
 	})
@@ -6926,7 +7051,7 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 
 
 ## Создаёт merged ArrayMesh для всех зданий чанка — ONE surface per frame (incremental)
-## Surface order: panel_walls → brick_walls → wall_walls → roofs → cleanup
+## Surface order: panel_walls → brick_walls → wall_walls → roofs → parapets → cleanup
 func _finalize_building_geo_batch(chunk_key: String) -> void:
 	if not _building_geo_batch.has(chunk_key):
 		return
@@ -6943,10 +7068,10 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 
 	# Incremental: track which surface to process next
 	var step: int = batch.get("_finalize_step", 0)
-	# Steps: 0=panel_walls, 1=brick_walls, 2=wall_walls, 3=roofs, 4=cleanup
-	var surface_keys: Array[String] = ["panel_walls", "brick_walls", "wall_walls", "roofs"]
+	# Steps: 0=panel_walls, 1=brick_walls, 2=wall_walls, 3=roofs, 4=parapets, 5=cleanup
+	var surface_keys: Array[String] = ["panel_walls", "brick_walls", "wall_walls", "roofs", "parapets"]
 
-	if step < 4:
+	if step < 5:
 		var surface_key: String = surface_keys[step]
 		var geo: Dictionary = batch[surface_key]
 		if geo["vertices"].size() > 0:
@@ -6964,8 +7089,10 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 			if step < 3:
 				var tex_type: String = surface_key.replace("_walls", "")
 				material = _building_wall_materials[tex_type]
-			else:
+			elif step == 3:
 				material = _building_roof_material
+			else:
+				material = _building_parapet_material
 
 			var rid := _rs_add_mesh(chunk_key, arr_mesh, material,
 				shadow_setting, render_distance)
@@ -6979,7 +7106,7 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 		# Skip empty surfaces — advance to next non-empty or cleanup
 		step += 1
 		# Skip remaining empty surfaces to avoid wasting frames
-		while step < 4:
+		while step < 5:
 			var next_geo: Dictionary = batch[surface_keys[step]]
 			if next_geo["vertices"].size() > 0:
 				break
@@ -6987,13 +7114,13 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 
 		batch["_finalize_step"] = step
 		# Re-enqueue if more surfaces remain
-		if step < 4:
+		if step < 5:
 			if not _building_geo_finalize_queue.has(chunk_key):
 				_building_geo_finalize_queue.push_front(chunk_key)
 			return
-		# Fall through to cleanup (step == 4)
+		# Fall through to cleanup (step == 5)
 
-	# === Step 4: Cleanup — collisions, building ranges, erase batch ===
+	# === Step 5: Cleanup — collisions, building ranges, erase batch ===
 	var all_baked: bool = batch.get("_all_baked", false)
 
 	if not batch["collisions"].is_empty():
@@ -8305,11 +8432,124 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 			roof_material.albedo_texture = _building_textures["roof"]
 			roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 		else:
-			roof_material.albedo_color = Color(0.4, 0.35, 0.3)
+			roof_material.albedo_color = Color(0.15, 0.15, 0.15)
 		roof_mesh_instance.material_override = roof_material
 
 		# Добавляем крышу к стенам
 		wall_mesh_instance.add_child(roof_mesh_instance)
+
+		# === ПАРАПЕТ ===
+		var par_arrays := []
+		par_arrays.resize(Mesh.ARRAY_MAX)
+		var par_verts := PackedVector3Array()
+		var par_uv := PackedVector2Array()
+		var par_norms := PackedVector3Array()
+		var par_idx := PackedInt32Array()
+
+		var n_p := points.size()
+		var p_top := roof_y + 0.50
+		var p_bot := roof_y
+
+		var p_edge_offsets := PackedVector2Array()
+		for qi in n_p:
+			var qi_next := (qi + 1) % n_p
+			var qdir := (points[qi_next] - points[qi]).normalized()
+			p_edge_offsets.append(Vector2(-qdir.y * normal_sign, qdir.x * normal_sign) * 0.20)
+
+		for qi in n_p:
+			var qi_next := (qi + 1) % n_p
+			var qp0 := points[qi]
+			var qp1 := points[qi_next]
+			var qoff := p_edge_offsets[qi]
+			var qdir2 := (qp1 - qp0).normalized()
+			var qnorm := Vector3(-qdir2.y * normal_sign, 0.0, qdir2.x * normal_sign)
+			var qop0 := qp0 + qoff
+			var qop1 := qp1 + qoff
+
+			# Наружная грань
+			var vi := par_verts.size()
+			par_verts.append(Vector3(qop0.x, p_top, qop0.y))
+			par_verts.append(Vector3(qop1.x, p_top, qop1.y))
+			par_verts.append(Vector3(qop1.x, p_bot, qop1.y))
+			par_verts.append(Vector3(qop0.x, p_bot, qop0.y))
+			par_uv.append(Vector2(0, 0))
+			par_uv.append(Vector2(1, 0))
+			par_uv.append(Vector2(1, 1))
+			par_uv.append(Vector2(0, 1))
+			par_norms.append(qnorm)
+			par_norms.append(qnorm)
+			par_norms.append(qnorm)
+			par_norms.append(qnorm)
+			par_idx.append(vi + 0)
+			par_idx.append(vi + 1)
+			par_idx.append(vi + 2)
+			par_idx.append(vi + 0)
+			par_idx.append(vi + 2)
+			par_idx.append(vi + 3)
+
+			# Нижняя грань
+			vi = par_verts.size()
+			par_verts.append(Vector3(qop0.x, p_bot, qop0.y))
+			par_verts.append(Vector3(qop1.x, p_bot, qop1.y))
+			par_verts.append(Vector3(qp1.x, p_bot, qp1.y))
+			par_verts.append(Vector3(qp0.x, p_bot, qp0.y))
+			par_uv.append(Vector2(0, 0))
+			par_uv.append(Vector2(1, 0))
+			par_uv.append(Vector2(1, 1))
+			par_uv.append(Vector2(0, 1))
+			par_norms.append(Vector3.DOWN)
+			par_norms.append(Vector3.DOWN)
+			par_norms.append(Vector3.DOWN)
+			par_norms.append(Vector3.DOWN)
+			par_idx.append(vi + 0)
+			par_idx.append(vi + 1)
+			par_idx.append(vi + 2)
+			par_idx.append(vi + 0)
+			par_idx.append(vi + 2)
+			par_idx.append(vi + 3)
+
+			# Угловое заполнение
+			var qnext_off := p_edge_offsets[qi_next]
+			var qca := qp1 + qoff
+			var qcb := qp1 + qnext_off
+			if qca.distance_squared_to(qcb) > 0.0001:
+				var qmid := (qoff.normalized() + qnext_off.normalized()).normalized()
+				var qfn := Vector3(qmid.x, 0.0, qmid.y)
+				vi = par_verts.size()
+				par_verts.append(Vector3(qca.x, p_top, qca.y))
+				par_verts.append(Vector3(qcb.x, p_top, qcb.y))
+				par_verts.append(Vector3(qcb.x, p_bot, qcb.y))
+				par_verts.append(Vector3(qca.x, p_bot, qca.y))
+				par_uv.append(Vector2(0, 0))
+				par_uv.append(Vector2(1, 0))
+				par_uv.append(Vector2(1, 1))
+				par_uv.append(Vector2(0, 1))
+				par_norms.append(qfn)
+				par_norms.append(qfn)
+				par_norms.append(qfn)
+				par_norms.append(qfn)
+				par_idx.append(vi + 0)
+				par_idx.append(vi + 1)
+				par_idx.append(vi + 2)
+				par_idx.append(vi + 0)
+				par_idx.append(vi + 2)
+				par_idx.append(vi + 3)
+
+		if par_idx.size() >= 3:
+			par_arrays[Mesh.ARRAY_VERTEX] = par_verts
+			par_arrays[Mesh.ARRAY_TEX_UV] = par_uv
+			par_arrays[Mesh.ARRAY_NORMAL] = par_norms
+			par_arrays[Mesh.ARRAY_INDEX] = par_idx
+			var par_mesh := ArrayMesh.new()
+			par_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, par_arrays)
+			var par_mi := MeshInstance3D.new()
+			par_mi.mesh = par_mesh
+			par_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			var par_mat := StandardMaterial3D.new()
+			par_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+			par_mat.albedo_color = Color(0.5, 0.5, 0.5)
+			par_mi.material_override = par_mat
+			wall_mesh_instance.add_child(par_mi)
 
 	# Создаём физическое тело
 	var body := StaticBody3D.new()
@@ -8578,7 +8818,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 	wall_mesh_instance.material_override = wall_material
 
-	# === КРЫША ===
+	# === КРЫША (плоская поверхность) ===
 	var roof_indices_2d := Geometry2D.triangulate_polygon(points)
 	if roof_indices_2d.size() >= 3:
 		var roof_arrays := []
@@ -8591,7 +8831,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		for p in points:
 			roof_vertices.append(Vector3(p.x, roof_y, p.y))
 			roof_uvs.append(Vector2(p.x * 0.1, p.y * 0.1))
-			roof_normals.append(Vector3(0, 1, 0))
+			roof_normals.append(Vector3.UP)
 
 		roof_arrays[Mesh.ARRAY_VERTEX] = roof_vertices
 		roof_arrays[Mesh.ARRAY_TEX_UV] = roof_uvs
@@ -8603,7 +8843,6 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 		var roof_mesh_instance := MeshInstance3D.new()
 		roof_mesh_instance.mesh = roof_mesh
-
 		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
 		var roof_material := StandardMaterial3D.new()
@@ -8612,10 +8851,128 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 			roof_material.albedo_texture = _building_textures["roof"]
 			roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 		else:
-			roof_material.albedo_color = Color(0.4, 0.35, 0.3)
+			roof_material.albedo_color = Color(0.15, 0.15, 0.15)
 		roof_mesh_instance.material_override = roof_material
 
 		wall_mesh_instance.add_child(roof_mesh_instance)
+
+		# === ПАРАПЕТ: наружная, нижняя грани + угловые заполнения ===
+		var parapet_arrays := []
+		parapet_arrays.resize(Mesh.ARRAY_MAX)
+		var par_vertices := PackedVector3Array()
+		var par_uvs := PackedVector2Array()
+		var par_normals := PackedVector3Array()
+		var par_indices := PackedInt32Array()
+
+		var n_pts := points.size()
+		var parapet_top := roof_y + 0.50
+		var parapet_bottom := roof_y
+
+		# Предвычисляем offset каждого ребра (normal_sign из signed area)
+		var edge_offsets := PackedVector2Array()
+		for ei in n_pts:
+			var ei_next := (ei + 1) % n_pts
+			var edir := (points[ei_next] - points[ei]).normalized()
+			edge_offsets.append(Vector2(-edir.y * normal_sign, edir.x * normal_sign) * 0.20)
+
+		for i in n_pts:
+			var i_next := (i + 1) % n_pts
+			var p0 := points[i]
+			var p1 := points[i_next]
+			var off := edge_offsets[i]
+			var dir2 := (p1 - p0).normalized()
+			var out_normal := Vector3(-dir2.y * normal_sign, 0.0, dir2.x * normal_sign)
+
+			var op0 := p0 + off
+			var op1 := p1 + off
+
+			# Наружная грань
+			var vi := par_vertices.size()
+			par_vertices.append(Vector3(op0.x, parapet_top, op0.y))
+			par_vertices.append(Vector3(op1.x, parapet_top, op1.y))
+			par_vertices.append(Vector3(op1.x, parapet_bottom, op1.y))
+			par_vertices.append(Vector3(op0.x, parapet_bottom, op0.y))
+			par_uvs.append(Vector2(0, 0))
+			par_uvs.append(Vector2(1, 0))
+			par_uvs.append(Vector2(1, 1))
+			par_uvs.append(Vector2(0, 1))
+			par_normals.append(out_normal)
+			par_normals.append(out_normal)
+			par_normals.append(out_normal)
+			par_normals.append(out_normal)
+			par_indices.append(vi + 0)
+			par_indices.append(vi + 1)
+			par_indices.append(vi + 2)
+			par_indices.append(vi + 0)
+			par_indices.append(vi + 2)
+			par_indices.append(vi + 3)
+
+			# Нижняя грань
+			vi = par_vertices.size()
+			par_vertices.append(Vector3(op0.x, parapet_bottom, op0.y))
+			par_vertices.append(Vector3(op1.x, parapet_bottom, op1.y))
+			par_vertices.append(Vector3(p1.x, parapet_bottom, p1.y))
+			par_vertices.append(Vector3(p0.x, parapet_bottom, p0.y))
+			par_uvs.append(Vector2(0, 0))
+			par_uvs.append(Vector2(1, 0))
+			par_uvs.append(Vector2(1, 1))
+			par_uvs.append(Vector2(0, 1))
+			par_normals.append(Vector3.DOWN)
+			par_normals.append(Vector3.DOWN)
+			par_normals.append(Vector3.DOWN)
+			par_normals.append(Vector3.DOWN)
+			par_indices.append(vi + 0)
+			par_indices.append(vi + 1)
+			par_indices.append(vi + 2)
+			par_indices.append(vi + 0)
+			par_indices.append(vi + 2)
+			par_indices.append(vi + 3)
+
+			# Угловое заполнение
+			var next_off := edge_offsets[i_next]
+			var corner_a := p1 + off
+			var corner_b := p1 + next_off
+			if corner_a.distance_squared_to(corner_b) > 0.0001:
+				var mid_dir := (off.normalized() + next_off.normalized()).normalized()
+				var face_normal := Vector3(mid_dir.x, 0.0, mid_dir.y)
+				vi = par_vertices.size()
+				par_vertices.append(Vector3(corner_a.x, parapet_top, corner_a.y))
+				par_vertices.append(Vector3(corner_b.x, parapet_top, corner_b.y))
+				par_vertices.append(Vector3(corner_b.x, parapet_bottom, corner_b.y))
+				par_vertices.append(Vector3(corner_a.x, parapet_bottom, corner_a.y))
+				par_uvs.append(Vector2(0, 0))
+				par_uvs.append(Vector2(1, 0))
+				par_uvs.append(Vector2(1, 1))
+				par_uvs.append(Vector2(0, 1))
+				par_normals.append(face_normal)
+				par_normals.append(face_normal)
+				par_normals.append(face_normal)
+				par_normals.append(face_normal)
+				par_indices.append(vi + 0)
+				par_indices.append(vi + 1)
+				par_indices.append(vi + 2)
+				par_indices.append(vi + 0)
+				par_indices.append(vi + 2)
+				par_indices.append(vi + 3)
+
+		parapet_arrays[Mesh.ARRAY_VERTEX] = par_vertices
+		parapet_arrays[Mesh.ARRAY_TEX_UV] = par_uvs
+		parapet_arrays[Mesh.ARRAY_NORMAL] = par_normals
+		parapet_arrays[Mesh.ARRAY_INDEX] = par_indices
+
+		var parapet_mesh := ArrayMesh.new()
+		parapet_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, parapet_arrays)
+
+		var parapet_mesh_instance := MeshInstance3D.new()
+		parapet_mesh_instance.mesh = parapet_mesh
+		parapet_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+		var parapet_material := StandardMaterial3D.new()
+		parapet_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		parapet_material.albedo_color = Color(0.5, 0.5, 0.5)
+		parapet_mesh_instance.material_override = parapet_material
+
+		wall_mesh_instance.add_child(parapet_mesh_instance)
 
 	# Создаём физическое тело
 	var body := StaticBody3D.new()

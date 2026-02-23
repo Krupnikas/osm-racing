@@ -2,13 +2,13 @@ extends Node
 
 ## Тест производительности загрузки чанков.
 ## Фаза 1: Начальная загрузка — камера стоит, профилируется отдельно.
-## Фаза 2: Полёт — камера летит на юг на высоте 50м со скоростью 100 км/ч (60с).
+## Фаза 2: Полёт — камера летит на юг на высоте 38м со скоростью 100 км/ч (60с).
 ## Всё остальное как в игре — NPC, профилирование, здания, деревья.
 
 @export var test_duration: float = 60.0
 @export var spike_threshold_ms: float = 16.0
 @export var fly_speed: float = 27.78  # 100 km/h in m/s
-@export var fly_height: float = 50.0
+@export var fly_height: float = 38.0
 @export var test_location: Vector2 = Vector2(59.150406, 37.948805)  # Cherepovets center
 @export var auto_quit_after_test: bool = true
 
