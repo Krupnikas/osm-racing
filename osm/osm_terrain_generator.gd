@@ -33,6 +33,7 @@ var _shop_back_wall_shader: Shader = null  # Кэш шейдера задней 
 var _ground_textures: Dictionary = {}
 var _normal_textures: Dictionary = {}  # Normal maps
 var _noise_textures: Dictionary = {}  # Noise textures for road shader
+var _ground_shader_material: ShaderMaterial = null  # Shared material for all grass chunks
 var _textures_initialized := false
 
 # Текстуры люков
@@ -550,12 +551,18 @@ func _init_textures() -> void:
 	_fence_material.roughness = 0.85
 	_fence_material.cull_mode = BaseMaterial3D.CULL_BACK
 
-	# Текстуры земли - загружаем PBR текстуру травы
-	var grass_img := Image.load_from_file("res://textures/Grass004_1K-JPG_Color.jpg")
+	# Текстуры земли - загружаем PBR текстуру травы (Ground037 — дикая трава с проплешинами)
+	var grass_img := Image.load_from_file("res://textures/Ground037_1K-JPG_Color.jpg")
 	if grass_img:
 		_ground_textures["grass"] = ImageTexture.create_from_image(grass_img)
 	else:
 		_ground_textures["grass"] = TextureGeneratorScript.create_forest_texture(256)
+	var grass_normal_img := Image.load_from_file("res://textures/Ground037_1K-JPG_NormalGL.jpg")
+	if grass_normal_img:
+		_ground_textures["grass_normal"] = ImageTexture.create_from_image(grass_normal_img)
+	var grass_rough_img := Image.load_from_file("res://textures/Ground037_1K-JPG_Roughness.jpg")
+	if grass_rough_img:
+		_ground_textures["grass_roughness"] = ImageTexture.create_from_image(grass_rough_img)
 	_ground_textures["forest"] = TextureGeneratorScript.create_forest_texture(256)
 	_ground_textures["water"] = TextureGeneratorScript.create_water_texture(256)
 
@@ -568,6 +575,17 @@ func _init_textures() -> void:
 	# Noise текстуры для дорожного шейдера
 	_noise_textures["micro"] = TextureGeneratorScript.create_noise_micro(256)
 	_noise_textures["macro"] = TextureGeneratorScript.create_noise_macro(512)
+
+	# Shared ground shader material для всех травяных чанков
+	var ground_shader := load("res://shaders/ground.gdshader") as Shader
+	if ground_shader:
+		_ground_shader_material = ShaderMaterial.new()
+		_ground_shader_material.shader = ground_shader
+		_ground_shader_material.set_shader_parameter("albedo_tex", _ground_textures.get("grass"))
+		_ground_shader_material.set_shader_parameter("normal_tex", _ground_textures.get("grass_normal"))
+		_ground_shader_material.set_shader_parameter("roughness_tex", _ground_textures.get("grass_roughness"))
+		_ground_shader_material.set_shader_parameter("noise_macro_tex", _noise_textures.get("macro"))
+		print("OSM: Ground shader material created")
 
 	_textures_initialized = true
 	var elapsed := Time.get_ticks_msec() - start_time
@@ -5006,21 +5024,22 @@ func _process_deferred_nodes() -> void:
 			var verts: PackedVector3Array = item["vertices"]
 			var idxs: PackedInt32Array = item["indices"]
 			var faces := PackedVector3Array()
-			for ti in range(0, idxs.size(), 3):
-				faces.append(verts[idxs[ti]])
-				faces.append(verts[idxs[ti + 1]])
-				faces.append(verts[idxs[ti + 2]])
-			var shape := ConcavePolygonShape3D.new()
-			shape.set_faces(faces)
+			for i in range(0, idxs.size(), 3):
+				faces.append(verts[idxs[i]])
+				faces.append(verts[idxs[i + 1]])
+				faces.append(verts[idxs[i + 2]])
 			var body := StaticBody3D.new()
 			body.name = "TerrainCollision"
 			body.collision_layer = 1
+			body.collision_mask = 0
 			var col_shape := CollisionShape3D.new()
-			col_shape.shape = shape
+			var concave := ConcavePolygonShape3D.new()
+			concave.set_faces(faces)
+			col_shape.shape = concave
 			body.add_child(col_shape)
 			_budgeted_add_child(t_parent, body)
 		_record_perf("deferred_terrain_coll", Time.get_ticks_usec() - start)
-		return  # 1 heavy collision за кадр
+		return
 
 	# 2. Building collisions (budgeted)
 	while not _deferred_building_collisions.is_empty():
@@ -8703,7 +8722,7 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 	var normals := PackedVector3Array()
 	var tri_indices := PackedInt32Array()
 
-	var uv_scale := 0.05  # Масштаб UV для земли (20м = 1 повтор текстуры)
+	var uv_scale := 0.25  # Масштаб UV для земли (20м = 1 повтор текстуры)
 
 	# Добавляем вершины
 	for p in points:
@@ -10059,7 +10078,7 @@ func _create_chunk_ground_terrain(chunk_key: String, parent: Node3D, road_polyli
 	var all_uvs := PackedVector2Array()
 	var all_normals := PackedVector3Array()
 	var all_indices := PackedInt32Array()
-	var uv_scale := 0.05
+	var uv_scale := 0.25
 	var total_tris := 0
 
 	for poly in terrain_polys:
@@ -10096,14 +10115,17 @@ func _create_chunk_ground_terrain(chunk_key: String, parent: Node3D, road_polyli
 	mesh_inst.mesh = arr_mesh
 
 	# Материал — трава
-	var material := StandardMaterial3D.new()
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	if _ground_textures.has("grass"):
-		material.albedo_texture = _ground_textures["grass"]
-		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	if _ground_shader_material:
+		mesh_inst.material_override = _ground_shader_material
 	else:
-		material.albedo_color = Color(0.3, 0.5, 0.2)
-	mesh_inst.material_override = material
+		var fallback := StandardMaterial3D.new()
+		fallback.cull_mode = BaseMaterial3D.CULL_DISABLED
+		if _ground_textures.has("grass"):
+			fallback.albedo_texture = _ground_textures["grass"]
+			fallback.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		else:
+			fallback.albedo_color = Color(0.3, 0.5, 0.2)
+		mesh_inst.material_override = fallback
 	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
@@ -10310,7 +10332,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	var all_uvs := PackedVector2Array()
 	var all_normals := PackedVector3Array()
 	var all_indices := PackedInt32Array()
-	var uv_scale := 0.05
+	var uv_scale := 0.25
 	var total_tris := 0
 
 	for poly in terrain_polys:
@@ -10342,17 +10364,20 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	var arr_mesh := ArrayMesh.new()
 	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
-	var material := StandardMaterial3D.new()
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	if _ground_textures.has("grass"):
-		material.albedo_texture = _ground_textures["grass"]
-		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-	else:
-		material.albedo_color = Color(0.3, 0.5, 0.2)
+	var material: Material = _ground_shader_material
+	if not material:
+		var fallback := StandardMaterial3D.new()
+		fallback.cull_mode = BaseMaterial3D.CULL_DISABLED
+		if _ground_textures.has("grass"):
+			fallback.albedo_texture = _ground_textures["grass"]
+			fallback.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		else:
+			fallback.albedo_color = Color(0.3, 0.5, 0.2)
+		material = fallback
 
 	_rs_add_mesh(chunk_key, arr_mesh, material)
 
-	# Коллизия — отложенная (ConcavePolygonShape3D тяжёлая)
+	# Коллизия — отложенная (ConcavePolygonShape3D из реальной геометрии)
 	_deferred_terrain_collisions.append({
 		"parent": parent,
 		"vertices": all_vertices,
@@ -11485,6 +11510,11 @@ func set_wet_mode(enabled: bool, is_night: bool = true) -> void:
 		for mat in _chunk_road_materials[chunk_key]:
 			_apply_wet_material(mat, enabled, is_night)
 
+	# Обновляем shared ground material
+	if _ground_shader_material:
+		_ground_shader_material.set_shader_parameter("is_wet", enabled)
+		_ground_shader_material.set_shader_parameter("is_night", is_night)
+
 
 func _is_road_material(mat: Material) -> bool:
 	"""Проверяет, является ли материал дорожным (не бордюр, не здание)"""
@@ -11587,6 +11617,10 @@ func _on_night_mode_changed(enabled: bool) -> void:
 	"""Обрабатывает переключение ночного режима"""
 	print("OSM: Night mode ", "enabled" if enabled else "disabled")
 	_is_night_mode = enabled
+
+	# Ground shader night mode
+	if _ground_shader_material:
+		_ground_shader_material.set_shader_parameter("is_night", enabled)
 
 	# NEW: Update lamp night mode
 	_update_lamp_night_mode(enabled)
