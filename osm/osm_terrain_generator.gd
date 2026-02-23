@@ -6685,7 +6685,13 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 	fnd_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	var fnd_mat := StandardMaterial3D.new()
 	fnd_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	fnd_mat.albedo_color = _building_foundation_materials[fnd_color_idx].albedo_color
+	var fnd_src := _building_foundation_materials[fnd_color_idx]
+	fnd_mat.albedo_color = fnd_src.albedo_color
+	# Рандомная дешёвая краска: roughness 0.5-0.9, metallic 0.02-0.10
+	var fnd_hash := fmod(abs(points[0].x * 41.0 + points[0].y * 59.0), 1.0)
+	fnd_mat.roughness = 0.5 + fnd_hash * 0.4
+	fnd_mat.metallic = 0.02 + fnd_hash * 0.08
+	fnd_mat.metallic_specular = 0.3
 	fnd_mesh.material_override = fnd_mat
 	var fnd_top := base_elev + fnd_h
 	var fnd_bottom := base_elev
@@ -6714,23 +6720,23 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 	body.add_child(mesh)
 	body.add_child(fnd_mesh)
 
-	# Создаём коллизию для каждой стены отдельно (точнее чем бокс)
+	# Коллизия только на уровне земли (0.5м) — машина не врезается во второй этаж
+	var collision_h := 0.5
 	for i in range(points.size()):
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
-		var total_wall_h := building_height
-		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev + building_height / 2, (p1.y + p2.y) / 2)
+		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev + collision_h / 2, (p1.y + p2.y) / 2)
 		var wall_length := p1.distance_to(p2)
 
-		if wall_length < 0.5:  # Пропускаем слишком короткие стены
+		if wall_length < 0.5:
 			continue
 
 		var wall_angle := atan2(p2.y - p1.y, p2.x - p1.x)
 
 		var collision := CollisionShape3D.new()
 		var box := BoxShape3D.new()
-		box.size = Vector3(wall_length, total_wall_h, 0.3)  # Толщина стены 0.3м
+		box.size = Vector3(wall_length, collision_h, 0.3)
 		collision.shape = box
 		collision.position = wall_center
 		collision.rotation.y = -wall_angle
@@ -8745,6 +8751,10 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 		var fnd_mat := StandardMaterial3D.new()
 		fnd_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 		fnd_mat.albedo_color = _building_foundation_materials[fnd_ci].albedo_color
+		var fnd_hash := fmod(abs(points[0].x * 41.0 + points[0].y * 59.0), 1.0)
+		fnd_mat.roughness = 0.5 + fnd_hash * 0.4
+		fnd_mat.metallic = 0.02 + fnd_hash * 0.08
+		fnd_mat.metallic_specular = 0.3
 		fnd_mi.material_override = fnd_mat
 		wall_mesh_instance.add_child(fnd_mi)
 
@@ -9219,6 +9229,10 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		var fnd_mat2 := StandardMaterial3D.new()
 		fnd_mat2.cull_mode = BaseMaterial3D.CULL_DISABLED
 		fnd_mat2.albedo_color = _building_foundation_materials[fnd_ci2].albedo_color
+		var fnd_hash2 := fmod(abs(points[0].x * 41.0 + points[0].y * 59.0), 1.0)
+		fnd_mat2.roughness = 0.5 + fnd_hash2 * 0.4
+		fnd_mat2.metallic = 0.02 + fnd_hash2 * 0.08
+		fnd_mat2.metallic_specular = 0.3
 		fnd_mi2.material_override = fnd_mat2
 		wall_mesh_instance.add_child(fnd_mi2)
 
@@ -9236,16 +9250,18 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 
 # Отложенное создание коллизий зданий (вызывается через call_deferred)
-func _create_building_collisions_deferred(body: StaticBody3D, points: PackedVector2Array, base_elev: float, building_height: float) -> void:
+func _create_building_collisions_deferred(body: StaticBody3D, points: PackedVector2Array, base_elev: float, _building_height: float) -> void:
 	if not is_instance_valid(body):
 		return
+
+	# Коллизия только на уровне земли (0.5м) — машина не врезается во второй этаж
+	var collision_h := 0.5
 
 	for i in range(points.size()):
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
-		var total_wall_h := building_height
-		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev + building_height / 2, (p1.y + p2.y) / 2)
+		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev + collision_h / 2, (p1.y + p2.y) / 2)
 		var wall_length := p1.distance_to(p2)
 
 		if wall_length < 0.5:
@@ -9255,7 +9271,7 @@ func _create_building_collisions_deferred(body: StaticBody3D, points: PackedVect
 
 		var collision := CollisionShape3D.new()
 		var box := BoxShape3D.new()
-		box.size = Vector3(wall_length, total_wall_h, 0.3)
+		box.size = Vector3(wall_length, collision_h, 0.3)
 		collision.shape = box
 		collision.position = wall_center
 		collision.rotation.y = -wall_angle
@@ -9487,7 +9503,7 @@ func _calculate_polygon_area(points: PackedVector2Array) -> float:
 # Проверка направления полигона (true = против часовой стрелки = нормали наружу)
 ## Высота фундамента здания (0.5–1.0м), детерминированная по координатам
 static func _get_foundation_height(points: PackedVector2Array) -> float:
-	var hash_val := abs(points[0].x * 31.0 + points[0].y * 97.0)
+	var hash_val: float = absf(points[0].x * 31.0 + points[0].y * 97.0)
 	return 0.5 + fmod(hash_val, 1.0) * 0.5  # 0.5 to 1.0
 
 
