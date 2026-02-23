@@ -75,6 +75,116 @@ static func build_from_track_waypoints(waypoints: Array, latlon_converter: Calla
 	return route
 
 
+## Строит маршрут из RoadNetwork с промежуточными waypoints для предсказуемого пути
+## intermediate_targets — 3D позиции промежуточных точек (sparse waypoints без старта/финиша)
+static func build_from_road_network(start_pos: Vector3, finish_pos: Vector3,
+		road_network, intermediate_targets: Array = []) -> RaceRoute:
+	var route := RaceRoute.new()
+
+	if not road_network or road_network.all_waypoints.is_empty():
+		push_error("RaceRoute: road_network is null or empty")
+		return route
+
+	# Строим список целей: start → intermediate1 → ... → finish
+	var targets: Array[Vector3] = [start_pos]
+	for t in intermediate_targets:
+		targets.append(t)
+	targets.append(finish_pos)
+
+	print("RaceRoute: Building from RoadNetwork with %d targets" % targets.size())
+
+	var all_positions: Array[Vector3] = []
+	var visited_global: Dictionary = {}
+
+	# Для каждого сегмента (target[i] → target[i+1]) строим путь по дорожной сети
+	for seg_idx in range(targets.size() - 1):
+		var seg_start: Vector3 = targets[seg_idx]
+		var seg_finish: Vector3 = targets[seg_idx + 1]
+
+		var start_wp = road_network.get_nearest_waypoint(seg_start)
+		var finish_wp = road_network.get_nearest_waypoint(seg_finish)
+
+		if not start_wp or not finish_wp:
+			print("RaceRoute: Segment %d — no waypoints found, adding direct line" % seg_idx)
+			if all_positions.is_empty() or all_positions[-1].distance_to(seg_start) > 1.0:
+				all_positions.append(seg_start)
+			all_positions.append(seg_finish)
+			continue
+
+		# Greedy pathfinding по next_waypoints к finish
+		var path: Array = []
+		var current = start_wp
+		var visited: Dictionary = {}
+
+		for _iter in range(MAX_SEARCH_ITERATIONS):
+			if visited.has(current):
+				break
+			visited[current] = true
+
+			path.append(current.position)
+
+			# Достигли финиша?
+			if current == finish_wp or current.position.distance_to(seg_finish) < 15.0:
+				break
+
+			# Выбираем следующий waypoint ближайший к цели сегмента
+			var best_next = null
+			var best_dist := INF
+			for next_wp in current.next_waypoints:
+				if visited.has(next_wp):
+					continue
+				# Не идём назад по глобальному маршруту
+				if visited_global.has(next_wp):
+					continue
+				var d: float = next_wp.position.distance_to(seg_finish)
+				if d < best_dist:
+					best_dist = d
+					best_next = next_wp
+
+			if not best_next:
+				# Fallback: попробуем любой не visited
+				for next_wp in current.next_waypoints:
+					if not visited.has(next_wp):
+						best_next = next_wp
+						break
+
+			if not best_next:
+				break  # Dead end
+
+			current = best_next
+
+		# Добавляем позиции сегмента (без дубликатов)
+		for pos in path:
+			visited_global[current] = true
+			if all_positions.is_empty() or all_positions[-1].distance_to(pos) > 1.0:
+				all_positions.append(pos)
+
+		print("RaceRoute: Segment %d: %d waypoints" % [seg_idx, path.size()])
+
+	# Конвертируем в RoutePoints
+	var accumulated_distance := 0.0
+	for i in range(all_positions.size()):
+		if i > 0:
+			accumulated_distance += all_positions[i - 1].distance_to(all_positions[i])
+
+		var direction := Vector3.FORWARD
+		if i < all_positions.size() - 1:
+			direction = (all_positions[i + 1] - all_positions[i]).normalized()
+		elif route.points.size() > 0:
+			direction = route.points[-1].direction
+
+		var point := RoutePoint.new(all_positions[i], direction, accumulated_distance)
+		route.points.append(point)
+
+	if route.points.size() > 0:
+		route.total_length = route.points[-1].distance_from_start
+
+	print("RaceRoute: Built from RoadNetwork: %d points, length: %.1fm" % [
+		route.points.size(), route.total_length])
+
+	return route
+
+
 ## Строит маршрут от старта до финиша используя RoadNetwork (fallback, менее надёжен)
 static func build_from_positions(start_pos: Vector3, finish_pos: Vector3, road_network) -> RaceRoute:
 	var route := RaceRoute.new()

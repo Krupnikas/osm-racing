@@ -43,7 +43,6 @@ var obstacle_check_ray: RayCast3D
 
 # Внутренние переменные
 var update_timer := 0.0
-
 # Цвета для рандомизации
 const RACER_COLORS := [
 	Color(0.9, 0.1, 0.1),   # Красный
@@ -149,7 +148,6 @@ func start_racing() -> void:
 		var projection := race_route.project_position(global_position, 0)
 		current_segment_idx = projection.segment_idx
 		race_progress = projection.distance
-		print("RacerAI: %s starting at segment %d, progress %.1fm" % [racer_name, current_segment_idx, race_progress])
 
 
 func finish_race() -> void:
@@ -220,24 +218,28 @@ func _update_ai_driver() -> void:
 	var obstacle_data := _check_obstacle_ahead()
 
 	if obstacle_data.detected:
-		# Смешиваем path following с obstacle avoidance
-		# Умеренный blend для плавного объезда без резких дуг
-		var blend_factor: float = 0.25 + obstacle_data.urgency * 0.35
-		var path_steering: float = steering_input
-		var avoidance_steering: float = obstacle_data.avoidance_steering
+		if obstacle_data.urgency > 0.6:
+			# Здание/стена близко — жёсткий override, полностью уходим от препятствия
+			steering_input = obstacle_data.avoidance_steering
+			throttle_input = 0.3
+			brake_input = 0.4
+		else:
+			# Далёкое препятствие — плавный blend
+			var blend_factor: float = 0.3 + obstacle_data.urgency * 0.5
+			steering_input = lerp(steering_input, obstacle_data.avoidance_steering, blend_factor)
+			steering_input = clamp(steering_input, -1.0, 1.0)
 
-		# Финальный steering = blend между path и avoidance
-		steering_input = lerp(path_steering, avoidance_steering, blend_factor)
-		steering_input = clamp(steering_input, -1.0, 1.0)
-
-		# Притормаживаем пропорционально urgency
-		if obstacle_data.urgency > 0.5:
-			throttle_input = lerp(0.6, 0.2, obstacle_data.urgency)
-			brake_input = lerp(0.1, 0.5, obstacle_data.urgency)
+			# Притормаживаем пропорционально urgency
+			if obstacle_data.urgency > 0.3:
+				throttle_input = lerp(0.7, 0.3, obstacle_data.urgency)
+				brake_input = lerp(0.05, 0.3, obstacle_data.urgency)
 
 	# Коррекция для удержания в коридоре маршрута
-	var corridor_correction := _calculate_corridor_correction()
-	steering_input = clamp(steering_input + corridor_correction, -1.0, 1.0)
+	# НЕ применяем если obstacle avoidance активен — приоритет безопасности
+	var corridor_correction := 0.0
+	if not obstacle_data.detected:
+		corridor_correction = _calculate_corridor_correction()
+		steering_input = clamp(steering_input + corridor_correction, -1.0, 1.0)
 
 	# Контроль скорости (всегда, с учётом поворотов)
 	var turn_sharpness := _get_turn_sharpness_ahead()
@@ -310,23 +312,31 @@ func _get_turn_sharpness_ahead() -> float:
 
 func _calculate_corridor_correction() -> float:
 	"""Коррекция руления для удержания в коридоре маршрута.
-	Если AI выезжает за 60% ширины коридора, применяем коррекцию к центру."""
+	Определяет с какой стороны от маршрута AI и толкает к центру."""
 	if not race_route:
 		return 0.0
 
 	# Проецируем позицию на маршрут
 	var projection := race_route.project_position(global_position, current_segment_idx)
-	var lateral_offset: float = projection.lateral_offset
+	var lateral_dist: float = projection.lateral_offset  # Всегда положительное расстояние
 
-	# Порог - 60% от ширины коридора
-	var threshold := CORRIDOR_WIDTH * 0.6
+	# Определяем СТОРОНУ: cross product направления маршрута и вектора к AI
+	var route_data: Dictionary = race_route.get_point_at_distance(projection.distance)
+	var route_pos: Vector3 = route_data.position
+	var route_dir: Vector3 = route_data.direction
+	var to_ai := global_position - route_pos
+	# cross.y > 0 → AI справа от маршрута, < 0 → слева
+	var side_sign: float = sign(route_dir.cross(to_ai).y)
 
-	if abs(lateral_offset) > threshold:
-		# Пропорциональная коррекция к центру
-		var excess: float = abs(lateral_offset) - threshold
-		var max_excess: float = CORRIDOR_WIDTH * 0.4  # Оставшиеся 40%
-		var correction_strength: float = clamp(excess / max_excess, 0.0, 1.0) * 0.4
-		return -sign(lateral_offset) * correction_strength
+	# Порог - 40% от ширины коридора
+	var threshold := CORRIDOR_WIDTH * 0.4
+
+	if lateral_dist > threshold:
+		var excess: float = lateral_dist - threshold
+		var max_excess: float = CORRIDOR_WIDTH * 0.6
+		var correction_strength: float = clamp(excess / max_excess, 0.0, 1.0) * 0.6
+		# Рулим В СТОРОНУ маршрута (противоположно стороне AI)
+		return -side_sign * correction_strength
 
 	return 0.0
 
@@ -337,9 +347,8 @@ func _check_obstacle_ahead() -> Dictionary:
 	var result := {"detected": false, "avoidance_steering": 0.0, "urgency": 0.0}
 
 	var speed_kmh: float = max(10.0, current_speed_kmh)
-	# Дистанция проверки: минимум BRAKE_DISTANCE * 1.5, или пропорционально скорости
-	# Увеличен множитель скорости для более раннего обнаружения на высокой скорости
-	var check_distance: float = max(BRAKE_DISTANCE * 1.5, speed_kmh * 1.0)
+	# Дистанция проверки: короткая, чтобы не реагировать на далёкие здания вдоль дороги
+	var check_distance: float = clamp(speed_kmh * 0.4, 8.0, 25.0)
 
 	var from := global_position + Vector3(0, 1.0, 0)
 	var forward := -global_transform.basis.z
@@ -347,13 +356,11 @@ func _check_obstacle_ahead() -> Dictionary:
 	forward = forward.normalized()
 	var right := forward.cross(Vector3.UP).normalized()
 
-	# Проверяем 5 лучей для лучшего покрытия: центральный, боковые и крайние
+	# 3 луча: центральный и боковые (без крайних — они ловят здания сбоку от дороги)
 	var rays := [
 		{"dir": forward, "weight": 1.0},                                # Центр
 		{"dir": (forward + right * 0.3).normalized(), "weight": 0.9},   # Немного справа
 		{"dir": (forward - right * 0.3).normalized(), "weight": 0.9},   # Немного слева
-		{"dir": (forward + right * 0.7).normalized(), "weight": 0.6},   # Справа
-		{"dir": (forward - right * 0.7).normalized(), "weight": 0.6}    # Слева
 	]
 
 	var closest_distance := INF

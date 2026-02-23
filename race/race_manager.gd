@@ -347,23 +347,45 @@ func _build_race_route() -> void:
 	if not current_track:
 		return
 
-	# Используем route_points если есть, иначе waypoints
-	var points_to_use: Array = []
-	if current_track.route_points and current_track.route_points.size() > 0:
-		points_to_use = current_track.route_points
-		print("RaceManager: Building route from %d route_points" % points_to_use.size())
-	elif current_track.waypoints and current_track.waypoints.size() > 0:
-		points_to_use = current_track.waypoints
-		print("RaceManager: Building route from %d waypoints" % points_to_use.size())
+	# Приоритет маршрутов:
+	# 1. Dense route_points (>10 точек) — лучший вариант
+	# 2. RoadNetwork pathfinding — автогенерация по дорожной сети
+	# 3. Sparse waypoints — fallback
+
+	if current_track.route_points and current_track.route_points.size() > 10:
+		# Dense route_points — используем напрямую
+		print("RaceManager: Building route from %d route_points" % current_track.route_points.size())
+		var converter := func(lat: float, lon: float) -> Vector3:
+			return _latlon_to_local(lat, lon)
+		_race_route = RaceRouteScript.build_from_track_waypoints(current_track.route_points, converter)
 	else:
-		push_error("RaceManager: No route points or waypoints in track!")
-		return
+		# Пробуем RoadNetwork pathfinding
+		var road_network = null
+		var traffic_manager = get_tree().current_scene.find_child("TrafficManager", true, false)
+		if traffic_manager and traffic_manager.has_method("get_road_network"):
+			road_network = traffic_manager.get_road_network()
 
-	# Создаём маршрут через RaceRoute.build_from_track_waypoints
-	var converter := func(lat: float, lon: float) -> Vector3:
-		return _latlon_to_local(lat, lon)
-
-	_race_route = RaceRouteScript.build_from_track_waypoints(points_to_use, converter)
+		if road_network and not road_network.all_waypoints.is_empty():
+			var start_pos := _latlon_to_local(current_track.start_lat, current_track.start_lon)
+			var finish_pos := _latlon_to_local(current_track.finish_lat, current_track.finish_lon)
+			# Sparse waypoints как промежуточные цели для предсказуемого пути
+			var intermediate: Array = []
+			if current_track.waypoints and current_track.waypoints.size() > 2:
+				for i in range(1, current_track.waypoints.size() - 1):
+					var wp = current_track.waypoints[i]
+					intermediate.append(_latlon_to_local(wp.x, wp.y))
+			print("RaceManager: Building route from RoadNetwork with %d intermediate targets" % intermediate.size())
+			_race_route = RaceRouteScript.build_from_road_network(
+				start_pos, finish_pos, road_network, intermediate)
+		elif current_track.waypoints and current_track.waypoints.size() > 0:
+			# Fallback: sparse waypoints
+			print("RaceManager: Building route from %d sparse waypoints (fallback)" % current_track.waypoints.size())
+			var converter := func(lat: float, lon: float) -> Vector3:
+				return _latlon_to_local(lat, lon)
+			_race_route = RaceRouteScript.build_from_track_waypoints(current_track.waypoints, converter)
+		else:
+			push_error("RaceManager: No route data available!")
+			return
 
 	if _race_route:
 		print("RaceManager: Race route built with %d points, length: %.1fm" % [
@@ -423,7 +445,8 @@ func _spawn_opponents() -> void:
 		# RaceGrid уже рассчитывает правильный basis с учётом направления -Z для VehicleBody3D
 		var grid_transform: Transform3D = grid_positions[i]
 		opponent.global_position = grid_transform.origin
-		opponent.global_transform.basis = grid_transform.basis
+		# Разворачиваем на 180° — grid basis смотрит назад для соперников
+		opponent.global_transform.basis = grid_transform.basis * Basis(Vector3.UP, PI)
 
 		# Устанавливаем маршрут
 		if opponent.has_method("set_race_route"):
