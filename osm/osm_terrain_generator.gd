@@ -173,6 +173,7 @@ var _window_finalize_progress: Dictionary = {}  # chunk_key -> {buf, offset, mm,
 var _building_wall_materials: Dictionary = {}  # texture_type -> ShaderMaterial (shared)
 var _building_roof_material: StandardMaterial3D = null  # shared
 var _building_parapet_material: StandardMaterial3D = null  # shared
+var _building_foundation_materials: Array[StandardMaterial3D] = []  # 4 random colors
 
 # ENTRANCE GEOMETRY MERGE: объединяем все подъезды чанка в один ArrayMesh
 var _entrance_batch: Dictionary = {}  # chunk_key -> {parent, concrete: {vertices,normals,indices}, red_metal, ...}
@@ -558,6 +559,19 @@ func _init_textures() -> void:
 	_building_parapet_material = StandardMaterial3D.new()
 	_building_parapet_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_building_parapet_material.albedo_color = Color(0.5, 0.5, 0.5)
+
+	_building_foundation_materials.clear()
+	var foundation_colors: Array[Color] = [
+		Color(0.4, 0.15, 0.12),   # бордовый
+		Color(0.15, 0.3, 0.15),   # тёмно-зелёный
+		Color(0.15, 0.15, 0.35),  # тёмно-синий
+		Color(0.35, 0.35, 0.35),  # серый
+	]
+	for fc in foundation_colors:
+		var fm := StandardMaterial3D.new()
+		fm.cull_mode = BaseMaterial3D.CULL_DISABLED
+		fm.albedo_color = fc
+		_building_foundation_materials.append(fm)
 
 	# Shared material бордюров
 	_curb_material = StandardMaterial3D.new()
@@ -5373,7 +5387,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 					color = Color(0.65, 0.55, 0.45)  # Стандартный коричневатый
 
 	var center := _get_polygon_center(points)
-	var base_elev := 0.0
+	var base_elev := 0.22  # Уровень террейна (sidewalk_height)
 
 	# Вычисляем расстояние до игрока для LOD (shadows)
 	var distance_to_player: float = 0.0
@@ -6573,8 +6587,8 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 	im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
 
 	# Высоты с учётом террейна
-	var floor_y := base_elev + 0.1  # Чуть выше террейна
-	var foundation_y := floor_y - 3.0  # Фундамент на 3м ниже — скрывает дыры на склонах
+	var floor_y := base_elev + 0.5
+	var foundation_y := base_elev + 0.5
 	var roof_y := base_elev + building_height
 
 	# Крыша - используем триангуляцию для корректной работы с невыпуклыми полигонами
@@ -6619,18 +6633,50 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 
 	im.surface_end()
 
+	# === ФУНДАМЕНТ ===
+	var fnd_color_idx := int(abs(points[0].x * 73.0 + points[0].y * 137.0)) % 4
+	var fnd_mesh := MeshInstance3D.new()
+	var fnd_im := ImmediateMesh.new()
+	fnd_mesh.mesh = fnd_im
+	fnd_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	var fnd_mat := StandardMaterial3D.new()
+	fnd_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	fnd_mat.albedo_color = _building_foundation_materials[fnd_color_idx].albedo_color
+	fnd_mesh.material_override = fnd_mat
+	var fnd_top := base_elev + 0.5
+	var fnd_bottom := base_elev
+	fnd_im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in range(points.size()):
+		var fp1 := points[i]
+		var fp2 := points[(i + 1) % points.size()]
+		var fdir := Vector2(fp2.x - fp1.x, fp2.y - fp1.y).normalized()
+		var fnorm := Vector3(-fdir.y * normal_sign, 0, fdir.x * normal_sign)
+		fnd_im.surface_set_normal(fnorm)
+		var fv1 := Vector3(fp1.x, fnd_top, fp1.y)
+		var fv2 := Vector3(fp2.x, fnd_top, fp2.y)
+		var fv3 := Vector3(fp2.x, fnd_bottom, fp2.y)
+		var fv4 := Vector3(fp1.x, fnd_bottom, fp1.y)
+		fnd_im.surface_add_vertex(fv1)
+		fnd_im.surface_add_vertex(fv2)
+		fnd_im.surface_add_vertex(fv3)
+		fnd_im.surface_add_vertex(fv1)
+		fnd_im.surface_add_vertex(fv3)
+		fnd_im.surface_add_vertex(fv4)
+	fnd_im.surface_end()
+
 	var body := StaticBody3D.new()
 	body.collision_layer = 2  # Слой 2 для зданий
 	body.collision_mask = 0   # Статика не проверяет коллизии (машина проверяет со зданиями)
 	body.add_child(mesh)
+	body.add_child(fnd_mesh)
 
 	# Создаём коллизию для каждой стены отдельно (точнее чем бокс)
 	for i in range(points.size()):
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
-		var total_wall_h := building_height + 3.0  # +3м фундамент вниз
-		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev - 2.4 + total_wall_h / 2, (p1.y + p2.y) / 2)
+		var total_wall_h := building_height
+		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev + building_height / 2, (p1.y + p2.y) / 2)
 		var wall_length := p1.distance_to(p2)
 
 		if wall_length < 0.5:  # Пропускаем слишком короткие стены
@@ -6727,8 +6773,8 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		return
 
 	# === ВЫЧИСЛЕНИЕ ГЕОМЕТРИИ СТЕН ===
-	var floor_y := base_elev + 0.1
-	var foundation_y := floor_y - 3.0  # Фундамент на 3м ниже
+	var floor_y := base_elev + 0.5
+	var foundation_y := base_elev + 0.5
 	var roof_y := base_elev + building_height
 
 	var wall_vertices := PackedVector3Array()
@@ -6760,7 +6806,7 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 
 		var u1 := accumulated_width * uv_scale_x
 		var u2 := (accumulated_width + wall_width) * uv_scale_x
-		var v_bottom := -3.0 * uv_scale_y  # 3м фундамента ниже пола
+		var v_bottom := 0.0
 		var v_top := building_height * uv_scale_y
 
 		var idx := wall_vertices.size()
@@ -6906,6 +6952,41 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 					parapet_indices.append(vi + 2)
 					parapet_indices.append(vi + 3)
 
+	# === ФУНДАМЕНТ (0.5м полоса под стенами) ===
+	var fnd_vertices := PackedVector3Array()
+	var fnd_uvs := PackedVector2Array()
+	var fnd_normals := PackedVector3Array()
+	var fnd_indices := PackedInt32Array()
+	var fnd_top := base_elev + 0.5
+	var fnd_bottom := base_elev
+	var fnd_material_idx := int(abs(points[0].x * 73.0 + points[0].y * 137.0)) % 4
+
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
+		var dir := (p2 - p1).normalized()
+		var fnormal := Vector3(-dir.y * normal_sign, 0, dir.x * normal_sign)
+
+		var vi := fnd_vertices.size()
+		fnd_vertices.append(Vector3(p1.x, fnd_top, p1.y))
+		fnd_vertices.append(Vector3(p2.x, fnd_top, p2.y))
+		fnd_vertices.append(Vector3(p2.x, fnd_bottom, p2.y))
+		fnd_vertices.append(Vector3(p1.x, fnd_bottom, p1.y))
+		fnd_uvs.append(Vector2(0, 0))
+		fnd_uvs.append(Vector2(1, 0))
+		fnd_uvs.append(Vector2(1, 1))
+		fnd_uvs.append(Vector2(0, 1))
+		fnd_normals.append(fnormal)
+		fnd_normals.append(fnormal)
+		fnd_normals.append(fnormal)
+		fnd_normals.append(fnormal)
+		fnd_indices.append(vi + 0)
+		fnd_indices.append(vi + 1)
+		fnd_indices.append(vi + 2)
+		fnd_indices.append(vi + 0)
+		fnd_indices.append(vi + 2)
+		fnd_indices.append(vi + 3)
+
 	# Сохраняем результат
 	var result := {
 		"valid": true,
@@ -6914,7 +6995,7 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		"texture_type": task_data.texture_type,
 		"parent": task_data.parent,
 		"base_elev": base_elev,
-		"distance_to_player": task_data.distance_to_player,  # For shadow LOD
+		"distance_to_player": task_data.distance_to_player,
 		"wall_vertices": wall_vertices,
 		"wall_uvs": wall_uvs,
 		"wall_normals": wall_normals,
@@ -6926,7 +7007,12 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		"parapet_vertices": parapet_vertices,
 		"parapet_uvs": parapet_uvs,
 		"parapet_normals": parapet_normals,
-		"parapet_indices": parapet_indices
+		"parapet_indices": parapet_indices,
+		"fnd_vertices": fnd_vertices,
+		"fnd_uvs": fnd_uvs,
+		"fnd_normals": fnd_normals,
+		"fnd_indices": fnd_indices,
+		"fnd_material_idx": fnd_material_idx
 	}
 
 	_building_mutex.lock()
@@ -6974,8 +7060,12 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 			"wall_walls": _make_empty_geo_batch(),
 			"roofs": _make_empty_geo_batch(),
 			"parapets": _make_empty_geo_batch(),
+			"foundation_0": _make_empty_geo_batch(),
+			"foundation_1": _make_empty_geo_batch(),
+			"foundation_2": _make_empty_geo_batch(),
+			"foundation_3": _make_empty_geo_batch(),
 			"collisions": [],
-			"_building_ranges": [],  # [{wall_key, wall_start, wall_count, roof_start, roof_count, points}]
+			"_building_ranges": [],
 		}
 
 	var batch: Dictionary = _building_geo_batch[chunk_key]
@@ -7024,6 +7114,18 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 			parapet_batch["indices"].append(result.parapet_indices[i] + parapet_start)
 		parapet_count = parapet_verts.size()
 
+	# === НАКАПЛИВАЕМ ФУНДАМЕНТ ===
+	var fnd_verts: PackedVector3Array = result.fnd_vertices
+	if result.fnd_indices.size() >= 3:
+		var fnd_key := "foundation_%d" % result.fnd_material_idx
+		var fnd_batch: Dictionary = batch[fnd_key]
+		var fnd_start: int = fnd_batch["vertices"].size()
+		fnd_batch["vertices"].append_array(fnd_verts)
+		fnd_batch["uvs"].append_array(result.fnd_uvs)
+		fnd_batch["normals"].append_array(result.fnd_normals)
+		for i in range(result.fnd_indices.size()):
+			fnd_batch["indices"].append(result.fnd_indices[i] + fnd_start)
+
 	# Сохраняем ranges для deferred elevation
 	batch["_building_ranges"].append({
 		"wall_key": wall_key,
@@ -7051,7 +7153,7 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 
 
 ## Создаёт merged ArrayMesh для всех зданий чанка — ONE surface per frame (incremental)
-## Surface order: panel_walls → brick_walls → wall_walls → roofs → parapets → cleanup
+## Surface order: panel_walls → brick_walls → wall_walls → roofs → parapets → foundation_0..3 → cleanup
 func _finalize_building_geo_batch(chunk_key: String) -> void:
 	if not _building_geo_batch.has(chunk_key):
 		return
@@ -7068,10 +7170,10 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 
 	# Incremental: track which surface to process next
 	var step: int = batch.get("_finalize_step", 0)
-	# Steps: 0=panel_walls, 1=brick_walls, 2=wall_walls, 3=roofs, 4=parapets, 5=cleanup
-	var surface_keys: Array[String] = ["panel_walls", "brick_walls", "wall_walls", "roofs", "parapets"]
+	# Steps: 0-2=walls, 3=roofs, 4=parapets, 5-8=foundations, 9=cleanup
+	var surface_keys: Array[String] = ["panel_walls", "brick_walls", "wall_walls", "roofs", "parapets", "foundation_0", "foundation_1", "foundation_2", "foundation_3"]
 
-	if step < 5:
+	if step < 9:
 		var surface_key: String = surface_keys[step]
 		var geo: Dictionary = batch[surface_key]
 		if geo["vertices"].size() > 0:
@@ -7091,8 +7193,10 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 				material = _building_wall_materials[tex_type]
 			elif step == 3:
 				material = _building_roof_material
-			else:
+			elif step == 4:
 				material = _building_parapet_material
+			else:
+				material = _building_foundation_materials[step - 5]
 
 			var rid := _rs_add_mesh(chunk_key, arr_mesh, material,
 				shadow_setting, render_distance)
@@ -7105,22 +7209,19 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 
 		# Skip empty surfaces — advance to next non-empty or cleanup
 		step += 1
-		# Skip remaining empty surfaces to avoid wasting frames
-		while step < 5:
+		while step < 9:
 			var next_geo: Dictionary = batch[surface_keys[step]]
 			if next_geo["vertices"].size() > 0:
 				break
 			step += 1
 
 		batch["_finalize_step"] = step
-		# Re-enqueue if more surfaces remain
-		if step < 5:
+		if step < 9:
 			if not _building_geo_finalize_queue.has(chunk_key):
 				_building_geo_finalize_queue.push_front(chunk_key)
 			return
-		# Fall through to cleanup (step == 5)
 
-	# === Step 5: Cleanup — collisions, building ranges, erase batch ===
+	# === Step 9: Cleanup — collisions, building ranges, erase batch ===
 	var all_baked: bool = batch.get("_all_baked", false)
 
 	if not batch["collisions"].is_empty():
@@ -8292,8 +8393,8 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 		return
 
 	# Высоты с учётом террейна
-	var floor_y := base_elev + 0.1  # Чуть выше террейна
-	var foundation_y := floor_y - 3.0  # Фундамент на 3м ниже — скрывает дыры на склонах
+	var floor_y := base_elev + 0.5
+	var foundation_y := base_elev + 0.5
 	var roof_y := base_elev + building_height
 
 	# === СТЕНЫ с ArrayMesh для UV ===
@@ -8331,7 +8432,7 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 		# UV: фундамент ниже 0 (уходит под землю), видимая часть от 0 до building_height
 		var u1 := accumulated_width * uv_scale_x
 		var u2 := (accumulated_width + wall_width) * uv_scale_x
-		var v_bottom := -3.0 * uv_scale_y  # 3м фундамента ниже пола
+		var v_bottom := 0.0
 		var v_top := building_height * uv_scale_y
 
 		var idx := wall_vertices.size()
@@ -8551,6 +8652,56 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 			par_mi.material_override = par_mat
 			wall_mesh_instance.add_child(par_mi)
 
+	# === ФУНДАМЕНТ ===
+	var fnd_ci := int(abs(points[0].x * 73.0 + points[0].y * 137.0)) % 4
+	var fnd_arr := []
+	fnd_arr.resize(Mesh.ARRAY_MAX)
+	var fv := PackedVector3Array()
+	var fu := PackedVector2Array()
+	var fn := PackedVector3Array()
+	var fi := PackedInt32Array()
+	var ft := base_elev + 0.5
+	var fb := base_elev
+	for i in range(points.size()):
+		var fp1 := points[i]
+		var fp2 := points[(i + 1) % points.size()]
+		var fdir := (fp2 - fp1).normalized()
+		var fnorm := Vector3(-fdir.y * normal_sign, 0.0, fdir.x * normal_sign)
+		var fvi := fv.size()
+		fv.append(Vector3(fp1.x, ft, fp1.y))
+		fv.append(Vector3(fp2.x, ft, fp2.y))
+		fv.append(Vector3(fp2.x, fb, fp2.y))
+		fv.append(Vector3(fp1.x, fb, fp1.y))
+		fu.append(Vector2(0, 0))
+		fu.append(Vector2(1, 0))
+		fu.append(Vector2(1, 1))
+		fu.append(Vector2(0, 1))
+		fn.append(fnorm)
+		fn.append(fnorm)
+		fn.append(fnorm)
+		fn.append(fnorm)
+		fi.append(fvi + 0)
+		fi.append(fvi + 1)
+		fi.append(fvi + 2)
+		fi.append(fvi + 0)
+		fi.append(fvi + 2)
+		fi.append(fvi + 3)
+	if fi.size() >= 3:
+		fnd_arr[Mesh.ARRAY_VERTEX] = fv
+		fnd_arr[Mesh.ARRAY_TEX_UV] = fu
+		fnd_arr[Mesh.ARRAY_NORMAL] = fn
+		fnd_arr[Mesh.ARRAY_INDEX] = fi
+		var fnd_m := ArrayMesh.new()
+		fnd_m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, fnd_arr)
+		var fnd_mi := MeshInstance3D.new()
+		fnd_mi.mesh = fnd_m
+		fnd_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		var fnd_mat := StandardMaterial3D.new()
+		fnd_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		fnd_mat.albedo_color = _building_foundation_materials[fnd_ci].albedo_color
+		fnd_mi.material_override = fnd_mat
+		wall_mesh_instance.add_child(fnd_mi)
+
 	# Создаём физическое тело
 	var body := StaticBody3D.new()
 	body.collision_layer = 2  # Слой 2 для зданий
@@ -8682,8 +8833,8 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 
 	# Высоты с учётом террейна
-	var floor_y := base_elev + 0.1
-	var foundation_y := floor_y - 3.0  # Фундамент на 3м ниже
+	var floor_y := base_elev + 0.5
+	var foundation_y := base_elev + 0.5
 	var roof_y := base_elev + building_height
 
 	# === СТЕНЫ с ArrayMesh для UV ===
@@ -8974,6 +9125,56 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 		wall_mesh_instance.add_child(parapet_mesh_instance)
 
+	# === ФУНДАМЕНТ ===
+	var fnd_ci2 := int(abs(points[0].x * 73.0 + points[0].y * 137.0)) % 4
+	var fnd_arr2 := []
+	fnd_arr2.resize(Mesh.ARRAY_MAX)
+	var fv2 := PackedVector3Array()
+	var fu2 := PackedVector2Array()
+	var fn2 := PackedVector3Array()
+	var fi2 := PackedInt32Array()
+	var ft2 := base_elev + 0.5
+	var fb2 := base_elev
+	for i in range(points.size()):
+		var fp1 := points[i]
+		var fp2 := points[(i + 1) % points.size()]
+		var fdir := (fp2 - fp1).normalized()
+		var fnorm := Vector3(-fdir.y * normal_sign, 0.0, fdir.x * normal_sign)
+		var fvi := fv2.size()
+		fv2.append(Vector3(fp1.x, ft2, fp1.y))
+		fv2.append(Vector3(fp2.x, ft2, fp2.y))
+		fv2.append(Vector3(fp2.x, fb2, fp2.y))
+		fv2.append(Vector3(fp1.x, fb2, fp1.y))
+		fu2.append(Vector2(0, 0))
+		fu2.append(Vector2(1, 0))
+		fu2.append(Vector2(1, 1))
+		fu2.append(Vector2(0, 1))
+		fn2.append(fnorm)
+		fn2.append(fnorm)
+		fn2.append(fnorm)
+		fn2.append(fnorm)
+		fi2.append(fvi + 0)
+		fi2.append(fvi + 1)
+		fi2.append(fvi + 2)
+		fi2.append(fvi + 0)
+		fi2.append(fvi + 2)
+		fi2.append(fvi + 3)
+	if fi2.size() >= 3:
+		fnd_arr2[Mesh.ARRAY_VERTEX] = fv2
+		fnd_arr2[Mesh.ARRAY_TEX_UV] = fu2
+		fnd_arr2[Mesh.ARRAY_NORMAL] = fn2
+		fnd_arr2[Mesh.ARRAY_INDEX] = fi2
+		var fnd_m2 := ArrayMesh.new()
+		fnd_m2.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, fnd_arr2)
+		var fnd_mi2 := MeshInstance3D.new()
+		fnd_mi2.mesh = fnd_m2
+		fnd_mi2.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		var fnd_mat2 := StandardMaterial3D.new()
+		fnd_mat2.cull_mode = BaseMaterial3D.CULL_DISABLED
+		fnd_mat2.albedo_color = _building_foundation_materials[fnd_ci2].albedo_color
+		fnd_mi2.material_override = fnd_mat2
+		wall_mesh_instance.add_child(fnd_mi2)
+
 	# Создаём физическое тело
 	var body := StaticBody3D.new()
 	body.collision_layer = 2
@@ -8996,18 +9197,18 @@ func _create_building_collisions_deferred(body: StaticBody3D, points: PackedVect
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
-		var total_wall_h := building_height + 3.0  # +3м фундамент вниз
-		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev - 2.4 + total_wall_h / 2, (p1.y + p2.y) / 2)
+		var total_wall_h := building_height
+		var wall_center := Vector3((p1.x + p2.x) / 2, base_elev + building_height / 2, (p1.y + p2.y) / 2)
 		var wall_length := p1.distance_to(p2)
 
-		if wall_length < 0.5:  # Пропускаем слишком короткие стены
+		if wall_length < 0.5:
 			continue
 
 		var wall_angle := atan2(p2.y - p1.y, p2.x - p1.x)
 
 		var collision := CollisionShape3D.new()
 		var box := BoxShape3D.new()
-		box.size = Vector3(wall_length, total_wall_h, 0.3)  # Толщина стены 0.3м
+		box.size = Vector3(wall_length, total_wall_h, 0.3)
 		collision.shape = box
 		collision.position = wall_center
 		collision.rotation.y = -wall_angle
@@ -10909,7 +11110,7 @@ func _generate_industrial_buildings(points: PackedVector2Array, parent: Node3D) 
 				break
 
 		if all_inside:
-			var base_elev := 0.0
+			var base_elev := 0.22
 			_create_3d_building(bld_points, building_color, bld_height, parent, base_elev)
 
 
