@@ -411,5 +411,6 @@ func _on_test_track_selected(track: Dictionary) -> void:
 	if MusicManager:
 		MusicManager.play_next_track()
 
-	# Загружаем сцену тестовой трассы (без OSM)
-	get_tree().change_scene_to_file("res://race/test_track_scene.tscn")
+	# Загружаем сцену (кастомную или стандартную тестовую)
+	var scene_path: String = track.get("scene_path", "res://race/test_track_scene.tscn")
+	get_tree().change_scene_to_file(scene_path)
