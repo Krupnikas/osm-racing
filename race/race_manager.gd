@@ -12,6 +12,7 @@ const RaceGridScript = preload("res://race/race_grid.gd")
 const OPPONENT_SCENES := [
 	"res://race/racer_nexia.tscn",
 	"res://race/racer_vaz2107.tscn",
+	"res://race/racer_logan.tscn",
 ]
 const OPPONENT_COUNT := 3  # Количество AI соперников
 

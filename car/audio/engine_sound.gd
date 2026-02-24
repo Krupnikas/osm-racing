@@ -60,7 +60,7 @@ func _process(delta: float) -> void:
 	pitch_scale = lerp(pitch_scale, 0.5 + rpm_norm * 1.5, delta * 10.0)
 
 	# Громкость
-	var target_volume := lerp(min_volume, max_volume, rpm_norm * 0.5 + throttle * 0.5)
+	var target_volume: float = lerp(min_volume, max_volume, rpm_norm * 0.5 + throttle * 0.5)
 	if is_finite(target_volume):
 		volume_db = target_volume
 

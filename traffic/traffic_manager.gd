@@ -18,6 +18,7 @@ var npc_lada_scene: PackedScene
 var npc_taxi_scene: PackedScene
 var npc_vaz2107_scene: PackedScene
 var npc_polo_scene: PackedScene
+var npc_logan_scene: PackedScene
 var road_network: Node  # RoadNetwork
 var terrain_generator: Node  # OSMTerrainGenerator
 var player_car: Node3D
@@ -51,6 +52,7 @@ func _ready() -> void:
 	npc_taxi_scene = preload("res://traffic/npc_taxi.tscn")
 	npc_vaz2107_scene = preload("res://traffic/npc_vaz_2107.tscn")
 	npc_polo_scene = preload("res://traffic/npc_polo.tscn")
+	npc_logan_scene = preload("res://traffic/npc_logan.tscn")
 
 	# Создаём RoadNetwork
 	var RoadNetworkScript = preload("res://traffic/road_network.gd")
@@ -96,6 +98,7 @@ func _warmup_mesh_cache() -> void:
 	if npc_taxi_scene: scenes.append(npc_taxi_scene)
 	if npc_vaz2107_scene: scenes.append(npc_vaz2107_scene)
 	if npc_polo_scene: scenes.append(npc_polo_scene)
+	if npc_logan_scene: scenes.append(npc_logan_scene)
 	for scene in scenes:
 		var instance := scene.instantiate() as Node3D
 		instance.visible = false
@@ -379,7 +382,7 @@ func _get_npc_from_pool():
 		return npc
 
 	if active_npcs.size() < max_npcs:
-		# Распределение: 5% Lada 2109 DPS, 15% Такси, 15% ПАЗ, 25% ВАЗ-2107, 40% блочные
+		# Распределение: 5% DPS, 10% Такси, 10% ПАЗ, 25% ВАЗ-2107, 20% Polo, 2% Logan, 28% блочные
 		var rand := randf()
 		var scene_to_use: PackedScene
 		var car_type: String
@@ -388,24 +391,28 @@ func _get_npc_from_pool():
 			# 5% - Lada 2109 DPS
 			scene_to_use = npc_lada_scene
 			car_type = "Lada 2109 DPS"
-		elif rand < 0.20:
-			# 15% - Такси
+		elif rand < 0.15:
+			# 10% - Такси
 			scene_to_use = npc_taxi_scene
 			car_type = "Taxi"
-		elif rand < 0.35:
-			# 15% - ПАЗ
+		elif rand < 0.25:
+			# 10% - ПАЗ
 			scene_to_use = npc_paz_scene
 			car_type = "PAZ bus"
-		elif rand < 0.55:
-			# 20% - ВАЗ-2107
+		elif rand < 0.50:
+			# 25% - ВАЗ-2107
 			scene_to_use = npc_vaz2107_scene
 			car_type = "VAZ-2107"
-		elif rand < 0.75:
+		elif rand < 0.70:
 			# 20% - VW Polo
 			scene_to_use = npc_polo_scene
 			car_type = "VW Polo"
+		elif rand < 0.72:
+			# 2% - Renault Logan
+			scene_to_use = npc_logan_scene
+			car_type = "Renault Logan"
 		else:
-			# 25% - блочные машинки
+			# 28% - блочные машинки
 			scene_to_use = npc_car_scene
 			car_type = "box car"
 

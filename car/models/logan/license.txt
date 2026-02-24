@@ -1,0 +1,11 @@
+Model Information:
+* title:	Renault Logan 2004
+* source:	https://sketchfab.com/3d-models/renault-logan-2004-e4f9463f6e004b90bb977d12f6375b9c
+* author:	Denis Petrushin (https://sketchfab.com/goooddenis)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Renault Logan 2004" (https://sketchfab.com/3d-models/renault-logan-2004-e4f9463f6e004b90bb977d12f6375b9c) by Denis Petrushin (https://sketchfab.com/goooddenis) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
