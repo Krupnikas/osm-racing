@@ -1187,7 +1187,7 @@ func _init_lamp_meshes() -> void:
 
 	# Определяем позицию света — верхняя точка модели
 	var aabb := _lamp_model_mesh.get_aabb()
-	_lamp_light_offset = Vector3(-0.6, aabb.end.y - 0.10, 0)
+	_lamp_light_offset = Vector3(-0.6, aabb.end.y - 0.17, 0)
 
 	var total_tris := 0
 	for s in range(_lamp_model_mesh.get_surface_count()):
@@ -9766,21 +9766,20 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 ## Создаёт светящийся шарик-лампочку (emission) для фонаря
 func _create_lamp_bulb() -> MeshInstance3D:
 	var sphere := SphereMesh.new()
-	sphere.radius = 0.08
-	sphere.height = 0.16
+	sphere.radius = 0.15
+	sphere.height = 0.3
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(1.0, 0.9, 0.5)
 	mat.emission_enabled = true
 	mat.emission = Color(1.0, 0.8, 0.3)
-	mat.emission_energy_multiplier = 10.0
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.emission_energy_multiplier = 15.0
 	var mi := MeshInstance3D.new()
 	mi.name = "LampBulb"
 	mi.mesh = sphere
 	mi.material_override = mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.visibility_range_end = 300.0
+	mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 	return mi
-
 
 
 ## Создаёт полупрозрачный конус для визуализации SpotLight (debug)
