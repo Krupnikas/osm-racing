@@ -1627,13 +1627,13 @@ func _check_initial_load_complete() -> void:
 					light.shadow_enabled = false
 					light.light_bake_mode = Light3D.BAKE_DISABLED
 					light.distance_fade_enabled = true
-					light.distance_fade_begin = 60.0
+					light.distance_fade_begin = 120.0
 					light.distance_fade_shadow = 30.0
-					light.distance_fade_length = 10.0
+					light.distance_fade_length = 30.0
 					light.visible = _is_night_mode and not light_data.broken
 					light.set_meta("broken", light_data.broken)
 					light.add_child(_create_lamp_bulb())
-					#light.add_child(_create_lamp_glow_light(light_data.broken))
+					light.add_child(_create_lamp_glow_light(light_data.broken))
 					light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
 					container.add_child(light)
 					if _lamp_lights_by_chunk.has(chunk_key):
@@ -4829,13 +4829,13 @@ func _process_deferred_lamp_lights() -> void:
 			light.shadow_enabled = false
 			light.light_bake_mode = Light3D.BAKE_DISABLED
 			light.distance_fade_enabled = true
-			light.distance_fade_begin = 60.0
+			light.distance_fade_begin = 120.0
 			light.distance_fade_shadow = 30.0
-			light.distance_fade_length = 10.0
+			light.distance_fade_length = 30.0
 			light.visible = _is_night_mode and not light_data.broken
 			light.set_meta("broken", light_data.broken)
 			light.add_child(_create_lamp_bulb())
-			#light.add_child(_create_lamp_glow_light(light_data.broken))
+			light.add_child(_create_lamp_glow_light(light_data.broken))
 			light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
 			container.add_child(light)
 			if _lamp_lights_by_chunk.has(chunk_key):
@@ -9748,13 +9748,13 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	lamp_light.shadow_enabled = false
 	lamp_light.light_bake_mode = Light3D.BAKE_DISABLED
 	lamp_light.distance_fade_enabled = true
-	lamp_light.distance_fade_begin = 60.0
+	lamp_light.distance_fade_begin = 120.0
 	lamp_light.distance_fade_shadow = 30.0
-	lamp_light.distance_fade_length = 10.0
+	lamp_light.distance_fade_length = 30.0
 	lamp_light.visible = is_night and not is_broken
 	lamp_light.set_meta("is_broken", is_broken)
 	lamp_light.add_child(_create_lamp_bulb())
-	#lamp_light.add_child(_create_lamp_glow_light(is_broken))
+	lamp_light.add_child(_create_lamp_glow_light(is_broken))
 	lamp_light.add_child(_create_debug_light_cone(lamp_light.spot_range, lamp_light.spot_angle))
 	lamp_root.add_child(lamp_light)
 	_lamp_batch_lights.append(lamp_light)
@@ -9788,19 +9788,20 @@ func _create_lamp_bulb() -> MeshInstance3D:
 func _create_lamp_glow_light(is_broken: bool) -> SpotLight3D:
 	var glow := SpotLight3D.new()
 	glow.name = "LampGlow"
-	glow.rotation_degrees.x = -90  # Прямо вниз
+	glow.position.y = -0.01
+	glow.rotation_degrees.x = -75
 	glow.spot_range = 15.0
-	glow.spot_angle = 120.0
-	glow.spot_attenuation = 8.0
-	glow.light_energy = 0.1
+	glow.spot_angle = 180.0
+	glow.spot_attenuation = 1.0
+	glow.light_energy = 1.5
 	glow.light_color = Color(1.0, 0.65, 0.2)
-	glow.light_volumetric_fog_energy = 4.0
+	glow.light_volumetric_fog_energy = 5.0
 	glow.shadow_enabled = false
 	glow.light_bake_mode = Light3D.BAKE_DISABLED
 	glow.distance_fade_enabled = true
-	glow.distance_fade_begin = 60.0
+	glow.distance_fade_begin = 120.0
 	glow.distance_fade_shadow = 30.0
-	glow.distance_fade_length = 10.0
+	glow.distance_fade_length = 30.0
 	glow.visible = _is_night_mode and not is_broken
 	glow.set_meta("broken", is_broken)
 	return glow
@@ -10856,6 +10857,7 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 
 		var lamp_pos_left := road_pos + perp * lamp_offset
 		var lamp_pos_right := road_pos - perp * lamp_offset
+		var both_sides := road_width >= 12.0  # primary and wider — both sides
 
 		if not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road(lamp_pos_left, 0.0):
 			var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
@@ -10864,7 +10866,7 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 			if _loaded_chunks.has(chunk_key):
 				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_left.x, 0.0, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[chunk_key])
 
-		if not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road(lamp_pos_right, 0.0):
+		if both_sides and not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road(lamp_pos_right, 0.0):
 			var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
 			var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
 			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
