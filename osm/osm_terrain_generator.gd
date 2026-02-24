@@ -117,8 +117,6 @@ var _created_lamp_positions: Dictionary = {}  # Позиции созданны�
 var _created_sign_positions: Dictionary = {}  # Позиции созданных знаков для избежания дубликатов
 var _created_bus_stop_positions: Dictionary = {}  # Позиции созданных остановок для избежания дубликатов
 var _custom_model_cache: Dictionary = {}  # path -> PackedScene
-var _pending_lamps: Array = []  # Отложенные фонари (создаются после загрузки всех парковок)
-var _lamps_created := false  # Флаг что фонари уже созданы
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
 var _crossing_sign_front_mat: StandardMaterial3D
 var _crossing_sign_back_mat: StandardMaterial3D
@@ -149,7 +147,6 @@ var _culling_debug_counter := 0
 
 # Отложенная генерация дорог и других тяжёлых объектов
 var _road_queue: Array = []  # Очередь {nodes, tags, parent}
-var _road_queue_sorted := false
 var _curb_queue: Array = []  # Очередь бордюров (создаются после детекции перекрёстков)
 
 # Threaded road processing — smoothing + geometry in worker threads
@@ -182,7 +179,7 @@ var _entrance_lights: Array[OmniLight3D] = []  # Светильники подъ
 const ResidentialEntranceScript = preload("res://osm/residential_entrance_generator.gd")
 
 # Lamp lights - для управления ночным режимом
-var _lamp_batch_lights: Array[OmniLight3D] = []  # Все OmniLight3D (теперь без батчинга, по одному фонарю за раз)
+var _lamp_batch_lights: Array[Light3D] = []  # Все SpotLight3D фонарей (immediate path)
 
 var _curb_smoothed_queue: Array = []  # Очередь сглаженных бордюров для генерации меша
 var _curb_mesh_state: Dictionary = {}  # Текущее состояние генерации меша бордюра (для разбивки по кадрам)
@@ -235,7 +232,8 @@ var _lamp_batches_to_finalize: Array[String] = []  # Chunk keys ready for finali
 
 # Street lamp model mesh (loaded from GLB, decimated)
 var _lamp_model_mesh: ArrayMesh
-var _lamp_light_offset := Vector3(0, 6.0, 0)  # Позиция OmniLight3D относительно основания
+var _lamp_light_offset := Vector3(0, 6.7, 0)  # Позиция SpotLight3D относительно основания
+var _lamp_debug_visible := false  # Видимость debug шариков и конусов (L)
 
 # Keep for night mode updates and chunk association
 var _lamp_lights_by_chunk: Dictionary = {}  # chunk_key -> Array[OmniLight3D]
@@ -318,7 +316,8 @@ var _finalize_phase: int = 0  # Round-robin: 0=roads, 1=curbs, 2=lamps, 3=buildi
 var _chunk_activation_pending: Dictionary = {}  # chunk_key -> state (-1=waiting, >=0=RS activation index)
 
 # Global add_child budget — limits scene tree insertions per frame
-const ADD_CHILD_BUDGET_PER_FRAME := 2
+const ADD_CHILD_BUDGET_NORMAL := 2
+var _add_child_budget: int = 2  # Текущий бюджет (увеличен при начальной загрузке)
 var _add_child_count: int = 0
 var _deferred_add_child_queue: Array = []  # [{parent: Node, child: Node}]
 
@@ -1188,7 +1187,7 @@ func _init_lamp_meshes() -> void:
 
 	# Определяем позицию света — верхняя точка модели
 	var aabb := _lamp_model_mesh.get_aabb()
-	_lamp_light_offset = Vector3(-0.6, aabb.end.y - 0.3, 0)
+	_lamp_light_offset = Vector3(-0.6, aabb.end.y - 0.1, 0)
 
 	var total_tris := 0
 	for s in range(_lamp_model_mesh.get_surface_count()):
@@ -1199,14 +1198,22 @@ func _init_lamp_meshes() -> void:
 		_lamp_model_mesh.get_surface_count(), total_tris, _lamp_light_offset.y
 	])
 
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_L:
+			_lamp_debug_visible = not _lamp_debug_visible
+			get_tree().call_group("lamp_debug_vis", "set_visible", _lamp_debug_visible)
+			print("OSM: Lamp debug vis = %s" % _lamp_debug_visible)
+
 func _process(delta: float) -> void:
 	var _frame_start := Time.get_ticks_usec()
 	_current_frame_perf.clear()
 	_slow_frame_cooldown -= delta
 
 	# Reset add_child budget and drain deferred queue
+	_add_child_budget = 9999 if _initial_loading else ADD_CHILD_BUDGET_NORMAL
 	_add_child_count = 0
-	while not _deferred_add_child_queue.is_empty() and _add_child_count < ADD_CHILD_BUDGET_PER_FRAME:
+	while not _deferred_add_child_queue.is_empty() and _add_child_count < _add_child_budget:
 		var ac_item: Dictionary = _deferred_add_child_queue[0]
 		if is_instance_valid(ac_item["parent"]) and is_instance_valid(ac_item["child"]):
 			ac_item["parent"].add_child(ac_item["child"])
@@ -1220,7 +1227,8 @@ func _process(delta: float) -> void:
 	_record_perf("building_results", t_building)
 
 	# Общий бюджет на все очереди — 5ms (90fps = 11ms, рендер ~4ms, физика ~2ms)
-	const FRAME_BUDGET_USEC := 5000
+	# При начальной загрузке — без ограничений (500ms)
+	var FRAME_BUDGET_USEC := 500000 if _initial_loading else 5000
 
 	# Обрабатываем очередь дорог
 	t0 = Time.get_ticks_usec()
@@ -1263,11 +1271,14 @@ func _process(delta: float) -> void:
 	var t_curb := Time.get_ticks_usec() - t0
 	_record_perf("curb_collisions", t_curb)
 
-	# Создаём отложенные ноды с бюджетом (buildings, trees, lamps, roads collision)
+	# Создаём отложенные ноды с бюджетом (buildings, trees, roads collision)
 	t0 = Time.get_ticks_usec()
 	_process_deferred_nodes()
 	var t_deferred := Time.get_ticks_usec() - t0
 	_record_perf("deferred_nodes", t_deferred)
+
+	# Лампы — отдельно, все за один проход (без бюджета, SpotLight3D лёгкие)
+	_process_deferred_lamp_lights()
 
 	# Применяем готовые результаты клиппинга террейна из worker threads
 	t0 = Time.get_ticks_usec()
@@ -1419,14 +1430,12 @@ func start_loading() -> void:
 	_parking_spatial_hash.clear()
 	_created_lamp_positions.clear()  # Очищаем позиции фонарей
 	_created_bus_stop_positions.clear()  # Очищаем позиции остановок
-	_pending_lamps.clear()  # Очищаем отложенные фонари
 	_pending_parking_signs.clear()  # Очищаем отложенные знаки парковки
 	_deferred_lamp_queue.clear()
 	_deferred_manhole_queue.clear()
 	_deferred_traffic_queue.clear()
 	_deferred_billboard_queue.clear()
 	_chunk_activation_pending.clear()
-	_lamps_created = false  # Сбрасываем флаг
 	_intersection_positions.clear()  # Очищаем перекрёстки
 	_intersection_radii.clear()
 	_intersection_angles.clear()
@@ -1503,9 +1512,8 @@ func _check_initial_load_complete() -> void:
 	var total_chunks: int = _initial_chunks_needed.size()
 	var chunk_progress: float = float(loaded_count) / float(max(1, total_chunks))  # 0.0-1.0
 
-	# Считаем размер всех очередей (включая финализацию визуала)
-	# Deferred collisions/lights НЕ учитываем — они продолжают работу после загрузки
-	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + _pending_road_tasks + _pending_veg_tasks + _pending_terrain_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_footway_queue.size() + _deferred_billboard_queue.size() + _chunk_activation_pending.size()
+	# Считаем размер всех очередей (включая финализацию визуала и deferred лампы)
+	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + _pending_road_tasks + _pending_veg_tasks + _pending_terrain_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_footway_queue.size() + _deferred_billboard_queue.size() + _chunk_activation_pending.size() + _deferred_lamp_lights.size()
 
 	# DEBUG: Детальное логирование очередей
 	if loaded_count >= total_chunks and total_queued > 0:
@@ -1592,10 +1600,47 @@ func _check_initial_load_complete() -> void:
 		if _finalization_state == 0:
 			print("OSM: Starting finalization...")
 			_finalization_state = 1
-			initial_load_progress.emit(0.95, "Финализация: батчинг фонарей...")
-			# OLD: Создаём все фонари сразу (DEPRECATED - now using batching)
-			# _create_pending_lamps()
-			print("OSM: Lamp batching queued, starting parking signs...")
+			initial_load_progress.emit(0.95, "Финализация: создание света фонарей...")
+			# Создаём все отложенные SpotLight3D сразу (без бюджета)
+			var lamp_light_count := 0
+			while not _deferred_lamp_lights.is_empty():
+				var item: Dictionary = _deferred_lamp_lights[0]
+				var container: Node3D = item["container"]
+				if not is_instance_valid(container):
+					_deferred_lamp_lights.pop_front()
+					continue
+				var lights: Array = item["lights"]
+				var chunk_key: String = item["chunk_key"]
+				var idx: int = item.get("idx", 0)
+				while idx < lights.size():
+					var light_data: Dictionary = lights[idx]
+					var light := SpotLight3D.new()
+					light.position = light_data.position
+					light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
+					light.rotation_degrees.x = -75
+					light.spot_range = 15.0
+					light.spot_angle = 70.0
+					light.spot_attenuation = 1.0
+					light.light_energy = 2.6
+					light.light_color = Color(1.0, 0.65, 0.2)
+					light.light_volumetric_fog_energy = 8.0
+					light.shadow_enabled = false
+					light.light_bake_mode = Light3D.BAKE_DISABLED
+					light.distance_fade_enabled = true
+					light.distance_fade_begin = 60.0
+					light.distance_fade_shadow = 30.0
+					light.distance_fade_length = 10.0
+					light.visible = _is_night_mode and not light_data.broken
+					light.set_meta("broken", light_data.broken)
+					light.add_child(_create_lamp_bulb())
+					light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
+					container.add_child(light)
+					if _lamp_lights_by_chunk.has(chunk_key):
+						_lamp_lights_by_chunk[chunk_key].append(light)
+					lamp_light_count += 1
+					idx += 1
+				_deferred_lamp_lights.pop_front()
+			print("OSM: Created %d lamp lights during finalization" % lamp_light_count)
 			_finalization_state = 2
 			initial_load_progress.emit(0.98, "Финализация: создание знаков парковки (%d)..." % _pending_parking_signs.size())
 			# Создаём все знаки парковки сразу
@@ -2163,7 +2208,6 @@ func reset_terrain() -> void:
 	# Сбрасываем таймеры зависания
 	_queue_stuck_time = 0.0
 	_last_queue_size = 0
-	_road_queue_sorted = false
 
 	# КРИТИЧНО: Очищаем все очереди генерации объектов
 	_building_mutex.lock()
@@ -2185,9 +2229,7 @@ func reset_terrain() -> void:
 	_terrain_objects_queue.clear()
 	_infrastructure_queue.clear()
 	_vegetation_queue.clear()
-	_pending_lamps.clear()
 	_pending_parking_signs.clear()
-	_lamps_created = false
 	_curb_queue.clear()
 	_curb_smoothed_queue.clear()
 	_curb_mesh_state.clear()
@@ -2294,12 +2336,6 @@ func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: 
 	if gen != _load_generation:
 		print("OSM: Ignoring stale chunk generation %s (gen %d != %d)" % [chunk_key, gen, _load_generation])
 		return
-
-	# OLD: Создаём фонари для этого чанка (DEPRECATED - now using batching)
-	if not _initial_loading:
-		# Batching happens automatically in _process() via _lamp_batches_to_finalize
-		pass
-		# _create_pending_lamps()  # DISABLED
 
 	# Добавляем чанк в очередь для создания билбордов из DecorationLayer
 	if _decoration_layer and not _billboard_batches_to_finalize.has(chunk_key):
@@ -2750,7 +2786,7 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 					major_road_count += 1
 				var w: float = ROAD_WIDTHS.get(t, 6.0)
 				max_width = maxf(max_width, w)
-				# height_offset по типу дороги (совпадает с _create_road_immediate)
+				# height_offset по типу дороги
 				var ho := 0.006
 				match t:
 					"motorway", "trunk": ho = 0.012
@@ -2997,148 +3033,6 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 		var seg := {"p1": smoothed_pts[i], "p2": smoothed_pts[i + 1], "width": width}
 		_road_segments.append(seg)
 		_add_road_segment_to_spatial_hash(seg)
-
-
-## Немедленное создание дороги (вызывается из очереди)
-func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> void:
-	if not is_instance_valid(parent):
-		return
-
-	var highway_type: String = tags.get("highway", "residential")
-	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
-
-	# Pre-compute local points ONCE (avoids 5x redundant _latlon_to_local calls)
-	var local_points := PackedVector2Array()
-	local_points.resize(nodes.size())
-	for i in range(nodes.size()):
-		local_points[i] = _latlon_to_local(nodes[i].lat, nodes[i].lon)
-
-	# Вычисляем длину дороги для расчёта рамп
-	var road_length := 0.0
-	for i in range(local_points.size() - 1):
-		road_length += local_points[i].distance_to(local_points[i + 1])
-
-	# Проверяем является ли дорога мостом/туннелем
-	var elevation_info := _calculate_road_elevation(tags, 0.0, road_length)
-	var is_bridge: bool = elevation_info.get("is_bridge", false)
-
-	var texture_key: String
-	var height_offset: float
-	var curb_height: float
-	match highway_type:
-		"motorway", "trunk":
-			texture_key = "highway"
-			height_offset = 0.012
-			curb_height = 0.0
-		"primary":
-			texture_key = "primary"
-			height_offset = 0.010
-			curb_height = 0.0
-		"secondary":
-			texture_key = "primary"
-			height_offset = 0.008
-			curb_height = 0.0
-		"tertiary":
-			texture_key = "residential"
-			height_offset = 0.007
-			curb_height = 0.0
-		"residential", "unclassified":
-			texture_key = "residential"
-			height_offset = 0.006
-			curb_height = 0.0
-		"service":
-			texture_key = "residential"
-			height_offset = 0.004
-			curb_height = 0.0
-		"footway", "path", "cycleway", "track":
-			texture_key = "path"
-			height_offset = 0.23
-			curb_height = 0.0
-		_:
-			texture_key = "residential"
-			height_offset = 0.006
-			curb_height = 0.0
-
-	# Сглаживаем точки один раз — используются и для дороги, и для бордюров
-	var smoothed_points: PackedVector2Array = _smooth_road_corners(local_points)
-
-	# Создаём дорогу - обычную или мост
-	if is_bridge:
-		_create_bridge_road(nodes, width, texture_key, height_offset, elevation_info, parent)
-		var b_height: float = elevation_info.get("bridge_height", 0.0)
-		var b_ramp: float = elevation_info.get("ramp_length", 0.0)
-		var b_layer: int = elevation_info.get("layer", 0)
-		if b_height > 0:
-			print("OSM: Bridge created: height=%.1fm, ramp=%.1fm, layer=%d" % [b_height, b_ramp, b_layer])
-	else:
-		# Пешеходные дорожки: crossing на уровне дороги, off-road — elevated
-		if highway_type in ["footway", "path"] and smoothed_points.size() >= 2:
-			var is_tagged_crossing: bool = tags.get("footway", "") == "crossing"
-			var on_road: Array[bool] = []
-			for p in smoothed_points:
-				on_road.append(_is_point_on_vehicle_road(p))
-			var current_pts := PackedVector2Array()
-			current_pts.append(smoothed_points[0])
-			var current_on := on_road[0]
-			var last_off_road_pt := smoothed_points[0]  # fallback: начало пути
-			var has_before_off: bool = not on_road[0]  # Только если первая точка реально за пределами дороги
-			if not current_on:
-				last_off_road_pt = smoothed_points[0]
-			for i in range(1, smoothed_points.size()):
-				if on_road[i] != current_on:
-					var edge_pt := _find_road_edge_point(smoothed_points[i - 1], current_on, smoothed_points[i])
-					current_pts.append(edge_pt)
-					if current_pts.size() >= 2:
-						if current_on:
-							if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, smoothed_points[i])):
-								_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
-								if enable_crossing_signs:
-									_enqueue_crossing_signs(current_pts, parent)
-						else:
-							_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
-							last_off_road_pt = smoothed_points[i - 1]
-							has_before_off = true
-					current_pts = PackedVector2Array()
-					current_pts.append(edge_pt)
-					current_on = on_road[i]
-				else:
-					if not current_on:
-						last_off_road_pt = smoothed_points[i]
-						has_before_off = true
-				current_pts.append(smoothed_points[i])
-			if current_pts.size() >= 2:
-				if current_on:
-					var last_pt: Vector2 = smoothed_points[smoothed_points.size() - 1]
-					if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, last_pt)):
-						_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
-						if enable_crossing_signs:
-							_enqueue_crossing_signs(current_pts, parent)
-				else:
-					_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
-		else:
-			_add_road_to_batch_fast(smoothed_points, width, texture_key, height_offset, parent)
-
-	if curb_height > 0.0:
-		_curb_queue.append({
-			"local_points": smoothed_points,
-			"width": width,
-			"height_offset": height_offset,
-			"curb_height": curb_height,
-			"parent": parent,
-			"is_bridge": is_bridge,
-			"bridge_info": elevation_info
-		})
-
-	# Фонари (только крупные дороги)
-	if highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary"]:
-		_generate_street_lamps_fast(smoothed_points, width, parent)
-
-	# Люки
-	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
-		_generate_manholes_fast(smoothed_points, width, parent)
-
-	# RoadNetwork для NPC
-	_extract_road_for_traffic_fast(smoothed_points, tags, elevation_info)
 
 
 ## Вычисляет геометрию дороги в worker thread (чистая математика, thread-safe)
@@ -4649,7 +4543,7 @@ func update_window_night_mode(is_night: bool) -> void:
 	var light_count := 0
 	for light in _entrance_lights:
 		if is_instance_valid(light):
-			light.light_energy = 2.0 if is_night else 0.0
+			light.light_energy = 2.6 if is_night else 0.0
 			light_count += 1
 
 	var icon := "🌙" if is_night else "☀️"
@@ -4800,7 +4694,7 @@ func _process_deferred_nodes() -> void:
 
 	# 1. Road/terrain collisions (тяжёлые — 1 за кадр, ConcavePolygonShape3D ~5-15ms)
 	if not _deferred_road_collisions.is_empty():
-		if _add_child_count >= ADD_CHILD_BUDGET_PER_FRAME:
+		if _add_child_count >= _add_child_budget:
 			return
 		var item: Dictionary = _deferred_road_collisions.pop_front()
 		if is_instance_valid(item["body"]):
@@ -4819,7 +4713,7 @@ func _process_deferred_nodes() -> void:
 		return  # 1 heavy collision за кадр
 
 	if not _deferred_terrain_collisions.is_empty():
-		if _add_child_count >= ADD_CHILD_BUDGET_PER_FRAME:
+		if _add_child_count >= _add_child_budget:
 			return
 		var item: Dictionary = _deferred_terrain_collisions.pop_front()
 		var t_parent: Node3D = item["parent"]
@@ -4847,7 +4741,7 @@ func _process_deferred_nodes() -> void:
 
 	# 2. Building collisions (budgeted)
 	while not _deferred_building_collisions.is_empty():
-		if _add_child_count >= ADD_CHILD_BUDGET_PER_FRAME or (Time.get_ticks_usec() - start) > BUDGET_USEC:
+		if _add_child_count >= _add_child_budget or (Time.get_ticks_usec() - start) > BUDGET_USEC:
 			return
 		var item: Dictionary = _deferred_building_collisions[0]
 		var parent: Node3D = item["parent"]
@@ -4856,7 +4750,7 @@ func _process_deferred_nodes() -> void:
 			continue
 		var collisions: Array = item["collisions"]
 		var idx: int = item["idx"]
-		while idx < collisions.size() and _add_child_count < ADD_CHILD_BUDGET_PER_FRAME:
+		while idx < collisions.size() and _add_child_count < _add_child_budget:
 			if (Time.get_ticks_usec() - start) > BUDGET_USEC:
 				item["idx"] = idx
 				return
@@ -4876,7 +4770,7 @@ func _process_deferred_nodes() -> void:
 
 	# 3. Tree collisions (budgeted)
 	while not _deferred_tree_collisions.is_empty():
-		if _add_child_count >= ADD_CHILD_BUDGET_PER_FRAME or (Time.get_ticks_usec() - start) > BUDGET_USEC:
+		if _add_child_count >= _add_child_budget or (Time.get_ticks_usec() - start) > BUDGET_USEC:
 			return
 		var item: Dictionary = _deferred_tree_collisions[0]
 		var parent_node: Node3D = item["parent"]
@@ -4885,7 +4779,7 @@ func _process_deferred_nodes() -> void:
 			continue
 		var collisions: Array = item["collisions"]
 		var idx: int = item["idx"]
-		while idx < collisions.size() and _add_child_count < ADD_CHILD_BUDGET_PER_FRAME:
+		while idx < collisions.size() and _add_child_count < _add_child_budget:
 			var collision_data: Dictionary = collisions[idx]
 			var coll_pos: Vector3 = collision_data["position"]
 			if _is_point_near_road(Vector2(coll_pos.x, coll_pos.z), 60.0):
@@ -4908,40 +4802,43 @@ func _process_deferred_nodes() -> void:
 			item["idx"] = idx
 			return
 
-	# 4. Lamp lights (budgeted)
+
+## Создаёт все отложенные SpotLight3D фонарей за один проход (без бюджета).
+## Вызывается из _process() отдельно от _process_deferred_nodes.
+func _process_deferred_lamp_lights() -> void:
 	while not _deferred_lamp_lights.is_empty():
-		if _add_child_count >= ADD_CHILD_BUDGET_PER_FRAME or (Time.get_ticks_usec() - start) > BUDGET_USEC:
-			return
 		var item: Dictionary = _deferred_lamp_lights[0]
 		var container: Node3D = item["container"]
 		if not is_instance_valid(container):
 			_deferred_lamp_lights.pop_front()
 			continue
 		var lights: Array = item["lights"]
-		var idx: int = item["idx"]
 		var chunk_key: String = item["chunk_key"]
-		var is_night: bool = item["is_night"]
-		while idx < lights.size() and _add_child_count < ADD_CHILD_BUDGET_PER_FRAME:
-			var light_data: Dictionary = lights[idx]
-			var light := OmniLight3D.new()
+		for light_data: Dictionary in lights:
+			var light := SpotLight3D.new()
 			light.position = light_data.position
-			light.omni_range = 12.0
-			light.omni_attenuation = 1.2
-			light.light_energy = 1.5
+			light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
+			light.rotation_degrees.x = -75
+			light.spot_range = 15.0  # Большой range для AABB (frustum culling)
+			light.spot_angle = 70.0
+			light.spot_attenuation = 1.0  # Быстрый спад: на 8м ~70%, на 20м ~12%
+			light.light_energy = 2.6
 			light.light_color = Color(1.0, 0.65, 0.2)
+			light.light_volumetric_fog_energy = 8.0
 			light.shadow_enabled = false
 			light.light_bake_mode = Light3D.BAKE_DISABLED
-			light.visible = is_night and not light_data.broken
+			light.distance_fade_enabled = true
+			light.distance_fade_begin = 60.0
+			light.distance_fade_shadow = 30.0
+			light.distance_fade_length = 10.0
+			light.visible = _is_night_mode and not light_data.broken
 			light.set_meta("broken", light_data.broken)
-			_budgeted_add_child(container, light)
+			light.add_child(_create_lamp_bulb())
+			light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
+			container.add_child(light)
 			if _lamp_lights_by_chunk.has(chunk_key):
 				_lamp_lights_by_chunk[chunk_key].append(light)
-			idx += 1
-		if idx >= lights.size():
-			_deferred_lamp_lights.pop_front()
-		else:
-			item["idx"] = idx
-			return
+		_deferred_lamp_lights.pop_front()
 
 
 # Старая версия без текстур (для совместимости)
@@ -9311,6 +9208,12 @@ func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3,
 	if not enable_street_lamps:
 		return
 
+	# Deduplication: same road loaded by overlapping chunks → same lamp positions
+	var pos_key := "%d_%d" % [int(lamp_pos.x), int(lamp_pos.z)]
+	if _created_lamp_positions.has(pos_key):
+		return
+	_created_lamp_positions[pos_key] = true
+
 	# Initialize batch if needed
 	if not _lamp_batch_data.has(chunk_key):
 		_lamp_batch_data[chunk_key] = {
@@ -9333,7 +9236,8 @@ func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3,
 	var is_broken := randf() < 0.05
 	_lamp_batch_data[chunk_key]["light_data"].append({
 		"position": light_world_pos,
-		"broken": is_broken
+		"broken": is_broken,
+		"yaw": yaw
 	})
 
 	# Mark for finalization
@@ -9391,6 +9295,11 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 	# Add entire subtree to scene tree in one budgeted call
 	_budgeted_add_child(parent, lamp_container)
 
+	# Free any existing lights for this chunk (safety: prevents duplicates if finalized twice)
+	if _lamp_lights_by_chunk.has(chunk_key):
+		for old_light in _lamp_lights_by_chunk[chunk_key]:
+			if is_instance_valid(old_light):
+				old_light.queue_free()
 	_lamp_lights_by_chunk[chunk_key] = []
 
 	var is_night: bool = false
@@ -9423,23 +9332,24 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 
 ## Update lamp globe colors and light visibility for night mode
 func _update_lamp_night_mode(is_night: bool) -> void:
-	# Update light visibility for all chunks
+	# Update light visibility for batched lamps (deferred path)
 	for chunk_key in _lamp_lights_by_chunk.keys():
 		var lights: Array = _lamp_lights_by_chunk[chunk_key]
 		for light in lights:
 			if is_instance_valid(light):
-				# Light visibility depends on night mode AND if lamp is not broken
-				# Broken lamps have a special metadata flag set during creation
 				var is_broken: bool = light.get_meta("broken", false)
 				light.visible = is_night and not is_broken
 
-	# Note: Globe colors are baked into MultiMesh instance colors
-	# If we need dynamic color changes, would need to:
-	# 1. Store MultiMesh references per chunk
-	# 2. Iterate and call set_instance_color() for each instance
-	# For now, globe colors are static (set at batch creation time)
+	# Update light visibility for immediate lamps
+	for light in _lamp_batch_lights:
+		if is_instance_valid(light):
+			var is_broken: bool = light.get_meta("is_broken", false)
+			light.visible = is_night and not is_broken
 
-	print("OSM: Updated lamp night mode (is_night=%s)" % is_night)
+	var total_by_chunk := 0
+	for chunk_key2 in _lamp_lights_by_chunk.keys():
+		total_by_chunk += _lamp_lights_by_chunk[chunk_key2].size()
+	print("OSM: Updated lamp night mode (is_night=%s) by_chunk=%d immediate=%d deferred_pending=%d" % [is_night, total_by_chunk, _lamp_batch_lights.size(), _deferred_lamp_lights.size()])
 
 ## Add tree to batch for MultiMesh rendering
 func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, parent: Node3D, is_pine: bool = false) -> void:
@@ -9818,19 +9728,30 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	var col := _create_lamp_collision(Transform3D.IDENTITY)
 	lamp_root.add_child(col)
 
-	# OmniLight3D
+	# SpotLight3D направленный вниз
 	var is_broken := randf() < 0.05
 	var is_night := _is_night_mode
-	var lamp_light := OmniLight3D.new()
+	var lamp_light := SpotLight3D.new()
 	lamp_light.position = _lamp_light_offset
-	lamp_light.omni_range = 12.0
-	lamp_light.omni_attenuation = 1.2
-	lamp_light.light_energy = 1.5
+	# lamp_root уже повёрнут по Y (модель боком), компенсируем +90° чтобы -Z смотрела к дороге
+	lamp_light.rotation_degrees.y = 90.0 + 180.0
+	lamp_light.rotation_degrees.x = -75  # 15° наклон к дороге от вертикали
+	lamp_light.spot_range = 15.0
+	lamp_light.spot_angle = 70.0
+	lamp_light.spot_attenuation = 1.0
+	lamp_light.light_energy = 2.6
 	lamp_light.light_color = Color(1.0, 0.65, 0.2)
+	lamp_light.light_volumetric_fog_energy = 8.0
 	lamp_light.shadow_enabled = false
 	lamp_light.light_bake_mode = Light3D.BAKE_DISABLED
+	lamp_light.distance_fade_enabled = true
+	lamp_light.distance_fade_begin = 60.0
+	lamp_light.distance_fade_shadow = 30.0
+	lamp_light.distance_fade_length = 10.0
 	lamp_light.visible = is_night and not is_broken
 	lamp_light.set_meta("is_broken", is_broken)
+	lamp_light.add_child(_create_lamp_bulb())
+	lamp_light.add_child(_create_debug_light_cone(lamp_light.spot_range, lamp_light.spot_angle))
 	lamp_root.add_child(lamp_light)
 	_lamp_batch_lights.append(lamp_light)
 
@@ -9838,6 +9759,79 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 
 	if _draw_call_logging_enabled:
 		_draw_call_stats["lamps"] += 1
+
+
+## Создаёт светящийся шарик-лампочку (emission) для фонаря
+func _create_lamp_bulb() -> MeshInstance3D:
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.05
+	sphere.height = 0.1
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(1.0, 0.8, 0.3)
+	mat.emission_enabled = true
+	mat.emission = Color(1.0, 0.7, 0.2)
+	mat.emission_energy_multiplier = 8.0
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var mi := MeshInstance3D.new()
+	mi.name = "LampBulb"
+	mi.mesh = sphere
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return mi
+
+
+## Создаёт полупрозрачный конус для визуализации SpotLight (debug)
+## + красный шарик в точке источника света
+func _create_debug_light_cone(spot_range: float, spot_angle: float) -> Node3D:
+	var root := Node3D.new()
+	root.name = "DebugLightVis"
+	root.add_to_group("lamp_debug_vis")
+	root.visible = _lamp_debug_visible
+
+	# --- Красный шарик (0.5м диаметр) в центре источника ---
+	var sphere_mesh := SphereMesh.new()
+	sphere_mesh.radius = 0.25
+	sphere_mesh.height = 0.5
+	var sphere_mat := StandardMaterial3D.new()
+	sphere_mat.albedo_color = Color(1.0, 0.0, 0.0)
+	sphere_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var sphere_mi := MeshInstance3D.new()
+	sphere_mi.mesh = sphere_mesh
+	sphere_mi.material_override = sphere_mat
+	sphere_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(sphere_mi)
+
+	# --- Конус вдоль -Z (направление SpotLight3D) ---
+	# CylinderMesh ориентирован по Y: top (+Y/2) = top_radius, bottom (-Y/2) = bottom_radius
+	# top_radius=0 → вершина конуса, bottom_radius=R → основание конуса
+	# Нужно: вершина в начале координат (0,0,0), основание на расстоянии spot_range по -Z
+	#
+	# Поворот rotation_degrees.x = +90: Y→Z, поэтому:
+	#   top  (+Y/2) → (+Z/2)  — вершина смещается в +Z (ближе к источнику)
+	#   bottom (-Y/2) → (-Z/2) — основание смещается в -Z (вдоль луча)
+	# Центр цилиндра (0,0,0), после поворота: top в (0,0,+h/2), bottom в (0,0,-h/2)
+	# Сдвиг position.z = -h/2 переносит top в (0,0,0), bottom в (0,0,-h) — ровно по лучу
+	var cone_mesh := CylinderMesh.new()
+	var radius := spot_range * tan(deg_to_rad(spot_angle))
+	cone_mesh.top_radius = 0.0
+	cone_mesh.bottom_radius = radius
+	cone_mesh.height = spot_range
+	cone_mesh.radial_segments = 12
+	cone_mesh.rings = 1
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(1.0, 0.8, 0.2, 0.15)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var mi := MeshInstance3D.new()
+	mi.mesh = cone_mesh
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.rotation_degrees.x = 90  # Y→Z: top(+Y)→+Z(ближе), bottom(-Y)→-Z(дальше)
+	mi.position.z = -spot_range * 0.5  # top(вершина) в (0,0,0), bottom(основание) в (0,0,-range)
+	root.add_child(mi)
+
+	return root
 
 
 # Создание автобусной остановки
@@ -10769,91 +10763,13 @@ func _generate_industrial_buildings(points: PackedVector2Array, parent: Node3D) 
 			_create_3d_building(bld_points, building_color, bld_height, parent, base_elev)
 
 
-# Процедурная генерация фонарей вдоль дороги
-func _generate_street_lamps_along_road(nodes: Array, road_width: float, parent: Node3D) -> void:
-	if not enable_street_lamps or nodes.size() < 2:
-		return
-
-	var lamp_spacing := 25.0  # Расстояние между фонарями (метры)
-	var lamp_offset := road_width / 2 + 1.5  # Смещение от края дороги
-
-	var accumulated_distance := 0.0
-	var last_lamp_distance := 0.0
-
-	for i in range(nodes.size() - 1):
-		var p1 := _latlon_to_local(nodes[i].lat, nodes[i].lon)
-		var p2 := _latlon_to_local(nodes[i + 1].lat, nodes[i + 1].lon)
-
-		var segment_length := p1.distance_to(p2)
-		var dir := (p2 - p1).normalized()
-		var perp := Vector2(-dir.y, dir.x)  # Перпендикуляр
-
-		# Проходим по сегменту и ставим фонари
-		var pos_along := 0.0
-		while pos_along < segment_length:
-			var distance_from_last := accumulated_distance + pos_along - last_lamp_distance
-
-			if distance_from_last >= lamp_spacing:
-				# Интерполируем позицию
-				var t := pos_along / segment_length
-				var road_pos := p1.lerp(p2, t)
-
-				# Ставим фонари по обе стороны дороги
-				var lamp_pos_left := road_pos + perp * lamp_offset
-				var lamp_pos_right := road_pos - perp * lamp_offset
-
-				# Проверяем, не попадают ли фонари на парковку или другую дорогу
-				var left_on_parking := _is_point_in_any_parking(lamp_pos_left)
-				var right_on_parking := _is_point_in_any_parking(lamp_pos_right)
-				var left_on_road := _is_point_near_road(lamp_pos_left, 0.0)
-				var right_on_road := _is_point_near_road(lamp_pos_right, 0.0)
-
-				var elev_left := 0.0
-				var elev_right := 0.0
-
-				# Направление к дороге (от фонаря к центру дороги)
-				var dir_to_road_left := -perp  # Левый фонарь смотрит вправо (к дороге)
-				var dir_to_road_right := perp   # Правый фонарь смотрит влево (к дороге)
-
-				# NEW: Add lamps to batch instead of pending queue
-				# Left lamp
-				if not left_on_parking and not left_on_road:
-					var lamp_3d_left := Vector3(lamp_pos_left.x, elev_left, lamp_pos_left.y)
-					var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
-					var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
-					var chunk_key := "%d,%d" % [chunk_x, chunk_z]
-
-					# Only add if chunk is loaded
-					if _loaded_chunks.has(chunk_key):
-						var chunk_parent: Node3D = _loaded_chunks[chunk_key]
-						_add_lamp_to_batch(chunk_key, lamp_3d_left, Vector3(dir_to_road_left.x, 0, dir_to_road_left.y), chunk_parent)
-
-				# Right lamp
-				if not right_on_parking and not right_on_road:
-					var lamp_3d_right := Vector3(lamp_pos_right.x, elev_right, lamp_pos_right.y)
-					var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
-					var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
-					var chunk_key := "%d,%d" % [chunk_x, chunk_z]
-
-					# Only add if chunk is loaded
-					if _loaded_chunks.has(chunk_key):
-						var chunk_parent: Node3D = _loaded_chunks[chunk_key]
-						_add_lamp_to_batch(chunk_key, lamp_3d_right, Vector3(dir_to_road_right.x, 0, dir_to_road_right.y), chunk_parent)
-
-				last_lamp_distance = accumulated_distance + pos_along
-
-			pos_along += lamp_spacing / 4  # Проверяем чаще для точности
-
-		accumulated_distance += segment_length
-
-
 ## Incremental lamp generation: processes segments from start_seg_idx, returns last processed segment index.
 ## Respects time budget (budget_usec from budget_start).
 func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_width: float, parent: Node3D, start_seg_idx: int, budget_start: int, budget_usec: int) -> int:
 	if not enable_street_lamps or local_points.size() < 2:
 		return local_points.size()
 
-	var lamp_spacing := 25.0
+	var lamp_spacing := 17.0
 	var lamp_offset := road_width / 2 + 1.5
 	var n_pts: int = local_points.size()
 
@@ -10920,68 +10836,6 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 		next_lamp_dist += lamp_spacing
 
 	return n_pts  # Fully processed
-
-
-# Fast variant: accepts pre-computed local_points
-func _generate_street_lamps_fast(local_points: PackedVector2Array, road_width: float, parent: Node3D) -> void:
-	if not enable_street_lamps or local_points.size() < 2:
-		return
-
-	var lamp_spacing := 25.0
-	var lamp_offset := road_width / 2 + 1.5
-
-	# Pre-compute total road length and cumulative distances
-	var n_pts: int = local_points.size()
-	var cumulative := PackedFloat64Array()
-	cumulative.resize(n_pts)
-	cumulative[0] = 0.0
-	for i in range(1, n_pts):
-		cumulative[i] = cumulative[i - 1] + local_points[i - 1].distance_to(local_points[i])
-	var total_length: float = cumulative[n_pts - 1]
-
-	# Place lamps at exact spacing intervals along the polyline
-	var next_lamp_dist := lamp_spacing  # Skip first point
-	var seg_idx := 0
-
-	while next_lamp_dist < total_length:
-		# Find which segment this distance falls on
-		while seg_idx < n_pts - 2 and cumulative[seg_idx + 1] < next_lamp_dist:
-			seg_idx += 1
-
-		var seg_start_dist: float = cumulative[seg_idx]
-		var seg_end_dist: float = cumulative[seg_idx + 1]
-		var seg_length: float = seg_end_dist - seg_start_dist
-		if seg_length < 0.001:
-			next_lamp_dist += lamp_spacing
-			continue
-
-		var t: float = (next_lamp_dist - seg_start_dist) / seg_length
-		var p1: Vector2 = local_points[seg_idx]
-		var p2: Vector2 = local_points[seg_idx + 1]
-		var road_pos: Vector2 = p1.lerp(p2, t)
-		var dir: Vector2 = (p2 - p1).normalized()
-		var perp := Vector2(-dir.y, dir.x)
-
-		var lamp_pos_left := road_pos + perp * lamp_offset
-		var lamp_pos_right := road_pos - perp * lamp_offset
-
-		# Check left side
-		if not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road(lamp_pos_left, 0.0):
-			var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
-			var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
-			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
-			if _loaded_chunks.has(chunk_key):
-				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_left.x, 0.0, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[chunk_key])
-
-		# Check right side
-		if not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road(lamp_pos_right, 0.0):
-			var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
-			var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
-			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
-			if _loaded_chunks.has(chunk_key):
-				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_right.x, 0.0, lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[chunk_key])
-
-		next_lamp_dist += lamp_spacing
 
 
 func _generate_manholes_along_road(nodes: Array, road_width: float, parent: Node3D) -> void:
@@ -11239,7 +11093,7 @@ func _finalize_entrance_batch(chunk_key: String) -> void:
 			light.name = "EntranceLamp"
 			light.position = light_data["position"]
 			light.light_color = Color(1.0, 0.85, 0.6)
-			light.light_energy = 2.0 if is_night else 0.0
+			light.light_energy = 2.6 if is_night else 0.0
 			light.omni_range = 5.0
 			light.omni_attenuation = 1.2
 			light.shadow_enabled = false
@@ -11253,54 +11107,6 @@ func _finalize_entrance_batch(chunk_key: String) -> void:
 			chunk_key, arr_mesh.get_surface_count(), collisions.size(), lights.size()])
 
 	_entrance_batch.erase(chunk_key)
-
-
-func _create_pending_lamps() -> void:
-	"""Создаёт отложенные фонари, фильтруя те что на парковках"""
-	print("OSM: _create_pending_lamps started, count=%d" % _pending_lamps.size())
-	if _pending_lamps.is_empty():
-		print("OSM: No pending lamps")
-		return
-
-	var created := 0
-	var skipped := 0
-
-	for lamp_data in _pending_lamps:
-		var pos: Vector2 = lamp_data.pos
-		var elev: float = lamp_data.elev
-		var dir: Vector2 = lamp_data.dir
-
-		# Находим ПРАВИЛЬНЫЙ чанк для этого фонаря по его позиции
-		var chunk_x := int(floor(pos.x / chunk_size))
-		var chunk_z := int(floor(pos.y / chunk_size))
-		var chunk_key := "%d,%d" % [chunk_x, chunk_z]
-
-		# Проверяем что чанк загружен
-		if not _loaded_chunks.has(chunk_key):
-			skipped += 1
-			continue
-
-		var parent: Node3D = _loaded_chunks[chunk_key]
-
-		# Проверяем что фонарь не на парковке
-		if _is_point_in_any_parking(pos):
-			skipped += 1
-			continue
-
-		# Проверяем что фонарь не на дороге (с небольшим запасом)
-		if _is_point_on_road(pos, 0.5):
-			skipped += 1
-			continue
-
-		_create_street_lamp(pos, elev, parent, dir)
-		created += 1
-
-	if created > 0:
-		print("OSM: Created %d lamps, skipped %d (added to infrastructure queue)" % [created, skipped])
-	_pending_lamps.clear()
-	_lamps_created = true  # Флаг только для начальной загрузки
-
-	# PHASE 2: Без батчинга - фонари создаются по одному из infrastructure queue
 
 
 func _create_pending_parking_signs() -> void:
@@ -13845,7 +13651,7 @@ func _process_chunk_activation() -> void:
 ## Budgeted add_child — limits scene tree insertions per frame.
 ## Returns true if added immediately, false if deferred.
 func _budgeted_add_child(parent_node: Node, child_node: Node) -> bool:
-	if _add_child_count < ADD_CHILD_BUDGET_PER_FRAME:
+	if _add_child_count < _add_child_budget:
 		parent_node.add_child(child_node)
 		_add_child_count += 1
 		return true

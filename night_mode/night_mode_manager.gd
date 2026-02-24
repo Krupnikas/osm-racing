@@ -40,6 +40,13 @@ var _day_glow_bloom := 0.05  # Оригинальное значение
 var _day_glow_blend_mode := Environment.GLOW_BLEND_MODE_SOFTLIGHT
 var _day_glow_hdr_threshold := 1.2  # Оригинальное значение
 var _day_glow_hdr_scale := 1.0
+var _day_vfog_density := 0.005
+var _day_vfog_albedo := Color(1, 1, 1)
+var _day_vfog_emission := Color(0, 0, 0)
+var _day_vfog_emission_energy := 0.0
+var _day_vfog_ambient_inject := 0.0
+var _day_vfog_detail_spread := 0.8
+var _day_vfog_length := 200.0
 
 # Ночные настройки в стиле NFS Underground
 const NIGHT_SUN_ENERGY := 0.02  # Почти нет солнца ночью
@@ -78,10 +85,18 @@ func _ready() -> void:
 	# Создаём систему дождя
 	_create_rain_system()
 
+	# CLI аргументы
+	var args := OS.get_cmdline_args()
+	if args.has("--night"):
+		start_night = true
+	var start_rain := args.has("--rain")
+
 	# Стартовый режим
 	if start_night:
 		enable_night_mode()
-	print("NightModeManager: Ready (%s mode, no rain)" % ("night" if is_night else "day"))
+	if start_rain:
+		toggle_rain()
+	print("NightModeManager: Ready (%s mode, %s)" % ["night" if is_night else "day", "rain" if is_raining else "no rain"])
 
 
 func _find_scene_components() -> void:
@@ -103,6 +118,13 @@ func _find_scene_components() -> void:
 			_day_glow_blend_mode = _environment.glow_blend_mode
 			_day_glow_hdr_threshold = _environment.glow_hdr_threshold
 			_day_glow_hdr_scale = _environment.glow_hdr_scale
+			_day_vfog_density = _environment.volumetric_fog_density
+			_day_vfog_albedo = _environment.volumetric_fog_albedo
+			_day_vfog_emission = _environment.volumetric_fog_emission
+			_day_vfog_emission_energy = _environment.volumetric_fog_emission_energy
+			_day_vfog_ambient_inject = _environment.volumetric_fog_ambient_inject
+			_day_vfog_detail_spread = _environment.volumetric_fog_detail_spread
+			_day_vfog_length = _environment.volumetric_fog_length
 
 	# Ищем DirectionalLight3D (солнце)
 	_sun_light = get_tree().current_scene.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
@@ -417,6 +439,18 @@ func enable_night_mode() -> void:
 		_environment.tonemap_exposure = 1.1
 		_environment.tonemap_white = 6.0
 
+		# Volumetric fog — интенсивный ночной, лучи от фонарей видны
+		_environment.volumetric_fog_enabled = true
+		_transition_tween.tween_property(_environment, "volumetric_fog_density", 0.015, 1.5)
+		_environment.volumetric_fog_albedo = Color(0.6, 0.65, 0.8)  # Холодноватый
+		_environment.volumetric_fog_emission = Color(0.02, 0.01, 0.03)  # Слабое фиолетовое свечение
+		_environment.volumetric_fog_emission_energy = 0.3
+		_environment.volumetric_fog_ambient_inject = 0.1
+		_environment.volumetric_fog_detail_spread = 0.3
+		_environment.volumetric_fog_length = 40.0
+		_environment.volumetric_fog_temporal_reprojection_enabled = true
+		_environment.volumetric_fog_temporal_reprojection_amount = 0.95
+
 	night_mode_changed.emit(true)
 	print("Night mode enabled")
 
@@ -475,6 +509,15 @@ func disable_night_mode() -> void:
 		_environment.tonemap_mode = _day_tonemap_mode
 		_environment.tonemap_exposure = _day_tonemap_exposure
 		_environment.tonemap_white = _day_tonemap_white
+
+		# Restore volumetric fog
+		_transition_tween.tween_property(_environment, "volumetric_fog_density", _day_vfog_density, 1.5)
+		_environment.volumetric_fog_albedo = _day_vfog_albedo
+		_environment.volumetric_fog_emission = _day_vfog_emission
+		_environment.volumetric_fog_emission_energy = _day_vfog_emission_energy
+		_environment.volumetric_fog_ambient_inject = _day_vfog_ambient_inject
+		_environment.volumetric_fog_detail_spread = _day_vfog_detail_spread
+		_environment.volumetric_fog_length = _day_vfog_length
 
 	night_mode_changed.emit(false)
 	print("Night mode disabled")
