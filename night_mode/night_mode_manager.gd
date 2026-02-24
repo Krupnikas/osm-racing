@@ -447,7 +447,7 @@ func enable_night_mode() -> void:
 		_environment.volumetric_fog_emission_energy = 0.3
 		_environment.volumetric_fog_ambient_inject = 0.1
 		_environment.volumetric_fog_detail_spread = 0.3
-		_environment.volumetric_fog_length = 40.0
+		_environment.volumetric_fog_length = 200.0
 		_environment.volumetric_fog_temporal_reprojection_enabled = true
 		_environment.volumetric_fog_temporal_reprojection_amount = 0.95
 
