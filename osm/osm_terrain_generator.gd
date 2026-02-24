@@ -8657,6 +8657,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	# UV масштаб: texture_repeat_x повторов на весь периметр (0 = авто ~10м на повтор)
 	var texture_repeat_x: float = building_override.texture_repeat_x if building_override.texture_repeat_x > 0 else 0.0
 	var uv_scale_x := texture_repeat_x / perimeter if texture_repeat_x > 0 else 0.1
+	var uv_offset_x: float = building_override.texture_offset_x
 
 	var is_ccw := _is_polygon_ccw(points)
 	var normal_sign := -1.0 if is_ccw else 1.0
@@ -8687,8 +8688,8 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 			u2 = repeats
 		else:
 			# Стандартный режим: накапливаемый UV по периметру
-			u1 = accumulated_width * uv_scale_x
-			u2 = (accumulated_width + wall_width) * uv_scale_x
+			u1 = accumulated_width * uv_scale_x + uv_offset_x
+			u2 = (accumulated_width + wall_width) * uv_scale_x + uv_offset_x
 
 		# Для фото текстуры: N повторов по высоте, UV.y=0 вверху
 		# UV масштаб по видимой высоте (floor_y → roof_y), фундамент получает дополнительный UV

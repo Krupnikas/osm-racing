@@ -152,6 +152,8 @@ func _load_building_overrides_json(path: String) -> void:
 
 		# Повторение текстуры
 		override.texture_repeat_y = od.get("repeat_y", 1.0)
+		override.texture_repeat_x = od.get("repeat_x", 0.0)
+		override.texture_offset_x = od.get("offset_x", 0.0)
 
 		# Адаптивное повторение
 		if od.has("adaptive_repeat"):

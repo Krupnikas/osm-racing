@@ -93,6 +93,14 @@
       ]
     },
     {
+      "osm_way_id": 46227249,
+      "comment": "16 Пионерская улица (ТЦ Квадрат)",
+      "wall_texture": "buildings/tckvadrat.png",
+      "repeat_y": 1.0,
+      "repeat_x": 2.0,
+      "offset_x": 0.72
+    },
+    {
       "osm_way_id": 694466403,
       "comment": "Сытый пряный (пекарня)",
       "height_override": 3.5,

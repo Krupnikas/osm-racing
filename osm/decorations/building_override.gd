@@ -17,6 +17,7 @@ extends Resource
 @export var wall_emissive_path: String = ""  # Emissive mask для светящихся окон (авто: *_emissive_mask.png)
 @export var roof_texture_path: String = ""  # Кастомная текстура крыши
 @export var texture_repeat_x: float = 0.0  # Повторений по периметру (0 = авто)
+@export var texture_offset_x: float = 0.0  # Сдвиг UV по периметру (доля от repeat, 0.0-1.0)
 @export var texture_repeat_y: float = 2.0  # Сколько раз текстура повторяется по высоте
 
 # Адаптивное повторение (отдельно для коротких/длинных стен)
