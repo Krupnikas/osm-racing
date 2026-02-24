@@ -8,6 +8,7 @@ static func get_all_test_tracks() -> Array:
 		_create_flat_track(),
 		_create_suspension_track(),
 		_create_npc_track(),
+		_create_performance_track(),
 	]
 
 static func _create_flat_track() -> Dictionary:
@@ -29,5 +30,13 @@ static func _create_npc_track() -> Dictionary:
 		"track_id": "test_npc",
 		"track_name": "Много НПС",
 		"description": "Овальная трасса с большим количеством NPC машин",
+	}
+
+static func _create_performance_track() -> Dictionary:
+	return {
+		"track_id": "test_flyover",
+		"track_name": "Пролёт",
+		"description": "Летающая камера на высоте 50м над городом (60 сек)",
+		"scene_path": "res://tests/chunk_load_test.tscn",
 	}
 
