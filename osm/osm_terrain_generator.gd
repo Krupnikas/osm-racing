@@ -10467,11 +10467,22 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 				continue
 			var dir := (p2 - p1).normalized()
 			var outward := Vector2(dir.y, -dir.x)
-			# Outer: miter (встык), Inner: overlap (пересекаются)
-			var p1_out := miter_out[ei]
-			var p2_out := miter_out[(ei + 1) % pn]
-			p1 -= dir * curb_w
-			p2 += dir * curb_w
+			# Outer: miter (встык), на границе чанка — простое смещение по outward
+			var p1_out: Vector2
+			var p2_out: Vector2
+			if p1_on_boundary:
+				p1_out = p1 + outward * curb_w
+			else:
+				p1_out = miter_out[ei]
+			if p2_on_boundary:
+				p2_out = p2 + outward * curb_w
+			else:
+				p2_out = miter_out[(ei + 1) % pn]
+			# Inner: overlap (пересекаются), на границе — без overlap
+			if not p1_on_boundary:
+				p1 -= dir * curb_w
+			if not p2_on_boundary:
+				p2 += dir * curb_w
 			var n_front := Vector3(outward.x, 0.0, outward.y)
 			var ci := curb_verts.size()
 			# Передняя грань
