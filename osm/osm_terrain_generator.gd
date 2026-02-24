@@ -3071,7 +3071,7 @@ func _create_road_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> v
 			current_pts.append(smoothed_points[0])
 			var current_on := on_road[0]
 			var last_off_road_pt := smoothed_points[0]  # fallback: начало пути
-			var has_before_off := true  # smoothed_points[0] всегда годится как reference
+			var has_before_off: bool = not on_road[0]  # Только если первая точка реально за пределами дороги
 			if not current_on:
 				last_off_road_pt = smoothed_points[0]
 			for i in range(1, smoothed_points.size()):
@@ -4155,7 +4155,7 @@ func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
 	current_pts.append(smoothed_points[0])
 	var current_on: bool = on_road[0]
 	var last_off_road_pt := smoothed_points[0]
-	var has_before_off := true
+	var has_before_off: bool = not on_road[0]  # Только если первая точка реально за пределами дороги
 	for i in range(1, smoothed_points.size()):
 		if on_road[i] != current_on:
 			var edge_pt := _find_road_edge_point(smoothed_points[i - 1], current_on, smoothed_points[i])
