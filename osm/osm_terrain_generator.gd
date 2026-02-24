@@ -1187,7 +1187,7 @@ func _init_lamp_meshes() -> void:
 
 	# Определяем позицию света — верхняя точка модели
 	var aabb := _lamp_model_mesh.get_aabb()
-	_lamp_light_offset = Vector3(-0.6, aabb.end.y - 0.1, 0)
+	_lamp_light_offset = Vector3(-0.6, aabb.end.y - 0.15, 0)
 
 	var total_tris := 0
 	for s in range(_lamp_model_mesh.get_surface_count()):
@@ -1633,6 +1633,7 @@ func _check_initial_load_complete() -> void:
 					light.visible = _is_night_mode and not light_data.broken
 					light.set_meta("broken", light_data.broken)
 					light.add_child(_create_lamp_bulb())
+					#light.add_child(_create_lamp_glow_light(light_data.broken))
 					light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
 					container.add_child(light)
 					if _lamp_lights_by_chunk.has(chunk_key):
@@ -4834,6 +4835,7 @@ func _process_deferred_lamp_lights() -> void:
 			light.visible = _is_night_mode and not light_data.broken
 			light.set_meta("broken", light_data.broken)
 			light.add_child(_create_lamp_bulb())
+			#light.add_child(_create_lamp_glow_light(light_data.broken))
 			light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
 			container.add_child(light)
 			if _lamp_lights_by_chunk.has(chunk_key):
@@ -9751,6 +9753,7 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	lamp_light.visible = is_night and not is_broken
 	lamp_light.set_meta("is_broken", is_broken)
 	lamp_light.add_child(_create_lamp_bulb())
+	#lamp_light.add_child(_create_lamp_glow_light(is_broken))
 	lamp_light.add_child(_create_debug_light_cone(lamp_light.spot_range, lamp_light.spot_angle))
 	lamp_root.add_child(lamp_light)
 	_lamp_batch_lights.append(lamp_light)
@@ -9764,13 +9767,13 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 ## Создаёт светящийся шарик-лампочку (emission) для фонаря
 func _create_lamp_bulb() -> MeshInstance3D:
 	var sphere := SphereMesh.new()
-	sphere.radius = 0.05
-	sphere.height = 0.1
+	sphere.radius = 0.08
+	sphere.height = 0.16
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(1.0, 0.8, 0.3)
+	mat.albedo_color = Color(1.0, 0.9, 0.5)
 	mat.emission_enabled = true
-	mat.emission = Color(1.0, 0.7, 0.2)
-	mat.emission_energy_multiplier = 8.0
+	mat.emission = Color(1.0, 0.8, 0.3)
+	mat.emission_energy_multiplier = 10.0
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	var mi := MeshInstance3D.new()
 	mi.name = "LampBulb"
@@ -9778,6 +9781,28 @@ func _create_lamp_bulb() -> MeshInstance3D:
 	mi.material_override = mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	return mi
+
+
+## Создаёт второй SpotLight3D для свечения у верхушки фонаря (короткий range, сильный fog)
+func _create_lamp_glow_light(is_broken: bool) -> SpotLight3D:
+	var glow := SpotLight3D.new()
+	glow.name = "LampGlow"
+	glow.rotation_degrees.x = -90  # Прямо вниз
+	glow.spot_range = 15.0
+	glow.spot_angle = 120.0
+	glow.spot_attenuation = 8.0
+	glow.light_energy = 0.1
+	glow.light_color = Color(1.0, 0.65, 0.2)
+	glow.light_volumetric_fog_energy = 4.0
+	glow.shadow_enabled = false
+	glow.light_bake_mode = Light3D.BAKE_DISABLED
+	glow.distance_fade_enabled = true
+	glow.distance_fade_begin = 60.0
+	glow.distance_fade_shadow = 30.0
+	glow.distance_fade_length = 10.0
+	glow.visible = _is_night_mode and not is_broken
+	glow.set_meta("broken", is_broken)
+	return glow
 
 
 ## Создаёт полупрозрачный конус для визуализации SpotLight (debug)
@@ -10770,7 +10795,7 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 		return local_points.size()
 
 	var lamp_spacing := 17.0
-	var lamp_offset := road_width / 2 + 1.5
+	var lamp_offset := road_width / 2 + 0.5
 	var n_pts: int = local_points.size()
 
 	# Pre-compute cumulative distances (fast, needed for correct spacing)
