@@ -248,7 +248,8 @@ func _create_underglow() -> void:
 		light.name = "Underglow_%d" % i
 		light.position = positions[i]
 		light.omni_range = 1.5
-		light.light_energy = 0.25  # Совсем тусклый неон
+		light.light_energy = 0.05
+		light.light_volumetric_fog_energy = 0.0
 		light.light_color = underglow_color
 		light.visible = false
 		add_child(light)
