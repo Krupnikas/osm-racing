@@ -11025,9 +11025,8 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	for poly in terrain_polys:
 		var pn := poly.size()
 		var curb_w := 0.15
-		var curb_h := 0.15
 		var top := sidewalk_height
-		var bot := top - curb_h
+		var bot := -0.05  # 5см под землю чтобы не было щели с травой
 
 		# Miter outer-точка для каждой вершины — внешняя сторона встык
 		var miter_out: PackedVector2Array = PackedVector2Array()
