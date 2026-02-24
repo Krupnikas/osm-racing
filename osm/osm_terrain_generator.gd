@@ -101,7 +101,8 @@ var _road_segments: Array = []  # Сегменты дорог для позиц�
 var _road_spatial_hash: Dictionary = {}  # Spatial hash для быстрого поиска дорог
 const ROAD_CELL_SIZE := 20.0  # Размер ячейки spatial hash для дорог
 var _building_segments: Array = []  # Сегменты стен зданий {p1: Vector2, p2: Vector2}
-var _building_spatial_hash: Dictionary = {}  # Spatial hash для быстрого поиска зданий
+var _building_spatial_hash: Dictionary = {}  # Spatial hash для быстрого поиска зданий (сегменты)
+var _building_poly_hash: Dictionary = {}  # Spatial hash полигонов зданий для is_point_in_polygon
 const BUILDING_CELL_SIZE := 20.0  # Размер ячейки spatial hash для зданий
 var _intersection_positions: Array[Vector2] = []  # Позиции перекрёстков (центры)
 var _intersection_radii: Array[Vector2] = []  # Полуоси эллипсов (x=вдоль широкой дороги, y=вдоль узкой)
@@ -727,6 +728,7 @@ func _init_tree_meshes_simplified() -> void:
 
 	var crown_mat := StandardMaterial3D.new()
 	crown_mat.albedo_color = Color(0.2, 0.5, 0.15)
+	crown_mat.vertex_color_use_as_albedo = true
 	_tree_mesh_leaf.surface_set_material(1, crown_mat)
 
 	# Для упрощённого режима pine = leaf и LOD1 = LOD0
@@ -847,6 +849,12 @@ func _load_tree_mesh_normalized(scene: PackedScene, target_height: float) -> Arr
 		result_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 		var mat: Material = surf["material"]
 		if mat:
+			# Включаем vertex_color для кроны (зелёный материал) — для per-instance вариативности
+			if mat is StandardMaterial3D:
+				var smat: StandardMaterial3D = mat.duplicate()
+				if smat.albedo_color.g > smat.albedo_color.r and smat.albedo_color.g > smat.albedo_color.b:
+					smat.vertex_color_use_as_albedo = true
+				mat = smat
 			result_mesh.surface_set_material(result_mesh.get_surface_count() - 1, mat)
 
 	print("OSM: Tree normalized: AABB (%.1f, %.1f, %.1f)→(%.1f, %.1f, %.1f), height %.1f→%.1fm, scale=%.4f" % [
@@ -2192,6 +2200,7 @@ func reset_terrain() -> void:
 	_road_spatial_hash.clear()
 	_building_segments.clear()
 	_building_spatial_hash.clear()
+	_building_poly_hash.clear()
 	_parking_polygons.clear()
 	_parking_bounds.clear()
 	_parking_spatial_hash.clear()
@@ -2422,6 +2431,7 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				var bp2 := bpoints[(j + 1) % bpoints.size()]
 				var bseg := {"p1": bp1, "p2": bp2}
 				_add_building_segment_to_spatial_hash(bseg)
+			_add_building_poly_to_hash(bpoints)
 
 	# Сбор перекрёстков (узлы, где сходятся несколько дорог)
 	# НЕ очищаем массивы - накапливаем из всех чанков (очистка в start_loading)
@@ -5001,6 +5011,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		var seg := {"p1": p1, "p2": p2}
 		_building_segments.append(seg)
 		_add_building_segment_to_spatial_hash(seg)
+	_add_building_poly_to_hash(points)
 
 	# Debug name для отладки конкретных зданий
 	var addr_street: String = str(tags.get("addr:street", ""))
@@ -5887,6 +5898,7 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 		var seg := {"p1": p1, "p2": p2}
 		_building_segments.append(seg)
 		_add_building_segment_to_spatial_hash(seg)
+	_add_building_poly_to_hash(points)
 
 	var amenity_type: String = str(tags.get("amenity", ""))
 
@@ -8057,6 +8069,8 @@ func _process_vegetation_queue() -> void:
 					"chunk_key": chunk_key,
 					"chunk_size": chunk_size,
 					"road_spatial_hash": _road_spatial_hash,
+					"building_spatial_hash": _building_spatial_hash,
+					"building_poly_hash": _building_poly_hash,
 					"parent": item.parent
 				}
 				_pending_veg_tasks += 1
@@ -8067,6 +8081,7 @@ func _process_vegetation_queue() -> void:
 					"chunk_size": chunk_size,
 					"road_spatial_hash": _road_spatial_hash,
 					"building_spatial_hash": _building_spatial_hash,
+					"building_poly_hash": _building_poly_hash,
 					"parking_spatial_hash": _parking_spatial_hash,
 					"parking_polygons": _parking_polygons,
 					"parent": item.parent
@@ -9510,10 +9525,19 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.use_colors = true
 		mm.mesh = config["mesh_lod0"]
 		mm.instance_count = transforms.size()
 		for i in range(transforms.size()):
 			mm.set_instance_transform(i, transforms[i])
+			# Вариативность цвета кроны: от тёмно-зелёного до жёлто-зелёного
+			var pos: Vector3 = (transforms[i] as Transform3D).origin
+			var h1 := fmod(absf(pos.x * 73.1 + pos.z * 137.9), 1.0)
+			var h2 := fmod(absf(pos.x * 41.3 + pos.z * 97.7), 1.0)
+			var r := 0.12 + h1 * 0.3
+			var g := 0.3 + h2 * 0.4
+			var b := 0.03 + h1 * 0.12
+			mm.set_instance_color(i, Color(r, g, b))
 		mm_inst.multimesh = mm
 		_budgeted_add_child(parent, mm_inst)
 
@@ -9906,17 +9930,24 @@ func _is_point_near_road_threadsafe(point: Vector2, min_distance: float, road_ha
 	return false
 
 
-func _is_point_near_building_threadsafe(point: Vector2, min_distance: float, building_hash: Dictionary) -> bool:
+func _is_point_near_building_threadsafe(point: Vector2, min_distance: float, building_hash: Dictionary, poly_hash: Dictionary = {}) -> bool:
 	var cell_x := int(floor(point.x / BUILDING_CELL_SIZE))
 	var cell_y := int(floor(point.y / BUILDING_CELL_SIZE))
+	# Проверяем расстояние до стен
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			var key := Vector2i(cell_x + dx, cell_y + dy)
-			if not building_hash.has(key):
-				continue
-			for seg in building_hash[key]:
-				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
-				if point.distance_to(closest) < min_distance:
+			if building_hash.has(key):
+				for seg in building_hash[key]:
+					var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+					if point.distance_to(closest) < min_distance:
+						return true
+	# Проверяем, не внутри ли полигона здания
+	if not poly_hash.is_empty():
+		var key := Vector2i(cell_x, cell_y)
+		if poly_hash.has(key):
+			for poly: PackedVector2Array in poly_hash[key]:
+				if Geometry2D.is_point_in_polygon(point, poly):
 					return true
 	return false
 
@@ -9951,6 +9982,8 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 	var chunk_key: String = task_data.chunk_key
 	var t_chunk_size: float = task_data.chunk_size
 	var road_hash: Dictionary = task_data.road_spatial_hash
+	var building_hash: Dictionary = task_data.building_spatial_hash
+	var poly_hash: Dictionary = task_data.building_poly_hash
 
 	var min_x := points[0].x
 	var max_x := points[0].x
@@ -10000,18 +10033,22 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 			continue
 		if _is_point_near_road_threadsafe(test_point, 3.0, road_hash):
 			continue
+		if _is_point_near_building_threadsafe(test_point, 2.0, building_hash, poly_hash):
+			continue
 
 		var elevation := 0.0
 		var is_pine := dense and fmod(hash1 * 97.0 + hash2 * 53.0, 1.0) < PINE_MIX_RATIO
 
 		# Детерминистичные масштаб/поворот (не randf для потокобезопасности)
 		var scale_hash := fmod(float(seed_value + i * 3571) * 0.7236, 1.0)
+		var scale_hash_y := fmod(float(seed_value + i * 4919) * 0.8317, 1.0)
 		var rot_hash := fmod(float(seed_value + i * 6271) * 0.5413, 1.0)
-		var scale_factor := 0.8 + scale_hash * 0.5
+		var scale_xz := 0.5 + scale_hash * 1.0
+		var scale_y := 0.5 + scale_hash_y * 1.0
 		var rotation_y := rot_hash * TAU
 
 		var tree_pos := Vector3(test_x, elevation, test_y)
-		var basis := Basis(Vector3.UP, rotation_y).scaled(Vector3(scale_factor, scale_factor, scale_factor))
+		var basis := Basis(Vector3.UP, rotation_y).scaled(Vector3(scale_xz, scale_y, scale_xz))
 		var transform := Transform3D(basis, tree_pos)
 
 		if is_pine:
@@ -10044,6 +10081,7 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 	var t_chunk_size: float = task_data.chunk_size
 	var road_hash: Dictionary = task_data.road_spatial_hash
 	var building_hash: Dictionary = task_data.building_spatial_hash
+	var poly_hash: Dictionary = task_data.building_poly_hash
 	var parking_hash: Dictionary = task_data.parking_spatial_hash
 	var parking_polys: Array = task_data.parking_polygons
 
@@ -10077,7 +10115,7 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 
 		if _is_point_near_road_threadsafe(test_point, 2.0, road_hash):
 			continue
-		if _is_point_near_building_threadsafe(test_point, 2.0, building_hash):
+		if _is_point_near_building_threadsafe(test_point, 2.0, building_hash, poly_hash):
 			continue
 		if _is_point_in_any_parking_threadsafe(test_point, parking_hash, parking_polys):
 			continue
@@ -10086,12 +10124,14 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 
 		# Детерминистичные масштаб/поворот
 		var scale_hash := fmod(float(seed_value + i * 3571) * 0.7236, 1.0)
+		var scale_hash_y := fmod(float(seed_value + i * 4919) * 0.8317, 1.0)
 		var rot_hash := fmod(float(seed_value + i * 6271) * 0.5413, 1.0)
-		var scale_factor := 0.8 + scale_hash * 0.5
+		var scale_xz := 0.5 + scale_hash * 1.0
+		var scale_y := 0.5 + scale_hash_y * 1.0
 		var rotation_y := rot_hash * TAU
 
 		var tree_pos := Vector3(test_x, elevation, test_y)
-		var basis := Basis(Vector3.UP, rotation_y).scaled(Vector3(scale_factor, scale_factor, scale_factor))
+		var basis := Basis(Vector3.UP, rotation_y).scaled(Vector3(scale_xz, scale_y, scale_xz))
 		var transform := Transform3D(basis, tree_pos)
 
 		# chunk_trees — всегда лиственные (без pine mix)
@@ -13370,6 +13410,29 @@ func _add_building_segment_to_spatial_hash(seg: Dictionary) -> void:
 			if not _building_spatial_hash.has(key):
 				_building_spatial_hash[key] = []
 			_building_spatial_hash[key].append(seg)
+
+
+## Добавляет полигон здания в spatial hash для проверки is_point_in_polygon
+func _add_building_poly_to_hash(poly: PackedVector2Array) -> void:
+	var min_x := poly[0].x
+	var max_x := poly[0].x
+	var min_y := poly[0].y
+	var max_y := poly[0].y
+	for p in poly:
+		min_x = minf(min_x, p.x)
+		max_x = maxf(max_x, p.x)
+		min_y = minf(min_y, p.y)
+		max_y = maxf(max_y, p.y)
+	var min_cx := int(floor(min_x / BUILDING_CELL_SIZE))
+	var max_cx := int(floor(max_x / BUILDING_CELL_SIZE))
+	var min_cy := int(floor(min_y / BUILDING_CELL_SIZE))
+	var max_cy := int(floor(max_y / BUILDING_CELL_SIZE))
+	for cx in range(min_cx, max_cx + 1):
+		for cy in range(min_cy, max_cy + 1):
+			var key := Vector2i(cx, cy)
+			if not _building_poly_hash.has(key):
+				_building_poly_hash[key] = []
+			_building_poly_hash[key].append(poly)
 
 
 ## Проверяет, находится ли точка слишком близко к любому зданию
