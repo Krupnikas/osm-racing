@@ -369,7 +369,7 @@ func _setup_underglow() -> void:
 	_underglow_material.albedo_color = color
 	_underglow_material.emission_enabled = true
 	_underglow_material.emission = color
-	_underglow_material.emission_energy_multiplier = 1.5
+	_underglow_material.emission_energy_multiplier = 0.5
 
 	# 5 SpotLight3D с каждой стороны (между колёсами, короче в 2 раза)
 	var left_positions: Array[Vector3] = []
@@ -410,9 +410,9 @@ func _setup_underglow() -> void:
 		light.rotation_degrees = Vector3(-90, 0, 0)  # Светит вниз (-Y)
 		light.spot_range = 1.0
 		light.spot_angle = 60.0
-		light.light_energy = 0.2
+		light.light_energy = 0.05
 		light.spot_attenuation = 2.0
-		light.light_volumetric_fog_energy = 2.0
+		light.light_volumetric_fog_energy = 0.5
 		light.light_color = color
 		light.shadow_enabled = true
 		light.visible = _underglow_enabled
@@ -427,9 +427,9 @@ func _setup_underglow() -> void:
 		light.rotation_degrees = Vector3(-90, 0, 0)  # Светит вниз (-Y)
 		light.spot_range = 1.0
 		light.spot_angle = 70.0
-		light.light_energy = 0.2
+		light.light_energy = 0.05
 		light.spot_attenuation = 2.0
-		light.light_volumetric_fog_energy = 2.0
+		light.light_volumetric_fog_energy = 0.5
 		light.light_color = color
 		light.shadow_enabled = true
 		light.visible = _underglow_enabled
@@ -444,9 +444,9 @@ func _setup_underglow() -> void:
 		light.rotation_degrees = Vector3(-90, 0, 0)  # Светит вниз (-Y)
 		light.spot_range = 1.0
 		light.spot_angle = 90.0
-		light.light_energy = 0.2
+		light.light_energy = 0.05
 		light.spot_attenuation = 2.0
-		light.light_volumetric_fog_energy = 2.0
+		light.light_volumetric_fog_energy = 0.5
 		light.light_color = color
 		light.shadow_enabled = true
 		light.visible = _underglow_enabled
