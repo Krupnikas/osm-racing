@@ -83,6 +83,16 @@
       "repeat_y": 1.0
     },
     {
+      "osm_way_id": 744262162,
+      "comment": "16В Пионерская улица (Всё Пучком)",
+      "height_override": 3.5,
+      "wall_texture": "buildings/vse-puchkom-texture.png",
+      "repeat_y": 1.0,
+      "shop_entrances": [
+        {"lat": 59.146141, "lon": 37.946557, "sign_logo": "vse-puchkom.png"}
+      ]
+    },
+    {
       "osm_way_id": 694466403,
       "comment": "Сытый пряный (пекарня)",
       "height_override": 3.5,

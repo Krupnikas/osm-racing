@@ -9839,6 +9839,18 @@ func _create_bus_stop(pos: Vector2, elevation: float, tags: Dictionary, parent: 
 	model.scale = Vector3(0.1, 0.1, 0.1)
 	stop_root.add_child(model)
 
+	# Коллизия павильона
+	var body := StaticBody3D.new()
+	body.name = "BusStopCol"
+	body.collision_layer = 2  # Buildings layer
+	var shape := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(3.0, 2.5, 1.2)
+	shape.shape = box
+	shape.position.y = 1.25
+	body.add_child(shape)
+	stop_root.add_child(body)
+
 	parent.add_child(stop_root)
 
 
