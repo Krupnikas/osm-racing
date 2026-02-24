@@ -10846,14 +10846,16 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 		var lamp_pos_right := road_pos - perp * lamp_offset
 		var both_sides := road_width >= 12.0  # primary and wider — both sides
 
-		if not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road(lamp_pos_left, 0.0):
+		# Skip lamps inside intersection contours (where bezier curbs are)
+		var left_in_intersection := _is_point_in_intersection_shape(lamp_pos_left) >= 0
+		if not left_in_intersection and not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road(lamp_pos_left, 0.0):
 			var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
 			var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
 			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
 			if _loaded_chunks.has(chunk_key):
 				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_left.x, 0.0, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[chunk_key])
 
-		if both_sides and not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road(lamp_pos_right, 0.0):
+		if both_sides and _is_point_in_intersection_shape(lamp_pos_right) < 0 and not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road(lamp_pos_right, 0.0):
 			var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
 			var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
 			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
