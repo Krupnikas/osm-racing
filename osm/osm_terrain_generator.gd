@@ -1187,7 +1187,7 @@ func _init_lamp_meshes() -> void:
 
 	# Определяем позицию света — верхняя точка модели
 	var aabb := _lamp_model_mesh.get_aabb()
-	_lamp_light_offset = Vector3(-0.6, aabb.end.y - 0.15, 0)
+	_lamp_light_offset = Vector3(-0.6, aabb.end.y - 0.10, 0)
 
 	var total_tris := 0
 	for s in range(_lamp_model_mesh.get_surface_count()):
@@ -1197,6 +1197,8 @@ func _init_lamp_meshes() -> void:
 	print("OSM: Street lamp model loaded: %d surfaces, %d tris, light at Y=%.1f" % [
 		_lamp_model_mesh.get_surface_count(), total_tris, _lamp_light_offset.y
 	])
+
+
 
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -1623,7 +1625,7 @@ func _check_initial_load_complete() -> void:
 					light.spot_attenuation = 1.0
 					light.light_energy = 2.6
 					light.light_color = Color(1.0, 0.65, 0.2)
-					light.light_volumetric_fog_energy = 8.0
+					light.light_volumetric_fog_energy = 16.0
 					light.shadow_enabled = false
 					light.light_bake_mode = Light3D.BAKE_DISABLED
 					light.distance_fade_enabled = true
@@ -1633,7 +1635,6 @@ func _check_initial_load_complete() -> void:
 					light.visible = _is_night_mode and not light_data.broken
 					light.set_meta("broken", light_data.broken)
 					light.add_child(_create_lamp_bulb())
-					light.add_child(_create_lamp_glow_light(light_data.broken))
 					light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
 					container.add_child(light)
 					if _lamp_lights_by_chunk.has(chunk_key):
@@ -4825,7 +4826,7 @@ func _process_deferred_lamp_lights() -> void:
 			light.spot_attenuation = 1.0  # Быстрый спад: на 8м ~70%, на 20м ~12%
 			light.light_energy = 2.6
 			light.light_color = Color(1.0, 0.65, 0.2)
-			light.light_volumetric_fog_energy = 8.0
+			light.light_volumetric_fog_energy = 16.0
 			light.shadow_enabled = false
 			light.light_bake_mode = Light3D.BAKE_DISABLED
 			light.distance_fade_enabled = true
@@ -4835,7 +4836,6 @@ func _process_deferred_lamp_lights() -> void:
 			light.visible = _is_night_mode and not light_data.broken
 			light.set_meta("broken", light_data.broken)
 			light.add_child(_create_lamp_bulb())
-			light.add_child(_create_lamp_glow_light(light_data.broken))
 			light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
 			container.add_child(light)
 			if _lamp_lights_by_chunk.has(chunk_key):
@@ -9744,7 +9744,7 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	lamp_light.spot_attenuation = 1.0
 	lamp_light.light_energy = 2.6
 	lamp_light.light_color = Color(1.0, 0.65, 0.2)
-	lamp_light.light_volumetric_fog_energy = 8.0
+	lamp_light.light_volumetric_fog_energy = 16.0
 	lamp_light.shadow_enabled = false
 	lamp_light.light_bake_mode = Light3D.BAKE_DISABLED
 	lamp_light.distance_fade_enabled = true
@@ -9754,7 +9754,6 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	lamp_light.visible = is_night and not is_broken
 	lamp_light.set_meta("is_broken", is_broken)
 	lamp_light.add_child(_create_lamp_bulb())
-	lamp_light.add_child(_create_lamp_glow_light(is_broken))
 	lamp_light.add_child(_create_debug_light_cone(lamp_light.spot_range, lamp_light.spot_angle))
 	lamp_root.add_child(lamp_light)
 	_lamp_batch_lights.append(lamp_light)
@@ -9783,28 +9782,6 @@ func _create_lamp_bulb() -> MeshInstance3D:
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	return mi
 
-
-## Создаёт второй SpotLight3D для свечения у верхушки фонаря (короткий range, сильный fog)
-func _create_lamp_glow_light(is_broken: bool) -> SpotLight3D:
-	var glow := SpotLight3D.new()
-	glow.name = "LampGlow"
-	glow.position.y = -0.01
-	glow.rotation_degrees.x = -75
-	glow.spot_range = 15.0
-	glow.spot_angle = 180.0
-	glow.spot_attenuation = 1.0
-	glow.light_energy = 1.5
-	glow.light_color = Color(1.0, 0.65, 0.2)
-	glow.light_volumetric_fog_energy = 5.0
-	glow.shadow_enabled = false
-	glow.light_bake_mode = Light3D.BAKE_DISABLED
-	glow.distance_fade_enabled = true
-	glow.distance_fade_begin = 120.0
-	glow.distance_fade_shadow = 30.0
-	glow.distance_fade_length = 30.0
-	glow.visible = _is_night_mode and not is_broken
-	glow.set_meta("broken", is_broken)
-	return glow
 
 
 ## Создаёт полупрозрачный конус для визуализации SpotLight (debug)
