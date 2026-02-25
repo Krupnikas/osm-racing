@@ -13,6 +13,12 @@ uniform float normal_strength : hint_range(0.0, 2.0) = 0.8;
 uniform float ao_strength : hint_range(0.0, 1.0) = 0.4;
 uniform float roughness_base : hint_range(0.0, 1.0) = 0.7;
 
+// Window recess emission — vertex COLOR содержит цвет окна
+uniform bool use_vertex_emission = false;
+uniform float recess_emission_energy : hint_range(0.0, 8.0) = 2.0;
+
+global uniform bool is_night_global;
+
 void fragment() {
 	// Получаем цвет из текстуры или используем albedo_color
 	vec4 tex_color = texture(albedo_texture, UV);
@@ -53,4 +59,14 @@ void fragment() {
 	}
 	METALLIC = 0.0;
 	SPECULAR = 0.5;
+
+	// Recess emission: vertex color = window light color (premultiplied)
+	if (use_vertex_emission && is_night_global) {
+		float lum = dot(COLOR.rgb, vec3(0.299, 0.587, 0.114));
+		if (lum > 0.01) {
+			EMISSION = COLOR.rgb * recess_emission_energy;
+			// Lit recesses slightly brighter albedo from window light
+			ALBEDO = mix(ALBEDO, ALBEDO + COLOR.rgb * 0.3, min(lum * 2.0, 1.0));
+		}
+	}
 }
