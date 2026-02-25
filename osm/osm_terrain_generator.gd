@@ -191,7 +191,7 @@ var _lamp_batch_lights: Array[Light3D] = []  # Все SpotLight3D фонарей
 var _curb_smoothed_queue: Array = []  # Очередь сглаженных бордюров для генерации меша
 var _curb_mesh_state: Dictionary = {}  # Текущее состояние генерации меша бордюра (для разбивки по кадрам)
 var _curb_geo_batch: Dictionary = {}  # chunk_key -> {parent, vertices, normals, indices}
-var _curb_material: StandardMaterial3D = null  # Shared material для всех бордюров
+var _curb_material: Material = null  # Shared material для всех бордюров (ShaderMaterial с PBR текстурой)
 
 # Vegetation batching system - MultiMesh with LOD
 var _tree_batch_data: Dictionary = {}  # key: chunk_key -> {leaf_transforms: [], pine_transforms: [], collisions: [], parent: Node3D}
@@ -529,25 +529,55 @@ func _init_textures() -> void:
 	print("OSM: Initializing textures...")
 	var start_time := Time.get_ticks_msec()
 
-	# Текстуры дорог
-	_road_textures["highway"] = TextureGeneratorScript.create_highway_texture(512, 4)
-	_road_textures["primary"] = TextureGeneratorScript.create_primary_texture(512, 4)  # Одна сплошная в центре
-	_road_textures["residential"] = TextureGeneratorScript.create_road_texture(256, 2, true, false)
-	_road_textures["path"] = TextureGeneratorScript.create_sidewalk_texture(256)
-	_road_textures["crossing"] = TextureGeneratorScript.create_crossing_texture(256)
-	_road_textures["intersection"] = TextureGeneratorScript.create_intersection_texture(256)  # Чистый асфальт
+	# Текстуры дорог — PBR текстуры из ambientCG (CC0)
+	# Asphalt026B — дороги, Asphalt022 — тротуары
+	var road_albedo_img := Image.load_from_file("res://textures/road/Asphalt026B_1K-JPG_Color.jpg")
+	var road_albedo_tex: Texture2D = ImageTexture.create_from_image(road_albedo_img) if road_albedo_img else null
+	var sidewalk_albedo_img := Image.load_from_file("res://textures/road/Asphalt022_1K-JPG_Color.jpg")
+	var sidewalk_albedo_tex: Texture2D = ImageTexture.create_from_image(sidewalk_albedo_img) if sidewalk_albedo_img else null
+
+	# Все типы дорог используют одну PBR текстуру асфальта
+	_road_textures["highway"] = road_albedo_tex
+	_road_textures["primary"] = road_albedo_tex
+	_road_textures["residential"] = road_albedo_tex
+	_road_textures["crossing"] = road_albedo_tex
+	_road_textures["intersection"] = road_albedo_tex
+	_road_textures["path"] = sidewalk_albedo_tex
+
+	# Разметка (белые линии на прозрачном фоне)
+	_road_textures["marking_highway"] = TextureGeneratorScript.create_highway_markings(512, 4)
+	_road_textures["marking_primary"] = TextureGeneratorScript.create_primary_markings(512, 4)
+	_road_textures["marking_residential"] = TextureGeneratorScript.create_residential_markings(256)
+	_road_textures["marking_crossing"] = TextureGeneratorScript.create_crossing_markings(256)
 
 	# Текстуры люков
 	_manhole_albedo = load("res://textures/road/manhole/color_alpha.png")
 	_manhole_normal = load("res://textures/road/manhole/normal.png")
 	print("OSM Manholes: textures loaded - albedo=%s, normal=%s" % [_manhole_albedo != null, _manhole_normal != null])
 
-	# Текстуры зданий (без окон - окна добавляются как 3D объекты)
-	# Уменьшено до 256 для performance (было 512)
-	_building_textures["panel"] = TextureGeneratorScript.create_panel_building_no_windows(256, 5)
-	_building_textures["brick"] = TextureGeneratorScript.create_brick_building_no_windows(256)
-	_building_textures["wall"] = TextureGeneratorScript.create_wall_texture(256)
+	# Текстуры зданий — PBR текстуры из ambientCG (CC0)
+	# Bricks053 — светлые здания (panel), Bricks026 — кирпичные (brick)
+	var panel_albedo_img := Image.load_from_file("res://textures/walls/Bricks053_1K-JPG_Color.jpg")
+	var panel_normal_img := Image.load_from_file("res://textures/walls/Bricks053_1K-JPG_NormalGL.jpg")
+	var panel_rough_img := Image.load_from_file("res://textures/walls/Bricks053_1K-JPG_Roughness.jpg")
+	var brick_albedo_img := Image.load_from_file("res://textures/walls/Bricks026_1K-JPG_Color.jpg")
+	var brick_normal_img := Image.load_from_file("res://textures/walls/Bricks026_1K-JPG_NormalGL.jpg")
+	var brick_rough_img := Image.load_from_file("res://textures/walls/Bricks026_1K-JPG_Roughness.jpg")
+
+	_building_textures["panel"] = ImageTexture.create_from_image(panel_albedo_img) if panel_albedo_img else TextureGeneratorScript.create_panel_building_no_windows(256, 5)
+	_building_textures["brick"] = ImageTexture.create_from_image(brick_albedo_img) if brick_albedo_img else TextureGeneratorScript.create_brick_building_no_windows(256)
+	_building_textures["wall"] = ImageTexture.create_from_image(panel_albedo_img) if panel_albedo_img else TextureGeneratorScript.create_wall_texture(256)
 	_building_textures["roof"] = TextureGeneratorScript.create_roof_texture(256)
+
+	# Normal/Roughness maps для стен
+	var _wall_normal_textures := {}
+	var _wall_roughness_textures := {}
+	_wall_normal_textures["panel"] = ImageTexture.create_from_image(panel_normal_img) if panel_normal_img else null
+	_wall_normal_textures["brick"] = ImageTexture.create_from_image(brick_normal_img) if brick_normal_img else null
+	_wall_normal_textures["wall"] = _wall_normal_textures["panel"]
+	_wall_roughness_textures["panel"] = ImageTexture.create_from_image(panel_rough_img) if panel_rough_img else null
+	_wall_roughness_textures["brick"] = ImageTexture.create_from_image(brick_rough_img) if brick_rough_img else null
+	_wall_roughness_textures["wall"] = _wall_roughness_textures["panel"]
 
 	# Shared материалы зданий (создаются один раз, переиспользуются для merged meshes)
 	for tex_type in ["panel", "brick", "wall"]:
@@ -559,6 +589,13 @@ func _init_textures() -> void:
 		else:
 			mat.set_shader_parameter("albedo_color", Color(0.7, 0.6, 0.5))
 			mat.set_shader_parameter("use_texture", false)
+		if _wall_normal_textures.get(tex_type):
+			mat.set_shader_parameter("normal_texture", _wall_normal_textures[tex_type])
+			mat.set_shader_parameter("use_normal", true)
+			mat.set_shader_parameter("normal_strength", 1.0)
+		if _wall_roughness_textures.get(tex_type):
+			mat.set_shader_parameter("roughness_texture", _wall_roughness_textures[tex_type])
+			mat.set_shader_parameter("use_roughness_texture", true)
 		_building_wall_materials[tex_type] = mat
 
 	_building_roof_material = StandardMaterial3D.new()
@@ -592,11 +629,13 @@ func _init_textures() -> void:
 		fm.metallic_specular = 0.3
 		_building_foundation_materials.append(fm)
 
-	# Shared material бордюров
-	_curb_material = StandardMaterial3D.new()
-	_curb_material.albedo_color = Color(0.78, 0.76, 0.72)
-	_curb_material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_curb_material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
+	# Shared material бордюров — ShaderMaterial для FRONT_FACING fix
+	# Бордюры не имеют UV, поэтому используем albedo_color вместо текстуры
+	_curb_material = ShaderMaterial.new()
+	_curb_material.shader = BuildingWallShader  # cull_disabled + FRONT_FACING flip
+	_curb_material.set_shader_parameter("use_texture", false)
+	_curb_material.set_shader_parameter("albedo_color", Color(0.72, 0.70, 0.66))
+	_curb_material.set_shader_parameter("roughness_base", 0.75)
 
 	# Shared material for iron bar fences
 	_fence_material = StandardMaterial3D.new()
@@ -620,8 +659,17 @@ func _init_textures() -> void:
 	_ground_textures["forest"] = TextureGeneratorScript.create_forest_texture(256)
 	_ground_textures["water"] = TextureGeneratorScript.create_water_texture(256)
 
-	# Normal maps
-	_normal_textures["asphalt"] = TextureGeneratorScript.create_asphalt_normal(256)
+	# Normal maps — PBR normal из ambientCG
+	var road_normal_img := Image.load_from_file("res://textures/road/Asphalt026B_1K-JPG_NormalGL.jpg")
+	_normal_textures["asphalt"] = ImageTexture.create_from_image(road_normal_img) if road_normal_img else TextureGeneratorScript.create_asphalt_normal(256)
+	var sidewalk_normal_img := Image.load_from_file("res://textures/road/Asphalt022_1K-JPG_NormalGL.jpg")
+	_normal_textures["sidewalk"] = ImageTexture.create_from_image(sidewalk_normal_img) if sidewalk_normal_img else _normal_textures["asphalt"]
+
+	# Roughness maps — PBR roughness из ambientCG
+	var road_rough_img := Image.load_from_file("res://textures/road/Asphalt026B_1K-JPG_Roughness.jpg")
+	_road_textures["road_roughness"] = ImageTexture.create_from_image(road_rough_img) if road_rough_img else null
+	var sidewalk_rough_img := Image.load_from_file("res://textures/road/Asphalt022_1K-JPG_Roughness.jpg")
+	_road_textures["sidewalk_roughness"] = ImageTexture.create_from_image(sidewalk_rough_img) if sidewalk_rough_img else null
 	_normal_textures["brick"] = TextureGeneratorScript.create_brick_normal(256)
 	_normal_textures["concrete"] = TextureGeneratorScript.create_concrete_normal(256)
 	_normal_textures["panel"] = TextureGeneratorScript.create_panel_building_normal(256, 5, 4)  # Было 512
@@ -4019,7 +4067,7 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 ## Returns true when fully processed, false when needs more frames.
 func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
 	var smoothed_points: PackedVector2Array = item.smoothed_points
-	var width: float = item.width
+	var width: float = item.width * 2.0  # Визуальная ширина x2 (ROAD_WIDTHS хранит логическую)
 	var parent: Node3D = item.parent
 
 	# Phase 1: classify points (on_road / in_parking) incrementally
@@ -4151,7 +4199,8 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 
 	var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
 	var vertex_offset: int = batch["vertices"].size()
-	var uv_scale: float = 0.1
+	# UV scale: 1 UV unit вдоль = width метров, чтобы текстура тайлилась 1:1
+	var uv_scale: float = 1.0 / width
 	var accumulated_length: float = 0.0
 	var half_w: float = width * 0.5
 	var n_points: int = points.size()
@@ -4261,13 +4310,18 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	if _draw_call_logging_enabled:
 		_draw_call_stats["roads"] += 1
 
-	# Создаём материал с шейдером (noise вариация roughness + лужи)
+	# Создаём материал с шейдером (noise вариация roughness + лужи + разметка)
 	var albedo_tex: Texture2D = _road_textures.get(texture_key, null)
-	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
+	var is_sidewalk := texture_key == "path"
+	var normal_tex: Texture2D = _normal_textures.get("sidewalk" if is_sidewalk else "asphalt", null)
+	var roughness_tex: Texture2D = _road_textures.get("sidewalk_roughness" if is_sidewalk else "road_roughness", null)
+	var marking_tex: Texture2D = _road_textures.get("marking_" + texture_key, null)
 	var material: Material = WetRoadMaterial.create_road_shader_material(
 		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode,
 		_noise_textures.get("micro", null),
-		_noise_textures.get("macro", null)
+		_noise_textures.get("macro", null),
+		roughness_tex,
+		marking_tex
 	)
 	if material is ShaderMaterial:
 		WetRoadMaterial.apply_road_type_params(material, texture_key)
@@ -5208,19 +5262,18 @@ func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
-	# Создаём материал с текстурой асфальта
-	var material := StandardMaterial3D.new()
-	material.albedo_texture = _road_textures.get("residential", null)
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	material.uv1_scale = Vector3(0.1, 0.1, 1.0)  # Масштаб UV для текстуры
-	# Normal map
-	if _normal_textures.has("asphalt"):
-		material.normal_enabled = true
-		material.normal_texture = _normal_textures["asphalt"]
-		material.normal_scale = 0.3  # Уменьшено для меньшего шума
-
-	if _is_wet_mode:
-		WetRoadMaterial.apply_wet_properties(material, true, _is_night_mode)
+	# Создаём материал — тот же шейдер что и дороги (PBR текстура + roughness + wet mode)
+	var albedo_tex: Texture2D = _road_textures.get("intersection", null)
+	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
+	var roughness_tex: Texture2D = _road_textures.get("road_roughness", null)
+	var material: Material = WetRoadMaterial.create_road_shader_material(
+		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode,
+		_noise_textures.get("micro", null),
+		_noise_textures.get("macro", null),
+		roughness_tex
+	)
+	if material is ShaderMaterial:
+		WetRoadMaterial.apply_road_type_params(material, "intersection")
 
 	st.set_material(material)
 
@@ -5228,19 +5281,30 @@ func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void
 	var height_offset := 0.005
 
 	# Добавляем вершины треугольников
+	var uv_ws := 1.0 / 6.0  # World-space UV (совпадает с дорогами и перекрёстками)
 	for i in range(0, indices.size(), 3):
 		for j in range(3):
 			var idx = indices[i + j]
 			var p = points[idx]
 			var h = 0.0 + height_offset
 
-			# UV координаты для текстуры
-			st.set_uv(Vector2(p.x * 0.1, p.y * 0.1))
+			# UV координаты — world-space для seamless стыка с дорогами
+			st.set_uv(Vector2(p.x * uv_ws, p.y * uv_ws))
 			st.set_normal(Vector3.UP)
 			st.add_vertex(Vector3(p.x, h, p.y))
 
 	mesh.mesh = st.commit()
 	parent.add_child(mesh)
+
+	# Track material for wet mode toggle
+	if material is ShaderMaterial:
+		var chunk_key := ""
+		if parent.name.begins_with("Chunk_"):
+			chunk_key = parent.name.substr(6)
+		if chunk_key != "":
+			if not _chunk_road_materials.has(chunk_key):
+				_chunk_road_materials[chunk_key] = []
+			_chunk_road_materials[chunk_key].append(material)
 
 
 func _spawn_parked_cars(parking_points: PackedVector2Array, parent: Node3D) -> void:
@@ -8361,16 +8425,8 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	wall_mesh_instance.visibility_range_end = render_distance
 	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
-	# Материал стен с шейдером для правильного двустороннего освещения
-	var wall_material := ShaderMaterial.new()
-	wall_material.shader = BuildingWallShader
-	if _building_textures.has(texture_type):
-		wall_material.set_shader_parameter("albedo_texture", _building_textures[texture_type])
-		wall_material.set_shader_parameter("use_texture", true)
-	else:
-		wall_material.set_shader_parameter("albedo_color", Color(0.7, 0.6, 0.5))
-		wall_material.set_shader_parameter("use_texture", false)
-	wall_mesh_instance.material_override = wall_material
+	# Используем shared материал стен (уже с PBR текстурами)
+	wall_mesh_instance.material_override = _building_wall_materials.get(texture_type)
 
 	# === КРЫША с ArrayMesh для UV ===
 	var roof_indices_2d := Geometry2D.triangulate_polygon(points)
@@ -13690,8 +13746,9 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 	var h_center := 0.0
 	var center_y := h_center + height_offset + z_off
 
-	# Центральная вершина (индекс 0)
-	st.set_uv(Vector2(0.5, 0.5))
+	# Центральная вершина (индекс 0) — world-space UV
+	var uv_ws := 1.0 / 6.0  # Совпадает с residential road uv_scale
+	st.set_uv(Vector2(pos.x * uv_ws, pos.y * uv_ws))
 	st.set_normal(Vector3.UP)
 	st.add_vertex(Vector3(pos.x, center_y, pos.y))
 
@@ -13701,25 +13758,12 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 		contour = _intersection_contours[intersection_idx]
 
 	if contour.size() >= 3:
-		# Контурный патч — вершины по контуру
-		# Находим bounding box для UV-маппинга
-		var min_x := contour[0].x
-		var max_x := contour[0].x
-		var min_y := contour[0].y
-		var max_y := contour[0].y
-		for cp in contour:
-			min_x = minf(min_x, cp.x)
-			max_x = maxf(max_x, cp.x)
-			min_y = minf(min_y, cp.y)
-			max_y = maxf(max_y, cp.y)
-		var range_x := maxf(max_x - min_x, 0.001)
-		var range_y := maxf(max_y - min_y, 0.001)
-
+		# Контурный патч — world-space UV для стыковки с дорогами
 		for cp in contour:
 			var h_edge := 0.0
 			var vertex_y := h_edge + height_offset + z_off
-			var u := (cp.x - min_x) / range_x
-			var v := (cp.y - min_y) / range_y
+			var u := cp.x * uv_ws
+			var v := cp.y * uv_ws
 			st.set_uv(Vector2(u, v))
 			st.set_normal(Vector3.UP)
 			st.add_vertex(Vector3(cp.x, vertex_y, cp.y))
@@ -13755,9 +13799,7 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 			var edge_pos := Vector2(x, z_coord)
 			var h_edge := 0.0
 			var vertex_y := h_edge + height_offset + z_off
-			var u := 0.5 + cos(angle) * 0.5
-			var v := 0.5 + sin(angle) * 0.5
-			st.set_uv(Vector2(u, v))
+			st.set_uv(Vector2(x * uv_ws, z_coord * uv_ws))
 			st.set_normal(Vector3.UP)
 			st.add_vertex(Vector3(x, vertex_y, z_coord))
 
@@ -13773,10 +13815,12 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 
 	var albedo_tex: Texture2D = _road_textures.get("intersection", null)
 	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
+	var roughness_tex: Texture2D = _road_textures.get("road_roughness", null)
 	var material: Material = WetRoadMaterial.create_road_shader_material(
 		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode,
 		_noise_textures.get("micro", null),
-		_noise_textures.get("macro", null)
+		_noise_textures.get("macro", null),
+		roughness_tex
 	)
 	if material is ShaderMaterial:
 		WetRoadMaterial.apply_road_type_params(material, "intersection")

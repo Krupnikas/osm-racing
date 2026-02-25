@@ -44,7 +44,7 @@ static func has_shader() -> bool:
 	return _road_shader != null
 
 
-static func create_road_shader_material(albedo_texture: Texture2D = null, normal_texture: Texture2D = null, is_wet: bool = false, is_night: bool = false, noise_micro: Texture2D = null, noise_macro: Texture2D = null) -> Material:
+static func create_road_shader_material(albedo_texture: Texture2D = null, normal_texture: Texture2D = null, is_wet: bool = false, is_night: bool = false, noise_micro: Texture2D = null, noise_macro: Texture2D = null, roughness_texture: Texture2D = null, marking_texture: Texture2D = null) -> Material:
 	"""Создаёт ShaderMaterial для дороги с поддержкой wet mode и noise variation"""
 	_load_shader()
 
@@ -65,7 +65,15 @@ static func create_road_shader_material(albedo_texture: Texture2D = null, normal
 
 	if normal_texture:
 		mat.set_shader_parameter("normal_texture", normal_texture)
-		mat.set_shader_parameter("normal_strength", 0.3)
+		mat.set_shader_parameter("normal_strength", 0.8)
+
+	if roughness_texture:
+		mat.set_shader_parameter("roughness_texture", roughness_texture)
+		mat.set_shader_parameter("use_roughness_texture", true)
+
+	if marking_texture:
+		mat.set_shader_parameter("marking_texture", marking_texture)
+		mat.set_shader_parameter("use_marking", true)
 
 	if noise_micro:
 		mat.set_shader_parameter("noise_micro_tex", noise_micro)

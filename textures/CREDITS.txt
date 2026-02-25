@@ -12,5 +12,55 @@ Files:
   - Grass004_1K-JPG_Roughness.jpg
   - Grass004_1K-JPG_AmbientOcclusion.jpg
 
+Ground037 (PBR Wild Grass Texture)
+-----------------------------------
+Source: ambientCG
+URL: https://ambientcg.com/view?id=Ground037
+License: CC0 1.0 Universal (Public Domain)
+Files:
+  - Ground037_1K-JPG_Color.jpg
+  - Ground037_1K-JPG_NormalGL.jpg
+  - Ground037_1K-JPG_Roughness.jpg
+
+Asphalt026B (PBR Road Asphalt Texture)
+--------------------------------------
+Source: ambientCG
+URL: https://ambientcg.com/view?id=Asphalt026B
+License: CC0 1.0 Universal (Public Domain)
+Files:
+  - textures/road/Asphalt026B_1K-JPG_Color.jpg
+  - textures/road/Asphalt026B_1K-JPG_NormalGL.jpg
+  - textures/road/Asphalt026B_1K-JPG_Roughness.jpg
+
+Asphalt022 (PBR Sidewalk Asphalt Texture)
+------------------------------------------
+Source: ambientCG
+URL: https://ambientcg.com/view?id=Asphalt022
+License: CC0 1.0 Universal (Public Domain)
+Files:
+  - textures/road/Asphalt022_1K-JPG_Color.jpg
+  - textures/road/Asphalt022_1K-JPG_NormalGL.jpg
+  - textures/road/Asphalt022_1K-JPG_Roughness.jpg
+
+Bricks053 (PBR Light Brick Wall Texture)
+-----------------------------------------
+Source: ambientCG
+URL: https://ambientcg.com/view?id=Bricks053
+License: CC0 1.0 Universal (Public Domain)
+Files:
+  - textures/walls/Bricks053_1K-JPG_Color.jpg
+  - textures/walls/Bricks053_1K-JPG_NormalGL.jpg
+  - textures/walls/Bricks053_1K-JPG_Roughness.jpg
+
+Bricks026 (PBR Red Brick Wall Texture)
+---------------------------------------
+Source: ambientCG
+URL: https://ambientcg.com/view?id=Bricks026
+License: CC0 1.0 Universal (Public Domain)
+Files:
+  - textures/walls/Bricks026_1K-JPG_Color.jpg
+  - textures/walls/Bricks026_1K-JPG_NormalGL.jpg
+  - textures/walls/Bricks026_1K-JPG_Roughness.jpg
+
 You can use these textures for any purpose without restriction.
 No attribution required (but appreciated).

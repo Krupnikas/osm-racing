@@ -2,11 +2,13 @@ shader_type spatial;
 render_mode cull_disabled, diffuse_lambert_wrap, specular_schlick_ggx;
 
 // Текстура стены
-uniform sampler2D albedo_texture : source_color, filter_linear_mipmap;
-uniform sampler2D normal_texture : hint_normal, filter_linear_mipmap;
+uniform sampler2D albedo_texture : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D normal_texture : hint_normal, filter_linear_mipmap, repeat_enable;
+uniform sampler2D roughness_texture : filter_linear_mipmap, repeat_enable;
 uniform vec4 albedo_color : source_color = vec4(0.7, 0.6, 0.5, 1.0);
 uniform bool use_texture = false;
 uniform bool use_normal = false;
+uniform bool use_roughness_texture = false;
 uniform float normal_strength : hint_range(0.0, 2.0) = 0.8;
 uniform float ao_strength : hint_range(0.0, 1.0) = 0.4;
 uniform float roughness_base : hint_range(0.0, 1.0) = 0.7;
@@ -41,8 +43,10 @@ void fragment() {
 		NORMAL = -NORMAL;
 	}
 
-	// Для кастомных текстур: меньше roughness = ярче отражения света
-	if (use_texture) {
+	// Roughness
+	if (use_roughness_texture) {
+		ROUGHNESS = texture(roughness_texture, UV).r;
+	} else if (use_texture) {
 		ROUGHNESS = 0.55;
 	} else {
 		ROUGHNESS = roughness_base;
