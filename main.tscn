@@ -1,4 +1,4 @@
-[gd_scene load_steps=23 format=3 uid="uid://bmain123"]
+[gd_scene load_steps=24 format=3 uid="uid://bmain123"]
 
 [ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://race/race_manager.gd" id="20_race_mgr"]
@@ -28,6 +28,7 @@
 [ext_resource type="Script" path="res://debug/collision_visualizer.gd" id="18_collision_vis"]
 [ext_resource type="Script" path="res://debug/performance_profiler.gd" id="19_profiler"]
 [ext_resource type="Script" path="res://settings/color_grading.gd" id="20_color_grading"]
+[ext_resource type="Script" path="res://ui/postprocess_overlay.gd" id="24_postprocess"]
 [ext_resource type="Script" path="res://car/lane_assist.gd" id="30_lane_assist"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
@@ -215,6 +216,9 @@ script = ExtResource("16_graphics")
 
 [node name="ColorGrading" type="CanvasLayer" parent="."]
 script = ExtResource("20_color_grading")
+
+[node name="PostProcessOverlay" type="CanvasLayer" parent="."]
+script = ExtResource("24_postprocess")
 
 [node name="GroundSetup" type="Node" parent="."]
 script = ExtResource("17_ground")
