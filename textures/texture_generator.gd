@@ -770,6 +770,111 @@ static func create_panel_building_normal(size: int = 512, floors: int = 5, windo
 	return ImageTexture.create_from_image(normal_image)
 
 
+# ============ ROAD MARKING TEXTURES (white on transparent) ============
+
+## Residential road markings: dashed center line
+static func create_residential_markings(size: int = 256) -> ImageTexture:
+	var image := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+
+	var line_width := size / 80
+	var dash_length := size / 3
+	var gap_length := size / 3
+	var center := size / 2
+
+	for y in range(size):
+		for x in range(size):
+			if abs(x - center) < line_width:
+				var dash_pos := y % (dash_length + gap_length)
+				if dash_pos < dash_length:
+					image.set_pixel(x, y, Color(0.9, 0.9, 0.88, 1.0))
+
+	return ImageTexture.create_from_image(image)
+
+
+## Highway markings: double solid center line + dashed lane dividers
+static func create_highway_markings(size: int = 512, lanes: int = 4) -> ImageTexture:
+	var image := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+
+	var line_width := size / 128
+	var dash_length := size / 4
+	var gap_length := size / 4
+	var lane_width := size / lanes
+	var center := size / 2
+
+	for y in range(size):
+		for x in range(size):
+			# Dashed lane dividers (skip center)
+			for lane_i in range(1, lanes):
+				var lane_x := lane_i * lane_width
+				if lane_i == lanes / 2:
+					continue
+				if abs(x - lane_x) < line_width:
+					var dash_pos := y % (dash_length + gap_length)
+					if dash_pos < dash_length:
+						image.set_pixel(x, y, Color(0.88, 0.88, 0.86, 1.0))
+
+			# Double solid center line
+			var double_line_gap := line_width * 2
+			if abs(x - center - double_line_gap) < line_width or abs(x - center + double_line_gap) < line_width:
+				image.set_pixel(x, y, Color(0.92, 0.92, 0.90, 1.0))
+
+	return ImageTexture.create_from_image(image)
+
+
+## Primary road markings: single solid center line + dashed lane dividers
+static func create_primary_markings(size: int = 512, lanes: int = 4) -> ImageTexture:
+	var image := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+
+	var line_width := size / 128
+	var dash_length := size / 4
+	var gap_length := size / 4
+	var lane_width := size / lanes
+	var center := size / 2
+
+	for y in range(size):
+		for x in range(size):
+			# Dashed lane dividers (skip center)
+			for lane_i in range(1, lanes):
+				var lane_x := lane_i * lane_width
+				if lane_i == lanes / 2:
+					continue
+				if abs(x - lane_x) < line_width:
+					var dash_pos := y % (dash_length + gap_length)
+					if dash_pos < dash_length:
+						image.set_pixel(x, y, Color(0.88, 0.88, 0.86, 1.0))
+
+			# Single solid center line
+			if abs(x - center) < line_width:
+				image.set_pixel(x, y, Color(0.92, 0.92, 0.90, 1.0))
+
+	return ImageTexture.create_from_image(image)
+
+
+## Crossing markings: zebra stripes
+static func create_crossing_markings(size: int = 256) -> ImageTexture:
+	var image := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+
+	var stripe_count := 6
+	var stripe_h := size / (stripe_count * 2)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 77777
+
+	for y in range(size):
+		var band := (y / stripe_h) % 2
+		if band == 1:
+			for x in range(size):
+				rng.seed = 77777 + x * 13 + y * 29
+				var wear := rng.randf()
+				if wear > 0.15:
+					image.set_pixel(x, y, Color(0.92, 0.92, 0.90, 1.0))
+
+	return ImageTexture.create_from_image(image)
+
+
 # ============ NOISE TEXTURES ============
 
 static func create_noise_micro(size: int = 256) -> NoiseTexture2D:
