@@ -177,7 +177,7 @@ var _window_finalize_queue: Array[String] = []  # Progressive window finalizatio
 var _window_finalize_progress: Dictionary = {}  # chunk_key -> {buf, offset, mm, transforms, colors, parent, mat, mm_instance}
 var _building_wall_materials: Dictionary = {}  # texture_type -> ShaderMaterial (shared)
 var _building_roof_material: StandardMaterial3D = null  # shared
-var _building_parapet_material: StandardMaterial3D = null  # shared
+var _building_parapet_material: ShaderMaterial = null  # shared (uses wall shader for FRONT_FACING fix)
 var _building_foundation_materials: Array[StandardMaterial3D] = []  # 4 random colors
 
 # ENTRANCE GEOMETRY MERGE: объединяем все подъезды чанка в один ArrayMesh
@@ -569,9 +569,12 @@ func _init_textures() -> void:
 	else:
 		_building_roof_material.albedo_color = Color(0.15, 0.15, 0.15)
 
-	_building_parapet_material = StandardMaterial3D.new()
-	_building_parapet_material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_building_parapet_material.albedo_color = Color(0.5, 0.5, 0.5)
+	# Парапет использует wall shader для корректной обработки FRONT_FACING
+	_building_parapet_material = ShaderMaterial.new()
+	_building_parapet_material.shader = BuildingWallShader
+	_building_parapet_material.set_shader_parameter("use_texture", false)
+	_building_parapet_material.set_shader_parameter("albedo_color", Color(0.5, 0.5, 0.5))
+	_building_parapet_material.set_shader_parameter("roughness_base", 0.7)
 
 	_building_foundation_materials.clear()
 	var foundation_colors: Array[Color] = [
@@ -8524,9 +8527,11 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 			var par_mi := MeshInstance3D.new()
 			par_mi.mesh = par_mesh
 			par_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-			var par_mat := StandardMaterial3D.new()
-			par_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-			par_mat.albedo_color = Color(0.5, 0.5, 0.5)
+			var par_mat := ShaderMaterial.new()
+			par_mat.shader = BuildingWallShader
+			par_mat.set_shader_parameter("use_texture", false)
+			par_mat.set_shader_parameter("albedo_color", Color(0.5, 0.5, 0.5))
+			par_mat.set_shader_parameter("roughness_base", 0.7)
 			par_mi.material_override = par_mat
 			wall_mesh_instance.add_child(par_mi)
 
@@ -9001,9 +9006,11 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		parapet_mesh_instance.mesh = parapet_mesh
 		parapet_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
-		var parapet_material := StandardMaterial3D.new()
-		parapet_material.cull_mode = BaseMaterial3D.CULL_DISABLED
-		parapet_material.albedo_color = Color(0.5, 0.5, 0.5)
+		var parapet_material := ShaderMaterial.new()
+		parapet_material.shader = BuildingWallShader
+		parapet_material.set_shader_parameter("use_texture", false)
+		parapet_material.set_shader_parameter("albedo_color", Color(0.5, 0.5, 0.5))
+		parapet_material.set_shader_parameter("roughness_base", 0.7)
 		parapet_mesh_instance.material_override = parapet_material
 
 		wall_mesh_instance.add_child(parapet_mesh_instance)
@@ -12014,8 +12021,9 @@ func _add_building_night_decorations(building_mesh: MeshInstance3D, points: Pack
 		_add_neon_sign(center, building_height, building_width, rng, parent, building_depth, building_elev)
 		_neon_signs_created += 1
 
-	# Добавляем светящиеся окна для зданий выше 1 этажа
-	if building_height > 3.5:
+	# Добавляем светящиеся окна для зданий с хотя бы 1 этажом окон
+	# Условие должно совпадать с wall cutout логикой в _compute_building_mesh_thread
+	if int(building_height / WINDOW_FLOOR_HEIGHT) >= 1:
 		_add_building_windows(points, building_height, rng, parent, building_elev)
 
 
