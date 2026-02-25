@@ -59,6 +59,13 @@ var _lon_scale := 0.0  # Cached cos(deg_to_rad(start_lat)) * 111000.0
 @export_group("Features", "enable_")
 @export var enable_buildings := true  # Включить здания
 @export var enable_windows := true  # Включить окна в зданиях
+
+# Shared window layout constants (used by thread + main thread)
+const WINDOW_SIZE := 1.2          # Window quad width/height (meters)
+const WINDOW_SPACING := 2.5       # Center-to-center distance (meters)
+const WINDOW_RECESS_DEPTH := 0.15 # How far window sits behind wall surface (meters)
+const WINDOW_CUT_MARGIN := 0.02   # Wall cutout is this much larger than window on each side
+const WINDOW_FLOOR_HEIGHT := 3.0  # Floor-to-floor height (meters)
 @export var enable_roads := true  # Включить дороги
 @export var enable_curbs := true  # Включить бордюры
 @export var enable_vegetation := true  # Включить деревья/растительность
@@ -170,7 +177,7 @@ var _window_finalize_queue: Array[String] = []  # Progressive window finalizatio
 var _window_finalize_progress: Dictionary = {}  # chunk_key -> {buf, offset, mm, transforms, colors, parent, mat, mm_instance}
 var _building_wall_materials: Dictionary = {}  # texture_type -> ShaderMaterial (shared)
 var _building_roof_material: StandardMaterial3D = null  # shared
-var _building_parapet_material: StandardMaterial3D = null  # shared
+var _building_parapet_material: ShaderMaterial = null  # shared (uses wall shader for FRONT_FACING fix)
 var _building_foundation_materials: Array[StandardMaterial3D] = []  # 4 random colors
 
 # ENTRANCE GEOMETRY MERGE: объединяем все подъезды чанка в один ArrayMesh
@@ -562,9 +569,12 @@ func _init_textures() -> void:
 	else:
 		_building_roof_material.albedo_color = Color(0.15, 0.15, 0.15)
 
-	_building_parapet_material = StandardMaterial3D.new()
-	_building_parapet_material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_building_parapet_material.albedo_color = Color(0.5, 0.5, 0.5)
+	# Парапет использует wall shader для корректной обработки FRONT_FACING
+	_building_parapet_material = ShaderMaterial.new()
+	_building_parapet_material.shader = BuildingWallShader
+	_building_parapet_material.set_shader_parameter("use_texture", false)
+	_building_parapet_material.set_shader_parameter("albedo_color", Color(0.5, 0.5, 0.5))
+	_building_parapet_material.set_shader_parameter("roughness_base", 0.7)
 
 	_building_foundation_materials.clear()
 	var foundation_colors: Array[Color] = [
@@ -4401,7 +4411,7 @@ func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
 	mm.use_colors = true
 	mm.use_custom_data = false
 	var quad := QuadMesh.new()
-	quad.size = Vector2(1.2, 1.2)
+	quad.size = Vector2(WINDOW_SIZE, WINDOW_SIZE)
 	mm.mesh = quad
 	mm.instance_count = transforms.size()
 
@@ -6466,50 +6476,198 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 	var is_ccw := _is_polygon_ccw(points)
 	var normal_sign := -1.0 if is_ccw else 1.0
 
+	var wnd_num_floors := int(building_height / WINDOW_FLOOR_HEIGHT)
+	var wnd_half := WINDOW_SIZE * 0.5
+
 	for i in range(points.size()):
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 		var wall_width := p1.distance_to(p2)
 
-		var v1 := Vector3(p1.x, foundation_y, p1.y)
-		var v2 := Vector3(p2.x, foundation_y, p2.y)
-		var v3 := Vector3(p2.x, roof_y, p2.y)
-		var v4 := Vector3(p1.x, roof_y, p1.y)
-
 		var dir := (p2 - p1).normalized()
-		# Нормаль наружу - учитываем направление обхода полигона
 		var normal := Vector3(-dir.y * normal_sign, 0, dir.x * normal_sign)
+		var dir3 := Vector3(dir.x, 0.0, dir.y)
 
-		var u1 := accumulated_width * uv_scale_x
-		var u2 := (accumulated_width + wall_width) * uv_scale_x
-		var v_bottom := 0.0
-		var v_top := building_height * uv_scale_y
+		var u_left := accumulated_width * uv_scale_x
+		var v_bottom_uv := 0.0
 
-		var idx := wall_vertices.size()
+		# Compute window positions for this wall segment
+		var win_positions: Array[float] = []  # along-wall center offsets
+		if wall_width >= WINDOW_SPACING and wnd_num_floors >= 1:
+			var wnd_count := int((wall_width - WINDOW_SPACING * 0.5) / WINDOW_SPACING)
+			if wnd_count < 1:
+				wnd_count = 1
+			var wnd_start := (wall_width - (wnd_count - 1) * WINDOW_SPACING) / 2.0
+			for wi in range(wnd_count):
+				win_positions.append(wnd_start + wi * WINDOW_SPACING)
 
-		wall_vertices.append(v1)
-		wall_vertices.append(v2)
-		wall_vertices.append(v3)
-		wall_vertices.append(v4)
+		if win_positions.is_empty() or wnd_num_floors < 1:
+			# No windows — single quad as before
+			var v1 := Vector3(p1.x, foundation_y, p1.y)
+			var v2 := Vector3(p2.x, foundation_y, p2.y)
+			var v3 := Vector3(p2.x, roof_y, p2.y)
+			var v4 := Vector3(p1.x, roof_y, p1.y)
+			var u_right := (accumulated_width + wall_width) * uv_scale_x
+			var v_top_uv := building_height * uv_scale_y
+			var idx := wall_vertices.size()
+			wall_vertices.append(v1)
+			wall_vertices.append(v2)
+			wall_vertices.append(v3)
+			wall_vertices.append(v4)
+			wall_uvs.append(Vector2(u_left, v_bottom_uv))
+			wall_uvs.append(Vector2(u_right, v_bottom_uv))
+			wall_uvs.append(Vector2(u_right, v_top_uv))
+			wall_uvs.append(Vector2(u_left, v_top_uv))
+			wall_normals.append(normal)
+			wall_normals.append(normal)
+			wall_normals.append(normal)
+			wall_normals.append(normal)
+			wall_indices.append(idx + 0)
+			wall_indices.append(idx + 1)
+			wall_indices.append(idx + 2)
+			wall_indices.append(idx + 0)
+			wall_indices.append(idx + 2)
+			wall_indices.append(idx + 3)
+		else:
+			# Build horizontal cut lines (Y values relative to foundation_y)
+			# Cutout is WINDOW_CUT_MARGIN larger than window on each side
+			var cut_half := wnd_half + WINDOW_CUT_MARGIN
+			var y_cuts: Array[float] = [0.0]  # start at foundation
+			for fl in range(wnd_num_floors):
+				var win_center_y := WINDOW_FLOOR_HEIGHT * 0.5 + fl * WINDOW_FLOOR_HEIGHT
+				y_cuts.append(win_center_y - cut_half)
+				y_cuts.append(win_center_y + cut_half)
+			y_cuts.append(building_height - (foundation_y - base_elev))  # roof relative
+			y_cuts.sort()
 
-		wall_uvs.append(Vector2(u1, v_bottom))
-		wall_uvs.append(Vector2(u2, v_bottom))
-		wall_uvs.append(Vector2(u2, v_top))
-		wall_uvs.append(Vector2(u1, v_top))
+			# Build vertical cut lines (along-wall offsets)
+			var x_cuts: Array[float] = [0.0]
+			for wp in win_positions:
+				x_cuts.append(wp - cut_half)
+				x_cuts.append(wp + cut_half)
+			x_cuts.append(wall_width)
+			x_cuts.sort()
 
-		wall_normals.append(normal)
-		wall_normals.append(normal)
-		wall_normals.append(normal)
-		wall_normals.append(normal)
+			# For each grid cell, check if it's a window hole or wall
+			var p1_3d := Vector3(p1.x, 0.0, p1.y)
+			for yi in range(y_cuts.size() - 1):
+				var y0 := y_cuts[yi]
+				var y1 := y_cuts[yi + 1]
+				if y1 - y0 < 0.001:
+					continue
+				for xi in range(x_cuts.size() - 1):
+					var x0 := x_cuts[xi]
+					var x1 := x_cuts[xi + 1]
+					if x1 - x0 < 0.001:
+						continue
 
-		wall_indices.append(idx + 0)
-		wall_indices.append(idx + 1)
-		wall_indices.append(idx + 2)
-		wall_indices.append(idx + 0)
-		wall_indices.append(idx + 2)
-		wall_indices.append(idx + 3)
+					# Check if this cell is a window hole (using cut_half for larger cutout)
+					var is_window := false
+					var cell_cx := (x0 + x1) * 0.5
+					var cell_cy := (y0 + y1) * 0.5
+					for wp in win_positions:
+						if absf(cell_cx - wp) < cut_half - 0.01:
+							for fl in range(wnd_num_floors):
+								var wy := WINDOW_FLOOR_HEIGHT * 0.5 + fl * WINDOW_FLOOR_HEIGHT
+								if absf(cell_cy - wy) < cut_half - 0.01:
+									is_window = true
+									break
+						if is_window:
+							break
+
+					if is_window:
+						continue  # Skip — this is a hole
+
+					# Emit wall quad for this cell
+					var va := p1_3d + dir3 * x0 + Vector3.UP * (foundation_y + y0)
+					var vb := p1_3d + dir3 * x1 + Vector3.UP * (foundation_y + y0)
+					var vc := p1_3d + dir3 * x1 + Vector3.UP * (foundation_y + y1)
+					var vd := p1_3d + dir3 * x0 + Vector3.UP * (foundation_y + y1)
+
+					var ua := (accumulated_width + x0) * uv_scale_x
+					var ub := (accumulated_width + x1) * uv_scale_x
+					var va_v := y0 * uv_scale_y
+					var vb_v := y1 * uv_scale_y
+
+					var idx := wall_vertices.size()
+					wall_vertices.append(va)
+					wall_vertices.append(vb)
+					wall_vertices.append(vc)
+					wall_vertices.append(vd)
+					wall_uvs.append(Vector2(ua, va_v))
+					wall_uvs.append(Vector2(ub, va_v))
+					wall_uvs.append(Vector2(ub, vb_v))
+					wall_uvs.append(Vector2(ua, vb_v))
+					wall_normals.append(normal)
+					wall_normals.append(normal)
+					wall_normals.append(normal)
+					wall_normals.append(normal)
+					wall_indices.append(idx + 0)
+					wall_indices.append(idx + 1)
+					wall_indices.append(idx + 2)
+					wall_indices.append(idx + 0)
+					wall_indices.append(idx + 2)
+					wall_indices.append(idx + 3)
 
 		accumulated_width += wall_width
+
+	# === WINDOW RECESS GEOMETRY (углубления вокруг окон) ===
+	var recess_vertices := PackedVector3Array()
+	var recess_uvs := PackedVector2Array()
+	var recess_normals := PackedVector3Array()
+	var recess_indices := PackedInt32Array()
+
+	if wnd_num_floors >= 1:
+		for i in range(points.size()):
+			var rp1 := points[i]
+			var rp2 := points[(i + 1) % points.size()]
+			var rwall_length := rp1.distance_to(rp2)
+			if rwall_length < WINDOW_SPACING:
+				continue
+
+			var rwall_dir_2d := (rp2 - rp1).normalized()
+			var rwall_normal_2d := Vector2(-rwall_dir_2d.y * normal_sign, rwall_dir_2d.x * normal_sign)
+			var rwall_dir_3d := Vector3(rwall_dir_2d.x, 0.0, rwall_dir_2d.y)
+			var rwall_normal_3d := Vector3(rwall_normal_2d.x, 0.0, rwall_normal_2d.y)
+			var inward := -rwall_normal_3d * WINDOW_RECESS_DEPTH
+
+			var rnum_windows := int((rwall_length - WINDOW_SPACING * 0.5) / WINDOW_SPACING)
+			if rnum_windows < 1:
+				rnum_windows = 1
+			var rstart_offset := (rwall_length - (rnum_windows - 1) * WINDOW_SPACING) / 2.0
+
+			for floor_idx in range(wnd_num_floors):
+				var y_center := foundation_y + WINDOW_FLOOR_HEIGHT * 0.5 + floor_idx * WINDOW_FLOOR_HEIGHT
+				for win_idx in range(rnum_windows):
+					var along_wall := rstart_offset + win_idx * WINDOW_SPACING
+					var wall_pos := rp1 + rwall_dir_2d * along_wall
+					var center_3d := Vector3(wall_pos.x, y_center, wall_pos.y)
+
+					# Outer corners (on wall surface) — larger by WINDOW_CUT_MARGIN
+					var cut_h := wnd_half + WINDOW_CUT_MARGIN
+					var outer_tl := center_3d - rwall_dir_3d * cut_h + Vector3.UP * cut_h
+					var outer_tr := center_3d + rwall_dir_3d * cut_h + Vector3.UP * cut_h
+					var outer_bl := center_3d - rwall_dir_3d * cut_h - Vector3.UP * cut_h
+					var outer_br := center_3d + rwall_dir_3d * cut_h - Vector3.UP * cut_h
+
+					# Inner corners (at recess depth) — exact window size
+					var inner_tl := center_3d - rwall_dir_3d * wnd_half + Vector3.UP * wnd_half + inward
+					var inner_tr := center_3d + rwall_dir_3d * wnd_half + Vector3.UP * wnd_half + inward
+					var inner_bl := center_3d - rwall_dir_3d * wnd_half - Vector3.UP * wnd_half + inward
+					var inner_br := center_3d + rwall_dir_3d * wnd_half - Vector3.UP * wnd_half + inward
+
+					# Left side — trapezoid (normal ~right into cavity)
+					_add_recess_quad(recess_vertices, recess_uvs, recess_normals, recess_indices,
+						outer_tl, outer_bl, inner_bl, inner_tl, rwall_dir_3d)
+					# Right side — trapezoid (normal ~left into cavity)
+					_add_recess_quad(recess_vertices, recess_uvs, recess_normals, recess_indices,
+						inner_tr, inner_br, outer_br, outer_tr, -rwall_dir_3d)
+					# Top side — trapezoid (normal ~down into cavity)
+					_add_recess_quad(recess_vertices, recess_uvs, recess_normals, recess_indices,
+						inner_tl, inner_tr, outer_tr, outer_tl, -Vector3.UP)
+					# Bottom side — trapezoid (normal ~up into cavity)
+					_add_recess_quad(recess_vertices, recess_uvs, recess_normals, recess_indices,
+						outer_bl, outer_br, inner_br, inner_bl, Vector3.UP)
 
 	# === ТРИАНГУЛЯЦИЯ КРЫШИ (плоская поверхность) ===
 	var roof_vertices := PackedVector3Array()
@@ -6688,7 +6846,11 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		"fnd_uvs": fnd_uvs,
 		"fnd_normals": fnd_normals,
 		"fnd_indices": fnd_indices,
-		"fnd_material_idx": fnd_material_idx
+		"fnd_material_idx": fnd_material_idx,
+		"recess_vertices": recess_vertices,
+		"recess_uvs": recess_uvs,
+		"recess_normals": recess_normals,
+		"recess_indices": recess_indices,
 	}
 
 	_building_mutex.lock()
@@ -6740,6 +6902,9 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 			"foundation_1": _make_empty_geo_batch(),
 			"foundation_2": _make_empty_geo_batch(),
 			"foundation_3": _make_empty_geo_batch(),
+			"panel_recess": _make_empty_geo_batch(),
+			"brick_recess": _make_empty_geo_batch(),
+			"wall_recess": _make_empty_geo_batch(),
 			"collisions": [],
 			"_building_ranges": [],
 		}
@@ -6802,6 +6967,20 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 		for i in range(result.fnd_indices.size()):
 			fnd_batch["indices"].append(result.fnd_indices[i] + fnd_start)
 
+	# === НАКАПЛИВАЕМ RECESS (углубления окон) ===
+	var recess_verts: PackedVector3Array = result.get("recess_vertices", PackedVector3Array())
+	if recess_verts.size() > 0:
+		var recess_key: String = texture_type + "_recess"
+		if not batch.has(recess_key):
+			recess_key = "brick_recess"
+		var recess_batch: Dictionary = batch[recess_key]
+		var recess_start: int = recess_batch["vertices"].size()
+		recess_batch["vertices"].append_array(recess_verts)
+		recess_batch["uvs"].append_array(result.recess_uvs)
+		recess_batch["normals"].append_array(result.recess_normals)
+		for ri in range(result.recess_indices.size()):
+			recess_batch["indices"].append(result.recess_indices[ri] + recess_start)
+
 	# Сохраняем ranges для deferred elevation
 	batch["_building_ranges"].append({
 		"wall_key": wall_key,
@@ -6846,10 +7025,10 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 
 	# Incremental: track which surface to process next
 	var step: int = batch.get("_finalize_step", 0)
-	# Steps: 0-2=walls, 3=roofs, 4=parapets, 5-8=foundations, 9=cleanup
-	var surface_keys: Array[String] = ["panel_walls", "brick_walls", "wall_walls", "roofs", "parapets", "foundation_0", "foundation_1", "foundation_2", "foundation_3"]
+	# Steps: 0-2=walls, 3=roofs, 4=parapets, 5-8=foundations, 9-11=recesses, 12=cleanup
+	var surface_keys: Array[String] = ["panel_walls", "brick_walls", "wall_walls", "roofs", "parapets", "foundation_0", "foundation_1", "foundation_2", "foundation_3", "panel_recess", "brick_recess", "wall_recess"]
 
-	if step < 9:
+	if step < 12:
 		var surface_key: String = surface_keys[step]
 		var geo: Dictionary = batch[surface_key]
 		if geo["vertices"].size() > 0:
@@ -6871,8 +7050,12 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 				material = _building_roof_material
 			elif step == 4:
 				material = _building_parapet_material
-			else:
+			elif step < 9:
 				material = _building_foundation_materials[step - 5]
+			else:
+				# Recesses (9-11) — same material as corresponding walls
+				var tex_type: String = surface_key.replace("_recess", "")
+				material = _building_wall_materials[tex_type]
 
 			var rid := _rs_add_mesh(chunk_key, arr_mesh, material,
 				shadow_setting, render_distance)
@@ -6885,19 +7068,19 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 
 		# Skip empty surfaces — advance to next non-empty or cleanup
 		step += 1
-		while step < 9:
+		while step < 12:
 			var next_geo: Dictionary = batch[surface_keys[step]]
 			if next_geo["vertices"].size() > 0:
 				break
 			step += 1
 
 		batch["_finalize_step"] = step
-		if step < 9:
+		if step < 12:
 			if not _building_geo_finalize_queue.has(chunk_key):
 				_building_geo_finalize_queue.push_front(chunk_key)
 			return
 
-	# === Step 9: Cleanup — collisions, building ranges, erase batch ===
+	# === Step 12: Cleanup — collisions, building ranges, erase batch ===
 	var all_baked: bool = batch.get("_all_baked", false)
 
 	if not batch["collisions"].is_empty():
@@ -8344,9 +8527,11 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 			var par_mi := MeshInstance3D.new()
 			par_mi.mesh = par_mesh
 			par_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-			var par_mat := StandardMaterial3D.new()
-			par_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-			par_mat.albedo_color = Color(0.5, 0.5, 0.5)
+			var par_mat := ShaderMaterial.new()
+			par_mat.shader = BuildingWallShader
+			par_mat.set_shader_parameter("use_texture", false)
+			par_mat.set_shader_parameter("albedo_color", Color(0.5, 0.5, 0.5))
+			par_mat.set_shader_parameter("roughness_base", 0.7)
 			par_mi.material_override = par_mat
 			wall_mesh_instance.add_child(par_mi)
 
@@ -8822,9 +9007,11 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		parapet_mesh_instance.mesh = parapet_mesh
 		parapet_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
-		var parapet_material := StandardMaterial3D.new()
-		parapet_material.cull_mode = BaseMaterial3D.CULL_DISABLED
-		parapet_material.albedo_color = Color(0.5, 0.5, 0.5)
+		var parapet_material := ShaderMaterial.new()
+		parapet_material.shader = BuildingWallShader
+		parapet_material.set_shader_parameter("use_texture", false)
+		parapet_material.set_shader_parameter("albedo_color", Color(0.5, 0.5, 0.5))
+		parapet_material.set_shader_parameter("roughness_base", 0.7)
 		parapet_mesh_instance.material_override = parapet_material
 
 		wall_mesh_instance.add_child(parapet_mesh_instance)
@@ -9152,6 +9339,33 @@ func _calculate_polygon_area(points: PackedVector2Array) -> float:
 static func _get_foundation_height(points: PackedVector2Array) -> float:
 	var hash_val: float = absf(points[0].x * 31.0 + points[0].y * 97.0)
 	return 0.5 + fmod(hash_val, 1.0) * 0.5  # 0.5 to 1.0
+
+
+static func _add_recess_quad(
+	vertices: PackedVector3Array, uvs: PackedVector2Array,
+	normals: PackedVector3Array, indices: PackedInt32Array,
+	v0: Vector3, v1: Vector3, v2: Vector3, v3: Vector3,
+	normal: Vector3
+) -> void:
+	var idx := vertices.size()
+	vertices.append(v0)
+	vertices.append(v1)
+	vertices.append(v2)
+	vertices.append(v3)
+	uvs.append(Vector2(0.0, 0.0))
+	uvs.append(Vector2(0.0, WINDOW_RECESS_DEPTH))
+	uvs.append(Vector2(WINDOW_SIZE * 0.1, WINDOW_RECESS_DEPTH))
+	uvs.append(Vector2(WINDOW_SIZE * 0.1, 0.0))
+	normals.append(normal)
+	normals.append(normal)
+	normals.append(normal)
+	normals.append(normal)
+	indices.append(idx + 0)
+	indices.append(idx + 1)
+	indices.append(idx + 2)
+	indices.append(idx + 0)
+	indices.append(idx + 2)
+	indices.append(idx + 3)
 
 
 func _is_polygon_ccw(points: PackedVector2Array) -> bool:
@@ -11820,8 +12034,9 @@ func _add_building_night_decorations(building_mesh: MeshInstance3D, points: Pack
 		_add_neon_sign(center, building_height, building_width, rng, parent, building_depth, building_elev)
 		_neon_signs_created += 1
 
-	# Добавляем светящиеся окна для зданий выше 1 этажа
-	if building_height > 3.5:
+	# Добавляем светящиеся окна для зданий с хотя бы 1 этажом окон
+	# Условие должно совпадать с wall cutout логикой в _compute_building_mesh_thread
+	if int(building_height / WINDOW_FLOOR_HEIGHT) >= 1:
 		_add_building_windows(points, building_height, rng, parent, building_elev)
 
 
@@ -11907,15 +12122,15 @@ func _add_building_windows(points: PackedVector2Array, height: float, rng: Rando
 	if points.size() < 3:
 		return
 
-	# Параметры окон
-	var floor_height := 3.0
+	# Параметры окон (используем shared constants)
+	var floor_height := WINDOW_FLOOR_HEIGHT
 	var num_floors := int(height / floor_height)
 	if num_floors < 1:
 		return
 
-	var window_size := 1.2  # Квадратные окна
-	var window_spacing := 2.5  # Расстояние между окнами
-	var wall_offset := 0.05  # Отступ окна от стены
+	var window_size := WINDOW_SIZE
+	var window_spacing := WINDOW_SPACING
+	var wall_offset := -WINDOW_RECESS_DEPTH  # Окно утоплено внутрь стены
 
 	# Цвета окон: тёплые-холодные и фитолампы
 	var warm_cold_colors := [
