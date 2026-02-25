@@ -6532,8 +6532,8 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 	var wall_normals := PackedVector3Array()
 	var wall_indices := PackedInt32Array()
 
-	var uv_scale_x := 0.1
-	var uv_scale_y := 0.1
+	var uv_scale_x := 0.4  # 1 UV unit = 2.5m (PBR кирпичные текстуры ~1м на тайл)
+	var uv_scale_y := 0.4
 	var accumulated_width := 0.0
 
 	# Определяем направление полигона для корректных нормалей
@@ -8351,8 +8351,8 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	var wall_normals := PackedVector3Array()
 	var wall_indices := PackedInt32Array()
 
-	var uv_scale_x := 0.1  # Масштаб UV по горизонтали (10м = 1 повтор текстуры)
-	var uv_scale_y := 0.1  # Масштаб UV по вертикали
+	var uv_scale_x := 0.4  # 1 UV unit = 2.5m (PBR кирпичные текстуры ~1м на тайл)
+	var uv_scale_y := 0.4
 
 	# Определяем направление полигона для корректных нормалей
 	var is_ccw := _is_polygon_ccw(points)
@@ -8811,7 +8811,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 	# UV масштаб: texture_repeat_x повторов на весь периметр (0 = авто ~10м на повтор)
 	var texture_repeat_x: float = building_override.texture_repeat_x if building_override.texture_repeat_x > 0 else 0.0
-	var uv_scale_x := texture_repeat_x / perimeter if texture_repeat_x > 0 else 0.1
+	var uv_scale_x := texture_repeat_x / perimeter if texture_repeat_x > 0 else 0.4
 
 	var is_ccw := _is_polygon_ccw(points)
 	var normal_sign := -1.0 if is_ccw else 1.0
