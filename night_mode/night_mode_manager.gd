@@ -45,6 +45,7 @@ var _day_vfog_albedo := Color(1, 1, 1)
 var _day_vfog_emission := Color(0, 0, 0)
 var _day_vfog_emission_energy := 0.0
 var _day_vfog_ambient_inject := 0.0
+var _day_vfog_gi_inject := 0.0
 var _day_vfog_detail_spread := 0.8
 var _day_vfog_length := 200.0
 
@@ -123,6 +124,7 @@ func _find_scene_components() -> void:
 			_day_vfog_emission = _environment.volumetric_fog_emission
 			_day_vfog_emission_energy = _environment.volumetric_fog_emission_energy
 			_day_vfog_ambient_inject = _environment.volumetric_fog_ambient_inject
+			_day_vfog_gi_inject = _environment.volumetric_fog_gi_inject
 			_day_vfog_detail_spread = _environment.volumetric_fog_detail_spread
 			_day_vfog_length = _environment.volumetric_fog_length
 
@@ -446,6 +448,7 @@ func enable_night_mode() -> void:
 		_environment.volumetric_fog_emission = Color(0.02, 0.01, 0.03)  # Слабое фиолетовое свечение
 		_environment.volumetric_fog_emission_energy = 0.3
 		_environment.volumetric_fog_ambient_inject = 0.1
+		_environment.volumetric_fog_gi_inject = 1.0  # Emission от окон рассеивается в тумане
 		_environment.volumetric_fog_detail_spread = 0.3
 		_environment.volumetric_fog_length = 200.0
 		_environment.volumetric_fog_temporal_reprojection_enabled = true
@@ -516,6 +519,7 @@ func disable_night_mode() -> void:
 		_environment.volumetric_fog_emission = _day_vfog_emission
 		_environment.volumetric_fog_emission_energy = _day_vfog_emission_energy
 		_environment.volumetric_fog_ambient_inject = _day_vfog_ambient_inject
+		_environment.volumetric_fog_gi_inject = _day_vfog_gi_inject
 		_environment.volumetric_fog_detail_spread = _day_vfog_detail_spread
 		_environment.volumetric_fog_length = _day_vfog_length
 

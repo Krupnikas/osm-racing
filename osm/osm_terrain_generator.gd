@@ -176,6 +176,7 @@ var _building_geo_finalize_queue: Array[String] = []  # Очередь chunk_key
 var _window_finalize_queue: Array[String] = []  # Progressive window finalization queue
 var _window_finalize_progress: Dictionary = {}  # chunk_key -> {buf, offset, mm, transforms, colors, parent, mat, mm_instance}
 var _building_wall_materials: Dictionary = {}  # texture_type -> ShaderMaterial (shared)
+var _building_recess_materials: Dictionary = {}  # texture_type -> ShaderMaterial (with vertex emission)
 var _building_roof_material: StandardMaterial3D = null  # shared
 var _building_parapet_material: ShaderMaterial = null  # shared (uses wall shader for FRONT_FACING fix)
 var _building_foundation_materials: Array[StandardMaterial3D] = []  # 4 random colors
@@ -597,6 +598,24 @@ func _init_textures() -> void:
 			mat.set_shader_parameter("roughness_texture", _wall_roughness_textures[tex_type])
 			mat.set_shader_parameter("use_roughness_texture", true)
 		_building_wall_materials[tex_type] = mat
+		# Recess material — same textures but with vertex color emission for window glow
+		var recess_mat := ShaderMaterial.new()
+		recess_mat.shader = BuildingWallShader
+		if _building_textures.has(tex_type):
+			recess_mat.set_shader_parameter("albedo_texture", _building_textures[tex_type])
+			recess_mat.set_shader_parameter("use_texture", true)
+		else:
+			recess_mat.set_shader_parameter("albedo_color", Color(0.7, 0.6, 0.5))
+			recess_mat.set_shader_parameter("use_texture", false)
+		if _wall_normal_textures.get(tex_type):
+			recess_mat.set_shader_parameter("normal_texture", _wall_normal_textures[tex_type])
+			recess_mat.set_shader_parameter("use_normal", true)
+			recess_mat.set_shader_parameter("normal_strength", 1.0)
+		if _wall_roughness_textures.get(tex_type):
+			recess_mat.set_shader_parameter("roughness_texture", _wall_roughness_textures[tex_type])
+			recess_mat.set_shader_parameter("use_roughness_texture", true)
+		recess_mat.set_shader_parameter("use_vertex_emission", true)
+		_building_recess_materials[tex_type] = recess_mat
 
 	_building_roof_material = StandardMaterial3D.new()
 	_building_roof_material.cull_mode = BaseMaterial3D.CULL_BACK
@@ -705,6 +724,7 @@ shader_type spatial;
 render_mode specular_schlick_ggx;
 
 uniform bool is_night = false;
+uniform float emission_energy : hint_range(0.0, 8.0) = 2.5;
 
 void fragment() {
 	// Проверяем, выключено ли окно (чёрный цвет = выключено)
@@ -718,8 +738,9 @@ void fragment() {
 	if (is_night && !is_off) {
 		// Ночью включенные окна светятся
 		float brightness = COLOR.a;
-		ALBEDO = COLOR.rgb * brightness;
-		EMISSION = COLOR.rgb * brightness;
+		vec3 window_color = COLOR.rgb * brightness;
+		ALBEDO = window_color;
+		EMISSION = window_color * emission_energy;
 		ROUGHNESS = 0.1;
 	} else {
 		// Днём все окна тёмные и отражающие, ночью выключенные тоже
@@ -6680,8 +6701,25 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 	var recess_uvs := PackedVector2Array()
 	var recess_normals := PackedVector3Array()
 	var recess_indices := PackedInt32Array()
+	var recess_colors := PackedColorArray()
 
 	if wnd_num_floors >= 1:
+		# RNG для цветов окон — seed должен совпадать с _add_building_windows
+		var center := Vector2.ZERO
+		for p in points:
+			center += p
+		center /= float(points.size())
+		var wnd_rng := RandomNumberGenerator.new()
+		wnd_rng.seed = hash(Vector2(center.x, center.y)) ^ 0x57494E44  # WIND
+		var off_percent := 0.30 + wnd_rng.randf() * 0.50
+		var phyto_percent := 0.03 + wnd_rng.randf() * 0.02
+		var warm_cold_colors: Array[Color] = [
+			Color(1.0, 0.85, 0.5), Color(1.0, 0.9, 0.6), Color(1.0, 0.95, 0.75),
+			Color(0.95, 0.92, 0.85), Color(0.9, 0.92, 0.95), Color(0.85, 0.9, 1.0),
+			Color(0.75, 0.85, 1.0),
+		]
+		var phyto_color := Color(0.9, 0.2, 0.9)
+
 		for i in range(points.size()):
 			var rp1 := points[i]
 			var rp2 := points[(i + 1) % points.size()]
@@ -6707,6 +6745,20 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 					var wall_pos := rp1 + rwall_dir_2d * along_wall
 					var center_3d := Vector3(wall_pos.x, y_center, wall_pos.y)
 
+					# Window color (same algorithm as _add_building_windows)
+					var wnd_color := Color.BLACK
+					var chance := wnd_rng.randf()
+					if chance < off_percent:
+						wnd_color = Color.BLACK  # off
+					elif chance < (1.0 - phyto_percent):
+						wnd_color = warm_cold_colors[wnd_rng.randi() % warm_cold_colors.size()]
+						wnd_color.a = 0.15 + wnd_rng.randf() * 0.35
+					else:
+						wnd_color = phyto_color
+						wnd_color.a = 0.25 + wnd_rng.randf() * 0.25
+					# Premultiply brightness into RGB for vertex color
+					var emit_color := Color(wnd_color.r * wnd_color.a, wnd_color.g * wnd_color.a, wnd_color.b * wnd_color.a, 1.0)
+
 					# Outer corners (on wall surface) — larger by WINDOW_CUT_MARGIN
 					var cut_h := wnd_half + WINDOW_CUT_MARGIN
 					var outer_tl := center_3d - rwall_dir_3d * cut_h + Vector3.UP * cut_h
@@ -6722,16 +6774,16 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 
 					# Left side — trapezoid (normal ~right into cavity)
 					_add_recess_quad(recess_vertices, recess_uvs, recess_normals, recess_indices,
-						outer_tl, outer_bl, inner_bl, inner_tl, rwall_dir_3d)
+						outer_tl, outer_bl, inner_bl, inner_tl, rwall_dir_3d, recess_colors, emit_color)
 					# Right side — trapezoid (normal ~left into cavity)
 					_add_recess_quad(recess_vertices, recess_uvs, recess_normals, recess_indices,
-						inner_tr, inner_br, outer_br, outer_tr, -rwall_dir_3d)
+						inner_tr, inner_br, outer_br, outer_tr, -rwall_dir_3d, recess_colors, emit_color)
 					# Top side — trapezoid (normal ~down into cavity)
 					_add_recess_quad(recess_vertices, recess_uvs, recess_normals, recess_indices,
-						inner_tl, inner_tr, outer_tr, outer_tl, -Vector3.UP)
+						inner_tl, inner_tr, outer_tr, outer_tl, -Vector3.UP, recess_colors, emit_color)
 					# Bottom side — trapezoid (normal ~up into cavity)
 					_add_recess_quad(recess_vertices, recess_uvs, recess_normals, recess_indices,
-						outer_bl, outer_br, inner_br, inner_bl, Vector3.UP)
+						outer_bl, outer_br, inner_br, inner_bl, Vector3.UP, recess_colors, emit_color)
 
 	# === ТРИАНГУЛЯЦИЯ КРЫШИ (плоская поверхность) ===
 	var roof_vertices := PackedVector3Array()
@@ -6915,6 +6967,7 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		"recess_uvs": recess_uvs,
 		"recess_normals": recess_normals,
 		"recess_indices": recess_indices,
+		"recess_colors": recess_colors,
 	}
 
 	_building_mutex.lock()
@@ -7038,10 +7091,13 @@ func _apply_building_mesh_result(result: Dictionary) -> void:
 		if not batch.has(recess_key):
 			recess_key = "brick_recess"
 		var recess_batch: Dictionary = batch[recess_key]
+		if not recess_batch.has("colors"):
+			recess_batch["colors"] = PackedColorArray()
 		var recess_start: int = recess_batch["vertices"].size()
 		recess_batch["vertices"].append_array(recess_verts)
 		recess_batch["uvs"].append_array(result.recess_uvs)
 		recess_batch["normals"].append_array(result.recess_normals)
+		recess_batch["colors"].append_array(result.get("recess_colors", PackedColorArray()))
 		for ri in range(result.recess_indices.size()):
 			recess_batch["indices"].append(result.recess_indices[ri] + recess_start)
 
@@ -7102,6 +7158,9 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 			arrays[Mesh.ARRAY_TEX_UV] = geo["uvs"]
 			arrays[Mesh.ARRAY_NORMAL] = geo["normals"]
 			arrays[Mesh.ARRAY_INDEX] = geo["indices"]
+			# Recess surfaces (steps 9-11) have vertex colors for window emission
+			if step >= 9 and geo.has("colors") and geo["colors"].size() == geo["vertices"].size():
+				arrays[Mesh.ARRAY_COLOR] = geo["colors"]
 
 			var arr_mesh := ArrayMesh.new()
 			arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
@@ -7117,9 +7176,9 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 			elif step < 9:
 				material = _building_foundation_materials[step - 5]
 			else:
-				# Recesses (9-11) — same material as corresponding walls
+				# Recesses (9-11) — recess material with vertex emission
 				var tex_type: String = surface_key.replace("_recess", "")
-				material = _building_wall_materials[tex_type]
+				material = _building_recess_materials.get(tex_type, _building_wall_materials[tex_type])
 
 			var rid := _rs_add_mesh(chunk_key, arr_mesh, material,
 				shadow_setting, render_distance)
@@ -9401,7 +9460,8 @@ static func _add_recess_quad(
 	vertices: PackedVector3Array, uvs: PackedVector2Array,
 	normals: PackedVector3Array, indices: PackedInt32Array,
 	v0: Vector3, v1: Vector3, v2: Vector3, v3: Vector3,
-	normal: Vector3
+	normal: Vector3, colors: PackedColorArray = PackedColorArray(),
+	color: Color = Color.BLACK
 ) -> void:
 	var idx := vertices.size()
 	vertices.append(v0)
@@ -9416,6 +9476,10 @@ static func _add_recess_quad(
 	normals.append(normal)
 	normals.append(normal)
 	normals.append(normal)
+	colors.append(color)
+	colors.append(color)
+	colors.append(color)
+	colors.append(color)
 	indices.append(idx + 0)
 	indices.append(idx + 1)
 	indices.append(idx + 2)
@@ -12201,12 +12265,18 @@ func _add_building_windows(points: PackedVector2Array, height: float, rng: Rando
 	var phyto_color := Color(0.9, 0.2, 0.9)  # Фиолетовый/маджента
 	var off_color := Color(0.0, 0.0, 0.0)  # Чёрный для выключенных окон
 
+	# Отдельный RNG для цветов окон — seed совпадает с _compute_building_mesh_thread
+	# чтобы recess-бортики светились тем же цветом что и окна
+	var center := _get_polygon_center(points)
+	var wnd_rng := RandomNumberGenerator.new()
+	wnd_rng.seed = hash(Vector2(center.x, center.y)) ^ 0x57494E44  # WIND
+
 	# Случайное распределение для этого здания:
 	# Выключено: 30-80%, Включено: 17-65%, Фитолампы: 3-5%
 	# NOTE: Цвета генерируются независимо от времени суток
 	# Shader сам решит показывать их или нет на основе is_night uniform
-	var off_percent := 0.30 + rng.randf() * 0.50  # 30% - 80%
-	var phyto_percent := 0.03 + rng.randf() * 0.02  # 3% - 5%
+	var off_percent := 0.30 + wnd_rng.randf() * 0.50  # 30% - 80%
+	var phyto_percent := 0.03 + wnd_rng.randf() * 0.02  # 3% - 5%
 	# Включённые = остаток (17% - 65%)
 
 	# Собираем трансформы и цвета окон
@@ -12251,19 +12321,19 @@ func _add_building_windows(points: PackedVector2Array, height: float, rng: Rando
 			for win_idx in range(num_windows):
 				# Выбор цвета: off_percent выключены, остальные - тёплые-холодные или фитолампы
 				var color: Color
-				var chance := rng.randf()
+				var chance := wnd_rng.randf()
 				if chance < off_percent:
 					# Выключенные окна (остаются тёмными ночью)
 					color = off_color
 				elif chance < (1.0 - phyto_percent):
 					# Тёплые до холодных оттенков (жёлтый -> белый)
-					color = warm_cold_colors[rng.randi() % warm_cold_colors.size()]
+					color = warm_cold_colors[wnd_rng.randi() % warm_cold_colors.size()]
 					# Случайная яркость от 0.15 до 0.5 (храним в альфа-канале)
-					color.a = 0.15 + rng.randf() * 0.35
+					color.a = 0.15 + wnd_rng.randf() * 0.35
 				else:
 					# Фитолампы (маджента)
 					color = phyto_color
-					color.a = 0.25 + rng.randf() * 0.25  # Фитолампы ярче
+					color.a = 0.25 + wnd_rng.randf() * 0.25  # Фитолампы ярче
 
 				# Позиция вдоль стены
 				var along_wall := start_offset + win_idx * window_spacing
