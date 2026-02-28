@@ -133,6 +133,105 @@
       "repeat_x": 3.0,
       "repeat_y": 1.0,
       "offset_x": -0.03
+    },
+    {
+      "osm_way_id": 46044485,
+      "comment": "9 Северное шоссе",
+      "wall_texture": "buildings/5-soviet-panel-5.png",
+      "repeat_y": 1.0,
+      "adaptive_repeat": {
+        "enabled": true,
+        "short": 1.0,
+        "long": 3.0
+      }
+    },
+    {
+      "osm_way_id": 46044490,
+      "comment": "7 Северное шоссе",
+      "wall_texture": "buildings/5-soviet-panel-5.png",
+      "repeat_y": 1.0,
+      "adaptive_repeat": {
+        "enabled": true,
+        "short": 1.0,
+        "long": 3.0
+      }
+    },
+    {
+      "osm_way_id": 46044491,
+      "comment": "13 Северное шоссе",
+      "wall_texture": "buildings/5-soviet-panel-5.png",
+      "repeat_y": 1.0,
+      "adaptive_repeat": {
+        "enabled": true,
+        "short": 1.0,
+        "long": 3.0
+      }
+    },
+    {
+      "osm_way_id": 46044492,
+      "comment": "17 Северное шоссе",
+      "wall_texture": "buildings/5-soviet-panel-5.png",
+      "repeat_y": 1.0,
+      "adaptive_repeat": {
+        "enabled": true,
+        "short": 1.0,
+        "long": 3.0
+      }
+    },
+    {
+      "osm_way_id": 46044493,
+      "comment": "21 Северное шоссе",
+      "wall_texture": "buildings/5-soviet-panel-5.png",
+      "repeat_y": 1.0,
+      "adaptive_repeat": {
+        "enabled": true,
+        "short": 1.0,
+        "long": 3.0
+      }
+    },
+    {
+      "osm_way_id": 46044499,
+      "comment": "23 Северное шоссе",
+      "wall_texture": "buildings/5-soviet-brick.png",
+      "repeat_y": 1.0,
+      "adaptive_repeat": {
+        "enabled": true,
+        "short": 1.0,
+        "long": 3.0
+      }
+    },
+    {
+      "osm_way_id": 46044500,
+      "comment": "27 Северное шоссе",
+      "wall_texture": "buildings/5-soviet-brick.png",
+      "repeat_y": 1.0,
+      "adaptive_repeat": {
+        "enabled": true,
+        "short": 1.0,
+        "long": 3.0
+      }
+    },
+    {
+      "osm_way_id": 46044504,
+      "comment": "29 Северное шоссе",
+      "wall_texture": "buildings/5-soviet-brick.png",
+      "repeat_y": 1.0,
+      "adaptive_repeat": {
+        "enabled": true,
+        "short": 1.0,
+        "long": 3.0
+      }
+    },
+    {
+      "osm_way_id": 45836640,
+      "comment": "31 Северное шоссе",
+      "wall_texture": "buildings/5-soviet-brick.png",
+      "repeat_y": 1.0,
+      "adaptive_repeat": {
+        "enabled": true,
+        "short": 1.0,
+        "long": 3.0
+      }
     }
   ],
   "custom_models": [
