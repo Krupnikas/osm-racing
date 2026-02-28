@@ -328,6 +328,7 @@ const ADD_CHILD_BUDGET_NORMAL := 2
 var _add_child_budget: int = 2  # Текущий бюджет (увеличен при начальной загрузке)
 var _add_child_count: int = 0
 var _deferred_add_child_queue: Array = []  # [{parent: Node, child: Node}]
+var _deferred_fence_edges: Array = []  # [{chunk_key, p1, p2, edge_idx}] — incremental fence generation
 
 # RenderingServer direct instances — bypass scene tree for zero-spike mesh display
 var _chunk_rs_instances: Dictionary = {}  # chunk_key -> Array[RID]
@@ -1291,15 +1292,20 @@ func _process(delta: float) -> void:
 	_current_frame_perf.clear()
 	_slow_frame_cooldown -= delta
 
-	# Reset add_child budget and drain deferred queue
+	# Reset add_child budget and drain deferred queue (with time budget)
 	_add_child_budget = 9999 if _initial_loading else ADD_CHILD_BUDGET_NORMAL
 	_add_child_count = 0
+	var _ac_t0 := Time.get_ticks_usec()
+	var AC_TIME_BUDGET_USEC := 500000 if _initial_loading else 2000  # 2ms normal, unlimited initial
 	while not _deferred_add_child_queue.is_empty() and _add_child_count < _add_child_budget:
+		if _add_child_count > 0 and (Time.get_ticks_usec() - _ac_t0) > AC_TIME_BUDGET_USEC:
+			break
 		var ac_item: Dictionary = _deferred_add_child_queue[0]
 		if is_instance_valid(ac_item["parent"]) and is_instance_valid(ac_item["child"]):
 			ac_item["parent"].add_child(ac_item["child"])
 			_add_child_count += 1
 		_deferred_add_child_queue.pop_front()
+	_record_perf("add_child_drain", Time.get_ticks_usec() - _ac_t0)
 
 	# Обрабатываем готовые здания из worker threads (даже на паузе)
 	var t0 := Time.get_ticks_usec()
@@ -1366,6 +1372,12 @@ func _process(delta: float) -> void:
 	_apply_terrain_thread_results()
 	var t_terrain_gen := Time.get_ticks_usec() - t0
 	_record_perf("terrain_gen", t_terrain_gen)
+
+	# Process deferred fence edges incrementally (2ms budget)
+	if not _deferred_fence_edges.is_empty():
+		t0 = Time.get_ticks_usec()
+		_process_deferred_fence_edges(t0, 2000)
+		_record_perf("fence_gen", Time.get_ticks_usec() - t0)
 
 	# Lazy chunk activation — включаем видимость через N кадров после финализации
 	_process_chunk_activation()
@@ -1461,10 +1473,12 @@ func _process(delta: float) -> void:
 		return
 
 	# Выгружаем 1 чанк за кадр (из очереди) — spread across frames
+	var _unload_t0 := Time.get_ticks_usec()
 	if not _chunks_to_unload.is_empty():
 		var unload_key: String = _chunks_to_unload.pop_front()
 		if _loaded_chunks.has(unload_key):
 			_unload_chunk(unload_key)
+	_record_perf("chunk_unload", Time.get_ticks_usec() - _unload_t0)
 
 	_check_timer += delta
 	if _check_timer < _check_interval:
@@ -1484,7 +1498,9 @@ func _process(delta: float) -> void:
 				player_pos = current_cam.global_position
 
 	# Проверяем нужны ли новые чанки
+	var _uc_t0 := Time.get_ticks_usec()
 	_update_chunks(player_pos)
+	_record_perf("update_chunks", Time.get_ticks_usec() - _uc_t0)
 
 	# Обновляем тени зданий и деревьев по расстоянию до игрока
 	_update_building_shadows(player_pos)
@@ -2128,6 +2144,15 @@ func _unload_chunk(chunk_key: String) -> void:
 		if _curb_geo_batch.has(chunk_key):
 			_curb_geo_batch.erase(chunk_key)
 
+		# Clean up fence geo batch and deferred fence edges
+		if _fence_geo_batch.has(chunk_key):
+			_fence_geo_batch.erase(chunk_key)
+		var fence_finalize_idx := _fence_batches_to_finalize.find(chunk_key)
+		if fence_finalize_idx >= 0:
+			_fence_batches_to_finalize.remove_at(fence_finalize_idx)
+		_deferred_fence_edges = _deferred_fence_edges.filter(
+			func(item): return item.chunk_key != chunk_key)
+
 		# Clean up building geometry merge batch
 		if _building_geo_batch.has(chunk_key):
 			_building_geo_batch.erase(chunk_key)
@@ -2347,6 +2372,7 @@ func reset_terrain() -> void:
 	_curb_geo_batch.clear()
 	_fence_geo_batch.clear()
 	_fence_batches_to_finalize.clear()
+	_deferred_fence_edges.clear()
 	_window_batch_data.clear()
 	_window_batch_materials.clear()
 	_pending_batch_chunks.clear()
@@ -6051,7 +6077,7 @@ func _generate_fence_segment(p1: Vector2, p2: Vector2,
 	_append_fence_box(lod1.vertices, lod1.normals, lod1.indices, rc_top, rail_hs, fwd, right)
 
 
-## Add iron bar fence along polyline to chunk batch
+## Add iron bar fence along polyline to chunk batch (deferred — queues edges for incremental processing)
 func _add_fence_to_batch(points: PackedVector2Array, parent: Node3D) -> void:
 	if points.size() < 3:
 		return
@@ -6071,11 +6097,11 @@ func _add_fence_to_batch(points: PackedVector2Array, parent: Node3D) -> void:
 	var batch: Dictionary = _fence_geo_batch[chunk_key]
 	var fence_offset := 0.3  # Match existing fence offset from contour
 
+	# Queue all edges for deferred incremental processing
 	for i in range(points.size()):
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
-		# Apply outward offset (same as old _create_fence)
 		var dir := (p2 - p1).normalized()
 		var outward := Vector2(-dir.y, dir.x) * fence_offset
 		p1 = p1 + outward
@@ -6085,21 +6111,52 @@ func _add_fence_to_batch(points: PackedVector2Array, parent: Node3D) -> void:
 		if seg_len < 0.5:
 			continue
 
-		# Store edge for collision (one box per full edge, not per subdivision)
 		batch.edges.append({"p1": p1, "p2": p2})
+		_deferred_fence_edges.append({"chunk_key": chunk_key, "p1": p1, "p2": p2, "edge_idx": i})
 
-		# Subdivide into ~2.25m sections
+	if not _fence_batches_to_finalize.has(chunk_key):
+		_fence_batches_to_finalize.append(chunk_key)
+
+
+## Process deferred fence edges incrementally (time-budgeted)
+## Each edge is subdivided into ~2.25m sections with _generate_fence_segment calls
+## Supports mid-edge resume via _fence_edge_cursor (section index within current edge)
+var _fence_edge_cursor: int = 0  # section index within current edge (for mid-edge resume)
+
+func _process_deferred_fence_edges(start_usec: int, budget_usec: int) -> void:
+	while not _deferred_fence_edges.is_empty():
+		var item: Dictionary = _deferred_fence_edges[0]
+		var chunk_key: String = item.chunk_key
+
+		# Skip if chunk was unloaded
+		if not _fence_geo_batch.has(chunk_key):
+			_deferred_fence_edges.pop_front()
+			_fence_edge_cursor = 0
+			continue
+
+		var batch: Dictionary = _fence_geo_batch[chunk_key]
+		var p1: Vector2 = item.p1
+		var p2: Vector2 = item.p2
+		var edge_idx: int = item.edge_idx
+		var seg_len := p1.distance_to(p2)
 		var num_sections := maxi(1, int(round(seg_len / 2.25)))
-		for j in range(num_sections):
+
+		# Process sections starting from cursor (supports mid-edge resume)
+		while _fence_edge_cursor < num_sections:
+			if (Time.get_ticks_usec() - start_usec) > budget_usec:
+				return  # Budget exhausted, resume next frame from _fence_edge_cursor
+			var j := _fence_edge_cursor
 			var t1 := float(j) / float(num_sections)
 			var t2 := float(j + 1) / float(num_sections)
 			var sp1 := p1.lerp(p2, t1)
 			var sp2 := p1.lerp(p2, t2)
-			var seed_val := int(sp1.x * 1000.0) ^ int(sp1.y * 1000.0) ^ (i * 997 + j)
+			var seed_val := int(sp1.x * 1000.0) ^ int(sp1.y * 1000.0) ^ (edge_idx * 997 + j)
 			_generate_fence_segment(sp1, sp2, batch.lod0, batch.lod1, seed_val)
+			_fence_edge_cursor += 1
 
-	if not _fence_batches_to_finalize.has(chunk_key):
-		_fence_batches_to_finalize.append(chunk_key)
+		# Edge fully processed
+		_deferred_fence_edges.pop_front()
+		_fence_edge_cursor = 0
 
 
 ## Finalize fence batch: create two RS instances (LOD0 + LOD1) per chunk
@@ -7596,12 +7653,21 @@ func _process_road_queue() -> void:
 				7:  # Fences (1 chunk)
 					_finalize_phase = 0
 					if not _fence_batches_to_finalize.is_empty():
-						var t_fence := Time.get_ticks_usec()
 						var chunk_key: String = _fence_batches_to_finalize[0]
-						_fence_batches_to_finalize.remove_at(0)
-						_finalize_fence_batches_for_chunk(chunk_key)
-						_record_perf("fin_fences", Time.get_ticks_usec() - t_fence)
-						did_work = true
+						# Don't finalize if deferred edges still pending for this chunk
+						var has_pending_edges := false
+						for fe in _deferred_fence_edges:
+							if fe.chunk_key == chunk_key:
+								has_pending_edges = true
+								break
+						if has_pending_edges:
+							did_work = true  # keep cycling
+						else:
+							var t_fence := Time.get_ticks_usec()
+							_fence_batches_to_finalize.remove_at(0)
+							_finalize_fence_batches_for_chunk(chunk_key)
+							_record_perf("fin_fences", Time.get_ticks_usec() - t_fence)
+							did_work = true
 
 		return
 
@@ -9301,17 +9367,8 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 		uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
 		normals.append(Vector3.UP)
 
-	# Фильтруем треугольники, попадающие на дороги
-	for ti in range(0, indices.size(), 3):
-		var i0: int = indices[ti]
-		var i1: int = indices[ti + 1]
-		var i2: int = indices[ti + 2]
-		var center := (points[i0] + points[i1] + points[i2]) / 3.0
-		if _is_point_near_road(center, 0.0):
-			continue
-		tri_indices.append(i0)
-		tri_indices.append(i1)
-		tri_indices.append(i2)
+	# Просто используем все треугольники — дороги рендерятся поверх (height_offset=-0.02)
+	tri_indices = indices
 
 	if tri_indices.is_empty():
 		return
@@ -11970,23 +12027,11 @@ func _update_building_shadows(player_pos: Vector3) -> void:
 			RenderingServer.instance_geometry_set_cast_shadows_setting(rid, want_shadow)
 
 
-func _update_tree_shadows(player_pos: Vector3) -> void:
-	var shadow_dist_sq: float = _tree_shadow_lod_distance * _tree_shadow_lod_distance
-	for chunk_key: String in _chunk_tree_shadow_nodes:
-		var parts: PackedStringArray = chunk_key.split(",")
-		var cx: float = float(parts[0]) * chunk_size + chunk_size * 0.5
-		var cz: float = float(parts[1]) * chunk_size + chunk_size * 0.5
-		var dx: float = player_pos.x - cx
-		var dz: float = player_pos.z - cz
-		var dist_sq: float = dx * dx + dz * dz
-		var want_shadow: int
-		if dist_sq < shadow_dist_sq:
-			want_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
-		else:
-			want_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		for node: MultiMeshInstance3D in _chunk_tree_shadow_nodes[chunk_key]:
-			if is_instance_valid(node):
-				node.cast_shadow = want_shadow
+func _update_tree_shadows(_player_pos: Vector3) -> void:
+	# Tree shadows always ON — shadow mesh is a simplified cross (8 verts per tree in MultiMesh),
+	# the cost is negligible. Disabling shadow LOD prevents the visible "pop" when all tree shadows
+	# in a chunk switch on/off at once.
+	pass
 
 
 func _setup_render_distance() -> void:
