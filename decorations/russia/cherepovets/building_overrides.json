@@ -109,6 +109,30 @@
       "shop_entrances": [
         {"lat": 59.148141, "lon": 37.947518, "sign_logo": "sytyi-pryany.png"}
       ]
+    },
+    {
+      "osm_way_id": 46044497,
+      "comment": "15 Северное шоссе",
+      "wall_texture": "buildings/124-124-4.jpg",
+      "repeat_x": 3.0,
+      "repeat_y": 1.0,
+      "offset_x": -0.03
+    },
+    {
+      "osm_way_id": 46044496,
+      "comment": "19 Северное шоссе",
+      "wall_texture": "buildings/124-124-4.jpg",
+      "repeat_x": 3.0,
+      "repeat_y": 1.0,
+      "offset_x": -0.03
+    },
+    {
+      "osm_way_id": 46044498,
+      "comment": "11 Северное шоссе",
+      "wall_texture": "buildings/124-124-4.jpg",
+      "repeat_x": 3.0,
+      "repeat_y": 1.0,
+      "offset_x": -0.03
     }
   ],
   "custom_models": [
