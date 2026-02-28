@@ -232,6 +232,39 @@
         "short": 1.0,
         "long": 4.0
       }
+    },
+    {
+      "osm_way_id": 45903551,
+      "comment": "46 Остинская улица (9-этажка особой формы)",
+      "wall_texture": "buildings/9-of-3-soviet-panel.png",
+      "repeat_y": 3.0,
+      "adaptive_repeat": {
+        "enabled": true,
+        "short": 0.5,
+        "long": 1.0
+      }
+    },
+    {
+      "osm_way_id": 45903552,
+      "comment": "44 Остинская улица (9-этажка особой формы)",
+      "wall_texture": "buildings/9-of-3-soviet-panel.png",
+      "repeat_y": 3.0,
+      "adaptive_repeat": {
+        "enabled": true,
+        "short": 0.5,
+        "long": 1.0
+      }
+    },
+    {
+      "osm_way_id": 45903553,
+      "comment": "42 Остинская улица (9-этажка особой формы)",
+      "wall_texture": "buildings/9-of-3-soviet-panel.png",
+      "repeat_y": 3.0,
+      "adaptive_repeat": {
+        "enabled": true,
+        "short": 0.5,
+        "long": 1.0
+      }
     }
   ],
   "custom_models": [
