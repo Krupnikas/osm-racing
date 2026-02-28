@@ -14263,8 +14263,8 @@ func _update_chunk_culling() -> void:
 		var nearest_z := clampf(car_pos.z, aabb_min.z, aabb_max.z)
 		var dist_to_edge := car_pos.distance_to(Vector3(nearest_x, car_pos.y, nearest_z))
 
-		# Ближние чанки (< 200м до ребра) — всегда видимы
-		if dist_to_edge < 200.0:
+		# Ближние чанки (< chunk_size до ребра) — всегда видимы
+		if dist_to_edge < chunk_size:
 			if not chunk_node.visible:
 				chunk_node.visible = true
 				if _chunk_rs_instances.has(chunk_key):
