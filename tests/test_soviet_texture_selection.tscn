@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://chjwve3vvh8yy"]
+
+[ext_resource type="Script" path="res://tests/test_soviet_texture_selection.gd" id="1"]
+
+[node name="TestSovietTextureSelection" type="Node"]
+script = ExtResource("1")

@@ -5196,20 +5196,40 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		_create_3d_building(points, override_color, building_height, parent, base_elev, debug_name)
 		print("OSM: Building override applied for way %d with color %s" % [way_id, override_color])
 	else:
-		# Определяем тип текстуры здания
-		var building_type: String = str(tags.get("building", "yes"))
-		var texture_type := "panel"  # По умолчанию панельки
-		if building_height > 15.0:
-			texture_type = "panel"  # Высотки - панельные
-		elif building_type in ["house", "detached", "semidetached_house"]:
-			texture_type = "brick"  # Частные дома - кирпич
-		elif building_type in ["industrial", "warehouse", "garage", "garages"]:
-			texture_type = "wall"  # Промышленные - простая штукатурка
-		else:
-			texture_type = "brick"  # Остальное - кирпич
+		# Проверяем, подходит ли здание для случайной советской текстуры
+		var use_soviet_texture := false
+		var soviet_texture_path := ""
 
-		# Используем многопоточную генерацию зданий
-		_queue_building_for_thread(points, building_height, texture_type, parent, base_elev, distance_to_player)
+		# Критерий 1: Нет override (уже подтверждено, т.к. мы в else)
+		# Критерий 2: Только Череповец
+		# Критерий 3: 5 этажей
+		if _is_cherepovets_location() and _is_5_story_building(building_height, tags):
+			use_soviet_texture = true
+			soviet_texture_path = _get_random_soviet_texture(way_id, tags)
+
+		if use_soviet_texture:
+			# Создаём динамический BuildingOverride со случайной текстурой
+			# ТОЛЬКО текстура + вертикальное повторение (1×). Без масштабов, без адаптивности.
+			var temp_override = BuildingOverride.new()
+			temp_override.wall_texture_path = soviet_texture_path
+			temp_override.texture_repeat_y = 1.0
+
+			_create_3d_building_with_custom_texture(points, building_height, temp_override, parent, base_elev, debug_name)
+		else:
+			# Оригинальная логика текстур по умолчанию
+			var building_type: String = str(tags.get("building", "yes"))
+			var texture_type := "panel"  # По умолчанию панельки
+			if building_height > 15.0:
+				texture_type = "panel"  # Высотки - панельные
+			elif building_type in ["house", "detached", "semidetached_house"]:
+				texture_type = "brick"  # Частные дома - кирпич
+			elif building_type in ["industrial", "warehouse", "garage", "garages"]:
+				texture_type = "wall"  # Промышленные - простая штукатурка
+			else:
+				texture_type = "brick"  # Остальное - кирпич
+
+			# Используем многопоточную генерацию зданий
+			_queue_building_for_thread(points, building_height, texture_type, parent, base_elev, distance_to_player)
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
@@ -8938,9 +8958,12 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		var mid := sorted_widths.size() / 2
 		median_width = sorted_widths[mid]
 
-	# UV масштаб: texture_repeat_x повторов на весь периметр (0 = авто ~10м на повтор)
+	# UV масштаб: texture_repeat_x повторов на весь периметр (0 = авто)
+	# Дефолт для ВСЕХ кастомных текстур: 0.1 (старый масштаб)
+	# Процедурные PBR-текстуры используют 0.4 в других функциях
 	var texture_repeat_x: float = building_override.texture_repeat_x if building_override.texture_repeat_x > 0 else 0.0
-	var uv_scale_x := texture_repeat_x / perimeter if texture_repeat_x > 0 else 0.4
+	var default_uv_scale := 0.1  # Кастомные текстуры (фото и советские .png) используют старый дефолт
+	var uv_scale_x := texture_repeat_x / perimeter if texture_repeat_x > 0 else default_uv_scale
 	var uv_offset_x: float = building_override.texture_offset_x
 
 	var is_ccw := _is_polygon_ccw(points)
@@ -14315,3 +14338,54 @@ func _update_chunk_culling() -> void:
 		print("Culling: %d visible, %d culled (frustum), loaded: %d" % [
 			visible_count, culled_count, _loaded_chunks.size()
 		])
+
+
+## Проверяет, находится ли текущая локация в Череповце
+func _is_cherepovets_location() -> bool:
+	# Простая проверка: если decoration_layer загружен, значит Череповец
+	# (decoration_layer загружается только для активированных городов)
+	return _decoration_layer != null
+
+
+## Проверяет, является ли здание пятиэтажным
+func _is_5_story_building(height: float, tags: Dictionary) -> bool:
+	# Метод 1: Проверка явного тега levels
+	if tags.has("building:levels"):
+		var levels_str := str(tags.get("building:levels", ""))
+		if levels_str.is_valid_int():
+			var levels := int(levels_str)
+			if levels == 5:
+				return true
+
+	# Метод 2: Проверка диапазона высоты (5 этажей × 3.2м ≈ 15-16.5м)
+	if height >= 15.0 and height <= 16.5:
+		return true
+
+	return false
+
+
+## Возвращает советскую текстуру на основе материала здания (детерминированную по way_id)
+func _get_random_soviet_texture(way_id: int, tags: Dictionary) -> String:
+	# Панельные текстуры (5 вариантов)
+	const PANEL_TEXTURES := [
+		"res://textures/buildings/5-soviet-panel.png",
+		"res://textures/buildings/5-soviet-panel-2.png",
+		"res://textures/buildings/5-soviet-panel-3.png",
+		"res://textures/buildings/5-soviet-panel-4.png",
+		"res://textures/buildings/5-soviet-panel-5.png"
+	]
+
+	# Кирпичная текстура (1 вариант)
+	const BRICK_TEXTURE := "res://textures/buildings/5-soviet-brick.png"
+
+	# Определяем материал из OSM тегов
+	var material := str(tags.get("building:material", ""))
+
+	# Кирпичные здания
+	if material == "brick":
+		return BRICK_TEXTURE
+
+	# Панельные здания (concrete, panel) или по умолчанию
+	# Используем way_id как seed для консистентных результатов между запусками игры
+	var index := way_id % PANEL_TEXTURES.size()
+	return PANEL_TEXTURES[index]

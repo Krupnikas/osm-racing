@@ -142,7 +142,7 @@
       "adaptive_repeat": {
         "enabled": true,
         "short": 1.0,
-        "long": 3.0
+        "long": 4.0
       }
     },
     {
@@ -153,7 +153,7 @@
       "adaptive_repeat": {
         "enabled": true,
         "short": 1.0,
-        "long": 3.0
+        "long": 4.0
       }
     },
     {
@@ -164,7 +164,7 @@
       "adaptive_repeat": {
         "enabled": true,
         "short": 1.0,
-        "long": 3.0
+        "long": 4.0
       }
     },
     {
@@ -175,7 +175,7 @@
       "adaptive_repeat": {
         "enabled": true,
         "short": 1.0,
-        "long": 3.0
+        "long": 4.0
       }
     },
     {
@@ -186,7 +186,7 @@
       "adaptive_repeat": {
         "enabled": true,
         "short": 1.0,
-        "long": 3.0
+        "long": 4.0
       }
     },
     {
@@ -197,7 +197,7 @@
       "adaptive_repeat": {
         "enabled": true,
         "short": 1.0,
-        "long": 3.0
+        "long": 4.0
       }
     },
     {
@@ -208,7 +208,7 @@
       "adaptive_repeat": {
         "enabled": true,
         "short": 1.0,
-        "long": 3.0
+        "long": 4.0
       }
     },
     {
@@ -219,7 +219,7 @@
       "adaptive_repeat": {
         "enabled": true,
         "short": 1.0,
-        "long": 3.0
+        "long": 4.0
       }
     },
     {
@@ -230,7 +230,7 @@
       "adaptive_repeat": {
         "enabled": true,
         "short": 1.0,
-        "long": 3.0
+        "long": 4.0
       }
     }
   ],
