@@ -322,6 +322,7 @@ var _deferred_footway_queue: Array = []  # [{smoothed_points, width, tags, paren
 var _deferred_billboard_queue: Array = []  # [{billboard, elevation, parent}]
 var _finalize_phase: int = 0  # Round-robin: 0=roads, 1=curbs, 2=lamps, 3=buildings, 4=windows, 5=trees, 6=billboards
 var _chunk_activation_pending: Dictionary = {}  # chunk_key -> state (-1=waiting, >=0=RS activation index)
+var _chunk_culling_cooldown: Dictionary = {}  # chunk_key -> timestamp (ms) — don't cull recently activated chunks
 
 # Global add_child budget — limits scene tree insertions per frame
 const ADD_CHILD_BUDGET_NORMAL := 2
@@ -1533,6 +1534,7 @@ func start_loading() -> void:
 	_deferred_traffic_queue.clear()
 	_deferred_billboard_queue.clear()
 	_chunk_activation_pending.clear()
+	_chunk_culling_cooldown.clear()
 	_intersection_positions.clear()  # Очищаем перекрёстки
 	_intersection_radii.clear()
 	_intersection_angles.clear()
@@ -2105,6 +2107,7 @@ func _load_chunk_at_position(pos: Vector3) -> void:
 
 func _unload_chunk(chunk_key: String) -> void:
 	if _loaded_chunks.has(chunk_key):
+		_chunk_culling_cooldown.erase(chunk_key)
 		# NEW: Clean up lamp batch data if not yet finalized
 		if _lamp_batch_data.has(chunk_key):
 			_lamp_batch_data.erase(chunk_key)
@@ -2357,6 +2360,7 @@ func reset_terrain() -> void:
 	_deferred_traffic_queue.clear()
 	_deferred_billboard_queue.clear()
 	_chunk_activation_pending.clear()
+	_chunk_culling_cooldown.clear()
 
 	# Clear ALL batching data on reset
 	_lamp_batch_data.clear()
@@ -14018,7 +14022,7 @@ func _process_chunk_activation() -> void:
 					if is_instance_valid(cn):
 						cn.visible = true
 				_chunk_activation_pending.erase(chunk_key)
-				print("OSM: Activated chunk %s (lazy, no RS)" % chunk_key)
+				_chunk_culling_cooldown[chunk_key] = Time.get_ticks_msec() + 3000
 				continue
 
 			var instances: Array = _chunk_rs_instances[chunk_key]
@@ -14027,7 +14031,6 @@ func _process_chunk_activation() -> void:
 			while i < end_idx:
 				RenderingServer.instance_set_visible(instances[i], true)
 				i += 1
-
 			if end_idx >= instances.size():
 				# Все RS instances активированы — включаем scene tree node
 				if _loaded_chunks.has(chunk_key):
@@ -14035,7 +14038,7 @@ func _process_chunk_activation() -> void:
 					if is_instance_valid(cn):
 						cn.visible = true
 				_chunk_activation_pending.erase(chunk_key)
-				print("OSM: Activated chunk %s (lazy, %d RS)" % [chunk_key, instances.size()])
+				_chunk_culling_cooldown[chunk_key] = Time.get_ticks_msec() + 3000
 			else:
 				_chunk_activation_pending[chunk_key] = end_idx
 
@@ -14233,6 +14236,13 @@ func _update_chunk_culling() -> void:
 		# Пропускаем чанки в процессе lazy activation
 		if _chunk_activation_pending.has(chunk_key):
 			continue
+		# Don't cull recently activated chunks (3s cooldown to prevent appear/disappear/appear)
+		if _chunk_culling_cooldown.has(chunk_key):
+			if Time.get_ticks_msec() < _chunk_culling_cooldown[chunk_key]:
+				visible_count += 1
+				continue
+			else:
+				_chunk_culling_cooldown.erase(chunk_key)
 
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
 		if not is_instance_valid(chunk_node):
@@ -14255,7 +14265,11 @@ func _update_chunk_culling() -> void:
 
 		# Ближние чанки (< 200м до ребра) — всегда видимы
 		if dist_to_edge < 200.0:
-			chunk_node.visible = true
+			if not chunk_node.visible:
+				chunk_node.visible = true
+				if _chunk_rs_instances.has(chunk_key):
+					for rid in _chunk_rs_instances[chunk_key]:
+						RenderingServer.instance_set_visible(rid, true)
 			visible_count += 1
 			continue
 
@@ -14286,7 +14300,13 @@ func _update_chunk_culling() -> void:
 		else:
 			visible_count += 1
 
-		chunk_node.visible = not should_hide
+		var want_visible := not should_hide
+		if chunk_node.visible != want_visible:
+			chunk_node.visible = want_visible
+			# Also toggle RS instances (roads, buildings, fences, terrain)
+			if _chunk_rs_instances.has(chunk_key):
+				for rid in _chunk_rs_instances[chunk_key]:
+					RenderingServer.instance_set_visible(rid, want_visible)
 
 	# DEBUG: раз в 5 секунд (~25 вызовов culling при 200ms интервале)
 	_culling_debug_counter += 1
