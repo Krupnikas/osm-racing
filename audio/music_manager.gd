@@ -19,6 +19,8 @@ var track_info := {
 	"maloy_dzhon_ron_don_don.ogg": ["Малой Джон", "Рон дон дон"],
 	"radio_tapok_edinstvenniy.ogg": ["Радио Тапок", "Единственный"],
 	"tuhliy_bez_kontrolya.ogg": ["Тухлый", "Без контроля"],
+	"luka_fiasko_v_tilte.mp3": ["Лука Фиаско", "В тильте"],
+	"rps_delay_delo.mp3": ["Р₽С", "Делай дело (feat. Молодой Дро)"],
 }
 
 # Audio player
@@ -41,6 +43,11 @@ func _ready() -> void:
 	# Запускаем первый трек
 	play_track(0)
 
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.physical_keycode == KEY_M:
+			play_next_track()
+
 func _initialize_playlist() -> void:
 	"""Инициализирует список треков"""
 	playlist = [
@@ -51,6 +58,8 @@ func _initialize_playlist() -> void:
 		"res://audio/music/maloy_dzhon_ron_don_don.ogg",
 		"res://audio/music/radio_tapok_edinstvenniy.ogg",
 		"res://audio/music/tuhliy_bez_kontrolya.ogg",
+		"res://audio/music/luka_fiasko_v_tilte.mp3",
+		"res://audio/music/rps_delay_delo.mp3",
 	]
 
 func play_track(index: int) -> void:
