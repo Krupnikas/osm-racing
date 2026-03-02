@@ -28,7 +28,7 @@ var current_cache_key: String = ""
 
 func _ready() -> void:
 	http_request = HTTPRequest.new()
-	http_request.timeout = 5.0  # 5 seconds timeout to clear stuck chunks
+	http_request.timeout = 1.0  # 1 second timeout to quickly fail over to the next server
 	add_child(http_request)
 	http_request.request_completed.connect(_on_request_completed)
 	_ensure_cache_dir()
@@ -174,7 +174,7 @@ func _try_next_server(reason: String) -> void:
 
 func _on_request_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	if result == HTTPRequest.RESULT_TIMEOUT:
-		_try_next_server("Request timed out (5s)")
+		_try_next_server("Request timed out (1s)")
 		return
 
 	if result != HTTPRequest.RESULT_SUCCESS:

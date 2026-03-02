@@ -88,7 +88,7 @@ var _camera: Camera3D
 var _profiler: PerformanceProfiler  # Для измерения производительности
 var _loaded_chunks: Dictionary = {}  # key: "x,z" -> value: Node3D (chunk node)
 var _loading_chunks: Dictionary = {}  # key: "x,z" -> value: {"time": timestamp, "loader": loader_node}
-const CHUNK_LOAD_TIMEOUT := 20.0  # Max total time (seconds). Allows OSMLoader 3 attempts x 5s plugin timeout.
+const CHUNK_LOAD_TIMEOUT := 3.0  # Max total load time (seconds) before force-recovering stuck slots.
 var _last_check_pos := Vector3.ZERO
 var _check_interval := 0.5  # Проверка каждые 0.5 сек
 var _check_timer := 0.0
