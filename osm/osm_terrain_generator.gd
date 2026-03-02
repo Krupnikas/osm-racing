@@ -4166,11 +4166,16 @@ func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
 			on_road[i] = false
 
 	var is_tagged_crossing: bool = item.tags.get("footway", "") == "crossing"
+
+	# Path: целиком через polygon clipping (обрезается road corridors как terrain)
+	_add_path_clipped_to_batch(smoothed_points, width, 0.23, parent)
+
+	# Crossing: splitting по on_road для определения on-road portions (зебра)
 	var current_pts := PackedVector2Array()
 	current_pts.append(smoothed_points[0])
 	var current_on: bool = on_road[0]
 	var last_off_road_pt := smoothed_points[0]
-	var has_before_off: bool = not on_road[0]  # Только если первая точка реально за пределами дороги
+	var has_before_off: bool = not on_road[0]
 	for i in range(1, smoothed_points.size()):
 		if on_road[i] != current_on:
 			var edge_pt := _find_road_edge_point(smoothed_points[i - 1], current_on, smoothed_points[i])
@@ -4183,7 +4188,6 @@ func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
 						if enable_crossing_signs:
 							_enqueue_crossing_signs(current_pts, parent)
 				else:
-					_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
 					last_off_road_pt = smoothed_points[i - 1]
 					has_before_off = true
 			current_pts = PackedVector2Array()
@@ -4201,8 +4205,6 @@ func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
 				_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
 				if enable_crossing_signs:
 					_enqueue_crossing_signs(current_pts, parent)
-		else:
-			_add_road_to_batch_fast(current_pts, width, "path", 0.23, parent)
 	return true
 
 
@@ -4301,6 +4303,165 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 		batch["indices"].append(idx + 0)
 		batch["indices"].append(idx + 2)
 		batch["indices"].append(idx + 3)
+
+
+## Добавляет тротуар (path) как polygon, обрезанный road corridors + intersections.
+## Результат обрезается точно по бордюру, как terrain.
+func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, height_offset: float, parent: Node3D) -> void:
+	if raw_points.size() < 2:
+		return
+
+	var chunk_key := ""
+	if parent.name.begins_with("Chunk_"):
+		chunk_key = parent.name.substr(6)
+	else:
+		chunk_key = "initial"
+
+	# 1. Строим corridor polygon из points + width
+	var validated: PackedVector2Array = _validate_road_direction(raw_points)
+	if validated.size() < 2:
+		return
+	var half_w: float = width * 0.5
+	var n_pts: int = validated.size()
+	var perps := PackedVector2Array()
+	perps.resize(n_pts)
+	for i in range(n_pts):
+		var perp: Vector2
+		if i == 0:
+			var d: Vector2 = (validated[1] - validated[0]).normalized()
+			perp = Vector2(-d.y, d.x)
+		elif i == n_pts - 1:
+			var d: Vector2 = (validated[i] - validated[i - 1]).normalized()
+			perp = Vector2(-d.y, d.x)
+		else:
+			var d: Vector2 = (validated[i + 1] - validated[i]).normalized()
+			perp = Vector2(-d.y, d.x)
+		perps[i] = perp
+	var corridor := PackedVector2Array()
+	for i in range(n_pts):
+		corridor.append(validated[i] - perps[i] * half_w)
+	for i in range(n_pts - 1, -1, -1):
+		corridor.append(validated[i] + perps[i] * half_w)
+
+	# 2. Обрезка по bbox чанка + начальная инициализация polys
+	var polys: Array[PackedVector2Array]
+	var ck_x := 0
+	var ck_z := 0
+	if chunk_key != "initial":
+		var ck_parts: PackedStringArray = chunk_key.split(",")
+		ck_x = int(ck_parts[0])
+		ck_z = int(ck_parts[1])
+		var margin := width + 2.0
+		var chunk_rect := PackedVector2Array([
+			Vector2(float(ck_x) * chunk_size - margin, float(ck_z) * chunk_size - margin),
+			Vector2(float(ck_x + 1) * chunk_size + margin, float(ck_z) * chunk_size - margin),
+			Vector2(float(ck_x + 1) * chunk_size + margin, float(ck_z + 1) * chunk_size + margin),
+			Vector2(float(ck_x) * chunk_size - margin, float(ck_z + 1) * chunk_size + margin),
+		])
+		polys = Geometry2D.intersect_polygons(corridor, chunk_rect)
+	else:
+		polys = [corridor]
+	if polys.is_empty():
+		return
+
+	# 3. Клипим road corridors (обрезаем тротуар по дорогам)
+	if chunk_key != "initial":
+		var terrain_roads: Array = []
+		for dx in range(-1, 2):
+			for dz in range(-1, 2):
+				var nk := "%d,%d" % [ck_x + dx, ck_z + dz]
+				if _chunk_terrain_roads.has(nk):
+					terrain_roads.append_array(_chunk_terrain_roads[nk])
+		for road_corridor in terrain_roads:
+			if road_corridor.size() < 4:
+				continue
+			var new_polys: Array[PackedVector2Array] = []
+			for poly in polys:
+				var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, road_corridor)
+				for cp in clipped:
+					if cp.size() >= 3:
+						new_polys.append(cp)
+			polys = new_polys
+			if polys.is_empty():
+				return
+
+	# 4. Клипим intersection contours
+	if not polys.is_empty():
+		var ch_min_x := float(ck_x) * chunk_size
+		var ch_max_x := ch_min_x + chunk_size
+		var ch_min_z := float(ck_z) * chunk_size
+		var ch_max_z := ch_min_z + chunk_size
+		for i in range(_intersection_contours.size()):
+			var contour: PackedVector2Array = _intersection_contours[i]
+			if contour.size() < 3:
+				continue
+			if chunk_key != "initial" and i < _intersection_positions.size():
+				var ipos: Vector2 = _intersection_positions[i]
+				if ipos.x < ch_min_x - 30.0 or ipos.x > ch_max_x + 30.0 or ipos.y < ch_min_z - 30.0 or ipos.y > ch_max_z + 30.0:
+					continue
+			var new_polys: Array[PackedVector2Array] = []
+			for poly in polys:
+				var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, contour)
+				for cp in clipped:
+					if cp.size() >= 3:
+						new_polys.append(cp)
+			polys = new_polys
+			if polys.is_empty():
+				return
+
+	# 5. Клипим parking polygons
+	if not polys.is_empty():
+		for parking_poly in _parking_polygons:
+			if parking_poly.size() < 3:
+				continue
+			var new_polys: Array[PackedVector2Array] = []
+			for poly in polys:
+				var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, parking_poly)
+				for cp in clipped:
+					if cp.size() >= 3:
+						new_polys.append(cp)
+			polys = new_polys
+			if polys.is_empty():
+				return
+
+	# 6. Фильтрация мелких осколков
+	var filtered: Array[PackedVector2Array] = []
+	for poly in polys:
+		if poly.size() >= 3 and absf(_polygon_area(poly)) >= 0.5:
+			filtered.append(poly)
+	if filtered.is_empty():
+		return
+
+	# 7. Добавляем в road batch (триангулированные полигоны)
+	if not _road_batch_data.has(chunk_key):
+		_road_batch_data[chunk_key] = {}
+	var texture_key := "path"
+	if not _road_batch_data[chunk_key].has(texture_key):
+		_road_batch_data[chunk_key][texture_key] = {
+			"vertices": PackedVector3Array(),
+			"uvs": PackedVector2Array(),
+			"normals": PackedVector3Array(),
+			"indices": PackedInt32Array(),
+			"parent": parent
+		}
+	var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
+
+	var hash_val: int = int(abs(validated[0].x * 1000 + validated[0].y * 7919)) % 100
+	var z_offset: float = hash_val * 0.00003
+	var h: float = height_offset + z_offset
+	var uv_scale: float = 1.0 / width
+
+	for poly in filtered:
+		var indices := Geometry2D.triangulate_polygon(poly)
+		if indices.size() < 3:
+			continue
+		var base_idx: int = batch["vertices"].size()
+		for p in poly:
+			batch["vertices"].append(Vector3(p.x, h, p.y))
+			batch["uvs"].append(Vector2(p.x * uv_scale, p.y * uv_scale))
+			batch["normals"].append(Vector3.UP)
+		for idx in indices:
+			batch["indices"].append(base_idx + idx)
 
 
 # Финализирует road batches для чанка - создаёт merged meshes
