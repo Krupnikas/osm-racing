@@ -24,6 +24,7 @@ var _night_sky: ShaderMaterial
 var _rain_system: GPUParticles3D
 var _terrain_generator: Node
 var _graphics_settings: Node
+var _car: Node  # VehicleBody3D — для скорости дождя
 
 # Сохранённые дневные настройки
 var _day_sun_energy := 1.0
@@ -85,6 +86,9 @@ func _ready() -> void:
 
 	# Создаём систему дождя
 	_create_rain_system()
+
+	# Ищем машину игрока для скорости дождя
+	_car = get_tree().get_first_node_in_group("car")
 
 	# CLI аргументы
 	var args := OS.get_cmdline_args()
@@ -326,13 +330,14 @@ func _create_rain_system() -> void:
 
 	# Материал частиц
 	var process_mat := ParticleProcessMaterial.new()
-	process_mat.direction = Vector3(0.1, -1, 0.05)  # Slight angle for wind
+	process_mat.direction = Vector3(0.1, -1, 0.05)
 	process_mat.spread = 3.0
 	process_mat.initial_velocity_min = 35.0
 	process_mat.initial_velocity_max = 45.0
 	process_mat.gravity = Vector3(0, -15, 0)
 	process_mat.damping_min = 0.0
 	process_mat.damping_max = 0.0
+	process_mat.particle_flag_align_y = true
 
 	# Emission shape - box above camera
 	process_mat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
@@ -363,11 +368,44 @@ func _create_rain_system() -> void:
 
 
 func _process(_delta: float) -> void:
-	# Rain follows camera
+	# Rain follows camera + velocity-based direction
 	if _rain_system and _rain_system.emitting:
 		var camera := get_viewport().get_camera_3d()
 		if camera:
-			_rain_system.global_position = camera.global_position + Vector3(0, 25, 0)
+			var offset := Vector3(0, 25, 0)
+
+			if not _car:
+				_car = get_tree().get_first_node_in_group("car")
+
+			if _car:
+				var vel: Vector3 = _car.linear_velocity
+				var hvel := Vector3(vel.x, 0.0, vel.z)
+				var hspeed := hvel.length()
+
+				# Сдвигаем эмиттер вперёд по движению
+				if hspeed > 2.0:
+					offset += hvel.normalized() * clampf(hspeed * 0.3, 0.0, 15.0)
+
+				var mat: ParticleProcessMaterial = _rain_system.process_material
+
+				if hspeed > 2.0:
+					# Direction: навстречу машине + вниз
+					var hdir := Vector3(-vel.x, 0.0, -vel.z).normalized()
+					var speed_factor := clampf(hspeed * 0.04, 0.0, 2.5)
+					mat.direction = (Vector3(0.0, -1.0, 0.0) + hdir * speed_factor).normalized()
+					# Gravity тоже горизонтально — чтобы живые частицы ускорялись навстречу
+					mat.gravity = Vector3(-vel.x * 0.5, -15.0, -vel.z * 0.5)
+					# Быстрее частицы на скорости
+					var speed_boost := clampf(hspeed * 0.3, 0.0, 15.0)
+					mat.initial_velocity_min = 35.0 + speed_boost
+					mat.initial_velocity_max = 45.0 + speed_boost
+				else:
+					mat.direction = Vector3(0.1, -1.0, 0.05).normalized()
+					mat.gravity = Vector3(0.0, -15.0, 0.0)
+					mat.initial_velocity_min = 35.0
+					mat.initial_velocity_max = 45.0
+
+			_rain_system.global_position = camera.global_position + offset
 
 
 func _input(event: InputEvent) -> void:
