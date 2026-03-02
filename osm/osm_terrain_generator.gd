@@ -101,7 +101,6 @@ var _load_generation := 0  # Инкрементируется при reset дл�
 var _entrance_nodes: Array = []  # Входы в здания/заведения из OSM
 var _poi_nodes: Array = []  # Точечные заведения (shop/amenity как node)
 var _parking_polygons: Array = []  # Полигоны парковок ({"poly": PackedVector2Array, "chunk_key": String}) для исключения фонарей
-var _parking_bounds: Array = []  # Cached {center: Vector2, radius: float} per parking polygon
 var _parking_spatial_hash: Dictionary = {}  # Spatial hash: Vector2i → Array of {polygon_idx: int, p1: Vector2, p2: Vector2}
 const PARKING_CELL_SIZE := 30.0
 
@@ -317,7 +316,6 @@ var _pending_terrain_tasks: int = 0
 var _deferred_building_collisions: Array = []  # [{parent, collisions, idx}]
 var _deferred_lamp_lights: Array = []  # [{container, lights, idx, chunk_key, is_night}]
 var _deferred_tree_collisions: Array = []  # [{parent, collisions, idx}]
-var _deferred_road_collisions: Array = []  # [{body, vertices, indices}]
 var _deferred_terrain_collisions: Array = []  # [{parent, vertices, indices}]
 var _deferred_footway_queue: Array = []  # [{smoothed_points, width, tags, parent}]
 var _deferred_billboard_queue: Array = []  # [{billboard, elevation, parent}]
@@ -1536,7 +1534,6 @@ func start_loading() -> void:
 	_initial_loading = true
 	_initial_chunks_loaded = 0
 	_parking_polygons.clear()  # Очищаем парковки при новой загрузке
-	_parking_bounds.clear()
 	_parking_spatial_hash.clear()
 	_created_lamp_positions.clear()  # Очищаем позиции фонарей
 	_created_bus_stop_positions.clear()  # Очищаем позиции остановок
@@ -2262,8 +2259,6 @@ func _unload_chunk(chunk_key: String) -> void:
 			func(item): return is_instance_valid(item.get("parent")))
 		_deferred_lamp_lights = _deferred_lamp_lights.filter(
 			func(item): return is_instance_valid(item.get("container")))
-		_deferred_road_collisions = _deferred_road_collisions.filter(
-			func(item): return is_instance_valid(item.get("body")))
 		_deferred_terrain_collisions = _deferred_terrain_collisions.filter(
 			func(item): return is_instance_valid(item.get("parent")))
 		_deferred_footway_queue = _deferred_footway_queue.filter(
@@ -2460,7 +2455,6 @@ func reset_terrain() -> void:
 	_building_spatial_hash.clear()
 	_building_poly_hash.clear()
 	_parking_polygons.clear()
-	_parking_bounds.clear()
 	_parking_spatial_hash.clear()
 	_chunk_hash_cells.clear()
 	_deferred_lamp_queue.clear()
@@ -2632,17 +2626,6 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			var parking_data := {"poly": points, "chunk_key": chunk_key}
 			_parking_polygons.append(parking_data)
 			
-			# Cache bounds for fast rejection
-			var center := Vector2.ZERO
-			for p in points:
-				center += p
-			center /= points.size()
-			var max_r := 0.0
-			for p in points:
-				var d: float = center.distance_to(p)
-				if d > max_r:
-					max_r = d
-			_parking_bounds.append({"center": center, "radius": max_r})
 			# Add parking edges to spatial hash
 			for ei in range(points.size()):
 				var ep1: Vector2 = points[ei]
@@ -3753,27 +3736,27 @@ func _create_bridge_collision(vertices: PackedVector3Array, indices: PackedInt32
 		
 		# Side 1 (v1 -> v2)
 		faces.append(v1)
-		faces.append(v2_b)
 		faces.append(v2)
-		faces.append(v1)
-		faces.append(v1_b)
 		faces.append(v2_b)
+		faces.append(v1)
+		faces.append(v2_b)
+		faces.append(v1_b)
 
 		# Side 2 (v2 -> v3)
 		faces.append(v2)
-		faces.append(v3_b)
 		faces.append(v3)
-		faces.append(v2)
-		faces.append(v2_b)
 		faces.append(v3_b)
+		faces.append(v2)
+		faces.append(v3_b)
+		faces.append(v2_b)
 		
 		# Side 3 (v3 -> v1)
 		faces.append(v3)
-		faces.append(v1_b)
 		faces.append(v1)
-		faces.append(v3)
-		faces.append(v3_b)
 		faces.append(v1_b)
+		faces.append(v3)
+		faces.append(v1_b)
+		faces.append(v3_b)
 
 	coll_shape.set_faces(faces)
 	shape.shape = coll_shape
@@ -4995,26 +4978,7 @@ func _process_deferred_nodes() -> void:
 	const BUDGET_USEC := 2000  # 2ms
 	var start := Time.get_ticks_usec()
 
-	# 1. Road/terrain collisions (тяжёлые — 1 за кадр, ConcavePolygonShape3D ~5-15ms)
-	if not _deferred_road_collisions.is_empty():
-		if _add_child_count >= _add_child_budget:
-			return
-		var item: Dictionary = _deferred_road_collisions.pop_front()
-		if is_instance_valid(item["body"]):
-			var verts: PackedVector3Array = item["vertices"]
-			var idxs: PackedInt32Array = item["indices"]
-			var faces := PackedVector3Array()
-			faces.resize(idxs.size())
-			for fi in range(idxs.size()):
-				faces[fi] = verts[idxs[fi]]
-			var shape := ConcavePolygonShape3D.new()
-			shape.set_faces(faces)
-			var col_shape := CollisionShape3D.new()
-			col_shape.shape = shape
-			_budgeted_add_child(item["body"], col_shape)
-		_record_perf("deferred_road_coll", Time.get_ticks_usec() - start)
-		return  # 1 heavy collision за кадр
-
+	# 1. Terrain collisions (тяжёлые — 1 за кадр, ConcavePolygonShape3D ~5-15ms)
 	if not _deferred_terrain_collisions.is_empty():
 		if _add_child_count >= _add_child_budget:
 			return
@@ -6428,7 +6392,6 @@ func _finalize_fence_batches_for_chunk(chunk_key: String) -> void:
 		var body := StaticBody3D.new()
 		body.collision_layer = 1
 		body.collision_mask = 0
-		body.add_to_group("Road")  # GEVP surface detection
 		for edge in edges:
 			var ep1: Vector2 = edge.p1
 			var ep2: Vector2 = edge.p2
