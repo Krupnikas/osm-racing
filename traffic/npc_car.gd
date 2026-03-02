@@ -566,6 +566,9 @@ func _setup_lights() -> void:
 
 func _connect_to_night_mode() -> void:
 	"""Подключается к NightModeManager"""
+	if not get_tree() or not get_tree().current_scene:
+		return
+		
 	var night_manager := get_tree().current_scene.find_child("NightModeManager", true, false)
 	if night_manager:
 		night_manager.night_mode_changed.connect(_on_night_mode_changed)

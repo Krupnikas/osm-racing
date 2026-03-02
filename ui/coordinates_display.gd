@@ -21,6 +21,7 @@ func _process(_delta: float) -> void:
 
 func local_to_latlon(x: float, z: float) -> Vector2:
 	# Обратная конвертация из локальных метров в lat/lon
-	var lat := start_lat + z / 111000.0
+	# Z отрицателен при движении на север, поэтому МИНУС
+	var lat := start_lat - z / 111000.0
 	var lon := start_lon + x / (111000.0 * cos(deg_to_rad(start_lat)))
 	return Vector2(lat, lon)
