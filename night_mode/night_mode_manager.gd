@@ -96,6 +96,7 @@ const RAIN_SUN_ENERGY_MULT := 0.35  # Солнце на 65% слабее
 const RAIN_AMBIENT_ENERGY_MULT := 0.4  # Ambient на 60% слабее
 const RAIN_BG_ENERGY_MULT := 0.4  # HDRI небо на 60% слабее (главный источник света)
 const RAIN_FOG_DENSITY_MULT := 1.5  # Туман чуть гуще
+const RAIN_VFOG_DENSITY_MULT := 2.0  # Объёмный туман гуще при дожде
 
 
 func _ready() -> void:
@@ -635,6 +636,7 @@ func _apply_rain_lighting(raining: bool) -> void:
 			_rain_light_tween.tween_property(_environment, "ambient_light_energy", _day_ambient_energy * RAIN_AMBIENT_ENERGY_MULT, 4.0)
 			_rain_light_tween.tween_property(_environment, "background_energy_multiplier", _day_bg_energy * RAIN_BG_ENERGY_MULT, 4.0)
 			_rain_light_tween.tween_property(_environment, "fog_density", _day_fog_density * RAIN_FOG_DENSITY_MULT, 4.0)
+			_rain_light_tween.tween_property(_environment, "volumetric_fog_density", _day_vfog_density * RAIN_VFOG_DENSITY_MULT, 4.0)
 	else:
 		if _sun_light:
 			_rain_light_tween.tween_property(_sun_light, "light_energy", _day_sun_energy, 4.0)
@@ -642,6 +644,7 @@ func _apply_rain_lighting(raining: bool) -> void:
 			_rain_light_tween.tween_property(_environment, "ambient_light_energy", _day_ambient_energy, 4.0)
 			_rain_light_tween.tween_property(_environment, "background_energy_multiplier", _day_bg_energy, 4.0)
 			_rain_light_tween.tween_property(_environment, "fog_density", _day_fog_density, 4.0)
+			_rain_light_tween.tween_property(_environment, "volumetric_fog_density", _day_vfog_density, 4.0)
 
 
 # === Мокрая машина ===
