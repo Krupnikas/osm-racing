@@ -203,6 +203,7 @@ func _apply_day_sky() -> void:
 	_day_hdri_material.set_shader_parameter("blend", 0.0)
 	_day_hdri_material.set_shader_parameter("exposure_current", 0.8 if is_raining else 1.0)
 	_day_hdri_material.set_shader_parameter("exposure_next", 0.8 if is_raining else 1.0)
+	_day_hdri_material.set_shader_parameter("rotation", 0.139)  # ~50° влево чтобы солнце совпало с тенями
 	_environment.sky.sky_material = _day_hdri_material
 	_environment.sky.process_mode = Sky.PROCESS_MODE_QUALITY
 
