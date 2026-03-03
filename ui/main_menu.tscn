@@ -316,6 +316,7 @@ text = "Назад"
 [connection signal="toggled" from="SettingsPanel/VBox/DOFCheck" to="." method="_on_dof_toggled"]
 [connection signal="toggled" from="SettingsPanel/VBox/VignetteCheck" to="." method="_on_vignette_toggled"]
 [connection signal="toggled" from="SettingsPanel/VBox/SimplifiedTreesCheck" to="." method="_on_simplified_trees_toggled"]
+[connection signal="item_selected" from="SettingsPanel/VBox/SkyResolutionOption" to="." method="_on_sky_resolution_selected"]
 [connection signal="value_changed" from="SettingsPanel/VBox/MusicVolBox/MusicVolSlider" to="." method="_on_music_vol_changed"]
 [connection signal="value_changed" from="SettingsPanel/VBox/SFXVolBox/SFXVolSlider" to="." method="_on_sfx_vol_changed"]
 [connection signal="value_changed" from="SettingsPanel/VBox/RenderDistBox/RenderDistSlider" to="." method="_on_render_dist_changed"]
@@ -506,6 +507,18 @@ text = "Виньетка"
 layout_mode = 2
 button_pressed = false
 text = "Упрощённые деревья"
+
+[node name="SkyResolutionOption" type="OptionButton" parent="SettingsPanel/VBox"]
+layout_mode = 2
+selected = 1
+item_count = 4
+popup/item_0/text = "Небо: 1K"
+popup/item_1/text = "Небо: 2K"
+popup/item_1/id = 1
+popup/item_2/text = "Небо: 4K"
+popup/item_2/id = 2
+popup/item_3/text = "Небо: 8K"
+popup/item_3/id = 3
 
 [node name="RenderDistLabel" type="Label" parent="SettingsPanel/VBox"]
 layout_mode = 2

@@ -662,6 +662,8 @@ func _update_graphics_checkboxes() -> void:
 		Viewport.MSAA_4X:
 			msaa_idx = 2
 	$SettingsPanel/VBox/MSAAOption.select(msaa_idx)
+	# Sky resolution option
+	$SettingsPanel/VBox/SkyResolutionOption.select(_graphics_settings.sky_resolution)
 	# Render distance slider
 	var slider := $SettingsPanel/VBox/RenderDistBox/RenderDistSlider as HSlider
 	if slider:
@@ -770,6 +772,11 @@ func _on_vignette_toggled(toggled_on: bool) -> void:
 func _on_simplified_trees_toggled(toggled_on: bool) -> void:
 	if _graphics_settings:
 		_graphics_settings.set_simplified_trees(toggled_on)
+
+
+func _on_sky_resolution_selected(index: int) -> void:
+	if _graphics_settings:
+		_graphics_settings.set_sky_resolution(index)
 
 
 func _on_render_dist_changed(value: float) -> void:

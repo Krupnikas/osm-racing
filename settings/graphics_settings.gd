@@ -28,6 +28,9 @@ var vignette_enabled := false  # Виньетка (по умолчанию вы�
 # Упрощённые деревья (процедурные вместо GLTF модели)
 var simplified_trees := false
 
+# Разрешение HDRI неба: 0=1K, 1=2K, 2=4K, 3=8K
+var sky_resolution := 1  # Default 2K
+
 # Дальность прорисовки
 var render_distance := 400.0  # Метры
 
@@ -153,6 +156,15 @@ func toggle_normal_maps() -> void:
 	print("Normal Maps: ", "ON" if normal_maps_enabled else "OFF")
 	print("WARNING: Normal Maps change requires terrain reload to take effect")
 	# Normal maps применяются при создании материалов - нужна перезагрузка чанков
+	settings_changed.emit()
+
+
+func set_sky_resolution(value: int) -> void:
+	sky_resolution = clampi(value, 0, 3)
+	print("Sky Resolution: ", ["1K", "2K", "4K", "8K"][sky_resolution])
+	var night_mgr := get_tree().current_scene.find_child("NightModeManager", true, false)
+	if night_mgr and night_mgr.has_method("reload_sky_textures"):
+		night_mgr.reload_sky_textures()
 	settings_changed.emit()
 
 
@@ -391,6 +403,7 @@ func set_quality_low() -> void:
 	dof_enabled = false
 	vignette_enabled = false
 	simplified_trees = true
+	sky_resolution = 0  # 1K
 	_apply_all()
 	print("Graphics: LOW")
 	settings_changed.emit()
@@ -403,12 +416,13 @@ func set_quality_medium() -> void:
 	ssao_enabled = true
 	normal_maps_enabled = true
 	clouds_enabled = true
-	msaa_mode = Viewport.MSAA_DISABLED  # MSAA тяжёлый
-	taa_enabled = true  # TAA легче
+	msaa_mode = Viewport.MSAA_DISABLED
+	taa_enabled = true
 	motion_blur_enabled = false
 	dof_enabled = false
 	vignette_enabled = false
 	simplified_trees = false
+	sky_resolution = 1  # 2K
 	_apply_all()
 	print("Graphics: MEDIUM")
 	settings_changed.emit()
@@ -421,12 +435,13 @@ func set_quality_high() -> void:
 	ssao_enabled = true
 	normal_maps_enabled = true
 	clouds_enabled = true
-	msaa_mode = Viewport.MSAA_2X  # 2X вместо 4X
+	msaa_mode = Viewport.MSAA_2X
 	taa_enabled = true
 	motion_blur_enabled = false
-	dof_enabled = false  # DOF тяжёлый
+	dof_enabled = false
 	vignette_enabled = false
 	simplified_trees = false
+	sky_resolution = 2  # 4K
 	_apply_all()
 	print("Graphics: HIGH")
 	settings_changed.emit()
@@ -473,7 +488,8 @@ func _load_settings() -> void:
 		dof_enabled = config.get_value("graphics", "dof", false)
 		vignette_enabled = config.get_value("graphics", "vignette", false)  # Дефолт false как при инициализации
 		simplified_trees = config.get_value("graphics", "simplified_trees", false)
-		render_distance = config.get_value("graphics", "render_distance", 400.0)  # Дефолт как при инициализации
+		sky_resolution = config.get_value("graphics", "sky_resolution", 1)
+		render_distance = config.get_value("graphics", "render_distance", 400.0)
 		music_volume = config.get_value("audio", "music_volume", 80.0)
 		sfx_volume = config.get_value("audio", "sfx_volume", 80.0)
 		print("GraphicsSettings: Settings loaded - FXAA: ", fxaa_enabled, ", TAA: ", taa_enabled, ", MSAA: ", msaa_mode)
@@ -498,6 +514,7 @@ func save_settings() -> void:
 	config.set_value("graphics", "dof", dof_enabled)
 	config.set_value("graphics", "vignette", vignette_enabled)
 	config.set_value("graphics", "simplified_trees", simplified_trees)
+	config.set_value("graphics", "sky_resolution", sky_resolution)
 	config.set_value("graphics", "render_distance", render_distance)
 	config.set_value("audio", "music_volume", music_volume)
 	config.set_value("audio", "sfx_volume", sfx_volume)
