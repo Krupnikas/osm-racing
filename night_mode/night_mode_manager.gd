@@ -89,10 +89,18 @@ const CAR_DRY_CLEARCOAT := 0.7
 const CAR_WET_CLEARCOAT := 1.0
 const CAR_WET_DARKEN := 0.2  # На сколько затемнить albedo
 
+# Дневной дождь — приглушённое освещение
+var _rain_light_tween: Tween
+const RAIN_SUN_ENERGY_MULT := 0.6  # Солнце на 40% слабее
+const RAIN_AMBIENT_ENERGY_MULT := 0.7  # Ambient на 30% слабее
+const RAIN_FOG_DENSITY_MULT := 3.0  # Туман гуще
+
 
 func _ready() -> void:
-	RenderingServer.global_shader_parameter_add("is_night_global", RenderingServer.GLOBAL_VAR_TYPE_BOOL, false)
-	RenderingServer.global_shader_parameter_add("wetness_global", RenderingServer.GLOBAL_VAR_TYPE_FLOAT, 0.0)
+	# Глобальные шейдерные параметры зарегистрированы в project.godot [shader_globals]
+	# Здесь только инициализируем значения
+	RenderingServer.global_shader_parameter_set("is_night_global", false)
+	RenderingServer.global_shader_parameter_set("wetness_global", 0.0)
 
 	await get_tree().process_frame
 	_find_scene_components()
@@ -459,9 +467,11 @@ func enable_night_mode() -> void:
 	if is_raining and _terrain_generator and _terrain_generator.has_method("set_wet_mode"):
 		_terrain_generator.set_wet_mode(true, true)
 
-	# Cancel existing tween
+	# Cancel existing tweens
 	if _transition_tween:
 		_transition_tween.kill()
+	if _rain_light_tween:
+		_rain_light_tween.kill()
 
 	_transition_tween = create_tween()
 	_transition_tween.set_parallel(true)
@@ -529,28 +539,33 @@ func disable_night_mode() -> void:
 	if is_raining and _terrain_generator and _terrain_generator.has_method("set_wet_mode"):
 		_terrain_generator.set_wet_mode(true, false)
 
-	# Cancel existing tween
+	# Cancel existing tweens
 	if _transition_tween:
 		_transition_tween.kill()
+	if _rain_light_tween:
+		_rain_light_tween.kill()
 
 	_transition_tween = create_tween()
 	_transition_tween.set_parallel(true)
 
-	# Restore sun
+	# Restore sun (с учётом дождя)
+	var target_sun_energy := _day_sun_energy * (RAIN_SUN_ENERGY_MULT if is_raining else 1.0)
+	var target_ambient_energy := _day_ambient_energy * (RAIN_AMBIENT_ENERGY_MULT if is_raining else 1.0)
+	var target_fog_density := _day_fog_density * (RAIN_FOG_DENSITY_MULT if is_raining else 1.0)
 	if _sun_light:
-		_transition_tween.tween_property(_sun_light, "light_energy", _day_sun_energy, 1.5)
+		_transition_tween.tween_property(_sun_light, "light_energy", target_sun_energy, 1.5)
 		_transition_tween.tween_property(_sun_light, "light_color", _day_sun_color, 1.5)
 
 	# Turn off moon light
 	if _moon_light:
 		_transition_tween.tween_property(_moon_light, "light_energy", 0.0, 1.5)
 
-	# Restore ambient and fog
+	# Restore ambient and fog (с учётом дождя)
 	if _environment:
 		_transition_tween.tween_property(_environment, "ambient_light_color", _day_ambient_color, 1.5)
-		_transition_tween.tween_property(_environment, "ambient_light_energy", _day_ambient_energy, 1.5)
+		_transition_tween.tween_property(_environment, "ambient_light_energy", target_ambient_energy, 1.5)
 		_transition_tween.tween_property(_environment, "fog_light_color", _day_fog_color, 1.5)
-		_transition_tween.tween_property(_environment, "fog_density", _day_fog_density, 1.5)
+		_transition_tween.tween_property(_environment, "fog_density", target_fog_density, 1.5)
 
 		# Restore day glow
 		_environment.glow_intensity = _day_glow_intensity
@@ -585,6 +600,7 @@ func toggle_rain() -> void:
 	# Днём плавно переключаем HDRI текстуру (ясно↔дождь)
 	if not is_night:
 		_apply_day_sky(true)
+		_apply_rain_lighting(is_raining)
 
 	# Update road wetness (плавно за 5 секунд)
 	if _terrain_generator and _terrain_generator.has_method("set_wet_mode"):
@@ -600,6 +616,28 @@ func toggle_rain() -> void:
 func set_rain(enabled: bool) -> void:
 	if enabled != is_raining:
 		toggle_rain()
+
+
+func _apply_rain_lighting(raining: bool) -> void:
+	"""Плавно приглушает/восстанавливает дневное освещение при дожде"""
+	if _rain_light_tween:
+		_rain_light_tween.kill()
+
+	_rain_light_tween = create_tween()
+	_rain_light_tween.set_parallel(true)
+
+	if raining:
+		if _sun_light:
+			_rain_light_tween.tween_property(_sun_light, "light_energy", _day_sun_energy * RAIN_SUN_ENERGY_MULT, 4.0)
+		if _environment:
+			_rain_light_tween.tween_property(_environment, "ambient_light_energy", _day_ambient_energy * RAIN_AMBIENT_ENERGY_MULT, 4.0)
+			_rain_light_tween.tween_property(_environment, "fog_density", _day_fog_density * RAIN_FOG_DENSITY_MULT, 4.0)
+	else:
+		if _sun_light:
+			_rain_light_tween.tween_property(_sun_light, "light_energy", _day_sun_energy, 4.0)
+		if _environment:
+			_rain_light_tween.tween_property(_environment, "ambient_light_energy", _day_ambient_energy, 4.0)
+			_rain_light_tween.tween_property(_environment, "fog_density", _day_fog_density, 4.0)
 
 
 # === Мокрая машина ===

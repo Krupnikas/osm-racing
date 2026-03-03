@@ -9,14 +9,14 @@ static var _road_shader: Shader = null
 static var _shader_loaded := false
 
 # Параметры мокрой дороги ночью - умеренные отражения
-const WET_NIGHT_METALLIC := 0.4
+const WET_NIGHT_METALLIC := 0.2
 const WET_NIGHT_ROUGHNESS := 0.1
-const WET_NIGHT_SPECULAR := 0.8
+const WET_NIGHT_SPECULAR := 0.7
 
 # Параметры мокрой дороги днём - меньше отражений
-const WET_DAY_METALLIC := 0.3
+const WET_DAY_METALLIC := 0.1
 const WET_DAY_ROUGHNESS := 0.15
-const WET_DAY_SPECULAR := 0.7
+const WET_DAY_SPECULAR := 0.6
 
 # Параметры сухой дороги
 const DRY_METALLIC := 0.0

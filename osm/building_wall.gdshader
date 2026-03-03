@@ -18,6 +18,7 @@ uniform bool use_vertex_emission = false;
 uniform float recess_emission_energy : hint_range(0.0, 8.0) = 2.0;
 
 global uniform bool is_night_global;
+global uniform float wetness_global;
 
 void fragment() {
 	// Получаем цвет из текстуры или используем albedo_color
@@ -33,6 +34,11 @@ void fragment() {
 	if (!use_texture) {
 		float height_variation = 0.02 * sin(UV.y * 50.0);
 		color += vec3(height_variation);
+	}
+
+	// Wet darkening — бордюры/стены темнеют от дождя
+	if (wetness_global > 0.0) {
+		color *= (1.0 - 0.45 * wetness_global);
 	}
 
 	ALBEDO = color;
@@ -56,6 +62,10 @@ void fragment() {
 		ROUGHNESS = 0.55;
 	} else {
 		ROUGHNESS = roughness_base;
+	}
+	// Wet: снижаем roughness
+	if (wetness_global > 0.0) {
+		ROUGHNESS = mix(ROUGHNESS, ROUGHNESS * 0.7, wetness_global);
 	}
 	METALLIC = 0.0;
 	SPECULAR = 0.5;

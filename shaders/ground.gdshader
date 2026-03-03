@@ -17,7 +17,7 @@ uniform bool is_night = false;
 uniform float normal_strength : hint_range(0.0, 2.0) = 0.8;
 uniform float dry_roughness_base : hint_range(0.0, 1.0) = 0.85;
 uniform float wet_roughness_base : hint_range(0.0, 1.0) = 0.75;
-uniform float wet_darkening : hint_range(0.0, 0.3) = 0.12;
+uniform float wet_darkening : hint_range(0.0, 0.8) = 0.55;
 
 // Macro variation (world-space noise)
 uniform float macro_world_scale : hint_range(0.005, 0.2) = 0.015;

@@ -114,3 +114,14 @@ ToggleWheels={
 [rendering]
 
 anti_aliasing/quality/msaa_3d=2
+
+[shader_globals]
+
+wetness_global={
+"type": "float",
+"value": 0.0
+}
+is_night_global={
+"type": "bool",
+"value": false
+}

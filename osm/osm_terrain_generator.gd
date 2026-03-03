@@ -22,6 +22,7 @@ const TireTrackManagerScript = preload("res://tracks/tire_track_manager.gd")
 const CROSSING_SIGN_TEXTURE = preload("res://textures/signs/pedestrian_crossing.png")
 const PARKING_SIGN_TEXTURE = preload("res://textures/signs/parking.png")
 const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
+const WheelDirtScript = preload("res://effects/wheel_dirt.gd")
 
 
 # Decoration Layer для добавления атмосферы поверх OSM данных
@@ -12157,6 +12158,7 @@ func _apply_wetness_global(value: float) -> void:
 	"""Устанавливает глобальный шейдерный параметр wetness_global (один вызов на кадр)"""
 	_wetness_value = value
 	RenderingServer.global_shader_parameter_set("wetness_global", value)
+	WheelDirtScript.current_wetness = value
 
 
 func _is_road_material(mat: Material) -> bool:

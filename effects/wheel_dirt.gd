@@ -6,32 +6,32 @@ extends GPUParticles3D
 @export var min_speed := 2.0  # м/с
 @export var base_emission_chance := 0.9  # Базовый шанс (увеличивается при заносе)
 
+# Глобальное значение wetness (обновляется из osm_terrain_generator)
+static var current_wetness: float = 0.0
+
 # Палитра цветов — реалистичная грязь с примесью травы
 const DIRT_COLORS: Array[Color] = [
-	# Коричневые тона (основа)
-	Color(0.35, 0.28, 0.18, 0.9),   # Средний коричневый
-	Color(0.28, 0.22, 0.14, 0.85),  # Тёмно-коричневый
-	Color(0.22, 0.18, 0.12, 0.8),   # Очень тёмный (мокрая грязь)
-	Color(0.42, 0.34, 0.22, 0.9),   # Светло-коричневый
-
-	# Оливковые/зелёные тона (трава в грязи)
-	Color(0.32, 0.35, 0.20, 0.85),  # Оливково-коричневый
-	Color(0.28, 0.32, 0.18, 0.8),   # Тёмно-оливковый
-	Color(0.35, 0.38, 0.25, 0.85),  # Зеленовато-коричневый
-	Color(0.25, 0.30, 0.18, 0.75),  # Грязно-зелёный
+	Color(0.35, 0.28, 0.18, 0.9),
+	Color(0.28, 0.22, 0.14, 0.85),
+	Color(0.22, 0.18, 0.12, 0.8),
+	Color(0.42, 0.34, 0.22, 0.9),
+	Color(0.32, 0.35, 0.20, 0.85),
+	Color(0.28, 0.32, 0.18, 0.8),
+	Color(0.35, 0.38, 0.25, 0.85),
+	Color(0.25, 0.30, 0.18, 0.75),
 ]
 
-# Палитра цветов водяных брызг
+# Палитра цветов водяных брызг — более заметные
 const SPRAY_COLORS: Array[Color] = [
-	Color(0.7, 0.75, 0.85, 0.25),   # Светлый туман
-	Color(0.6, 0.65, 0.75, 0.2),    # Серо-голубой
-	Color(0.75, 0.8, 0.9, 0.18),    # Почти белый
-	Color(0.55, 0.6, 0.7, 0.22),    # Тёмный туман
+	Color(0.75, 0.8, 0.9, 0.5),
+	Color(0.65, 0.7, 0.8, 0.45),
+	Color(0.8, 0.85, 0.95, 0.4),
+	Color(0.6, 0.65, 0.75, 0.45),
 ]
 
 const OFFROAD_SURFACES := ["Grass", "Dirt"]
 const ROAD_SURFACES := ["Road"]
-const SPRAY_MIN_SPEED := 8.0  # Брызги только на скорости
+const SPRAY_MIN_SPEED := 5.0
 
 
 func _process(_delta: float) -> void:
@@ -42,16 +42,18 @@ func _process(_delta: float) -> void:
 	if speed < min_speed:
 		return
 
-	var wetness: float = RenderingServer.global_shader_parameter_get("wetness_global")
+	var wetness := current_wetness
 
-	for wheel in vehicle.wheel_array:
+	for i in vehicle.wheel_array.size():
+		var wheel: Wheel = vehicle.wheel_array[i]
 		if not wheel.is_colliding():
 			continue
 
 		if wheel.surface_type in OFFROAD_SURFACES:
 			_process_dirt(wheel, speed)
-		elif wheel.surface_type in ROAD_SURFACES and wetness > 0.3 and speed > SPRAY_MIN_SPEED:
-			_process_spray(wheel, speed, wetness)
+		elif wheel.surface_type in ROAD_SURFACES and wetness > 0.2 and speed > SPRAY_MIN_SPEED:
+			var is_rear := i >= 2  # 0,1=front, 2,3=rear
+			_process_spray(wheel, speed, wetness, is_rear)
 
 
 func _process_dirt(wheel: Wheel, speed: float) -> void:
@@ -64,43 +66,34 @@ func _process_dirt(wheel: Wheel, speed: float) -> void:
 		return
 
 	var count := clampi(50 + int(slip * 40) + int(speed / 2.0), 50, 150)
-	for i in count:
+	for j in count:
 		_emit_dirt_particle(wheel, speed, slip)
 
 
-func _process_spray(wheel: Wheel, speed: float, wetness: float) -> void:
-	# Больше брызг на высокой скорости и при высокой wetness
-	var speed_factor := clampf((speed - SPRAY_MIN_SPEED) / 20.0, 0.0, 1.0)
-	var wet_factor := clampf((wetness - 0.3) / 0.7, 0.0, 1.0)
+func _process_spray(wheel: Wheel, speed: float, wetness: float, is_rear: bool) -> void:
+	var speed_factor := clampf((speed - SPRAY_MIN_SPEED) / 15.0, 0.0, 1.0)
+	var wet_factor := clampf((wetness - 0.2) / 0.8, 0.0, 1.0)
 	var intensity := speed_factor * wet_factor
 
-	# Только задние колёса дают основной шлейф
-	var is_rear := not wheel.is_front_wheel if "is_front_wheel" in wheel else true
 	if not is_rear:
-		intensity *= 0.2  # Передние колёса — минимальные брызги
+		intensity *= 0.15
 
-	var count := int(30.0 * intensity + 10.0 * intensity)
-	if count < 1:
-		return
+	var count := clampi(int(60.0 * intensity), 3 if is_rear else 1, 80)
 
-	for i in count:
-		_emit_spray_particle(wheel, speed, intensity)
+	for j in count:
+		_emit_spray_particle(wheel, speed, intensity, is_rear)
 
 
 func _emit_dirt_particle(wheel: Wheel, speed: float, slip: float) -> void:
 	var t := Transform3D.IDENTITY
-
-	# Позиция: точка контакта + случайное смещение
 	t.origin = wheel.last_collision_point
 	t.origin.x += randf_range(-0.12, 0.12)
 	t.origin.y += randf_range(0.02, 0.08)
 	t.origin.z += randf_range(-0.12, 0.12)
 
-	# Скорость: комбинация направления движения и бокового заноса
 	var move_dir := -vehicle.linear_velocity.normalized()
 	var side_dir := wheel.global_transform.basis.x * wheel.slip_vector.x * 0.3
 
-	# Случайный разброс
 	var scatter := Vector3(
 		randf_range(-0.4, 0.4),
 		0,
@@ -110,18 +103,15 @@ func _emit_dirt_particle(wheel: Wheel, speed: float, slip: float) -> void:
 	var vel := (move_dir + side_dir + scatter).normalized()
 	vel *= speed * randf_range(0.15, 0.4)
 
-	# Подброс вверх — меньше для мелких частиц, больше для крупных
 	var up_force := randf_range(0.8, 2.5) + speed * randf_range(0.02, 0.08)
-	up_force += slip * randf_range(0.3, 0.8)  # Занос добавляет высоту
+	up_force += slip * randf_range(0.3, 0.8)
 	vel.y += up_force
 
-	# Случайный цвет
 	var idx1 := randi() % DIRT_COLORS.size()
 	var idx2 := randi() % DIRT_COLORS.size()
 	var color1 := DIRT_COLORS[idx1]
 	var color2 := DIRT_COLORS[idx2]
 
-	# Вариация яркости
 	var brightness := randf_range(0.8, 1.2)
 	color1 = Color(
 		color1.r * brightness,
@@ -133,32 +123,32 @@ func _emit_dirt_particle(wheel: Wheel, speed: float, slip: float) -> void:
 	emit_particle(t, vel, color1, color2, 5)
 
 
-func _emit_spray_particle(wheel: Wheel, speed: float, intensity: float) -> void:
+func _emit_spray_particle(wheel: Wheel, speed: float, intensity: float, is_rear: bool) -> void:
 	var t := Transform3D.IDENTITY
 
-	# Позиция: точка контакта колеса, немного сзади и по бокам
 	t.origin = wheel.last_collision_point
-	t.origin.x += randf_range(-0.25, 0.25)
-	t.origin.y += randf_range(0.02, 0.15)
-	t.origin.z += randf_range(-0.2, 0.2)
+	t.origin.x += randf_range(-0.3, 0.3)
+	t.origin.y += randf_range(0.03, 0.2)
+	t.origin.z += randf_range(-0.25, 0.25)
 
-	# Направление: назад от движения + вбок + вверх
 	var move_dir := -vehicle.linear_velocity.normalized()
 	var side := wheel.global_transform.basis.x
-	var side_spread := side * randf_range(-0.6, 0.6)
+	var side_spread := side * randf_range(-0.8, 0.8)
 
-	var vel := (move_dir * 0.7 + side_spread + Vector3(0, 0.3, 0)).normalized()
-	vel *= speed * randf_range(0.2, 0.5) * intensity
+	# Задние колёса — шлейф назад и вверх, передние — слабый боковой
+	var up_component := 0.5 if is_rear else 0.2
+	var vel := (move_dir * 0.8 + side_spread * 0.5 + Vector3(0, up_component, 0)).normalized()
+	vel *= speed * randf_range(0.25, 0.6)
 
-	# Подброс вверх — водяной шлейф поднимается
-	vel.y += randf_range(0.5, 2.0) + speed * randf_range(0.01, 0.04)
+	# Подброс вверх
+	vel.y += randf_range(1.0, 3.5) + speed * randf_range(0.02, 0.06)
 
-	# Случайный цвет из палитры
 	var idx := randi() % SPRAY_COLORS.size()
 	var color1 := SPRAY_COLORS[idx]
-	var color2 := Color(color1.r, color1.g, color1.b, 0.0)  # Fade out
+	# color2 = полностью прозрачный для fade-out
+	var color2 := Color(color1.r, color1.g, color1.b, 0.0)
 
-	# Вариация прозрачности
-	color1.a *= randf_range(0.6, 1.0) * intensity
+	# Масштабируем видимость по интенсивности, но не слишком слабо
+	color1.a *= clampf(0.5 + intensity * 0.5, 0.3, 1.0)
 
 	emit_particle(t, vel, color1, color2, 5)

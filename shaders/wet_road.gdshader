@@ -37,12 +37,12 @@ uniform float puddle_darkness : hint_range(0.0, 0.5) = 0.2;
 
 // Metallic для отражений
 uniform float dry_metallic : hint_range(0.0, 1.0) = 0.0;
-uniform float wet_metallic : hint_range(0.0, 1.0) = 0.35;
-uniform float puddle_metallic : hint_range(0.0, 1.0) = 0.5;
+uniform float wet_metallic : hint_range(0.0, 1.0) = 0.1;
+uniform float puddle_metallic : hint_range(0.0, 1.0) = 0.3;
 
 // Specular
 uniform float dry_specular : hint_range(0.0, 1.0) = 0.5;
-uniform float wet_specular : hint_range(0.0, 1.0) = 0.8;
+uniform float wet_specular : hint_range(0.0, 1.0) = 0.6;
 
 // Масштабы UV для noise
 uniform float micro_scale : hint_range(1.0, 50.0) = 12.0;
@@ -104,13 +104,15 @@ void fragment() {
 	vec3 dry_albedo = albedo + (n_macro - 0.5) * macro_albedo_dry;
 
 	// === МОКРАЯ ДОРОГА ===
+	// Мокрый асфальт: сильное потемнение albedo (вода впитывается, свет поглощается)
+	vec3 wet_albedo = albedo * 0.35;
+
 	float wet_rough = wet_roughness;
 	if (use_roughness_texture) {
 		wet_rough = mix(wet_roughness, texture(roughness_texture, UV).r, 0.3);
 	}
 	wet_rough += (n_micro - 0.5) * micro_roughness_wet;
 	wet_rough += (n_macro - 0.5) * macro_roughness_wet;
-	vec3 wet_albedo = albedo * 0.9;
 
 	// Puddle detection — world-space noise для синхронизации между дорогами/перекрёстками
 	float n_puddle = texture(noise_macro_tex, world_pos.xz * puddle_world_scale).r;
@@ -120,12 +122,11 @@ void fragment() {
 	wet_rough = mix(wet_rough, puddle_roughness, puddle_factor);
 	float wet_met = mix(wet_metallic, puddle_metallic, puddle_factor);
 
-	// Fresnel эффект для отражений под углом (масштаб по wetness_global)
+	// Fresnel — specular only, не metallic (иначе отражения маскируют потемнение)
 	float fresnel = pow(1.0 - abs(dot(NORMAL, VIEW)), 3.0) * wetness_global;
-	wet_met = mix(wet_met, wet_met + 0.2, fresnel);
 
 	if (is_night) {
-		wet_met += 0.1;
+		wet_met += 0.05;
 		wet_rough *= 0.8;
 	}
 
