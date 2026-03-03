@@ -81,7 +81,7 @@ static func create_road_shader_material(albedo_texture: Texture2D = null, normal
 		mat.set_shader_parameter("noise_macro_tex", noise_macro)
 
 	# Wet/Night state
-	mat.set_shader_parameter("is_wet", is_wet)
+	mat.set_shader_parameter("wetness", 1.0 if is_wet else 0.0)
 	mat.set_shader_parameter("is_night", is_night)
 
 	# Default параметры
@@ -127,7 +127,7 @@ static func apply_wet_properties(material: Material, is_wet: bool, is_night: boo
 
 	if material is ShaderMaterial:
 		# Shader material - устанавливаем параметры
-		material.set_shader_parameter("is_wet", is_wet)
+		material.set_shader_parameter("wetness", 1.0 if is_wet else 0.0)
 		material.set_shader_parameter("is_night", is_night)
 
 		if is_wet:
@@ -190,6 +190,8 @@ static func apply_road_type_params(mat: ShaderMaterial, road_type: String) -> vo
 		"intersection", "crossing":
 			mat.set_shader_parameter("macro_roughness_dry", 0.05)
 			mat.set_shader_parameter("macro_albedo_dry", 0.02)
+			# Curb bias не нужен на перекрёстках (нет краёв)
+			mat.set_shader_parameter("curb_puddle_bias", 0.0)
 		"highway":
 			mat.set_shader_parameter("macro_roughness_dry", 0.06)
 			mat.set_shader_parameter("macro_albedo_dry", 0.02)

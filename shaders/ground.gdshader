@@ -10,7 +10,7 @@ uniform sampler2D roughness_tex : filter_linear_mipmap, repeat_enable;
 uniform sampler2D noise_macro_tex : filter_linear_mipmap, repeat_enable;
 
 // Глобальные режимы
-uniform bool is_wet = false;
+uniform float wetness : hint_range(0.0, 1.0) = 0.0;
 uniform bool is_night = false;
 
 // PBR параметры
@@ -73,8 +73,8 @@ void fragment() {
 		track = clamp(track, 0.0, 1.0);
 	}
 	// В дождь следы заметнее
-	if (is_wet) {
-		track = clamp(track * (1.0 + mud_wet_boost), 0.0, 1.0);
+	if (wetness > 0.0) {
+		track = clamp(track * (1.0 + mud_wet_boost * wetness), 0.0, 1.0);
 	}
 	// Десатурация зелени → серый
 	float luma = dot(albedo, vec3(0.299, 0.587, 0.114));
@@ -87,9 +87,9 @@ void fragment() {
 	roughness = mix(roughness, mud_roughness, track);
 
 	// Wet mode: трава темнеет, roughness снижается (без луж/блеска)
-	if (is_wet) {
-		albedo *= (1.0 - wet_darkening);
-		roughness = min(roughness, wet_roughness_base);
+	if (wetness > 0.0) {
+		albedo *= (1.0 - wet_darkening * wetness);
+		roughness = mix(roughness, min(roughness, wet_roughness_base), wetness);
 	}
 
 	// Night mode: лёгкое затемнение

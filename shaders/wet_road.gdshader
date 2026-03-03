@@ -23,7 +23,7 @@ uniform float normal_strength : hint_range(0.0, 2.0) = 0.8;
 uniform bool use_texture = true;
 
 // Параметры мокрой дороги
-uniform bool is_wet = false;
+uniform float wetness : hint_range(0.0, 1.0) = 0.0;
 uniform bool is_night = false;
 
 // Roughness настройки
@@ -60,6 +60,14 @@ uniform float micro_roughness_wet : hint_range(0.0, 0.1) = 0.04;
 // Curb puddle bias (0 = равномерно, >0 = чаще у краёв)
 uniform float curb_puddle_bias : hint_range(0.0, 1.0) = 0.3;
 
+// World-space масштаб noise для луж (синхронизация между дорогами/перекрёстками)
+uniform float puddle_world_scale : hint_range(0.01, 0.5) = 0.08;
+
+varying vec3 world_pos;
+
+void vertex() {
+	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+}
 
 void fragment() {
 	// Albedo
@@ -84,61 +92,48 @@ void fragment() {
 	float edge_dist = abs(UV.x - 0.5) * 2.0;
 	float curb_factor = mix(1.0, 1.0 + edge_dist * 0.5, curb_puddle_bias);
 
-	float roughness;
-	float metallic;
-	float specular;
-
-	if (is_wet) {
-		// === МОКРАЯ ДОРОГА ===
-		float base_rough = wet_roughness;
-		if (use_roughness_texture) {
-			base_rough = mix(wet_roughness, texture(roughness_texture, UV).r, 0.3);
-		}
-		base_rough += (n_micro - 0.5) * micro_roughness_wet;
-		base_rough += (n_macro - 0.5) * macro_roughness_wet;
-
-		// Puddle detection через macro noise + curb bias
-		float puddle_value = n_macro * curb_factor;
-		bool is_puddle = puddle_value > puddle_threshold;
-
-		if (is_puddle) {
-			roughness = puddle_roughness;
-			metallic = puddle_metallic;
-			albedo *= (1.0 - puddle_darkness);
-			albedo = mix(albedo, vec3(0.1, 0.15, 0.2), 0.15);
-		} else {
-			roughness = base_rough;
-			metallic = wet_metallic;
-			albedo *= 0.9;
-		}
-
-		specular = wet_specular;
-
-		// Fresnel эффект для отражений под углом
-		float fresnel = pow(1.0 - abs(dot(NORMAL, VIEW)), 3.0);
-		metallic = mix(metallic, metallic + 0.2, fresnel);
-
-		if (is_night) {
-			metallic += 0.1;
-			roughness *= 0.8;
-		}
-
+	// === СУХАЯ ДОРОГА (база) ===
+	float dry_rough;
+	if (use_roughness_texture) {
+		dry_rough = texture(roughness_texture, UV).r;
 	} else {
-		// === СУХАЯ ДОРОГА ===
-		if (use_roughness_texture) {
-			roughness = texture(roughness_texture, UV).r;
-		} else {
-			roughness = dry_roughness;
-		}
-		roughness += (n_micro - 0.5) * micro_roughness_dry;
-		roughness += (n_macro - 0.5) * macro_roughness_dry;
-
-		// Macro variation для albedo (мягкие пятна)
-		albedo += (n_macro - 0.5) * macro_albedo_dry;
-
-		metallic = dry_metallic;
-		specular = dry_specular;
+		dry_rough = dry_roughness;
 	}
+	dry_rough += (n_micro - 0.5) * micro_roughness_dry;
+	dry_rough += (n_macro - 0.5) * macro_roughness_dry;
+	vec3 dry_albedo = albedo + (n_macro - 0.5) * macro_albedo_dry;
+
+	// === МОКРАЯ ДОРОГА ===
+	float wet_rough = wet_roughness;
+	if (use_roughness_texture) {
+		wet_rough = mix(wet_roughness, texture(roughness_texture, UV).r, 0.3);
+	}
+	wet_rough += (n_micro - 0.5) * micro_roughness_wet;
+	wet_rough += (n_macro - 0.5) * macro_roughness_wet;
+	vec3 wet_albedo = albedo * 0.9;
+
+	// Puddle detection — world-space noise для синхронизации между дорогами/перекрёстками
+	float n_puddle = texture(noise_macro_tex, world_pos.xz * puddle_world_scale).r;
+	float puddle_value = n_puddle * curb_factor;
+	float puddle_factor = smoothstep(0.5, 1.0, wetness) * step(puddle_threshold, puddle_value);
+	wet_albedo = mix(wet_albedo, mix(wet_albedo * (1.0 - puddle_darkness), vec3(0.1, 0.15, 0.2), 0.15), puddle_factor);
+	wet_rough = mix(wet_rough, puddle_roughness, puddle_factor);
+	float wet_met = mix(wet_metallic, puddle_metallic, puddle_factor);
+
+	// Fresnel эффект для отражений под углом (масштаб по wetness)
+	float fresnel = pow(1.0 - abs(dot(NORMAL, VIEW)), 3.0) * wetness;
+	wet_met = mix(wet_met, wet_met + 0.2, fresnel);
+
+	if (is_night) {
+		wet_met += 0.1;
+		wet_rough *= 0.8;
+	}
+
+	// === Финальное смешивание по wetness ===
+	float roughness = mix(dry_rough, wet_rough, wetness);
+	float metallic = mix(dry_metallic, wet_met, wetness);
+	float specular = mix(dry_specular, wet_specular, wetness);
+	albedo = mix(dry_albedo, wet_albedo, wetness);
 
 	// Разметка делает поверхность гладкой (краска)
 	if (use_marking) {

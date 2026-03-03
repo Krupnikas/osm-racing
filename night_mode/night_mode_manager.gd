@@ -72,6 +72,17 @@ const NIGHT_FOG_DENSITY := 0.003
 # Transition
 var _transition_tween: Tween
 
+# Sky crossfade
+var _sky_blend_tween: Tween
+
+# Мокрая машина
+var _car_body_materials: Array[StandardMaterial3D] = []
+var _car_wet_tween: Tween
+const CAR_DRY_ROUGHNESS := 0.15
+const CAR_WET_ROUGHNESS := 0.03
+const CAR_DRY_CLEARCOAT_ROUGHNESS := 0.1
+const CAR_WET_CLEARCOAT_ROUGHNESS := 0.01
+
 
 func _ready() -> void:
 	RenderingServer.global_shader_parameter_add("is_night_global", RenderingServer.GLOBAL_VAR_TYPE_BOOL, false)
@@ -189,22 +200,48 @@ func _load_sky_texture(res_path: String) -> Texture2D:
 	return null
 
 
-func _apply_day_sky() -> void:
+func _apply_day_sky(crossfade: bool = false) -> void:
 	if not _environment or not _environment.sky or not _day_hdri_material:
 		return
-	var tex: Texture2D = _day_rain_tex if is_raining else _day_clear_tex
-	if not tex:
-		# Нет HDRI — используем оригинальный ProceduralSkyMaterial
+	var tex_next: Texture2D = _day_rain_tex if is_raining else _day_clear_tex
+	if not tex_next:
 		if _original_sky:
 			_environment.sky.sky_material = _original_sky
 		return
-	_day_hdri_material.set_shader_parameter("panorama_current", tex)
-	_day_hdri_material.set_shader_parameter("panorama_next", tex)
-	_day_hdri_material.set_shader_parameter("blend", 0.0)
-	_day_hdri_material.set_shader_parameter("exposure_current", 0.8 if is_raining else 1.0)
-	_day_hdri_material.set_shader_parameter("exposure_next", 0.8 if is_raining else 1.0)
-	_day_hdri_material.set_shader_parameter("rotation", 0.139)  # ~50° влево чтобы солнце совпало с тенями
+
+	var exposure_next := 0.8 if is_raining else 1.0
+
+	# Убеждаемся что шейдер активен
 	_environment.sky.sky_material = _day_hdri_material
+	_environment.sky.process_mode = Sky.PROCESS_MODE_REALTIME
+	_day_hdri_material.set_shader_parameter("rotation", 0.139)
+
+	if crossfade:
+		# Текущая текстура остаётся в panorama_current, новая — в panorama_next
+		var exposure_current: float = _day_hdri_material.get_shader_parameter("exposure_current")
+		_day_hdri_material.set_shader_parameter("panorama_next", tex_next)
+		_day_hdri_material.set_shader_parameter("exposure_next", exposure_next)
+		_day_hdri_material.set_shader_parameter("blend", 0.0)
+
+		if _sky_blend_tween:
+			_sky_blend_tween.kill()
+		_sky_blend_tween = create_tween()
+		_sky_blend_tween.tween_property(_day_hdri_material, "shader_parameter/blend", 1.0, 3.0)
+		_sky_blend_tween.tween_callback(_finish_sky_crossfade.bind(tex_next, exposure_next))
+	else:
+		# Мгновенная установка (первый запуск / reload)
+		_day_hdri_material.set_shader_parameter("panorama_current", tex_next)
+		_day_hdri_material.set_shader_parameter("panorama_next", tex_next)
+		_day_hdri_material.set_shader_parameter("blend", 0.0)
+		_day_hdri_material.set_shader_parameter("exposure_current", exposure_next)
+		_day_hdri_material.set_shader_parameter("exposure_next", exposure_next)
+
+
+func _finish_sky_crossfade(tex: Texture2D, exposure: float) -> void:
+	"""После завершения crossfade — переносим next в current"""
+	_day_hdri_material.set_shader_parameter("panorama_current", tex)
+	_day_hdri_material.set_shader_parameter("exposure_current", exposure)
+	_day_hdri_material.set_shader_parameter("blend", 0.0)
 	_environment.sky.process_mode = Sky.PROCESS_MODE_QUALITY
 
 
@@ -538,13 +575,16 @@ func toggle_rain() -> void:
 	is_raining = not is_raining
 	_rain_system.emitting = is_raining
 
-	# Днём переключаем HDRI текстуру (ясно/дождь)
+	# Днём плавно переключаем HDRI текстуру (ясно↔дождь)
 	if not is_night:
-		_apply_day_sky()
+		_apply_day_sky(true)
 
-	# Update road wetness
+	# Update road wetness (плавно за 5 секунд)
 	if _terrain_generator and _terrain_generator.has_method("set_wet_mode"):
 		_terrain_generator.set_wet_mode(is_raining, is_night)
+
+	# Мокрая машина (плавно за 3 секунды)
+	_apply_car_wetness(is_raining)
 
 	rain_changed.emit(is_raining)
 	print("Rain: ", "enabled" if is_raining else "disabled")
@@ -553,3 +593,59 @@ func toggle_rain() -> void:
 func set_rain(enabled: bool) -> void:
 	if enabled != is_raining:
 		toggle_rain()
+
+
+# === Мокрая машина ===
+
+func _collect_car_body_materials() -> void:
+	"""Собирает StandardMaterial3D кузова из машины игрока"""
+	_car_body_materials.clear()
+	if not _car:
+		_car = get_tree().get_first_node_in_group("car")
+	if not _car:
+		return
+
+	# Ищем Node3D-setup (polo_setup, beetle_setup, logan_setup) внутри машины
+	for child in _car.get_children():
+		if child is Node3D and child.get_script():
+			_collect_body_mats_recursive(child)
+			break
+	# Если не нашли через setup — ищем по всей иерархии
+	if _car_body_materials.is_empty():
+		_collect_body_mats_recursive(_car)
+
+
+func _collect_body_mats_recursive(node: Node) -> void:
+	"""Рекурсивно собирает body-материалы из MeshInstance3D"""
+	if node is MeshInstance3D:
+		var mesh_name: String = node.name.to_lower()
+		var is_body: bool = "body" in mesh_name or "roof" in mesh_name
+		if is_body:
+			var surface_count: int = node.get_surface_override_material_count()
+			for i in range(surface_count):
+				var mat: Material = node.get_surface_override_material(i)
+				if mat is StandardMaterial3D and mat not in _car_body_materials:
+					_car_body_materials.append(mat)
+	for child in node.get_children():
+		_collect_body_mats_recursive(child)
+
+
+func _apply_car_wetness(wet: bool) -> void:
+	"""Плавно делает кузов мокрым/сухим за 3 секунды"""
+	if _car_body_materials.is_empty():
+		_collect_car_body_materials()
+	if _car_body_materials.is_empty():
+		return
+
+	if _car_wet_tween:
+		_car_wet_tween.kill()
+
+	_car_wet_tween = create_tween()
+	_car_wet_tween.set_parallel(true)
+
+	var target_rough: float = CAR_WET_ROUGHNESS if wet else CAR_DRY_ROUGHNESS
+	var target_cc_rough: float = CAR_WET_CLEARCOAT_ROUGHNESS if wet else CAR_DRY_CLEARCOAT_ROUGHNESS
+
+	for mat in _car_body_materials:
+		_car_wet_tween.tween_property(mat, "roughness", target_rough, 3.0)
+		_car_wet_tween.tween_property(mat, "clearcoat_roughness", target_cc_rough, 3.0)
