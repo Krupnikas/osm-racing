@@ -17,7 +17,6 @@ const SPRAY_MIN_SPEED := 5.0
 
 
 func _ready() -> void:
-	# Создаём spray particle system как дочерний
 	var spray_scene := preload("res://effects/spray_effect.tscn")
 	_spray_particles = spray_scene.instantiate() as GPUParticles3D
 	add_child(_spray_particles)
@@ -65,10 +64,7 @@ func _process_spray(wheel: Wheel, speed: float, wetness: float, is_rear: bool, i
 	var wet_factor := clampf((wetness - 0.2) / 0.8, 0.0, 1.0)
 	var intensity := speed_factor * wet_factor
 
-	if not is_rear:
-		intensity *= 0.15
-
-	var count := clampi(int(30.0 * intensity), 2 if is_rear else 1, 40)
+	var count := clampi(int(30.0 * intensity), 2, 40)
 
 	for j in count:
 		_emit_spray_particle(wheel, speed, intensity, is_rear, is_left)
@@ -105,23 +101,13 @@ func _emit_spray_particle(wheel: Wheel, speed: float, intensity: float, is_rear:
 		return
 
 	var t := Transform3D.IDENTITY
-
 	t.origin = wheel.last_collision_point
 	t.origin.x += randf_range(-0.1, 0.1)
 	t.origin.y += randf_range(0.02, 0.08)
 	t.origin.z += randf_range(-0.1, 0.1)
 
-	var move_dir := -vehicle.linear_velocity.normalized()
-	var side := wheel.global_transform.basis.x
-
-	# Левые колёса — брызги влево, правые — вправо
-	var side_dir := -1.0 if is_left else 1.0
-	var side_vel := side * side_dir * randf_range(0.6, 1.8)
-	var back_component := 0.25 if is_rear else 0.1
-	var vel := (move_dir * back_component + side_vel + Vector3(0, 0.15, 0)).normalized()
-	vel *= speed * randf_range(0.12, 0.35)
-
-	# Небольшой подброс вверх
-	vel.y += randf_range(0.2, 0.8) + speed * randf_range(0.005, 0.02)
-
+	var side_sign := -1.0 if is_left else 1.0
+	var strength := speed * randf_range(0.3, 0.6)
+	# Velocity в локальных координатах (spray — дочерний машины, Godot сам применяет basis)
+	var vel := Vector3(side_sign * 8.0, 1.0, -8.0).normalized() * strength
 	_spray_particles.emit_particle(t, vel, Color.WHITE, Color.WHITE, 5)
