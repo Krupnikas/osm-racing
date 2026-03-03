@@ -1,5 +1,5 @@
 extends GPUParticles3D
-## Грязь из-под колёс при езде по бездорожью
+## Грязь из-под колёс при езде по бездорожью + брызги воды на мокрой дороге
 ## Реалистичные брызги с вариацией цвета и размера
 
 @export var vehicle: Vehicle
@@ -21,7 +21,17 @@ const DIRT_COLORS: Array[Color] = [
 	Color(0.25, 0.30, 0.18, 0.75),  # Грязно-зелёный
 ]
 
+# Палитра цветов водяных брызг
+const SPRAY_COLORS: Array[Color] = [
+	Color(0.7, 0.75, 0.85, 0.25),   # Светлый туман
+	Color(0.6, 0.65, 0.75, 0.2),    # Серо-голубой
+	Color(0.75, 0.8, 0.9, 0.18),    # Почти белый
+	Color(0.55, 0.6, 0.7, 0.22),    # Тёмный туман
+]
+
 const OFFROAD_SURFACES := ["Grass", "Dirt"]
+const ROAD_SURFACES := ["Road"]
+const SPRAY_MIN_SPEED := 8.0  # Брызги только на скорости
 
 
 func _process(_delta: float) -> void:
@@ -32,27 +42,49 @@ func _process(_delta: float) -> void:
 	if speed < min_speed:
 		return
 
+	var wetness: float = RenderingServer.global_shader_parameter_get("wetness_global")
+
 	for wheel in vehicle.wheel_array:
 		if not wheel.is_colliding():
 			continue
 
-		if wheel.surface_type not in OFFROAD_SURFACES:
-			continue
+		if wheel.surface_type in OFFROAD_SURFACES:
+			_process_dirt(wheel, speed)
+		elif wheel.surface_type in ROAD_SURFACES and wetness > 0.3 and speed > SPRAY_MIN_SPEED:
+			_process_spray(wheel, speed, wetness)
 
-		# Шанс эмиссии зависит от заноса и скорости
-		var slip := wheel.slip_vector.length()
-		var spin_factor := absf(wheel.spin) / 50.0  # Пробуксовка
-		var emission_chance := base_emission_chance + slip * 0.15 + spin_factor * 0.1
-		emission_chance = clampf(emission_chance, 0.1, 0.7)
 
-		if randf() > emission_chance:
-			continue
+func _process_dirt(wheel: Wheel, speed: float) -> void:
+	var slip := wheel.slip_vector.length()
+	var spin_factor := absf(wheel.spin) / 50.0
+	var emission_chance := base_emission_chance + slip * 0.15 + spin_factor * 0.1
+	emission_chance = clampf(emission_chance, 0.1, 0.7)
 
-		# Количество частиц: 50-150, больше при заносе
-		var count := clampi(50 + int(slip * 40) + int(speed / 2.0), 50, 150)
+	if randf() > emission_chance:
+		return
 
-		for i in count:
-			_emit_dirt_particle(wheel, speed, slip)
+	var count := clampi(50 + int(slip * 40) + int(speed / 2.0), 50, 150)
+	for i in count:
+		_emit_dirt_particle(wheel, speed, slip)
+
+
+func _process_spray(wheel: Wheel, speed: float, wetness: float) -> void:
+	# Больше брызг на высокой скорости и при высокой wetness
+	var speed_factor := clampf((speed - SPRAY_MIN_SPEED) / 20.0, 0.0, 1.0)
+	var wet_factor := clampf((wetness - 0.3) / 0.7, 0.0, 1.0)
+	var intensity := speed_factor * wet_factor
+
+	# Только задние колёса дают основной шлейф
+	var is_rear := not wheel.is_front_wheel if "is_front_wheel" in wheel else true
+	if not is_rear:
+		intensity *= 0.2  # Передние колёса — минимальные брызги
+
+	var count := int(30.0 * intensity + 10.0 * intensity)
+	if count < 1:
+		return
+
+	for i in count:
+		_emit_spray_particle(wheel, speed, intensity)
 
 
 func _emit_dirt_particle(wheel: Wheel, speed: float, slip: float) -> void:
@@ -97,5 +129,36 @@ func _emit_dirt_particle(wheel: Wheel, speed: float, slip: float) -> void:
 		color1.b * brightness,
 		color1.a * randf_range(0.7, 1.0)
 	)
+
+	emit_particle(t, vel, color1, color2, 5)
+
+
+func _emit_spray_particle(wheel: Wheel, speed: float, intensity: float) -> void:
+	var t := Transform3D.IDENTITY
+
+	# Позиция: точка контакта колеса, немного сзади и по бокам
+	t.origin = wheel.last_collision_point
+	t.origin.x += randf_range(-0.25, 0.25)
+	t.origin.y += randf_range(0.02, 0.15)
+	t.origin.z += randf_range(-0.2, 0.2)
+
+	# Направление: назад от движения + вбок + вверх
+	var move_dir := -vehicle.linear_velocity.normalized()
+	var side := wheel.global_transform.basis.x
+	var side_spread := side * randf_range(-0.6, 0.6)
+
+	var vel := (move_dir * 0.7 + side_spread + Vector3(0, 0.3, 0)).normalized()
+	vel *= speed * randf_range(0.2, 0.5) * intensity
+
+	# Подброс вверх — водяной шлейф поднимается
+	vel.y += randf_range(0.5, 2.0) + speed * randf_range(0.01, 0.04)
+
+	# Случайный цвет из палитры
+	var idx := randi() % SPRAY_COLORS.size()
+	var color1 := SPRAY_COLORS[idx]
+	var color2 := Color(color1.r, color1.g, color1.b, 0.0)  # Fade out
+
+	# Вариация прозрачности
+	color1.a *= randf_range(0.6, 1.0) * intensity
 
 	emit_particle(t, vel, color1, color2, 5)

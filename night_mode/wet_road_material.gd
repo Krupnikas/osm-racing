@@ -80,8 +80,7 @@ static func create_road_shader_material(albedo_texture: Texture2D = null, normal
 	if noise_macro:
 		mat.set_shader_parameter("noise_macro_tex", noise_macro)
 
-	# Wet/Night state
-	mat.set_shader_parameter("wetness", 1.0 if is_wet else 0.0)
+	# Night state (wetness управляется глобальным параметром wetness_global)
 	mat.set_shader_parameter("is_night", is_night)
 
 	# Default параметры
@@ -126,8 +125,7 @@ static func apply_wet_properties(material: Material, is_wet: bool, is_night: boo
 		return
 
 	if material is ShaderMaterial:
-		# Shader material - устанавливаем параметры
-		material.set_shader_parameter("wetness", 1.0 if is_wet else 0.0)
+		# Shader material (wetness управляется глобальным параметром wetness_global)
 		material.set_shader_parameter("is_night", is_night)
 
 		if is_wet:

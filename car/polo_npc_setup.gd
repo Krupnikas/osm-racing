@@ -80,6 +80,6 @@ func _change_body_color() -> void:
 			if material and (material is StandardMaterial3D or material is BaseMaterial3D) and is_body:
 				material.albedo_texture = null
 				material.albedo_color = body_color
-				material.metallic = 0.3
-				material.metallic_specular = 0.8
-				material.roughness = 0.15
+				material.metallic = 0.15
+				material.metallic_specular = 0.6
+				material.roughness = 0.35

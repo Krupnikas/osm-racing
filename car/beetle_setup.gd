@@ -186,14 +186,14 @@ func _change_body_color() -> void:
 						_glass_materials.append(material)
 						print("  -> Changed glass to tinted")
 					elif is_body:
-						# Кузов - глянцевая краска
+						# Кузов - матовая краска с лаком
 						material.albedo_texture = null
 						material.albedo_color = body_color
-						material.metallic = 0.3
-						material.metallic_specular = 0.8
-						material.roughness = 0.15
-						material.clearcoat = 0.9
-						material.clearcoat_roughness = 0.1
+						material.metallic = 0.15
+						material.metallic_specular = 0.6
+						material.roughness = 0.35
+						material.clearcoat = 0.7
+						material.clearcoat_roughness = 0.15
 						print("  -> Changed body color to yellow")
 				elif material is BaseMaterial3D:
 					if is_glass:

@@ -4556,9 +4556,6 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		if not _chunk_road_materials.has(chunk_key):
 			_chunk_road_materials[chunk_key] = []
 		_chunk_road_materials[chunk_key].append(material)
-		# Применяем текущее значение wetness (может быть в процессе перехода)
-		if _wetness_value != (1.0 if _is_wet_mode else 0.0):
-			material.set_shader_parameter("wetness", _wetness_value)
 
 	# Road collision — StaticBody3D (deferred shape creation)
 	var road_body := StaticBody3D.new()
@@ -5540,8 +5537,6 @@ func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void
 			if not _chunk_road_materials.has(chunk_key):
 				_chunk_road_materials[chunk_key] = []
 			_chunk_road_materials[chunk_key].append(material)
-			if _wetness_value != (1.0 if _is_wet_mode else 0.0):
-				material.set_shader_parameter("wetness", _wetness_value)
 
 
 func _spawn_parked_cars(parking_points: PackedVector2Array, parent: Node3D) -> void:
@@ -12149,36 +12144,27 @@ func set_wet_mode(enabled: bool, is_night: bool = true) -> void:
 	if _ground_shader_material:
 		_ground_shader_material.set_shader_parameter("is_night", is_night)
 
-	# Плавный переход wetness за 5 секунд
+	# Плавный переход wetness_global за 5 секунд (один вызов RenderingServer на кадр)
 	var target := 1.0 if enabled else 0.0
 	if _wetness_tween:
 		_wetness_tween.kill()
 	_wetness_tween = create_tween()
-	_wetness_tween.tween_method(_apply_wetness_value, _wetness_value, target, 5.0)
+	_wetness_tween.tween_method(_apply_wetness_global, _wetness_value, target, 5.0)
 	print("OSM: Wet mode %s (tweening %.1f → %.1f)" % ["enabled" if enabled else "disabled", _wetness_value, target])
 
 
-func _apply_wetness_value(value: float) -> void:
-	"""Применяет значение wetness ко всем дорожным и ground материалам"""
+func _apply_wetness_global(value: float) -> void:
+	"""Устанавливает глобальный шейдерный параметр wetness_global (один вызов на кадр)"""
 	_wetness_value = value
-	for chunk_key in _chunk_road_materials:
-		for mat in _chunk_road_materials[chunk_key]:
-			if mat is ShaderMaterial:
-				mat.set_shader_parameter("wetness", value)
-			elif mat is StandardMaterial3D:
-				# Fallback: интерполяция PBR свойств
-				mat.metallic = lerpf(WetRoadMaterial.DRY_METALLIC, WetRoadMaterial.WET_DAY_METALLIC, value)
-				mat.roughness = lerpf(WetRoadMaterial.DRY_ROUGHNESS, WetRoadMaterial.WET_DAY_ROUGHNESS, value)
-	if _ground_shader_material:
-		_ground_shader_material.set_shader_parameter("wetness", value)
+	RenderingServer.global_shader_parameter_set("wetness_global", value)
 
 
 func _is_road_material(mat: Material) -> bool:
 	"""Проверяет, является ли материал дорожным (не бордюр, не здание)"""
 	# ShaderMaterial с нашим road shader - это дорога
 	if mat is ShaderMaterial:
-		# Проверяем что это наш road shader по наличию параметра wetness
-		if mat.get_shader_parameter("wetness") != null:
+		# Проверяем что это наш road shader по наличию параметра is_night
+		if mat.get_shader_parameter("is_night") != null:
 			return true
 		return false
 
@@ -14166,8 +14152,6 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 		if not _chunk_road_materials.has(chunk_key):
 			_chunk_road_materials[chunk_key] = []
 		_chunk_road_materials[chunk_key].append(material)
-		if _wetness_value != (1.0 if _is_wet_mode else 0.0):
-			material.set_shader_parameter("wetness", _wetness_value)
 
 	parent.add_child(mesh_instance)
 

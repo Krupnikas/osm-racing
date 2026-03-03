@@ -77,15 +77,22 @@ var _sky_blend_tween: Tween
 
 # Мокрая машина
 var _car_body_materials: Array[StandardMaterial3D] = []
+var _car_body_dry_colors: Array[Color] = []  # Оригинальные цвета кузова
 var _car_wet_tween: Tween
-const CAR_DRY_ROUGHNESS := 0.15
-const CAR_WET_ROUGHNESS := 0.03
-const CAR_DRY_CLEARCOAT_ROUGHNESS := 0.1
-const CAR_WET_CLEARCOAT_ROUGHNESS := 0.01
+const CAR_DRY_ROUGHNESS := 0.35
+const CAR_WET_ROUGHNESS := 0.005
+const CAR_DRY_CLEARCOAT_ROUGHNESS := 0.15
+const CAR_WET_CLEARCOAT_ROUGHNESS := 0.002
+const CAR_DRY_METALLIC := 0.15
+const CAR_WET_METALLIC := 0.7
+const CAR_DRY_CLEARCOAT := 0.7
+const CAR_WET_CLEARCOAT := 1.0
+const CAR_WET_DARKEN := 0.2  # На сколько затемнить albedo
 
 
 func _ready() -> void:
 	RenderingServer.global_shader_parameter_add("is_night_global", RenderingServer.GLOBAL_VAR_TYPE_BOOL, false)
+	RenderingServer.global_shader_parameter_add("wetness_global", RenderingServer.GLOBAL_VAR_TYPE_FLOAT, 0.0)
 
 	await get_tree().process_frame
 	_find_scene_components()
@@ -340,7 +347,7 @@ func _create_moon_light() -> void:
 func _create_rain_system() -> void:
 	_rain_system = GPUParticles3D.new()
 	_rain_system.name = "RainSystem"
-	_rain_system.amount = 8000
+	_rain_system.amount = 16000
 	_rain_system.lifetime = 1.5
 	_rain_system.one_shot = false
 	_rain_system.explosiveness = 0.0
@@ -600,6 +607,7 @@ func set_rain(enabled: bool) -> void:
 func _collect_car_body_materials() -> void:
 	"""Собирает StandardMaterial3D кузова из машины игрока"""
 	_car_body_materials.clear()
+	_car_body_dry_colors.clear()
 	if not _car:
 		_car = get_tree().get_first_node_in_group("car")
 	if not _car:
@@ -626,6 +634,7 @@ func _collect_body_mats_recursive(node: Node) -> void:
 				var mat: Material = node.get_surface_override_material(i)
 				if mat is StandardMaterial3D and mat not in _car_body_materials:
 					_car_body_materials.append(mat)
+					_car_body_dry_colors.append(mat.albedo_color)
 	for child in node.get_children():
 		_collect_body_mats_recursive(child)
 
@@ -645,7 +654,16 @@ func _apply_car_wetness(wet: bool) -> void:
 
 	var target_rough: float = CAR_WET_ROUGHNESS if wet else CAR_DRY_ROUGHNESS
 	var target_cc_rough: float = CAR_WET_CLEARCOAT_ROUGHNESS if wet else CAR_DRY_CLEARCOAT_ROUGHNESS
+	var target_metallic: float = CAR_WET_METALLIC if wet else CAR_DRY_METALLIC
+	var target_clearcoat: float = CAR_WET_CLEARCOAT if wet else CAR_DRY_CLEARCOAT
 
-	for mat in _car_body_materials:
+	for i in range(_car_body_materials.size()):
+		var mat: StandardMaterial3D = _car_body_materials[i]
 		_car_wet_tween.tween_property(mat, "roughness", target_rough, 3.0)
 		_car_wet_tween.tween_property(mat, "clearcoat_roughness", target_cc_rough, 3.0)
+		_car_wet_tween.tween_property(mat, "metallic", target_metallic, 3.0)
+		_car_wet_tween.tween_property(mat, "clearcoat", target_clearcoat, 3.0)
+		var dry_color: Color = _car_body_dry_colors[i]
+		var wet_color: Color = dry_color.darkened(CAR_WET_DARKEN)
+		var target_color: Color = wet_color if wet else dry_color
+		_car_wet_tween.tween_property(mat, "albedo_color", target_color, 3.0)

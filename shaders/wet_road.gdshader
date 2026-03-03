@@ -23,7 +23,7 @@ uniform float normal_strength : hint_range(0.0, 2.0) = 0.8;
 uniform bool use_texture = true;
 
 // Параметры мокрой дороги
-uniform float wetness : hint_range(0.0, 1.0) = 0.0;
+global uniform float wetness_global;
 uniform bool is_night = false;
 
 // Roughness настройки
@@ -115,13 +115,13 @@ void fragment() {
 	// Puddle detection — world-space noise для синхронизации между дорогами/перекрёстками
 	float n_puddle = texture(noise_macro_tex, world_pos.xz * puddle_world_scale).r;
 	float puddle_value = n_puddle * curb_factor;
-	float puddle_factor = smoothstep(0.5, 1.0, wetness) * step(puddle_threshold, puddle_value);
+	float puddle_factor = smoothstep(0.5, 1.0, wetness_global) * step(puddle_threshold, puddle_value);
 	wet_albedo = mix(wet_albedo, mix(wet_albedo * (1.0 - puddle_darkness), vec3(0.1, 0.15, 0.2), 0.15), puddle_factor);
 	wet_rough = mix(wet_rough, puddle_roughness, puddle_factor);
 	float wet_met = mix(wet_metallic, puddle_metallic, puddle_factor);
 
-	// Fresnel эффект для отражений под углом (масштаб по wetness)
-	float fresnel = pow(1.0 - abs(dot(NORMAL, VIEW)), 3.0) * wetness;
+	// Fresnel эффект для отражений под углом (масштаб по wetness_global)
+	float fresnel = pow(1.0 - abs(dot(NORMAL, VIEW)), 3.0) * wetness_global;
 	wet_met = mix(wet_met, wet_met + 0.2, fresnel);
 
 	if (is_night) {
@@ -129,11 +129,11 @@ void fragment() {
 		wet_rough *= 0.8;
 	}
 
-	// === Финальное смешивание по wetness ===
-	float roughness = mix(dry_rough, wet_rough, wetness);
-	float metallic = mix(dry_metallic, wet_met, wetness);
-	float specular = mix(dry_specular, wet_specular, wetness);
-	albedo = mix(dry_albedo, wet_albedo, wetness);
+	// === Финальное смешивание по wetness_global ===
+	float roughness = mix(dry_rough, wet_rough, wetness_global);
+	float metallic = mix(dry_metallic, wet_met, wetness_global);
+	float specular = mix(dry_specular, wet_specular, wetness_global);
+	albedo = mix(dry_albedo, wet_albedo, wetness_global);
 
 	// Разметка делает поверхность гладкой (краска)
 	if (use_marking) {

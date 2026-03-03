@@ -179,13 +179,13 @@ func _change_body_color() -> void:
 						material.roughness = 0.05
 						_glass_materials.append(material)
 					elif is_body:
-						# Для кузова - глянцевая краска с лаком
+						# Для кузова - матовая краска с лаком
 						material.albedo_color = body_color
-						material.metallic = 0.3
-						material.metallic_specular = 0.8
-						material.roughness = 0.15
-						material.clearcoat = 0.9
-						material.clearcoat_roughness = 0.1
+						material.metallic = 0.15
+						material.metallic_specular = 0.6
+						material.roughness = 0.35
+						material.clearcoat = 0.7
+						material.clearcoat_roughness = 0.15
 
 
 func _setup_taillights() -> void:
