@@ -43,6 +43,7 @@ var _day_ambient_color := Color(0.5, 0.5, 0.5)
 var _day_ambient_energy := 1.0
 var _day_fog_color := Color(0.7, 0.75, 0.85)
 var _day_fog_density := 0.0008
+var _day_bg_energy := 1.0  # background_energy_multiplier
 var _day_tonemap_exposure := 1.0
 var _day_tonemap_white := 5.0
 var _day_tonemap_mode := Environment.TONE_MAPPER_FILMIC
@@ -91,9 +92,10 @@ const CAR_WET_DARKEN := 0.2  # На сколько затемнить albedo
 
 # Дневной дождь — приглушённое освещение
 var _rain_light_tween: Tween
-const RAIN_SUN_ENERGY_MULT := 0.6  # Солнце на 40% слабее
-const RAIN_AMBIENT_ENERGY_MULT := 0.7  # Ambient на 30% слабее
-const RAIN_FOG_DENSITY_MULT := 3.0  # Туман гуще
+const RAIN_SUN_ENERGY_MULT := 0.35  # Солнце на 65% слабее
+const RAIN_AMBIENT_ENERGY_MULT := 0.4  # Ambient на 60% слабее
+const RAIN_BG_ENERGY_MULT := 0.4  # HDRI небо на 60% слабее (главный источник света)
+const RAIN_FOG_DENSITY_MULT := 1.5  # Туман чуть гуще
 
 
 func _ready() -> void:
@@ -143,6 +145,7 @@ func _find_scene_components() -> void:
 				_original_sky = _environment.sky.sky_material as ProceduralSkyMaterial
 			_day_fog_color = _environment.fog_light_color
 			_day_fog_density = _environment.fog_density
+			_day_bg_energy = _environment.background_energy_multiplier
 			_day_tonemap_exposure = _environment.tonemap_exposure
 			_day_tonemap_white = _environment.tonemap_white
 			_day_tonemap_mode = _environment.tonemap_mode
@@ -549,11 +552,9 @@ func disable_night_mode() -> void:
 	_transition_tween.set_parallel(true)
 
 	# Restore sun (с учётом дождя)
-	var target_sun_energy := _day_sun_energy * (RAIN_SUN_ENERGY_MULT if is_raining else 1.0)
-	var target_ambient_energy := _day_ambient_energy * (RAIN_AMBIENT_ENERGY_MULT if is_raining else 1.0)
-	var target_fog_density := _day_fog_density * (RAIN_FOG_DENSITY_MULT if is_raining else 1.0)
+	var rain_mult := func(base: float, mult: float) -> float: return base * (mult if is_raining else 1.0)
 	if _sun_light:
-		_transition_tween.tween_property(_sun_light, "light_energy", target_sun_energy, 1.5)
+		_transition_tween.tween_property(_sun_light, "light_energy", rain_mult.call(_day_sun_energy, RAIN_SUN_ENERGY_MULT), 1.5)
 		_transition_tween.tween_property(_sun_light, "light_color", _day_sun_color, 1.5)
 
 	# Turn off moon light
@@ -563,9 +564,10 @@ func disable_night_mode() -> void:
 	# Restore ambient and fog (с учётом дождя)
 	if _environment:
 		_transition_tween.tween_property(_environment, "ambient_light_color", _day_ambient_color, 1.5)
-		_transition_tween.tween_property(_environment, "ambient_light_energy", target_ambient_energy, 1.5)
+		_transition_tween.tween_property(_environment, "ambient_light_energy", rain_mult.call(_day_ambient_energy, RAIN_AMBIENT_ENERGY_MULT), 1.5)
+		_transition_tween.tween_property(_environment, "background_energy_multiplier", rain_mult.call(_day_bg_energy, RAIN_BG_ENERGY_MULT), 1.5)
 		_transition_tween.tween_property(_environment, "fog_light_color", _day_fog_color, 1.5)
-		_transition_tween.tween_property(_environment, "fog_density", target_fog_density, 1.5)
+		_transition_tween.tween_property(_environment, "fog_density", rain_mult.call(_day_fog_density, RAIN_FOG_DENSITY_MULT), 1.5)
 
 		# Restore day glow
 		_environment.glow_intensity = _day_glow_intensity
@@ -631,12 +633,14 @@ func _apply_rain_lighting(raining: bool) -> void:
 			_rain_light_tween.tween_property(_sun_light, "light_energy", _day_sun_energy * RAIN_SUN_ENERGY_MULT, 4.0)
 		if _environment:
 			_rain_light_tween.tween_property(_environment, "ambient_light_energy", _day_ambient_energy * RAIN_AMBIENT_ENERGY_MULT, 4.0)
+			_rain_light_tween.tween_property(_environment, "background_energy_multiplier", _day_bg_energy * RAIN_BG_ENERGY_MULT, 4.0)
 			_rain_light_tween.tween_property(_environment, "fog_density", _day_fog_density * RAIN_FOG_DENSITY_MULT, 4.0)
 	else:
 		if _sun_light:
 			_rain_light_tween.tween_property(_sun_light, "light_energy", _day_sun_energy, 4.0)
 		if _environment:
 			_rain_light_tween.tween_property(_environment, "ambient_light_energy", _day_ambient_energy, 4.0)
+			_rain_light_tween.tween_property(_environment, "background_energy_multiplier", _day_bg_energy, 4.0)
 			_rain_light_tween.tween_property(_environment, "fog_density", _day_fog_density, 4.0)
 
 

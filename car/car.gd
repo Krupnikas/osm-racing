@@ -37,6 +37,8 @@ var handbrake_input := 0.0
 
 # Ссылка на освещение
 var _car_lights: Node3D
+var _is_night := false
+var _is_raining := false
 
 # Сигналы для UI
 signal speed_changed(speed_kmh: float)
@@ -222,17 +224,33 @@ func _setup_night_mode_connection() -> void:
 	var night_manager := get_tree().current_scene.find_child("NightModeManager", true, false)
 	if night_manager:
 		night_manager.night_mode_changed.connect(_on_night_mode_changed)
-		# Если уже ночь - включаем свет
+		night_manager.rain_changed.connect(_on_rain_changed)
+		# Если уже ночь или дождь - включаем свет
 		if night_manager.is_night:
+			_is_night = true
 			_on_night_mode_changed(true)
+		if night_manager.is_raining:
+			_is_raining = true
+			_update_headlights()
 
 
 func _on_night_mode_changed(enabled: bool) -> void:
-	if _car_lights and _car_lights.has_method("enable_lights"):
-		if enabled:
-			_car_lights.enable_lights()
-		else:
-			_car_lights.disable_lights()
+	_is_night = enabled
+	_update_headlights()
+
+
+func _on_rain_changed(enabled: bool) -> void:
+	_is_raining = enabled
+	_update_headlights()
+
+
+func _update_headlights() -> void:
+	if not _car_lights or not _car_lights.has_method("enable_lights"):
+		return
+	if _is_night or _is_raining:
+		_car_lights.enable_lights()
+	else:
+		_car_lights.disable_lights()
 
 
 func is_braking() -> bool:
