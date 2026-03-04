@@ -99,8 +99,7 @@ var _initial_chunks_needed: Array[String] = []  # Чанки нужные для
 var _initial_chunks_loaded: int = 0  # Количество загруженных начальных чанков
 var _loading_paused := false  # Загрузка НЕ на паузе - автоматический старт
 var _load_generation := 0  # Инкрементируется при reset для игнорирования старых callback'ов
-var _entrance_nodes: Array = []  # Входы в здания/заведения из OSM
-var _poi_nodes: Array = []  # Точечные заведения (shop/amenity как node)
+# _entrance_nodes/_poi_nodes removed — now passed as local params to avoid data race during frame budgeting
 var _parking_polygons: Array[PackedVector2Array] = []  # Полигоны парковок для исключения фонарей
 var _parking_bounds: Array = []  # Cached {center: Vector2, radius: float} per parking polygon
 var _parking_spatial_hash: Dictionary = {}  # Spatial hash: Vector2i → Array of {polygon_idx: int, p1: Vector2, p2: Vector2}
@@ -2473,7 +2472,8 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 		return
 
 	print("OSM: Chunk %s data loaded" % chunk_key)
-	_loading_chunks.erase(chunk_key)
+	# НЕ удаляем из _loading_chunks здесь — удалим в _generate_chunk_async после генерации
+	# Это предотвращает повторную загрузку пока идёт генерация с frame budgeting
 	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
 
 	# Создаём контейнер для чанка (невидимый — активируется после финализации)
@@ -2481,9 +2481,7 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	chunk_node.name = "Chunk_" + chunk_key
 	chunk_node.visible = false
 	add_child(chunk_node)
-	_loaded_chunks[chunk_key] = chunk_node
 	_chunk_activation_pending[chunk_key] = -1  # -1 = ждём финализации
-
 
 	# Генерируем объекты асинхронно (с frame budgeting)
 	_generate_chunk_async(osm_data, chunk_node, chunk_key, loader, gen)
@@ -2492,6 +2490,11 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: String, loader: Node, gen: int) -> void:
 	await _generate_terrain(osm_data, chunk_node, chunk_key)
 	loader.queue_free()
+
+	# Перемещаем чанк из _loading_chunks в _loaded_chunks ПОСЛЕ генерации
+	# Это гарантирует что initial_load_complete не сработает до заполнения очередей
+	_loading_chunks.erase(chunk_key)
+	_loaded_chunks[chunk_key] = chunk_node
 
 	# После await проверяем что это не устаревшая загрузка
 	if gen != _load_generation:
@@ -2513,9 +2516,11 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 	var _profile_start := Time.get_ticks_msec()
 	var _profile_last := _profile_start
 
-	# Frame budgeting counter - yield каждые N объектов для предотвращения фризов
+	# Frame budgeting: yield когда превышен бюджет времени
 	var objects_this_frame := 0
 	const OBJECTS_PER_FRAME := 3  # Количество лёгких объектов перед yield
+	const FRAME_BUDGET_US := 5000  # 5ms бюджет на фазу перед yield
+	var phase_t0 := Time.get_ticks_usec()
 	var target: Node3D = parent if parent else self
 	var ways: Array = osm_data.get("ways", [])
 	var road_count := 0
@@ -2548,18 +2553,18 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		chunk_max_z = chunk_min_z + chunk_size
 		filter_by_chunk = true
 
-	# Получаем входы и POI для ТЕКУЩЕГО чанка
-	# ВАЖНО: Сбрасываем POI перед обработкой каждого чанка!
-	# POI используют систему координат текущего loader'а
-	_entrance_nodes = osm_data.get("entrance_nodes", [])
-	_poi_nodes = osm_data.get("poi_nodes", [])
+	# Получаем входы и POI для ТЕКУЩЕГО чанка как ЛОКАЛЬНЫЕ переменные
+	# ВАЖНО: НЕ использовать instance vars _entrance_nodes/_poi_nodes!
+	# При frame budgeting (await) другой чанк может перезаписать instance vars.
+	var chunk_entrance_nodes: Array = osm_data.get("entrance_nodes", [])
+	var chunk_poi_nodes: Array = osm_data.get("poi_nodes", [])
 	# НЕ очищаем _parking_polygons и _road_segments - накапливаем из всех чанков
 	# _road_segments нужны для позиционирования знаков парковки
 
-	if not _entrance_nodes.is_empty():
-		print("OSM: Found %d entrance nodes in chunk" % _entrance_nodes.size())
-	if not _poi_nodes.is_empty():
-		print("OSM: Found %d POI nodes in chunk" % _poi_nodes.size())
+	if not chunk_entrance_nodes.is_empty():
+		print("OSM: Found %d entrance nodes in chunk" % chunk_entrance_nodes.size())
+	if not chunk_poi_nodes.is_empty():
+		print("OSM: Found %d POI nodes in chunk" % chunk_poi_nodes.size())
 
 	# Первый проход: собираем полигоны парковок, сегменты дорог и зданий из ВСЕХ OSM данных
 	# (включая объекты за пределами чанка - они нужны для корректной проверки расстояний)
@@ -2603,6 +2608,11 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 							_parking_spatial_hash[cell_key] = []
 						_parking_spatial_hash[cell_key].append({"idx": pidx, "p1": ep1, "p2": ep2})
 
+		# Yield если фаза 1 затянулась
+		if (Time.get_ticks_usec() - phase_t0) > FRAME_BUDGET_US:
+			await get_tree().process_frame
+			phase_t0 = Time.get_ticks_usec()
+
 		# Все дороги из OSM данных -> spatial hash (для проверки расстояний при генерации деревьев/фонарей)
 		# Используем сглаженные координаты — чтобы spatial hash соответствовал реальной геометрии дорог
 		if tags.has("highway") and nodes.size() >= 2:
@@ -2629,6 +2639,10 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				var bseg := {"p1": bp1, "p2": bp2}
 				_add_building_segment_to_spatial_hash(bseg)
 			_add_building_poly_to_hash(bpoints)
+
+	# Yield перед фазой 2 (перекрёстки)
+	await get_tree().process_frame
+	phase_t0 = Time.get_ticks_usec()
 
 	# Сбор перекрёстков (узлы, где сходятся несколько дорог)
 	# НЕ очищаем массивы - накапливаем из всех чанков (очистка в start_loading)
@@ -2685,6 +2699,11 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				var next_local2: Vector2 = _latlon_to_local(way_nodes[i + 1].lat, way_nodes[i + 1].lon)
 				var outward_next := (next_local2 - local).normalized()
 				node_arms[node_key].append({"direction": outward_next, "width": road_width})
+
+	# Yield перед обработкой перекрёстков
+	if (Time.get_ticks_usec() - phase_t0) > FRAME_BUDGET_US:
+		await get_tree().process_frame
+		phase_t0 = Time.get_ticks_usec()
 
 	# Определяем перекрёстки (2+ дороги сходятся ИЛИ 3+ рукава для однотипных T-образных)
 	for node_key in node_usage:
@@ -2793,6 +2812,15 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		hash_radius += 1.0
 		_add_intersection_to_spatial_hash(info["pos"], Vector2(hash_radius, hash_radius), idx)
 
+		# Yield если обработка перекрёстков затянулась
+		if (Time.get_ticks_usec() - phase_t0) > FRAME_BUDGET_US:
+			await get_tree().process_frame
+			phase_t0 = Time.get_ticks_usec()
+
+	# Yield перед фазой 3 (создание объектов)
+	await get_tree().process_frame
+	phase_t0 = Time.get_ticks_usec()
+
 	# Второй проход: создаём все объекты
 	var skipped_buildings := 0
 	for way in ways:
@@ -2850,9 +2878,9 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			objects_this_frame += 1
 		elif tags.has("building"):
 			var way_id: int = int(way.get("id", 0))  # Ensure int conversion from JSON float
-			_create_building(nodes, tags, target, loader, way_id)
+			_create_building(nodes, tags, target, loader, way_id, chunk_entrance_nodes, chunk_poi_nodes)
 			building_count += 1
-			# Здания теперь в thread pool - не нужен await
+			objects_this_frame += 1
 		elif tags.has("amenity") and not tags.has("building"):
 			# Amenity без building тега - создаём как здание
 			_create_amenity_building(nodes, tags, target, loader)
@@ -2883,12 +2911,11 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			_create_waterway(nodes, tags, target, loader)
 			objects_this_frame += 1
 
-		# Frame budgeting ОТКЛЮЧЕН - вызывает исчезновение бизнес-вывесок
-		# См. bisect: проблема появилась в коммите 00b311f
-		# if objects_this_frame >= OBJECTS_PER_FRAME:
-		# 	objects_this_frame = 0
-		# 	await get_tree().process_frame
-		pass
+		# Frame budgeting: yield каждые N объектов чтобы не фризить
+		# POI data race fix: entrance_nodes/poi_nodes теперь локальные переменные
+		if objects_this_frame >= OBJECTS_PER_FRAME:
+			objects_this_frame = 0
+			await get_tree().process_frame
 
 	# Ищем перекрёстки (узлы, которые используются несколькими дорогами)
 	# Для Т-образных перекрёстков: проверяем ВСЕ узлы дорог
@@ -5134,6 +5161,7 @@ func _process_deferred_nodes() -> void:
 ## Создаёт все отложенные SpotLight3D фонарей за один проход (без бюджета).
 ## Вызывается из _process() отдельно от _process_deferred_nodes.
 func _process_deferred_lamp_lights() -> void:
+	var t0 := Time.get_ticks_usec()
 	while not _deferred_lamp_lights.is_empty():
 		var item: Dictionary = _deferred_lamp_lights[0]
 		var container: Node3D = item["container"]
@@ -5147,9 +5175,9 @@ func _process_deferred_lamp_lights() -> void:
 			light.position = light_data.position
 			light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
 			light.rotation_degrees.x = -75
-			light.spot_range = 15.0  # Большой range для AABB (frustum culling)
+			light.spot_range = 15.0
 			light.spot_angle = 70.0
-			light.spot_attenuation = 1.0  # Быстрый спад: на 8м ~70%, на 20м ~12%
+			light.spot_attenuation = 1.0
 			light.light_energy = 2.6
 			light.light_color = Color(1.0, 0.65, 0.2)
 			light.light_volumetric_fog_energy = 16.0
@@ -5167,6 +5195,9 @@ func _process_deferred_lamp_lights() -> void:
 			if _lamp_lights_by_chunk.has(chunk_key):
 				_lamp_lights_by_chunk[chunk_key].append(light)
 		_deferred_lamp_lights.pop_front()
+		# 2ms budget — remaining lamps processed next frame
+		if (Time.get_ticks_usec() - t0) > 2000:
+			break
 
 
 # Старая версия без текстур (для совместимости)
@@ -5218,7 +5249,7 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: 
 	im.surface_end()
 	parent.add_child(mesh)
 
-func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, way_id: int = 0) -> void:
+func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, way_id: int = 0, entrance_nodes: Array = [], poi_nodes: Array = []) -> void:
 	if not enable_buildings or nodes.size() < 3:
 		return
 
@@ -5444,7 +5475,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
-	_add_business_signs_simple(points, tags, parent, building_height, base_elev, loader, way_id)
+	_add_business_signs_simple(points, tags, parent, building_height, base_elev, loader, way_id, entrance_nodes, poi_nodes)
 
 	# Добавляем подъезды жилых домов (из building_overrides JSON)
 	if way_id > 0 and _decoration_layer:
@@ -12666,7 +12697,7 @@ func _add_building_windows(points: PackedVector2Array, height: float, rng: Rando
 ## BUSINESS SIGNS (вывески для заведений)
 ## ============================================================================
 
-func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, parent: Node3D, building_height: float, base_elev: float = 0.0, loader: Node = null, way_id: int = 0) -> void:
+func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, parent: Node3D, building_height: float, base_elev: float = 0.0, loader: Node = null, way_id: int = 0, entrance_nodes: Array = [], poi_nodes: Array = []) -> void:
 	"""
 	Добавление вывесок для заведений
 	Приоритет: вход (entrance) > POI node > самая длинная стена
@@ -12684,7 +12715,7 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 
 	# 2. Ищем POI nodes внутри здания
 	if loader != null:
-		var pois_inside = _find_pois_inside_building(points, loader)
+		var pois_inside = _find_pois_inside_building(points, loader, poi_nodes)
 		var skip_override = null
 		if way_id > 0 and _decoration_layer:
 			skip_override = _decoration_layer.get_building_override_for_way(way_id)
@@ -12719,8 +12750,8 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 
 		# Приоритет 1: Ищем вход для этого здания
 		var entrance = {}
-		if not _entrance_nodes.is_empty() and loader != null:
-			entrance = _find_entrance_for_building(points, loader)
+		if not entrance_nodes.is_empty() and loader != null:
+			entrance = _find_entrance_for_building(points, loader, entrance_nodes)
 
 		if not entrance.is_empty():
 			# Размещаем вывеску над входом
@@ -13115,7 +13146,7 @@ func _point_to_segment_distance(point: Vector2, seg_start: Vector2, seg_end: Vec
 	return point.distance_to(projection)
 
 
-func _find_entrance_for_building(building_points: PackedVector2Array, _loader: Node) -> Dictionary:
+func _find_entrance_for_building(building_points: PackedVector2Array, _loader: Node, entrance_nodes: Array = []) -> Dictionary:
 	"""
 	Ищет вход, принадлежащий данному зданию.
 	Вход считается принадлежащим, если он находится на контуре здания
@@ -13128,7 +13159,7 @@ func _find_entrance_for_building(building_points: PackedVector2Array, _loader: N
 	"""
 	const MAX_DISTANCE := 2.0  # Максимальное расстояние от контура (2 метра)
 
-	for entrance in _entrance_nodes:
+	for entrance in entrance_nodes:
 		# Используем _latlon_to_local(), т.к. building_points в той же системе координат
 		var entrance_pos: Vector2 = _latlon_to_local(entrance.lat, entrance.lon)
 
@@ -13150,7 +13181,7 @@ func _find_entrance_for_building(building_points: PackedVector2Array, _loader: N
 	return {}
 
 
-func _find_pois_inside_building(building_points: PackedVector2Array, _loader: Node) -> Array:
+func _find_pois_inside_building(building_points: PackedVector2Array, _loader: Node, poi_nodes: Array = []) -> Array:
 	"""
 	Ищет POI nodes (точечные заведения) внутри полигона здания.
 	Использует алгоритм ray casting для проверки принадлежности точки полигону.
@@ -13173,7 +13204,7 @@ func _find_pois_inside_building(building_points: PackedVector2Array, _loader: No
 		min_y = min(min_y, p.y)
 		max_y = max(max_y, p.y)
 
-	for poi in _poi_nodes:
+	for poi in poi_nodes:
 		# Используем _latlon_to_local(), т.к. building_points в той же системе координат
 		var poi_pos: Vector2 = _latlon_to_local(poi.lat, poi.lon)
 

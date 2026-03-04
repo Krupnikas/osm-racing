@@ -13,6 +13,8 @@ var _frame_times: Array[float] = []
 var _fps_samples: Array[float] = []
 var _draw_calls: Array[int] = []
 var _vertices: Array[int] = []
+var _warmup_frames: int = 0  # Пропускаем первые кадры (TIME_PROCESS от предыдущего)
+const WARMUP_SKIP := 3  # Пропустить 3 кадра разогрева
 
 func start_logging(test_name_param: String = "performance_test") -> void:
 	test_name = test_name_param
@@ -22,9 +24,15 @@ func start_logging(test_name_param: String = "performance_test") -> void:
 	_fps_samples.clear()
 	_draw_calls.clear()
 	_vertices.clear()
+	_warmup_frames = 0
 	print("[PerformanceLogger] Started logging: %s" % test_name)
 
 func log_frame() -> void:
+	# Пропускаем первые кадры — TIME_PROCESS содержит остаток от предыдущих тяжёлых кадров
+	_warmup_frames += 1
+	if _warmup_frames <= WARMUP_SKIP:
+		return
+
 	var current_time = Time.get_ticks_msec() / 1000.0 - start_time
 
 	# Collect metrics
@@ -70,6 +78,10 @@ func get_summary() -> Dictionary:
 	var sorted_fps := _fps_samples.duplicate()
 	sorted_fps.sort()
 
+	# Sort frame times для расчёта перцентилей
+	var sorted_frame_times := _frame_times.duplicate()
+	sorted_frame_times.sort()
+
 	var summary = {
 		"test_name": test_name,
 		"duration": Time.get_ticks_msec() / 1000.0 - start_time,
@@ -77,12 +89,16 @@ func get_summary() -> Dictionary:
 		"avg_fps": _calculate_average(_fps_samples),
 		"min_fps": _fps_samples.min(),
 		"max_fps": _fps_samples.max(),
-		"median_fps": _calculate_percentile(sorted_fps, 50.0),  # NEW: Median (50th percentile)
-		"percentile_95_fps": _calculate_percentile(sorted_fps, 95.0),  # NEW: 95th percentile
-		"percentile_5_fps": _calculate_percentile(sorted_fps, 5.0),  # NEW: 5th percentile (low end)
+		"median_fps": _calculate_percentile(sorted_fps, 50.0),
+		"percentile_95_fps": _calculate_percentile(sorted_fps, 95.0),
+		"percentile_5_fps": _calculate_percentile(sorted_fps, 5.0),
+		"percentile_1_fps": _calculate_percentile(sorted_fps, 1.0),
 		"avg_frame_time": _calculate_average(_frame_times),
 		"min_frame_time": _frame_times.min(),
 		"max_frame_time": _frame_times.max(),
+		"p99_frame_time": _calculate_percentile(sorted_frame_times, 99.0),
+		"p95_frame_time": _calculate_percentile(sorted_frame_times, 95.0),
+		"p999_frame_time": _calculate_percentile(sorted_frame_times, 99.9),
 		"avg_draw_calls": _calculate_average_int(_draw_calls),
 		"max_draw_calls": _draw_calls.max(),
 		"avg_vertices": _calculate_average_int(_vertices),
@@ -137,11 +153,15 @@ func print_summary(summary: Dictionary = {}) -> void:
 	print("  Median (50th): %.1f" % summary.get("median_fps", 0.0))
 	print("  95th Percentile: %.1f" % summary.get("percentile_95_fps", 0.0))
 	print("  5th Percentile: %.1f" % summary.get("percentile_5_fps", 0.0))
+	print("  1st Percentile: %.1f" % summary.get("percentile_1_fps", 0.0))
 	print("  Min: %.1f" % summary.get("min_fps", 0.0))
 	print("  Max: %.1f" % summary.get("max_fps", 0.0))
 	print("")
 	print("Frame Time (ms):")
 	print("  Average: %.2f" % summary.get("avg_frame_time", 0.0))
+	print("  P95: %.2f" % summary.get("p95_frame_time", 0.0))
+	print("  P99: %.2f" % summary.get("p99_frame_time", 0.0))
+	print("  P99.9: %.2f" % summary.get("p999_frame_time", 0.0))
 	print("  Min: %.2f" % summary.get("min_frame_time", 0.0))
 	print("  Max: %.2f" % summary.get("max_frame_time", 0.0))
 	print("")
