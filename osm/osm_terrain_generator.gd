@@ -712,9 +712,58 @@ func _init_textures() -> void:
 		_ground_shader_material.set_shader_parameter("noise_micro_tex", _noise_textures.get("micro"))
 		print("OSM: Ground shader material created")
 
+	# Прогрев кэша кастомных текстур зданий — загружаем все текстуры из textures/buildings/
+	# чтобы при генерации чанков не было фризов от файловых проверок
+	_preload_custom_building_textures()
+
 	_textures_initialized = true
 	var elapsed := Time.get_ticks_msec() - start_time
 	print("OSM: Textures initialized in %d ms" % elapsed)
+
+func _preload_custom_building_textures() -> void:
+	"""Предзагружает все текстуры зданий и PBR-карты из textures/buildings/ в кэш"""
+	var dir := DirAccess.open("res://textures/buildings/")
+	if not dir:
+		return
+	var preloaded := 0
+	var pbr_cached := 0
+	var suffix_normal := "_normal.png"
+	var suffix_ao := "_ambient.png"
+	var suffix_spec := "_specular.png"
+	var suffix_disp := "_displacement.png"
+	dir.list_dir_begin()
+	var fname := dir.get_next()
+	while fname != "":
+		if not dir.current_is_dir() and not fname.ends_with(".import"):
+			var path := "res://textures/buildings/" + fname
+			# Предзагружаем основную текстуру
+			if not _custom_building_textures.has(path) and ResourceLoader.exists(path):
+				_custom_building_textures[path] = load(path)
+				preloaded += 1
+			# Кэшируем PBR-карты для основных текстур (не для самих PBR-суффиксов)
+			var is_pbr := fname.ends_with(suffix_normal) or fname.ends_with(suffix_ao) or fname.ends_with(suffix_spec) or fname.ends_with(suffix_disp)
+			if not is_pbr:
+				var base_path := path.get_basename()
+				var p_normal := base_path + suffix_normal
+				var p_ao := base_path + suffix_ao
+				var p_spec := base_path + suffix_spec
+				var p_disp := base_path + suffix_disp
+				if not _custom_building_maps.has(p_normal):
+					_load_texture_map("", p_normal)
+					pbr_cached += 1
+				if not _custom_building_maps.has(p_ao):
+					_load_texture_map("", p_ao)
+					pbr_cached += 1
+				if not _custom_building_maps.has(p_spec):
+					_load_texture_map("", p_spec)
+					pbr_cached += 1
+				if not _custom_building_maps.has(p_disp):
+					_load_texture_map("", p_disp)
+					pbr_cached += 1
+		fname = dir.get_next()
+	dir.list_dir_end()
+	print("OSM: Preloaded %d custom building textures, cached %d PBR map lookups" % [preloaded, pbr_cached])
+
 
 func _init_window_shader() -> void:
 	if _window_shader:
@@ -8999,8 +9048,8 @@ func _load_texture_map(explicit_path: String, auto_path: String) -> Texture2D:
 				tex = ImageTexture.create_from_image(img)
 				print("OSM: Loaded raw image: ", path, " (", img.get_width(), "x", img.get_height(), ")")
 
-	if tex:
-		_custom_building_maps[path] = tex
+	# Кэшируем и null чтобы не проверять файлы повторно
+	_custom_building_maps[path] = tex
 	return tex
 
 
@@ -9060,30 +9109,24 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 	# Загружаем дополнительные карты текстур (с кэшированием)
 	var base_path := texture_path.get_basename()  # путь без расширения
-	print("OSM: Loading PBR maps for base_path: ", base_path)
-
 	# Normal map
 	var normal_path := base_path + "_normal.png"
 	var normal_texture: Texture2D = _load_texture_map(building_override.wall_normal_path, normal_path)
-	var normal_strength: float = 2.0  # Максимальная сила для видимого эффекта
-	print("  Normal map: ", normal_path, " -> ", normal_texture != null)
+	var normal_strength: float = 2.0
 
 	# Ambient Occlusion
 	var ao_path := base_path + "_ambient.png"
 	var ao_texture: Texture2D = _load_texture_map(building_override.wall_ao_path, ao_path)
-	var ao_strength: float = 1.0  # Полная сила AO
-	print("  AO map: ", ao_path, " -> ", ao_texture != null)
+	var ao_strength: float = 1.0
 
 	# Specular (используется как инверсия roughness)
 	var specular_path := base_path + "_specular.png"
 	var specular_texture: Texture2D = _load_texture_map(building_override.wall_specular_path, specular_path)
-	print("  Specular map: ", specular_path, " -> ", specular_texture != null)
 
 	# Displacement/Height (для parallax mapping)
 	var displacement_path := base_path + "_displacement.png"
 	var displacement_texture: Texture2D = _load_texture_map(building_override.wall_displacement_path, displacement_path)
-	var heightmap_scale: float = 0.05  # Увеличенная глубина для видимого эффекта
-	print("  Displacement map: ", displacement_path, " -> ", displacement_texture != null)
+	var heightmap_scale: float = 0.05
 
 
 	# Высоты с учётом террейна
