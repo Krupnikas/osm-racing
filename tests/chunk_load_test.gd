@@ -88,7 +88,42 @@ func _find_nodes() -> void:
 		"YES" if car else "NO", "YES" if osm_terrain else "NO"])
 
 
+func _apply_render_flags() -> void:
+	var args := OS.get_cmdline_args()
+	var env: Environment
+	var we := get_node_or_null("WorldEnvironment") as WorldEnvironment
+	if we:
+		env = we.environment
+	if not env:
+		return
+	var disabled: PackedStringArray = []
+	for arg in args:
+		if arg == "--no-sdfgi":
+			env.sdfgi_enabled = false
+			disabled.append("SDFGI")
+		elif arg == "--no-ssr":
+			env.ssr_enabled = false
+			disabled.append("SSR")
+		elif arg == "--no-ssao":
+			env.ssao_enabled = false
+			disabled.append("SSAO")
+		elif arg == "--no-ssil":
+			env.ssil_enabled = false
+			disabled.append("SSIL")
+		elif arg == "--no-volumetric-fog":
+			env.volumetric_fog_enabled = false
+			disabled.append("VolumetricFog")
+		elif arg == "--no-glow":
+			env.glow_enabled = false
+			disabled.append("Glow")
+	if disabled.is_empty():
+		print("[ChunkLoadTest] Render: all effects enabled (matching main.tscn)")
+	else:
+		print("[ChunkLoadTest] Render: DISABLED %s" % " ".join(disabled))
+
+
 func _setup_test() -> void:
+	_apply_render_flags()
 	# Hide and freeze car — only used as NPC spawn anchor
 	if car:
 		car.visible = false

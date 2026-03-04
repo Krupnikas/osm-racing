@@ -97,7 +97,42 @@ func _find_nodes() -> void:
 	print("  OSMTerrain: %s" % ("YES" if osm_terrain else "NO"))
 	print("  NightModeManager: %s" % ("YES" if night_mode_manager else "NO"))
 
+func _apply_render_flags() -> void:
+	var args := OS.get_cmdline_args()
+	var env: Environment
+	var we := get_node_or_null("WorldEnvironment") as WorldEnvironment
+	if we:
+		env = we.environment
+	if not env:
+		return
+	var disabled: PackedStringArray = []
+	for arg in args:
+		if arg == "--no-sdfgi":
+			env.sdfgi_enabled = false
+			disabled.append("SDFGI")
+		elif arg == "--no-ssr":
+			env.ssr_enabled = false
+			disabled.append("SSR")
+		elif arg == "--no-ssao":
+			env.ssao_enabled = false
+			disabled.append("SSAO")
+		elif arg == "--no-ssil":
+			env.ssil_enabled = false
+			disabled.append("SSIL")
+		elif arg == "--no-volumetric-fog":
+			env.volumetric_fog_enabled = false
+			disabled.append("VolumetricFog")
+		elif arg == "--no-glow":
+			env.glow_enabled = false
+			disabled.append("Glow")
+	if disabled.is_empty():
+		print("[PerfTest] Render: all effects enabled (matching main.tscn)")
+	else:
+		print("[PerfTest] Render: DISABLED %s" % " ".join(disabled))
+
+
 func _setup_test() -> void:
+	_apply_render_flags()
 	# Set test location in Cherepovets
 	if osm_terrain:
 		# Connect to loading signals
@@ -325,13 +360,10 @@ func _print_gpu_cpu_stats(_delta: float = 0.0) -> void:
 	if cpu_valid > 0:
 		cpu_render_avg /= cpu_valid
 
-	# Process/physics times from Performance monitors
-	var process_ms: float = Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
-	var physics_ms: float = Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
 	var fps: float = Engine.get_frames_per_second()
 	var frame_ms: float = 1000.0 / maxf(fps, 1.0)
 
-	# Infer bottleneck: if process_ms << frame_ms, CPU finishes fast → GPU-bound
+	# Infer bottleneck from GPU/CPU render times
 	var bottleneck: String
 	if gpu_valid > 0:
 		if gpu_avg > cpu_render_avg * 1.2:
@@ -341,21 +373,13 @@ func _print_gpu_cpu_stats(_delta: float = 0.0) -> void:
 		else:
 			bottleneck = "BALANCED"
 	else:
-		# No GPU timing available — infer from process vs frame time
-		# CPU process < frame → CPU waits for GPU → GPU-bound
-		if process_ms < frame_ms * 0.6:
-			bottleneck = "GPU-BOUND (inferred)"
-		elif process_ms > frame_ms * 0.9:
-			bottleneck = "CPU-BOUND (inferred)"
-		else:
-			bottleneck = "BALANCED (inferred)"
+		bottleneck = "GPU timing N/A"
 
 	var draw_calls: int = int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
 	var objects: int = int(Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME))
 	var vram_mb: float = Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0
 
-	print("[BOTTLENECK] %s | FPS: %.0f | Frame: %.1f ms | Process: %.1f ms | Physics: %.1f ms" % [
-		bottleneck, fps, frame_ms, process_ms, physics_ms])
+	print("[BOTTLENECK] %s | FPS: %.0f | Frame: %.1f ms" % [bottleneck, fps, frame_ms])
 	if gpu_valid > 0:
 		print("  GPU render: %.2f ms avg (%.2f max) | CPU render: %.2f ms avg (%.2f max)" % [
 			gpu_avg, gpu_max, cpu_render_avg, cpu_render_max])

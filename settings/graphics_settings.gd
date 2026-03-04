@@ -10,6 +10,7 @@ var ssr_enabled := true
 var fog_enabled := true
 var glow_enabled := true
 var ssao_enabled := true
+var sdfgi_enabled := false  # SDFGI выключен по умолчанию (стоит ~12ms на M1 Pro)
 var normal_maps_enabled := true
 var clouds_enabled := true
 
@@ -148,6 +149,13 @@ func toggle_ssao() -> void:
 	ssao_enabled = not ssao_enabled
 	_apply_ssao()
 	print("SSAO: ", "ON" if ssao_enabled else "OFF")
+	settings_changed.emit()
+
+
+func toggle_sdfgi() -> void:
+	sdfgi_enabled = not sdfgi_enabled
+	_apply_sdfgi()
+	print("SDFGI: ", "ON" if sdfgi_enabled else "OFF")
 	settings_changed.emit()
 
 
@@ -305,6 +313,14 @@ func _apply_ssao() -> void:
 		print("ERROR: Cannot apply SSAO - no environment!")
 
 
+func _apply_sdfgi() -> void:
+	if _environment:
+		_environment.sdfgi_enabled = sdfgi_enabled
+		print("SDFGI: ", "ON" if sdfgi_enabled else "OFF")
+	else:
+		print("ERROR: Cannot apply SDFGI - no environment!")
+
+
 func _apply_taa() -> void:
 	var viewport := get_tree().root
 	if viewport:
@@ -395,6 +411,7 @@ func set_quality_low() -> void:
 	fog_enabled = false
 	glow_enabled = false
 	ssao_enabled = false
+	sdfgi_enabled = false
 	normal_maps_enabled = false
 	clouds_enabled = false
 	msaa_mode = Viewport.MSAA_DISABLED
@@ -414,6 +431,7 @@ func set_quality_medium() -> void:
 	fog_enabled = true
 	glow_enabled = true
 	ssao_enabled = true
+	sdfgi_enabled = false
 	normal_maps_enabled = true
 	clouds_enabled = true
 	msaa_mode = Viewport.MSAA_DISABLED
@@ -433,6 +451,7 @@ func set_quality_high() -> void:
 	fog_enabled = true
 	glow_enabled = true
 	ssao_enabled = true
+	sdfgi_enabled = true
 	normal_maps_enabled = true
 	clouds_enabled = true
 	msaa_mode = Viewport.MSAA_2X
@@ -452,6 +471,7 @@ func _apply_all() -> void:
 	_apply_fog()
 	_apply_glow()
 	_apply_ssao()
+	_apply_sdfgi()
 	_apply_taa()
 	_apply_msaa()
 	_apply_fxaa()
@@ -479,6 +499,7 @@ func _load_settings() -> void:
 		fog_enabled = config.get_value("graphics", "fog", true)
 		glow_enabled = config.get_value("graphics", "glow", true)
 		ssao_enabled = config.get_value("graphics", "ssao", true)
+		sdfgi_enabled = config.get_value("graphics", "sdfgi", false)
 		normal_maps_enabled = config.get_value("graphics", "normal_maps", true)
 		clouds_enabled = config.get_value("graphics", "clouds", true)
 		msaa_mode = config.get_value("graphics", "msaa", Viewport.MSAA_4X)
@@ -505,6 +526,7 @@ func save_settings() -> void:
 	config.set_value("graphics", "fog", fog_enabled)
 	config.set_value("graphics", "glow", glow_enabled)
 	config.set_value("graphics", "ssao", ssao_enabled)
+	config.set_value("graphics", "sdfgi", sdfgi_enabled)
 	config.set_value("graphics", "normal_maps", normal_maps_enabled)
 	config.set_value("graphics", "clouds", clouds_enabled)
 	config.set_value("graphics", "msaa", msaa_mode)

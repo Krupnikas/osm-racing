@@ -180,12 +180,15 @@ func _update_spawning() -> void:
 	var spawns_this_frame := 0
 	const MAX_SPAWNS_PER_FRAME := 3
 
-	# Проходим по всем загруженным чанкам
+	# Проходим по всем полностью загруженным чанкам
 	for chunk_key in loaded_chunks.keys():
 		if active_npcs.size() >= max_npcs:
 			break
 		if spawns_this_frame >= MAX_SPAWNS_PER_FRAME:
 			break
+		# Спавним только в полностью финализированных чанках
+		if not terrain_generator.is_chunk_fully_ready(chunk_key):
+			continue
 
 		# Инициализируем tracking для чанка
 		if not spawned_positions.has(chunk_key):

@@ -1449,16 +1449,14 @@ func _process(delta: float) -> void:
 	var _frame_time := (Time.get_ticks_usec() - _frame_start) / 1000.0
 	_record_perf("total_frame", int(_frame_time * 1000))
 
-	# Детальное логирование при FPS < 30 (frame > 33ms), не чаще раза в секунду
-	var _total_frame_ms := 1000.0 / Engine.get_frames_per_second() if Engine.get_frames_per_second() > 0 else 0.0
-	if _total_frame_ms > 33.0 and _slow_frame_cooldown <= 0.0:
+	# Детальное логирование при реальном delta > 16ms (< 60fps), не чаще раза в секунду
+	var _real_frame_ms := delta * 1000.0
+	if _real_frame_ms > 16.0 and _slow_frame_cooldown <= 0.0:
 		_slow_frame_cooldown = 1.0
 		if not _viewport_rid.is_valid():
 			_viewport_rid = get_viewport().get_viewport_rid()
 		var sf_render_cpu := RenderingServer.viewport_get_measured_render_time_cpu(_viewport_rid)
 		var sf_render_gpu := RenderingServer.viewport_get_measured_render_time_gpu(_viewport_rid)
-		var sf_process_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
-		var sf_physics_ms := Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
 		var sf_draw_calls := int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
 		var sf_vertices := Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)
 		var sf_objects := int(Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME))
@@ -1467,7 +1465,7 @@ func _process(delta: float) -> void:
 		var sf_nodes := int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT))
 		var sf_resources := int(Performance.get_monitor(Performance.OBJECT_RESOURCE_COUNT))
 		var sf_vram := Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0
-		# GPU timing на macOS/Metal может возвращать 0 — не показывать misleading label
+		# Определяем bottleneck
 		var sf_bottleneck: String
 		if sf_render_gpu < 0.01 and sf_render_cpu < 0.01:
 			sf_bottleneck = "GPU timing N/A"
@@ -1476,10 +1474,9 @@ func _process(delta: float) -> void:
 		else:
 			sf_bottleneck = "GPU-bound"
 		print("")
-		print("===== SLOW FRAME #%d (%.0f FPS, %.1fms) [%s] =====" % [
-			Engine.get_process_frames(), Engine.get_frames_per_second(), _total_frame_ms, sf_bottleneck])
-		print("  Render: CPU=%.1fms GPU=%.1fms | Godot: Process=%.1fms Physics=%.1fms" % [
-			sf_render_cpu, sf_render_gpu, sf_process_ms, sf_physics_ms])
+		print("===== SLOW FRAME #%d (delta=%.1fms, %.0f FPS) [%s] =====" % [
+			Engine.get_process_frames(), _real_frame_ms, Engine.get_frames_per_second(), sf_bottleneck])
+		print("  Render: CPU=%.1fms GPU=%.1fms" % [sf_render_cpu, sf_render_gpu])
 		# Our _process breakdown (этот кадр)
 		print("  OSM _process: %.1fms breakdown:" % _frame_time)
 		print("    building_results=%.2fms road_queue=%.2fms terrain_queue=%.2fms" % [
@@ -14286,7 +14283,11 @@ func _rs_add_mesh(chunk_key: String, mesh: Mesh, material: Material = null,
 	return inst
 
 
-## Записывает метрику времени
+## Чанк полностью финализирован: загружен, все очереди обработаны, RS instances активированы
+func is_chunk_fully_ready(chunk_key: String) -> bool:
+	return _loaded_chunks.has(chunk_key) and not _chunk_activation_pending.has(chunk_key)
+
+
 ## Lazy chunk activation — даёт Vulkan время подготовить GPU ресурсы перед показом
 func _process_chunk_activation() -> void:
 	if _chunk_activation_pending.is_empty():
