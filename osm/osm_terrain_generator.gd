@@ -1357,21 +1357,23 @@ func _process(delta: float) -> void:
 		_deferred_add_child_queue.pop_front()
 	_record_perf("add_child_drain", Time.get_ticks_usec() - _ac_t0)
 
+	# Общий бюджет на все очереди — 5ms (90fps = 11ms, рендер ~4ms, физика ~2ms)
+	# При начальной загрузке — без ограничений (500ms)
+	var FRAME_BUDGET_USEC := 500000 if _initial_loading else 5000
+
 	# Обрабатываем готовые здания из worker threads (даже на паузе)
 	var t0 := Time.get_ticks_usec()
 	_process_building_results()
 	var t_building := Time.get_ticks_usec() - t0
 	_record_perf("building_results", t_building)
 
-	# Общий бюджет на все очереди — 5ms (90fps = 11ms, рендер ~4ms, физика ~2ms)
-	# При начальной загрузке — без ограничений (500ms)
-	var FRAME_BUDGET_USEC := 500000 if _initial_loading else 5000
-
 	# Обрабатываем очередь дорог
-	t0 = Time.get_ticks_usec()
-	_process_road_queue()
-	var t_road := Time.get_ticks_usec() - t0
-	_record_perf("road_queue", t_road)
+	var t_road := 0
+	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
+		t0 = Time.get_ticks_usec()
+		_process_road_queue()
+		t_road = Time.get_ticks_usec() - t0
+		_record_perf("road_queue", t_road)
 
 	# Обрабатываем очередь terrain объектов
 	var t_terrain := 0
@@ -1409,22 +1411,25 @@ func _process(delta: float) -> void:
 	_record_perf("curb_collisions", t_curb)
 
 	# Создаём отложенные ноды с бюджетом (buildings, trees, roads collision)
-	t0 = Time.get_ticks_usec()
-	_process_deferred_nodes()
-	var t_deferred := Time.get_ticks_usec() - t0
-	_record_perf("deferred_nodes", t_deferred)
+	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
+		t0 = Time.get_ticks_usec()
+		_process_deferred_nodes()
+		_record_perf("deferred_nodes", Time.get_ticks_usec() - t0)
 
-	# Лампы — отдельно, все за один проход (без бюджета, SpotLight3D лёгкие)
-	_process_deferred_lamp_lights()
+	# Лампы — отдельно, с бюджетом
+	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
+		_process_deferred_lamp_lights()
 
 	# Применяем готовые результаты клиппинга террейна из worker threads
-	t0 = Time.get_ticks_usec()
-	_apply_terrain_thread_results()
-	var t_terrain_gen := Time.get_ticks_usec() - t0
-	_record_perf("terrain_gen", t_terrain_gen)
+	var t_terrain_gen := 0
+	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
+		t0 = Time.get_ticks_usec()
+		_apply_terrain_thread_results()
+		t_terrain_gen = Time.get_ticks_usec() - t0
+		_record_perf("terrain_gen", t_terrain_gen)
 
-	# Process deferred fence edges incrementally (2ms budget)
-	if not _deferred_fence_edges.is_empty():
+	# Process deferred fence edges incrementally (2ms budget, skip if over frame budget)
+	if not _deferred_fence_edges.is_empty() and (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
 		t0 = Time.get_ticks_usec()
 		_process_deferred_fence_edges(t0, 2000)
 		_record_perf("fence_gen", Time.get_ticks_usec() - t0)
@@ -1483,7 +1488,7 @@ func _process(delta: float) -> void:
 			t_infra / 1000.0, t_veg / 1000.0, t_veg_apply / 1000.0])
 		print("    curb_collisions=%.2fms terrain_gen=%.2fms" % [t_curb / 1000.0, t_terrain_gen / 1000.0])
 		# Unaccounted time (разница между total и суммой подсистем)
-		var accounted := (t_building + t_road + t_terrain + t_infra + t_veg + t_veg_apply + t_curb + t_terrain_gen) / 1000.0
+		var accounted: float = float(t_building + t_road + t_terrain + t_infra + t_veg + t_veg_apply + t_curb + t_terrain_gen) / 1000.0
 		print("    unaccounted=%.2fms (overhead/other)" % maxf(0.0, _frame_time - accounted))
 		# Scene stats
 		print("  Scene: draws=%d verts=%.1fM objects=%d nodes=%d resources=%d" % [
@@ -5195,8 +5200,8 @@ func _process_deferred_lamp_lights() -> void:
 			if _lamp_lights_by_chunk.has(chunk_key):
 				_lamp_lights_by_chunk[chunk_key].append(light)
 		_deferred_lamp_lights.pop_front()
-		# 2ms budget — remaining lamps processed next frame
-		if (Time.get_ticks_usec() - t0) > 2000:
+		# 2ms budget — remaining lamps processed next frame (unlimited during initial load)
+		if not _initial_loading and (Time.get_ticks_usec() - t0) > 2000:
 			break
 
 
@@ -6463,7 +6468,7 @@ func _finalize_fence_batches_for_chunk(chunk_key: String) -> void:
 		_rs_add_mesh(chunk_key, mesh, _fence_material,
 			RenderingServer.SHADOW_CASTING_SETTING_OFF, 150.0, 50.0)
 
-	# Collision: one StaticBody3D per chunk with box per edge
+	# Collision: build StaticBody3D with shapes off-tree, then add once
 	var edges: Array = batch.edges
 	if not edges.is_empty():
 		var body := StaticBody3D.new()
@@ -6479,12 +6484,13 @@ func _finalize_fence_batches_for_chunk(chunk_key: String) -> void:
 
 			var collision := CollisionShape3D.new()
 			var box := BoxShape3D.new()
-			box.size = Vector3(elen, 2.2, 0.08)  # length × fence height × thin wall
+			box.size = Vector3(elen, 2.2, 0.08)
 			collision.shape = box
-			collision.position = Vector3(mid.x, 0.12 + 1.1, mid.y)  # BASE_Y + half height
+			collision.position = Vector3(mid.x, 0.12 + 1.1, mid.y)
 			collision.rotation.y = -angle
 			body.add_child(collision)
-		_budgeted_add_child(batch.parent, body)
+		# Defer adding body to scene tree to spread cost
+		_deferred_add_child_queue.append({"parent": batch.parent, "child": body})
 
 	print("OSM: Finalized fence batch %s: LOD0 %d verts, LOD1 %d verts, %d collision edges" % [chunk_key, lod0_count, lod1_count, edges.size()])
 	_fence_geo_batch.erase(chunk_key)
@@ -7550,8 +7556,15 @@ func _process_building_results() -> void:
 		_building_mutex.unlock()
 		return
 
-	var results_to_process := _building_results.duplicate()
-	_building_results.clear()
+	# Take only up to N results at a time to avoid expensive duplicate of large arrays
+	var MAX_BATCH := 9999 if _initial_loading else 20
+	var batch_size := mini(_building_results.size(), MAX_BATCH)
+	var results_to_process: Array = []
+	for i in range(batch_size):
+		results_to_process.append(_building_results[i])
+	# Remove taken items
+	for i in range(batch_size):
+		_building_results.pop_front()
 	_building_mutex.unlock()
 
 	# Filter out invalid results to prevent processing empty/invalid buildings
@@ -7569,8 +7582,8 @@ func _process_building_results() -> void:
 		_sort_building_results_by_distance(valid_results, _car.global_position)
 		_record_perf("building_sort", Time.get_ticks_usec() - t_sort)
 
-	# Применяем здания с бюджетом 2ms (было 1 за кадр — слишком медленно для 266 зданий)
-	const BUILDING_APPLY_BUDGET_USEC := 2000
+	# Применяем здания с бюджетом 2ms (без ограничений при начальной загрузке)
+	var BUILDING_APPLY_BUDGET_USEC := 500000 if _initial_loading else 2000
 	var apply_start := Time.get_ticks_usec()
 	var applied := 0
 	for i in range(valid_results.size()):
@@ -7580,11 +7593,12 @@ func _process_building_results() -> void:
 			break
 	_record_perf("building_apply", Time.get_ticks_usec() - apply_start)
 
-	# Возвращаем оставшиеся обратно в очередь
+	# Возвращаем оставшиеся обратно в начало очереди (сохраняя порядок)
 	if applied < valid_results.size():
 		_building_mutex.lock()
-		for i in range(applied, valid_results.size()):
-			_building_results.append(valid_results[i])
+		var remaining: Array = valid_results.slice(applied)
+		remaining.append_array(_building_results)
+		_building_results = remaining
 		_building_mutex.unlock()
 
 
@@ -7735,7 +7749,7 @@ func _update_debug_stats(delta: float) -> void:
 ## Обрабатывает очередь дорог (3 дороги за кадр)
 func _process_road_queue() -> void:
 	var queue_start := Time.get_ticks_usec()
-	const TOTAL_BUDGET_USEC := 4000  # 4ms total budget for entire function
+	var TOTAL_BUDGET_USEC := 500000 if _initial_loading else 4000  # Unlimited during initial load
 
 	# Phase 0: Apply ready road results from worker threads (main thread, time-budgeted)
 	_road_mutex.lock()
@@ -7756,7 +7770,11 @@ func _process_road_queue() -> void:
 			break
 	_record_perf("road_apply", Time.get_ticks_usec() - queue_start)
 
-	# Process deferred footway splitting incrementally (N points per frame, budget 2.5ms)
+	# Overall budget gate — bail if already over budget
+	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+		return
+
+	# Process deferred footway splitting incrementally (budget: remaining time up to 2.5ms from start)
 	var fw_budget_end := queue_start + 2500
 	while not _deferred_footway_queue.is_empty():
 		if Time.get_ticks_usec() > fw_budget_end:
@@ -7768,6 +7786,9 @@ func _process_road_queue() -> void:
 		var done := _process_footway_incremental(fw_item, fw_budget_end)
 		if done:
 			_deferred_footway_queue.pop_front()
+
+	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+		return
 
 	# Process deferred lamp/manhole generation with time budget
 	while not _deferred_lamp_queue.is_empty():
@@ -7785,8 +7806,12 @@ func _process_road_queue() -> void:
 			_deferred_lamp_queue.pop_front()  # Fully processed
 		else:
 			item["_lamp_seg_idx"] = processed  # Resume next frame
+
+	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+		return
+
 	while not _deferred_manhole_queue.is_empty():
-		if (Time.get_ticks_usec() - queue_start) > 3000:
+		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 			break
 		var item: Dictionary = _deferred_manhole_queue[0]
 		if not is_instance_valid(item.parent):
@@ -7795,14 +7820,17 @@ func _process_road_queue() -> void:
 		_deferred_manhole_queue.pop_front()
 		_generate_manholes_fast(item.points, item.width, item.parent)
 	while not _deferred_traffic_queue.is_empty():
-		if (Time.get_ticks_usec() - queue_start) > 3500:
+		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 			break
 		var item: Dictionary = _deferred_traffic_queue.pop_front()
 		_extract_road_for_traffic_fast(item.points, item.tags, item.elevation_info)
 
+	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+		return
+
 	# Process deferred billboard creation with time budget
 	while not _deferred_billboard_queue.is_empty():
-		if (Time.get_ticks_usec() - queue_start) > 4000:
+		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 			break
 		var item: Dictionary = _deferred_billboard_queue.pop_front()
 		if not is_instance_valid(item.parent):
@@ -7818,8 +7846,8 @@ func _process_road_queue() -> void:
 		if has_pending or not _deferred_lamp_queue.is_empty() or not _deferred_manhole_queue.is_empty() or not _deferred_traffic_queue.is_empty() or not _deferred_footway_queue.is_empty() or not _deferred_billboard_queue.is_empty():
 			return  # Wait for results/deferred to be processed first
 
-		# Budget gate: skip finalization if deferred work already consumed >3ms
-		if (Time.get_ticks_usec() - queue_start) > 3000:
+		# Budget gate: skip finalization if deferred work already consumed most budget
+		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 			return
 
 		# Round-robin: ONE finalization type per frame, ONE chunk per type
