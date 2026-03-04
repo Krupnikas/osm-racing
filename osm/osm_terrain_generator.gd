@@ -77,6 +77,7 @@ const WINDOW_FLOOR_HEIGHT := 3.0  # Floor-to-floor height (meters)
 @export var enable_frustum_culling := true  # Включить frustum culling чанков
 @export var enable_manholes := true  # Включить люки на дорогах
 @export var enable_crossing_signs := true  # Включить знаки пешеходных переходов
+@export var enable_fences := true  # Включить заборы (промзоны, территории)
 @export var manhole_spacing := 100.0  # Расстояние между люками (метры)
 
 ## Тестовый режим: провайдер данных вместо HTTP (Callable(lat, lon, size) -> Dictionary)
@@ -311,6 +312,14 @@ var _slow_frame_cooldown := 0.0  # Ограничиваем частоту ло�
 var _terrain_thread_results: Array = []  # Results from terrain worker threads
 var _terrain_thread_mutex: Mutex
 var _pending_terrain_tasks: int = 0
+
+# Threaded terrain generation — Phase 1+2 (spatial hash + intersections) run on worker thread
+var _terrain_gen_results: Array = []  # Results from terrain gen worker threads
+var _pending_terrain_gen_tasks: int = 0
+
+# Phase 3 incremental queue — process ways/objects across frames with time budget
+var _phase3_queue: Array = []  # [{result, parent, chunk_key, way_idx, phase}]
+var _frame_start_usec: int = 0  # Set at top of _process() for budget checks in sub-functions
 
 # Очереди отложенного создания нод (бюджет: N нод за кадр)
 var _deferred_building_collisions: Array = []  # [{parent, collisions, idx}]
@@ -1339,6 +1348,7 @@ func _input(event: InputEvent) -> void:
 
 func _process(delta: float) -> void:
 	var _frame_start := Time.get_ticks_usec()
+	_frame_start_usec = _frame_start
 	_current_frame_perf.clear()
 	_slow_frame_cooldown -= delta
 
@@ -1419,6 +1429,18 @@ func _process(delta: float) -> void:
 	# Лампы — отдельно, с бюджетом
 	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
 		_process_deferred_lamp_lights()
+
+	# Apply threaded terrain generation results (Phase 1+2 done on worker thread)
+	if not _terrain_gen_results.is_empty():
+		t0 = Time.get_ticks_usec()
+		_apply_terrain_gen_result()
+		_record_perf("terrain_gen_apply", Time.get_ticks_usec() - t0)
+
+	# Process Phase 3 queue incrementally (ways, intersections, points, finalize)
+	if not _phase3_queue.is_empty() and (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
+		t0 = Time.get_ticks_usec()
+		_process_phase3_queue()
+		_record_perf("phase3_queue", Time.get_ticks_usec() - t0)
 
 	# Применяем готовые результаты клиппинга террейна из worker threads
 	var t_terrain_gen := 0
@@ -1602,6 +1624,12 @@ func start_loading() -> void:
 	_curb_collision_mutex.unlock()
 	_road_batch_data.clear()  # Очищаем road batch data
 	_chunk_terrain_roads.clear()
+	# Clear threaded terrain gen results
+	_terrain_thread_mutex.lock()
+	_terrain_gen_results.clear()
+	_terrain_thread_mutex.unlock()
+	_pending_terrain_gen_tasks = 0
+	_phase3_queue.clear()
 
 	# Reconnect night mode after reset
 	_connect_to_night_mode()
@@ -1663,12 +1691,17 @@ func _check_initial_load_complete() -> void:
 	var chunk_progress: float = float(loaded_count) / float(max(1, total_chunks))  # 0.0-1.0
 
 	# Считаем размер всех очередей (включая финализацию визуала и deferred лампы)
-	var total_queued: int = _building_results.size() + _road_queue.size() + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + _pending_road_tasks + _pending_veg_tasks + _pending_terrain_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_footway_queue.size() + _deferred_billboard_queue.size() + _chunk_activation_pending.size() + _deferred_lamp_lights.size()
+	# Read _pending_road_tasks under mutex (modified by worker threads)
+	_road_mutex.lock()
+	var pending_road_snapshot: int = _pending_road_tasks
+	var road_results_pending: int = _road_results.size()
+	_road_mutex.unlock()
+	var total_queued: int = _building_results.size() + _road_queue.size() + road_results_pending + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + pending_road_snapshot + _pending_veg_tasks + _pending_terrain_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_footway_queue.size() + _deferred_billboard_queue.size() + _chunk_activation_pending.size() + _deferred_lamp_lights.size() + _phase3_queue.size()
 
 	# DEBUG: Детальное логирование очередей
 	if loaded_count >= total_chunks and total_queued > 0:
 		print("OSM DEBUG: Chunks loaded %d/%d, queues=%d:" % [loaded_count, total_chunks, total_queued])
-		print("  data: bld=%d road=%d(thr:%d) terr=%d infra=%d pBld=%d pRoad=%d pVeg=%d pTerr=%d lamp=%d manhole=%d traffic=%d" % [_building_results.size(), _road_queue.size(), _pending_road_tasks, _terrain_objects_queue.size(), _infrastructure_queue.size(), _pending_building_tasks, _pending_road_tasks, _pending_veg_tasks, _pending_terrain_tasks, _deferred_lamp_queue.size(), _deferred_manhole_queue.size(), _deferred_traffic_queue.size()])
+		print("  data: bld=%d road=%d(thr:%d,res:%d) terr=%d infra=%d pBld=%d pRoad=%d pVeg=%d pTerr=%d lamp=%d manhole=%d traffic=%d" % [_building_results.size(), _road_queue.size(), pending_road_snapshot, road_results_pending, _terrain_objects_queue.size(), _infrastructure_queue.size(), _pending_building_tasks, pending_road_snapshot, _pending_veg_tasks, _pending_terrain_tasks, _deferred_lamp_queue.size(), _deferred_manhole_queue.size(), _deferred_traffic_queue.size()])
 		print("  finalize: roadBatch=%d bldGeo=%d curb=%d lamp=%d tree=%d billboard=%d window=%d" % [_pending_batch_chunks.size(), _building_geo_finalize_queue.size(), _curb_geo_batch.size(), _lamp_batches_to_finalize.size(), _tree_batches_to_finalize.size(), _billboard_batches_to_finalize.size(), _window_finalize_queue.size()])
 
 	# DEBUG: Проверяем зависшие чанки в _loading_chunks
@@ -1723,7 +1756,7 @@ func _check_initial_load_complete() -> void:
 		# Проверяем что все очереди обработаны (для плавности старта)
 		# Visual queues: must be empty before hiding loading screen
 		# Deferred collisions/lights are NOT blocking — they continue in background
-		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and _pending_road_tasks <= 0 and _pending_veg_tasks <= 0 and _pending_batch_chunks.is_empty() and _building_geo_finalize_queue.is_empty() and _curb_geo_batch.is_empty() and _lamp_batches_to_finalize.is_empty() and _tree_batches_to_finalize.is_empty() and _billboard_batches_to_finalize.is_empty() and _window_finalize_queue.is_empty() and _deferred_footway_queue.is_empty() and _deferred_billboard_queue.is_empty() and _chunk_activation_pending.is_empty()
+		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and road_results_pending <= 0 and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and pending_road_snapshot <= 0 and _pending_veg_tasks <= 0 and _pending_batch_chunks.is_empty() and _building_geo_finalize_queue.is_empty() and _curb_geo_batch.is_empty() and _lamp_batches_to_finalize.is_empty() and _tree_batches_to_finalize.is_empty() and _billboard_batches_to_finalize.is_empty() and _window_finalize_queue.is_empty() and _deferred_footway_queue.is_empty() and _deferred_billboard_queue.is_empty() and _chunk_activation_pending.is_empty() and _phase3_queue.is_empty()
 		if not queues_empty:
 			# Отслеживаем зависание очереди
 			if total_queued == _last_queue_size:
@@ -2240,7 +2273,21 @@ func _unload_chunk(chunk_key: String) -> void:
 			else:
 				_pending_terrain_tasks -= 1
 		_terrain_thread_results = filtered_terrain
+		# Clean up pending terrain gen results for this chunk
+		var filtered_gen: Array = []
+		for gr in _terrain_gen_results:
+			if gr.chunk_key != chunk_key:
+				filtered_gen.append(gr)
+			else:
+				_pending_terrain_gen_tasks -= 1
+		_terrain_gen_results = filtered_gen
 		_terrain_thread_mutex.unlock()
+		# Clean up pending Phase 3 queue for this chunk
+		var filtered_p3: Array = []
+		for p3 in _phase3_queue:
+			if p3.chunk_key != chunk_key:
+				filtered_p3.append(p3)
+		_phase3_queue = filtered_p3
 
 		# Clean up deferred node queues for this chunk
 		_deferred_building_collisions = _deferred_building_collisions.filter(
@@ -2488,98 +2535,90 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	# Генерируем объекты асинхронно (с frame budgeting)
 	_generate_chunk_async(osm_data, chunk_node, chunk_key, loader, gen)
 
-# Асинхронная генерация чанка с frame budgeting
+# Генерация чанка: dispatch computation to worker thread, finalize on main thread
 func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: String, loader: Node, gen: int) -> void:
-	await _generate_terrain(osm_data, chunk_node, chunk_key)
 	loader.queue_free()
+	# Dispatch Phase 1+2 to worker thread (spatial hash + intersections)
+	_generate_terrain(osm_data, chunk_node, chunk_key, gen)
 
-	# Перемещаем чанк из _loading_chunks в _loaded_chunks ПОСЛЕ генерации
-	# Это гарантирует что initial_load_complete не сработает до заполнения очередей
-	_loading_chunks.erase(chunk_key)
-	_loaded_chunks[chunk_key] = chunk_node
-
-	# После await проверяем что это не устаревшая загрузка
-	if gen != _load_generation:
-		print("OSM: Ignoring stale chunk generation %s (gen %d != %d)" % [chunk_key, gen, _load_generation])
+## Dispatch terrain generation: Phase 1+2 run on worker thread, Phase 3 on main thread.
+## For non-chunk (initial load), runs synchronously on main thread.
+func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String = "", gen: int = -1) -> void:
+	if chunk_key == "":
+		# Initial load (no chunk key) — run synchronously on main thread
+		_generate_terrain_sync(osm_data, parent, chunk_key)
 		return
 
-	# Добавляем чанк в очередь для создания билбордов из DecorationLayer
-	if _decoration_layer and not _billboard_batches_to_finalize.has(chunk_key):
-		_billboard_batches_to_finalize.append(chunk_key)
+	# Chunk load — dispatch Phase 1+2 to worker thread
+	# Ensure _lon_scale is initialized before threading
+	if _lon_scale == 0.0:
+		_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
+
+	var task_data := {
+		"osm_data": osm_data,
+		"chunk_key": chunk_key,
+		"gen": gen,
+		"start_lat": start_lat,
+		"start_lon": start_lon,
+		"lon_scale": _lon_scale,
+		"chunk_size": chunk_size,
+	}
+
+	_pending_terrain_gen_tasks += 1
+	WorkerThreadPool.add_task(
+		_compute_terrain_phases_thread.bind(task_data),
+		false,  # high_priority
+		"TerrainGen_" + chunk_key
+	)
 
 
-	# Если ночь уже включена - активируем свет в новом чанке
-	_apply_night_mode_to_chunk(chunk_node)
+## Worker thread: Phase 1 (spatial hash) + Phase 2 (intersections).
+## Pure computation — no scene tree access!
+func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
+	var osm_data: Dictionary = task_data.osm_data
+	var chunk_key: String = task_data.chunk_key
+	var gen: int = task_data.gen
+	var t_start_lat: float = task_data.start_lat
+	var t_start_lon: float = task_data.start_lon
+	var t_lon_scale: float = task_data.lon_scale
+	var t_chunk_size: float = task_data.chunk_size
 
-	# Проверяем завершение начальной загрузки
-	_check_initial_load_complete()
-
-func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String = "") -> void:
-	var _profile_start := Time.get_ticks_msec()
-	var _profile_last := _profile_start
-
-	# Frame budgeting: yield когда превышен бюджет времени
-	var objects_this_frame := 0
-	const OBJECTS_PER_FRAME := 3  # Количество лёгких объектов перед yield
-	const FRAME_BUDGET_US := 5000  # 5ms бюджет на фазу перед yield
-	var phase_t0 := Time.get_ticks_usec()
-	var target: Node3D = parent if parent else self
 	var ways: Array = osm_data.get("ways", [])
-	var road_count := 0
-	var building_count := 0
 
-	# Получаем loader для конвертации координат
-	var loader: Node = null
-	if parent:
-		# Для чанков используем временный loader с правильным центром
-		loader = OSMLoaderScript.new()
-		loader.center_lat = osm_data.get("center_lat", start_lat)
-		loader.center_lon = osm_data.get("center_lon", start_lon)
-	else:
-		loader = osm_loader
+	# Thread-local latlon conversion (no instance var access)
+	var _ll := func(lat: float, lon: float) -> Vector2:
+		var dx: float = (lon - t_start_lon) * t_lon_scale
+		var dz: float = (lat - t_start_lat) * 111000.0
+		return Vector2(dx, -dz)
 
-	# Вычисляем границы чанка для фильтрации дубликатов
-	var chunk_min_x := 0.0
-	var chunk_max_x := 0.0
-	var chunk_min_z := 0.0
-	var chunk_max_z := 0.0
-	var filter_by_chunk := false
+	# Chunk bounds
+	var coords: Array = chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+	var chunk_min_x: float = chunk_x * t_chunk_size
+	var chunk_max_x: float = chunk_min_x + t_chunk_size
+	var chunk_min_z: float = chunk_z * t_chunk_size
+	var chunk_max_z: float = chunk_min_z + t_chunk_size
 
-	if chunk_key != "":
-		var coords: Array = chunk_key.split(",")
-		var chunk_x := int(coords[0])
-		var chunk_z := int(coords[1])
-		chunk_min_x = chunk_x * chunk_size
-		chunk_max_x = chunk_min_x + chunk_size
-		chunk_min_z = chunk_z * chunk_size
-		chunk_max_z = chunk_min_z + chunk_size
-		filter_by_chunk = true
+	# ========== PHASE 1: Build spatial hash data ==========
+	var parking_polygons: Array = []
+	var parking_bounds: Array = []
+	var parking_hash_entries: Array = []
+	var road_hash_entries: Array = []
+	var building_hash_entries: Array = []
+	var building_poly_entries: Array = []
 
-	# Получаем входы и POI для ТЕКУЩЕГО чанка как ЛОКАЛЬНЫЕ переменные
-	# ВАЖНО: НЕ использовать instance vars _entrance_nodes/_poi_nodes!
-	# При frame budgeting (await) другой чанк может перезаписать instance vars.
-	var chunk_entrance_nodes: Array = osm_data.get("entrance_nodes", [])
-	var chunk_poi_nodes: Array = osm_data.get("poi_nodes", [])
-	# НЕ очищаем _parking_polygons и _road_segments - накапливаем из всех чанков
-	# _road_segments нужны для позиционирования знаков парковки
-
-	if not chunk_entrance_nodes.is_empty():
-		print("OSM: Found %d entrance nodes in chunk" % chunk_entrance_nodes.size())
-	if not chunk_poi_nodes.is_empty():
-		print("OSM: Found %d POI nodes in chunk" % chunk_poi_nodes.size())
-
-	# Первый проход: собираем полигоны парковок, сегменты дорог и зданий из ВСЕХ OSM данных
-	# (включая объекты за пределами чанка - они нужны для корректной проверки расстояний)
 	for way in ways:
 		var tags: Dictionary = way.get("tags", {})
 		var nodes: Array = way.get("nodes", [])
+
+		# Parking polygons
 		if tags.get("amenity") == "parking" and nodes.size() >= 3:
-			var points: PackedVector2Array = []
+			var points := PackedVector2Array()
 			for node in nodes:
-				var local: Vector2 = _latlon_to_local(node.lat, node.lon)
-				points.append(local)
-			_parking_polygons.append(points)
-			# Cache bounds for fast rejection
+				points.append(_ll.call(node.lat, node.lon))
+			var pidx: int = parking_polygons.size()
+			parking_polygons.append(points)
 			var center := Vector2.ZERO
 			for p in points:
 				center += p
@@ -2589,9 +2628,7 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				var d: float = center.distance_to(p)
 				if d > max_r:
 					max_r = d
-			_parking_bounds.append({"center": center, "radius": max_r})
-			# Add parking edges to spatial hash
-			var pidx: int = _parking_polygons.size() - 1
+			parking_bounds.append({"center": center, "radius": max_r})
 			for ei in range(points.size()):
 				var ep1: Vector2 = points[ei]
 				var ep2: Vector2 = points[(ei + 1) % points.size()]
@@ -2605,146 +2642,144 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				var cy1: int = int(floor(emax_y / PARKING_CELL_SIZE))
 				for cx in range(cx0, cx1 + 1):
 					for cy in range(cy0, cy1 + 1):
-						var cell_key := Vector2i(cx, cy)
-						if not _parking_spatial_hash.has(cell_key):
-							_parking_spatial_hash[cell_key] = []
-						_parking_spatial_hash[cell_key].append({"idx": pidx, "p1": ep1, "p2": ep2})
+						parking_hash_entries.append({"cell": Vector2i(cx, cy), "idx": pidx, "p1": ep1, "p2": ep2})
 
-		# Yield если фаза 1 затянулась
-		if (Time.get_ticks_usec() - phase_t0) > FRAME_BUDGET_US:
-			await get_tree().process_frame
-			phase_t0 = Time.get_ticks_usec()
-
-		# Все дороги из OSM данных -> spatial hash (для проверки расстояний при генерации деревьев/фонарей)
-		# Используем сглаженные координаты — чтобы spatial hash соответствовал реальной геометрии дорог
+		# Road segments -> spatial hash
 		if tags.has("highway") and nodes.size() >= 2:
 			var highway_type: String = tags.get("highway", "residential")
 			var road_w: float = ROAD_WIDTHS.get(highway_type, 5.0)
 			var raw_pts := PackedVector2Array()
 			raw_pts.resize(nodes.size())
 			for j in range(nodes.size()):
-				raw_pts[j] = _latlon_to_local(nodes[j].lat, nodes[j].lon)
+				raw_pts[j] = _ll.call(nodes[j].lat, nodes[j].lon)
 			var smoothed_pts := _smooth_road_corners(raw_pts)
 			for j in range(smoothed_pts.size() - 1):
 				var rseg := {"p1": smoothed_pts[j], "p2": smoothed_pts[j + 1], "width": road_w}
-				# Добавляем только в spatial hash (не в _road_segments чтобы избежать дубликатов)
-				_add_road_segment_to_spatial_hash(rseg)
+				var p1: Vector2 = rseg.p1
+				var p2: Vector2 = rseg.p2
+				var min_x: float = minf(p1.x, p2.x) - road_w / 2.0
+				var max_x: float = maxf(p1.x, p2.x) + road_w / 2.0
+				var min_y: float = minf(p1.y, p2.y) - road_w / 2.0
+				var max_y: float = maxf(p1.y, p2.y) + road_w / 2.0
+				var cells: Array = []
+				for rcx in range(int(floor(min_x / ROAD_CELL_SIZE)), int(floor(max_x / ROAD_CELL_SIZE)) + 1):
+					for rcy in range(int(floor(min_y / ROAD_CELL_SIZE)), int(floor(max_y / ROAD_CELL_SIZE)) + 1):
+						cells.append(Vector2i(rcx, rcy))
+				road_hash_entries.append({"seg": rseg, "cells": cells})
 
-		# Все здания из OSM данных -> spatial hash
+		# Building segments -> spatial hash
 		if (tags.has("building") or (tags.has("amenity") and not tags.has("highway"))) and nodes.size() >= 3:
-			var bpoints: PackedVector2Array = []
+			var bpoints := PackedVector2Array()
 			for node in nodes:
-				bpoints.append(_latlon_to_local(node.lat, node.lon))
+				bpoints.append(_ll.call(node.lat, node.lon))
 			for j in range(bpoints.size()):
 				var bp1 := bpoints[j]
 				var bp2 := bpoints[(j + 1) % bpoints.size()]
 				var bseg := {"p1": bp1, "p2": bp2}
-				_add_building_segment_to_spatial_hash(bseg)
-			_add_building_poly_to_hash(bpoints)
+				var bmin_x := minf(bp1.x, bp2.x)
+				var bmax_x := maxf(bp1.x, bp2.x)
+				var bmin_y := minf(bp1.y, bp2.y)
+				var bmax_y := maxf(bp1.y, bp2.y)
+				var bcells: Array = []
+				for bcx in range(int(floor(bmin_x / BUILDING_CELL_SIZE)), int(floor(bmax_x / BUILDING_CELL_SIZE)) + 1):
+					for bcy in range(int(floor(bmin_y / BUILDING_CELL_SIZE)), int(floor(bmax_y / BUILDING_CELL_SIZE)) + 1):
+						bcells.append(Vector2i(bcx, bcy))
+				building_hash_entries.append({"seg": bseg, "cells": bcells})
+			# Building polygon hash
+			var pmin_x: float = bpoints[0].x
+			var pmax_x: float = bpoints[0].x
+			var pmin_y: float = bpoints[0].y
+			var pmax_y: float = bpoints[0].y
+			for p in bpoints:
+				pmin_x = minf(pmin_x, p.x)
+				pmax_x = maxf(pmax_x, p.x)
+				pmin_y = minf(pmin_y, p.y)
+				pmax_y = maxf(pmax_y, p.y)
+			var pcells: Array = []
+			for pcx in range(int(floor(pmin_x / BUILDING_CELL_SIZE)), int(floor(pmax_x / BUILDING_CELL_SIZE)) + 1):
+				for pcy in range(int(floor(pmin_y / BUILDING_CELL_SIZE)), int(floor(pmax_y / BUILDING_CELL_SIZE)) + 1):
+					pcells.append(Vector2i(pcx, pcy))
+			building_poly_entries.append({"poly": bpoints, "cells": pcells})
 
-	# Yield перед фазой 2 (перекрёстки)
-	await get_tree().process_frame
-	phase_t0 = Time.get_ticks_usec()
-
-	# Сбор перекрёстков (узлы, где сходятся несколько дорог)
-	# НЕ очищаем массивы - накапливаем из всех чанков (очистка в start_loading)
-	var node_usage: Dictionary = {}  # node_key -> {pos: Vector2, types: Array[String], widths: Array[float], directions: Array[Vector2]}
-	var node_arms: Dictionary = {}  # node_key -> Array[{direction: Vector2, width: float}] — ВСЕ рукава (без дедупликации)
+	# ========== PHASE 2: Intersection detection ==========
+	var node_usage: Dictionary = {}
+	var node_arms: Dictionary = {}
 
 	for way in ways:
 		var tags: Dictionary = way.get("tags", {})
 		var way_nodes: Array = way.get("nodes", [])
-
 		if not tags.has("highway") or way_nodes.size() < 2:
 			continue
-
 		var highway_type: String = tags.get("highway", "")
-		# Пропускаем пешеходные дорожки
 		if highway_type in ["footway", "path", "cycleway", "track", "steps"]:
 			continue
-
 		var road_width: float = ROAD_WIDTHS.get(highway_type, 5.0)
 
-		# Проверяем ВСЕ узлы дороги для детекции Т-образных перекрёстков
 		for i in range(way_nodes.size()):
 			var node = way_nodes[i]
 			var node_key := "%.6f,%.6f" % [node.lat, node.lon]
-			var local: Vector2 = _latlon_to_local(node.lat, node.lon)
-
-			# Вычисляем направление дороги в этой точке
+			var local: Vector2 = _ll.call(node.lat, node.lon)
 			var direction := Vector2.ZERO
 			if i > 0:
-				var prev_local: Vector2 = _latlon_to_local(way_nodes[i - 1].lat, way_nodes[i - 1].lon)
-				direction = (local - prev_local).normalized()
+				direction = (local - _ll.call(way_nodes[i - 1].lat, way_nodes[i - 1].lon)).normalized()
 			elif i < way_nodes.size() - 1:
-				var next_local: Vector2 = _latlon_to_local(way_nodes[i + 1].lat, way_nodes[i + 1].lon)
-				direction = (next_local - local).normalized()
+				direction = (_ll.call(way_nodes[i + 1].lat, way_nodes[i + 1].lon) - local).normalized()
 
 			if not node_usage.has(node_key):
 				node_usage[node_key] = {"pos": local, "types": [], "widths": [], "directions": []}
-
 			if highway_type not in node_usage[node_key]["types"]:
 				node_usage[node_key]["types"].append(highway_type)
 				node_usage[node_key]["widths"].append(road_width)
 				node_usage[node_key]["directions"].append(direction)
 
-			# Собираем ВСЕ рукава дорог (направления наружу от перекрёстка)
 			if not node_arms.has(node_key):
 				node_arms[node_key] = []
-			# Рукав назад (к предыдущему узлу) — направление наружу
 			if i > 0:
-				var prev_local2: Vector2 = _latlon_to_local(way_nodes[i - 1].lat, way_nodes[i - 1].lon)
-				var outward_prev := (prev_local2 - local).normalized()
+				var prev_ll: Vector2 = _ll.call(way_nodes[i - 1].lat, way_nodes[i - 1].lon)
+				var outward_prev := (prev_ll - local).normalized()
 				node_arms[node_key].append({"direction": outward_prev, "width": road_width})
-			# Рукав вперёд (к следующему узлу) — направление наружу
 			if i < way_nodes.size() - 1:
-				var next_local2: Vector2 = _latlon_to_local(way_nodes[i + 1].lat, way_nodes[i + 1].lon)
-				var outward_next := (next_local2 - local).normalized()
+				var next_ll: Vector2 = _ll.call(way_nodes[i + 1].lat, way_nodes[i + 1].lon)
+				var outward_next := (next_ll - local).normalized()
 				node_arms[node_key].append({"direction": outward_next, "width": road_width})
 
-	# Yield перед обработкой перекрёстков
-	if (Time.get_ticks_usec() - phase_t0) > FRAME_BUDGET_US:
-		await get_tree().process_frame
-		phase_t0 = Time.get_ticks_usec()
+	# Detect intersections
+	var new_positions: Array = []
+	var new_radii: Array = []
+	var new_angles: Array = []
+	var new_types: Array = []
+	var new_roads: Array = []
+	var new_contours: Array = []
+	var new_curb_contours: Array = []
+	var new_hash_entries: Array = []
 
-	# Определяем перекрёстки (2+ дороги сходятся ИЛИ 3+ рукава для однотипных T-образных)
 	for node_key in node_usage:
 		var info: Dictionary = node_usage[node_key]
 		var types: Array = info["types"]
-
-		# Вычисляем фильтрованные рукава ДО проверки (нужны для однотипных перекрёстков)
 		var arms: Array = node_arms.get(node_key, [])
 		var filtered_arms: Array = []
 		for arm in arms:
 			var dominated := false
 			for existing in filtered_arms:
-				var angle_diff := absf(arm["direction"].angle_to(existing["direction"]))
-				if angle_diff < deg_to_rad(10.0):
+				if absf(arm["direction"].angle_to(existing["direction"])) < deg_to_rad(10.0):
 					dominated = true
-					# Оставляем более широкий
 					if arm["width"] > existing["width"]:
 						existing["direction"] = arm["direction"]
 						existing["width"] = arm["width"]
 					break
 			if not dominated:
 				filtered_arms.append(arm.duplicate())
-
-		# Перекрёсток: 2+ типа дорог ИЛИ 3+ уникальных рукава (Т-образные однотипные)
 		if types.size() < 2 and filtered_arms.size() < 3:
 			continue
-
-		# Проверяем на дубликат (перекрёсток уже есть рядом)
 		var is_duplicate := false
-		for existing_pos in _intersection_positions:
+		for existing_pos in new_positions:
 			if existing_pos.distance_to(info["pos"]) < 2.0:
 				is_duplicate = true
 				break
 		if is_duplicate:
 			continue
 
-		_intersection_positions.append(info["pos"])
-
-		# Находим самую широкую и вторую по ширине дорогу (из рукавов)
+		new_positions.append(info["pos"])
 		var max_width := 0.0
 		var second_width := 0.0
 		var max_dir := Vector2.RIGHT
@@ -2758,225 +2793,348 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				second_width = w
 		if second_width == 0.0:
 			second_width = max_width
-
-		# Полуоси эллипса = половина ширины дорог
-		var radius_a := max_width * 0.5  # вдоль широкой дороги
-		var radius_b := second_width * 0.5  # вдоль узкой дороги
-		_intersection_radii.append(Vector2(radius_a, radius_b))
-
-		# Угол поворота = направление широкой дороги + 90 градусов
-		var angle := atan2(max_dir.y, max_dir.x) + PI * 0.5
-		_intersection_angles.append(angle)
-
-		# Вычисляем максимальную разницу в приоритетах дорог
+		new_radii.append(Vector2(max_width * 0.5, second_width * 0.5))
+		new_angles.append(atan2(max_dir.y, max_dir.x) + PI * 0.5)
 		var min_priority := 999
 		var max_priority := 0
 		for t in types:
 			var p := _get_road_priority(t)
 			min_priority = mini(min_priority, p)
 			max_priority = maxi(max_priority, p)
-		# true если разница в приоритетах <= 1 (нужна заплатка без разметки)
-		var needs_patch := (max_priority - min_priority) <= 1
-		_intersection_types.append(needs_patch)
-
-		_intersection_roads.append(filtered_arms)
-
-		# Строим контур перекрёстка
-		var contour := _build_intersection_contour(_intersection_positions.size() - 1)
-		_intersection_contours.append(contour)
-		# Увеличенный контур для обрезки бордюров (+0.3м от контура)
+		new_types.append((max_priority - min_priority) <= 1)
+		new_roads.append(filtered_arms)
+		var contour := _build_intersection_contour_from_data(info["pos"], filtered_arms)
+		new_contours.append(contour)
 		if contour.size() > 0:
-			var center_pos: Vector2 = info["pos"]
 			var curb_contour := PackedVector2Array()
 			for cp in contour:
-				var offset_dir := (cp - center_pos).normalized()
-				curb_contour.append(cp + offset_dir * 0.3)
-			_intersection_curb_contours.append(curb_contour)
+				curb_contour.append(cp + (cp - info["pos"]).normalized() * 0.3)
+			new_curb_contours.append(curb_contour)
 		else:
-			_intersection_curb_contours.append(PackedVector2Array())
-
-		# Debug: выводим информацию о перекрёстке
-		var arm_info := ""
-		for fa in filtered_arms:
-			arm_info += " w=%.1f" % fa["width"]
-		print("  Intersection #%d at (%.1f, %.1f): %d arms%s, contour=%d pts" % [
-			_intersection_positions.size() - 1, info["pos"].x, info["pos"].y,
-			filtered_arms.size(), arm_info,
-			contour.size()])
-
-		# Добавляем в spatial hash — используем bounding radius контура
-		var idx := _intersection_positions.size() - 1
-		var hash_radius := maxf(radius_a, radius_b)
+			new_curb_contours.append(PackedVector2Array())
+		var hash_radius := maxf(max_width * 0.5, second_width * 0.5)
 		if contour.size() > 0:
 			for cp in contour:
 				hash_radius = maxf(hash_radius, cp.distance_to(info["pos"]))
-		# Запас для curb contour
-		hash_radius += 1.0
-		_add_intersection_to_spatial_hash(info["pos"], Vector2(hash_radius, hash_radius), idx)
+		new_hash_entries.append({"pos": info["pos"], "radii": Vector2(hash_radius + 1.0, hash_radius + 1.0)})
 
-		# Yield если обработка перекрёстков затянулась
-		if (Time.get_ticks_usec() - phase_t0) > FRAME_BUDGET_US:
-			await get_tree().process_frame
-			phase_t0 = Time.get_ticks_usec()
-
-	# Yield перед фазой 3 (создание объектов)
-	await get_tree().process_frame
-	phase_t0 = Time.get_ticks_usec()
-
-	# Второй проход: создаём все объекты
-	var skipped_buildings := 0
-	for way in ways:
-		var tags: Dictionary = way.get("tags", {})
-		var nodes: Array = way.get("nodes", [])
-
-		if nodes.size() < 2:
-			continue
-
-		# Фильтруем по принадлежности к чанку
-		if filter_by_chunk:
-			# Для линейных объектов (дороги) - проверяем пересечение с чанком
-			# Для полигонов (здания) - проверяем центр
-			var dominated_by_chunk := false
-			if tags.has("highway"):
-				# Дорога принадлежит чанку если хотя бы одна точка внутри
-				# Дубликаты допустимы - дороги длинные и проходят через много чанков
-				for node in nodes:
-					var local: Vector2 = _latlon_to_local(node.lat, node.lon)
-					if local.x >= chunk_min_x and local.x < chunk_max_x and local.y >= chunk_min_z and local.y < chunk_max_z:
-						dominated_by_chunk = true
-						break
-			elif tags.has("waterway"):
-				# Водные пути (реки) - рисуем если хотя бы одна точка в чанке
-				# Дубликаты допустимы, т.к. реки длинные и проходят через много чанков
-				for node in nodes:
-					var local: Vector2 = _latlon_to_local(node.lat, node.lon)
-					if local.x >= chunk_min_x and local.x < chunk_max_x and local.y >= chunk_min_z and local.y < chunk_max_z:
-						dominated_by_chunk = true
-						break
-			elif tags.has("building") or tags.has("amenity"):
-				# Здания - рисуем только если ЦЕНТР здания в чанке (по центру, не по точкам).
-				# Иначе здания на границе чанков дублируются из-за OSM overlap.
-				var center := _get_way_center(nodes)
-				dominated_by_chunk = center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z
-			else:
-				# Для остальных полигонов (landuse, natural, leisure) проверяем центр
-				var center := _get_way_center(nodes)
-				dominated_by_chunk = center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z
-
-			if not dominated_by_chunk:
-				if tags.has("building") or tags.has("amenity"):
-					skipped_buildings += 1
-				continue
-
-		# Пропускаем конкретные way по ID (нерелевантные/ошибочные дороги)
-		var way_id_raw: int = int(way.get("id", 0))
-		if way_id_raw in [75621890]:  # service road, не существует
-			continue
-
-		var _t0 := Time.get_ticks_msec()
-		if tags.has("highway"):
-			_create_road(nodes, tags, target, loader, way_id_raw)
-			road_count += 1
-			objects_this_frame += 1
-		elif tags.has("building"):
-			var way_id: int = int(way.get("id", 0))  # Ensure int conversion from JSON float
-			_create_building(nodes, tags, target, loader, way_id, chunk_entrance_nodes, chunk_poi_nodes)
-			building_count += 1
-			objects_this_frame += 1
-		elif tags.has("amenity") and not tags.has("building"):
-			# Amenity без building тега - создаём как здание
-			_create_amenity_building(nodes, tags, target, loader)
-			building_count += 1
-		elif tags.has("natural"):
-			_terrain_objects_queue.append({
-				"type": "natural",
-				"nodes": nodes,
-				"tags": tags,
-				"parent": target
-			})
-		elif tags.has("landuse"):
-			_terrain_objects_queue.append({
-				"type": "landuse",
-				"nodes": nodes,
-				"tags": tags,
-				"parent": target,
-				"way_id": int(way.get("id", 0))
-			})
-		elif tags.has("leisure"):
-			_terrain_objects_queue.append({
-				"type": "leisure",
-				"nodes": nodes,
-				"tags": tags,
-				"parent": target
-			})
-		elif tags.has("waterway"):
-			_create_waterway(nodes, tags, target, loader)
-			objects_this_frame += 1
-
-		# Frame budgeting: yield каждые N объектов чтобы не фризить
-		# POI data race fix: entrance_nodes/poi_nodes теперь локальные переменные
-		if objects_this_frame >= OBJECTS_PER_FRAME:
-			objects_this_frame = 0
-			await get_tree().process_frame
-
-	# Ищем перекрёстки (узлы, которые используются несколькими дорогами)
-	# Для Т-образных перекрёстков: проверяем ВСЕ узлы дорог
-	var node_road_count: Dictionary = {}  # node_key -> count (сколько дорог проходит через узел)
-	var node_positions: Dictionary = {}  # node_key -> Vector2
-	var node_road_types: Dictionary = {}  # node_key -> Array of highway types
-
+	# Phase 2b: node_road_count for intersection objects
+	# Use small margin to catch intersections right on chunk boundaries
+	var nrc_margin := 2.0
+	var node_road_count: Dictionary = {}
+	var node_positions: Dictionary = {}
+	var node_road_types: Dictionary = {}
 	for way in ways:
 		var way_tags: Dictionary = way.get("tags", {})
 		var way_nodes: Array = way.get("nodes", [])
-
 		if not way_tags.has("highway"):
 			continue
-
 		var highway_type: String = way_tags.get("highway", "")
-		# Исключаем пешеходные дороги из детекции перекрёстков
 		if highway_type in ["footway", "path", "cycleway", "steps", "pedestrian"]:
 			continue
-
 		if way_nodes.size() < 2:
 			continue
-
-		# Проверяем ВСЕ узлы дороги (не только концы) для детекции Т-образных перекрёстков
 		for node in way_nodes:
 			var node_key := "%.5f,%.5f" % [node.lat, node.lon]
-			var local: Vector2 = _latlon_to_local(node.lat, node.lon)
-
-			# Фильтруем по чанку
-			if filter_by_chunk:
-				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
-					continue
-
+			var local: Vector2 = _ll.call(node.lat, node.lon)
+			if local.x < chunk_min_x - nrc_margin or local.x >= chunk_max_x + nrc_margin or local.y < chunk_min_z - nrc_margin or local.y >= chunk_max_z + nrc_margin:
+				continue
 			if not node_road_count.has(node_key):
 				node_road_count[node_key] = 0
 				node_positions[node_key] = local
 				node_road_types[node_key] = []
-
 			node_road_count[node_key] += 1
 			if highway_type not in node_road_types[node_key]:
 				node_road_types[node_key].append(highway_type)
 
-	# Создаём светофоры, знаки и заплатки на перекрёстках
-	var intersection_count := 0
-	for node_key in node_road_count:
-		if node_road_count[node_key] >= 2:  # Перекрёсток - 2+ дороги сходятся концами
-			var pos: Vector2 = node_positions[node_key]
-			var road_types: Array = node_road_types[node_key]
-			var elevation := 0.0
+	# Store result via mutex
+	var result := {
+		"chunk_key": chunk_key, "gen": gen, "osm_data": osm_data,
+		"parking_polygons": parking_polygons, "parking_bounds": parking_bounds,
+		"parking_hash_entries": parking_hash_entries,
+		"road_hash_entries": road_hash_entries,
+		"building_hash_entries": building_hash_entries,
+		"building_poly_entries": building_poly_entries,
+		"new_positions": new_positions, "new_radii": new_radii,
+		"new_angles": new_angles, "new_types": new_types,
+		"new_roads": new_roads, "new_contours": new_contours,
+		"new_curb_contours": new_curb_contours,
+		"new_hash_entries": new_hash_entries,
+		"node_road_count": node_road_count,
+		"node_positions": node_positions,
+		"node_road_types": node_road_types,
+	}
+	_terrain_thread_mutex.lock()
+	_terrain_gen_results.append(result)
+	_terrain_thread_mutex.unlock()
 
-			# Считаем дороги для которых делаем заплатки и бордюры
+
+## Thread-safe intersection contour builder (no instance vars)
+## Uses edge-line intersection for Bezier control point — same algorithm as main branch
+func _build_intersection_contour_from_data(center: Vector2, roads: Array) -> PackedVector2Array:
+	if roads.size() < 2:
+		return PackedVector2Array()
+	var sorted_roads: Array = []
+	for r in roads:
+		var dir: Vector2 = r["direction"]
+		sorted_roads.append({"direction": dir, "width": r["width"], "angle": atan2(dir.y, dir.x)})
+	sorted_roads.sort_custom(func(a, b): return a["angle"] < b["angle"])
+	var contour := PackedVector2Array()
+	var road_count := sorted_roads.size()
+	var curve_segments := 6
+	var max_half_w := 0.0
+	for r in roads:
+		max_half_w = maxf(max_half_w, r["width"] * 0.5)
+	for i in range(road_count):
+		var road: Dictionary = sorted_roads[i]
+		var next_road: Dictionary = sorted_roads[(i + 1) % road_count]
+		var dir: Vector2 = road["direction"]
+		var half_w: float = road["width"] * 0.5
+		var extend: float = maxf(half_w, max_half_w) + 5.0
+		var perp := Vector2(-dir.y, dir.x)
+		var left_tip: Vector2 = center + dir * extend - perp * half_w
+		var right_tip: Vector2 = center + dir * extend + perp * half_w
+		contour.append(left_tip)
+		contour.append(right_tip)
+		var next_dir: Vector2 = next_road["direction"]
+		var next_half_w: float = next_road["width"] * 0.5
+		var next_extend: float = maxf(next_half_w, max_half_w) + 5.0
+		var next_perp := Vector2(-next_dir.y, next_dir.x)
+		var next_left_tip: Vector2 = center + next_dir * next_extend - next_perp * next_half_w
+		var delta: float = next_road["angle"] - road["angle"]
+		if delta < 0:
+			delta += TAU
+		if delta > deg_to_rad(150.0):
+			pass
+		elif delta > deg_to_rad(10.0):
+			# Find intersection of road edge lines for Bezier control point
+			var d: Vector2 = next_left_tip - right_tip
+			var det: float = dir.x * next_dir.y - dir.y * next_dir.x
+			if absf(det) > 0.001:
+				var t_val: float = (d.x * next_dir.y - d.y * next_dir.x) / det
+				var corner_point: Vector2 = right_tip + dir * t_val
+				var max_dist: float = maxf(extend, next_extend) * 3.0
+				if corner_point.distance_to(center) < max_dist:
+					for j in range(1, curve_segments + 1):
+						var t: float = float(j) / float(curve_segments + 1)
+						var p01: Vector2 = right_tip.lerp(corner_point, t)
+						var p12: Vector2 = corner_point.lerp(next_left_tip, t)
+						contour.append(p01.lerp(p12, t))
+	return contour
+
+
+## Apply terrain gen thread results on main thread. Called from _process().
+func _apply_terrain_gen_result() -> void:
+	_terrain_thread_mutex.lock()
+	if _terrain_gen_results.is_empty():
+		_terrain_thread_mutex.unlock()
+		return
+	var result: Dictionary = _terrain_gen_results.pop_front()
+	_terrain_thread_mutex.unlock()
+	_pending_terrain_gen_tasks -= 1
+
+	var chunk_key: String = result.chunk_key
+	var gen: int = result.gen
+	if gen >= 0 and gen != _load_generation:
+		print("OSM: Ignoring stale terrain gen %s (gen %d != %d)" % [chunk_key, gen, _load_generation])
+		return
+
+	# Find chunk node
+	var parent: Node3D = null
+	for child in get_children():
+		if child.name == "Chunk_" + chunk_key:
+			parent = child
+			break
+	if not parent:
+		print("OSM: Terrain gen result for %s but chunk node not found" % chunk_key)
+		return
+
+	# Apply Phase 1: spatial hash
+	var base_parking_idx: int = _parking_polygons.size()
+	for pp in result.parking_polygons:
+		_parking_polygons.append(pp)
+	for pb in result.parking_bounds:
+		_parking_bounds.append(pb)
+	for entry in result.parking_hash_entries:
+		var cell: Vector2i = entry.cell
+		if not _parking_spatial_hash.has(cell):
+			_parking_spatial_hash[cell] = []
+		_parking_spatial_hash[cell].append({"idx": base_parking_idx + entry.idx, "p1": entry.p1, "p2": entry.p2})
+	for rhe in result.road_hash_entries:
+		var seg: Dictionary = rhe.seg
+		_road_segments.append(seg)
+		for cell in rhe.cells:
+			if not _road_spatial_hash.has(cell):
+				_road_spatial_hash[cell] = []
+			_road_spatial_hash[cell].append(seg)
+	for bhe in result.building_hash_entries:
+		var seg: Dictionary = bhe.seg
+		_building_segments.append(seg)
+		for cell in bhe.cells:
+			if not _building_spatial_hash.has(cell):
+				_building_spatial_hash[cell] = []
+			_building_spatial_hash[cell].append(seg)
+	for bpe in result.building_poly_entries:
+		for cell in bpe.cells:
+			if not _building_poly_hash.has(cell):
+				_building_poly_hash[cell] = []
+			_building_poly_hash[cell].append(bpe.poly)
+
+	# Apply Phase 2: intersections (with global dedup)
+	for li in range(result.new_positions.size()):
+		var pos: Vector2 = result.new_positions[li]
+		var is_dup := false
+		for existing_pos in _intersection_positions:
+			if existing_pos.distance_to(pos) < 2.0:
+				is_dup = true
+				break
+		if is_dup:
+			continue
+		_intersection_positions.append(pos)
+		_intersection_radii.append(result.new_radii[li])
+		_intersection_angles.append(result.new_angles[li])
+		_intersection_types.append(result.new_types[li])
+		_intersection_roads.append(result.new_roads[li])
+		_intersection_contours.append(result.new_contours[li])
+		_intersection_curb_contours.append(result.new_curb_contours[li])
+		var he: Dictionary = result.new_hash_entries[li]
+		_add_intersection_to_spatial_hash(pos, he.radii, _intersection_positions.size() - 1)
+
+	# Queue Phase 3 for incremental processing across frames
+	_phase3_queue.append({
+		"result": result, "parent": parent, "chunk_key": chunk_key, "gen": gen,
+		"way_idx": 0, "phase": "ways",  # phases: ways, intersections, points, bus_stops, finalize
+	})
+
+
+## Process Phase 3 queue incrementally — time-budgeted across frames.
+## Returns true if work was done this frame.
+func _process_phase3_queue() -> bool:
+	if _phase3_queue.is_empty():
+		return false
+
+	# Budget: remaining frame time or 4ms, whichever is less
+	var remaining_us: int = maxi(0, (500000 if _initial_loading else 5000) - (Time.get_ticks_usec() - _frame_start_usec))
+	var budget_us: int = mini(remaining_us, 8000 if _initial_loading else 4000)  # Cap per-call: 8ms loading, 4ms gameplay
+	var t0 := Time.get_ticks_usec()
+
+	var entry: Dictionary = _phase3_queue[0]
+	var result: Dictionary = entry.result
+	var parent: Node3D = entry.parent
+	var chunk_key: String = entry.chunk_key
+	var gen: int = entry.gen
+	var phase: String = entry.phase
+
+	# Check parent still valid
+	if not is_instance_valid(parent):
+		_phase3_queue.pop_front()
+		return true
+
+	var osm_data: Dictionary = result.osm_data
+	var target: Node3D = parent if parent else self
+	var ways: Array = osm_data.get("ways", [])
+	var filter_by_chunk := chunk_key != ""
+	var chunk_min_x := 0.0
+	var chunk_max_x := 0.0
+	var chunk_min_z := 0.0
+	var chunk_max_z := 0.0
+	if filter_by_chunk:
+		var coords: Array = chunk_key.split(",")
+		chunk_min_x = int(coords[0]) * chunk_size
+		chunk_max_x = chunk_min_x + chunk_size
+		chunk_min_z = int(coords[1]) * chunk_size
+		chunk_max_z = chunk_min_z + chunk_size
+
+	if phase == "ways":
+		var chunk_entrance_nodes: Array = osm_data.get("entrance_nodes", [])
+		var chunk_poi_nodes: Array = osm_data.get("poi_nodes", [])
+		var way_idx: int = entry.way_idx
+		while way_idx < ways.size():
+			if (Time.get_ticks_usec() - t0) > budget_us:
+				entry.way_idx = way_idx
+				return true
+			var way: Dictionary = ways[way_idx]
+			way_idx += 1
+			var tags: Dictionary = way.get("tags", {})
+			var nodes: Array = way.get("nodes", [])
+			if nodes.size() < 2:
+				continue
+			if filter_by_chunk:
+				var dominated_by_chunk := false
+				if tags.has("highway"):
+					for node in nodes:
+						var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+						if local.x >= chunk_min_x and local.x < chunk_max_x and local.y >= chunk_min_z and local.y < chunk_max_z:
+							dominated_by_chunk = true
+							break
+				elif tags.has("waterway"):
+					for node in nodes:
+						var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+						if local.x >= chunk_min_x and local.x < chunk_max_x and local.y >= chunk_min_z and local.y < chunk_max_z:
+							dominated_by_chunk = true
+							break
+				elif tags.has("building") or tags.has("amenity"):
+					var center := _get_way_center(nodes)
+					dominated_by_chunk = center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z
+				else:
+					var center := _get_way_center(nodes)
+					dominated_by_chunk = center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z
+				if not dominated_by_chunk:
+					continue
+			var way_id_raw: int = int(way.get("id", 0))
+			if way_id_raw in [75621890]:
+				continue
+			if tags.has("highway"):
+				_create_road(nodes, tags, target, null, way_id_raw, true)  # skip_spatial_hash: already built by Phase 1+2
+			elif tags.has("building"):
+				_create_building(nodes, tags, target, null, way_id_raw, chunk_entrance_nodes, chunk_poi_nodes, true)  # skip_spatial_hash
+			elif tags.has("amenity") and not tags.has("building"):
+				_create_amenity_building(nodes, tags, target, null, true)  # skip_spatial_hash
+			elif tags.has("natural"):
+				_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+			elif tags.has("landuse"):
+				_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
+			elif tags.has("leisure"):
+				_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target})
+			elif tags.has("waterway"):
+				_create_waterway(nodes, tags, target, null)
+		# Done with ways — move to intersections
+		entry.phase = "intersections"
+		entry.way_idx = 0
+		# Pre-build intersection keys list for iteration
+		var ikeys: Array = []
+		var node_road_count: Dictionary = result.node_road_count
+		for nk in node_road_count:
+			if node_road_count[nk] >= 2:
+				ikeys.append(nk)
+		entry["ikeys"] = ikeys
+		return true
+
+	if phase == "intersections":
+		var node_road_count: Dictionary = result.node_road_count
+		var node_positions: Dictionary = result.node_positions
+		var node_road_types: Dictionary = result.node_road_types
+		var ikeys: Array = entry.get("ikeys", [])
+		var idx: int = entry.way_idx
+		while idx < ikeys.size():
+			if (Time.get_ticks_usec() - t0) > budget_us:
+				entry.way_idx = idx
+				return true
+			var node_key: String = ikeys[idx]
+			idx += 1
+			var pos: Vector2 = node_positions[node_key]
+			# Only create objects for nodes within strict chunk bbox (avoid duplicates from margin)
+			if filter_by_chunk:
+				if pos.x < chunk_min_x or pos.x >= chunk_max_x or pos.y < chunk_min_z or pos.y >= chunk_max_z:
+					continue
+			var road_types: Array = node_road_types[node_key]
 			var major_road_count := 0
 			var max_width := 0.0
-			var max_height_offset := 0.006  # default (residential)
+			var max_height_offset := 0.006
 			for t in road_types:
 				if t in ["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "service"]:
 					major_road_count += 1
-				var w: float = ROAD_WIDTHS.get(t, 6.0)
-				max_width = maxf(max_width, w)
-				# height_offset по типу дороги
+				max_width = maxf(max_width, ROAD_WIDTHS.get(t, 6.0))
 				var ho := 0.006
 				match t:
 					"motorway", "trunk": ho = 0.012
@@ -2986,122 +3144,172 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 					"residential", "unclassified": ho = 0.006
 					"service": ho = 0.004
 				max_height_offset = maxf(max_height_offset, ho)
-			# Ищем данные эллипса для этого перекрёстка
 			var intersection_idx := _find_nearest_intersection(pos, 2.0)
-
-			# Смещение знаков/светофоров к краю дороги (перпендикулярно направлению)
-			var sign_offset := Vector2(5, 5)  # Fallback
+			var sign_offset := Vector2(5, 5)
 			if intersection_idx >= 0:
 				var angle: float = _intersection_angles[intersection_idx]
-				# Перпендикуляр к направлению дороги
-				var perp := Vector2(cos(angle), sin(angle))
-				sign_offset = perp * (max_width * 0.5 + 0.5)  # К краю дороги + 0.5м
-
-			# На крупных перекрёстках - светофор, на мелких - знаки
+				sign_offset = Vector2(cos(angle), sin(angle)) * (max_width * 0.5 + 0.5)
 			var has_primary := "primary" in road_types or "secondary" in road_types
 			if has_primary and node_road_count[node_key] >= 3:
-				_create_traffic_light(pos + sign_offset, elevation, target)
+				_create_traffic_light(pos + sign_offset, 0.0, target)
 			else:
-				# На обычных перекрёстках - один знак
-				_create_yield_sign(pos + sign_offset, elevation, target)
-
-			# Создаём заплатку без разметки если есть хотя бы 1 дорога (service+)
+				_create_yield_sign(pos + sign_offset, 0.0, target)
 			if major_road_count >= 1:
 				_create_intersection_patch(pos, target, intersection_idx, max_height_offset, chunk_key)
+		# Done with intersections — move to points
+		entry.phase = "points"
+		entry.way_idx = 0
+		return true
 
-			# Бордюры перекрёстков генерируются по краям террейна в _finalize_terrain_mesh
-			if intersection_idx < 0:
-				print("  NO intersection contour: pos=(%.1f,%.1f) types=%s major=%d idx=%d" % [pos.x, pos.y, str(road_types), major_road_count, intersection_idx])
+	if phase == "points":
+		var point_objects: Array = osm_data.get("point_objects", [])
+		var idx: int = entry.way_idx
+		while idx < point_objects.size():
+			if (Time.get_ticks_usec() - t0) > budget_us:
+				entry.way_idx = idx
+				return true
+			var obj: Dictionary = point_objects[idx]
+			idx += 1
+			var tags: Dictionary = obj.get("tags", {})
+			var local: Vector2 = _latlon_to_local(obj.get("lat", 0.0), obj.get("lon", 0.0))
+			if filter_by_chunk:
+				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
+					continue
+			if tags.get("natural") == "tree":
+				if not _is_point_near_road(local, 3.0):
+					var tree_ck := chunk_key if not chunk_key.is_empty() else "%d,%d" % [int(floor(local.x / chunk_size)), int(floor(local.y / chunk_size))]
+					_add_tree_to_batch(tree_ck, local, 0.0, target)
+			elif tags.get("amenity") == "waste_disposal":
+				_create_garbage_container(local, 0.0, target)
+			elif tags.has("traffic_sign"):
+				_create_traffic_sign(local, 0.0, tags, target)
+			elif tags.get("highway") == "street_lamp":
+				if not _is_point_in_any_parking(local):
+					if chunk_key != "":
+						_add_lamp_to_batch(chunk_key, Vector3(local.x, 0.0, local.y), Vector3.FORWARD, target)
+					else:
+						_create_street_lamp(local, 0.0, target)
+		# Done with points — move to bus stops
+		entry.phase = "bus_stops"
+		entry.way_idx = 0
+		return true
 
-			intersection_count += 1
-
-	# Обрабатываем точечные объекты (деревья, знаки, фонари)
-	var point_objects: Array = osm_data.get("point_objects", [])
-	var tree_count := 0
-	var sign_count := 0
-	var lamp_count := 0
-
-	for obj in point_objects:
-		var tags: Dictionary = obj.get("tags", {})
-		var lat: float = obj.get("lat", 0.0)
-		var lon: float = obj.get("lon", 0.0)
-		var local: Vector2 = _latlon_to_local(lat, lon)
-
-		# Фильтруем по чанку
-		if filter_by_chunk:
-			if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
+	if phase == "bus_stops":
+		var bus_stops: Array = osm_data.get("bus_stops", [])
+		var excluded_stops := ["Улица Партизана Окинина"]
+		var idx: int = entry.way_idx
+		while idx < bus_stops.size():
+			var stop: Dictionary = bus_stops[idx]
+			idx += 1
+			var tags: Dictionary = stop.get("tags", {})
+			if tags.get("name", "") in excluded_stops:
 				continue
+			var local: Vector2 = _latlon_to_local(stop.get("lat", 0.0), stop.get("lon", 0.0))
+			if filter_by_chunk:
+				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
+					continue
+			_create_bus_stop(local, 0.0, tags, target)
+		# Done — finalize
+		entry.phase = "finalize"
+		return true
 
-		var elevation := 0.0
+	if phase == "finalize":
+		if chunk_key != "":
+			_place_custom_models_for_chunk(chunk_key, target)
+			_generate_trees_for_chunk(chunk_key, target)
+		var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
+		if not _pending_batch_chunks.has(batch_chunk_key):
+			_pending_batch_chunks.append(batch_chunk_key)
+		# Finalize chunk state
+		_loading_chunks.erase(chunk_key)
+		_loaded_chunks[chunk_key] = parent
+		if gen >= 0 and gen != _load_generation:
+			_phase3_queue.pop_front()
+			return true
+		if _decoration_layer and not _billboard_batches_to_finalize.has(chunk_key):
+			_billboard_batches_to_finalize.append(chunk_key)
+		_apply_night_mode_to_chunk(parent)
+		_check_initial_load_complete()
+		_phase3_queue.pop_front()
+		return true
 
-		if tags.get("natural") == "tree":
-			# Пропускаем деревья слишком близко к дорогам
-			if not _is_point_near_road(local, 3.0):
-				var tree_chunk_key := chunk_key
-				if tree_chunk_key.is_empty():
-					var cx := int(floor(local.x / chunk_size))
-					var cz := int(floor(local.y / chunk_size))
-					tree_chunk_key = "%d,%d" % [cx, cz]
-				_add_tree_to_batch(tree_chunk_key, local, elevation, target)
-				tree_count += 1
-		elif tags.get("amenity") == "waste_disposal":
-			_create_garbage_container(local, elevation, target)
-		elif tags.has("traffic_sign"):
-			_create_traffic_sign(local, elevation, tags, target)
-			sign_count += 1
-		elif tags.get("highway") == "street_lamp":
-			# Не ставим фонари на парковках
-			if not _is_point_in_any_parking(local):
-				if chunk_key != "":
-					# Use batching for OSM point lamps too
-					var lamp_pos := Vector3(local.x, elevation, local.y)
-					# Direction toward nearest road (approximate - use zero if not near road)
-					var road_dir := Vector3.FORWARD
-					_add_lamp_to_batch(chunk_key, lamp_pos, road_dir, target)
-				else:
-					_create_street_lamp(local, elevation, target)
-				lamp_count += 1
+	# Unknown phase — drop entry
+	_phase3_queue.pop_front()
+	return true
 
-	print("OSM: Generated %d roads, %d buildings, %d trees, %d signs, %d lamps, %d intersections" % [road_count, building_count, tree_count, sign_count, lamp_count, intersection_count])
 
-	# Обрабатываем автобусные остановки
-	var bus_stops: Array = osm_data.get("bus_stops", [])
-	var bus_stop_count := 0
-	# Список остановок для исключения (не существуют в реальности)
-	var excluded_stops := ["Улица Партизана Окинина"]
-	for stop in bus_stops:
-		var lat: float = stop.get("lat", 0.0)
-		var lon: float = stop.get("lon", 0.0)
-		var tags: Dictionary = stop.get("tags", {})
-		var stop_name: String = tags.get("name", "")
-
-		# Пропускаем исключённые остановки
-		if stop_name in excluded_stops:
+## Synchronous terrain generation (for initial load / non-chunk mode).
+func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: String = "") -> void:
+	var target: Node3D = parent if parent else self
+	var ways: Array = osm_data.get("ways", [])
+	var chunk_entrance_nodes: Array = osm_data.get("entrance_nodes", [])
+	var chunk_poi_nodes: Array = osm_data.get("poi_nodes", [])
+	# Phase 1: Spatial hash
+	for way in ways:
+		var tags: Dictionary = way.get("tags", {})
+		var nodes: Array = way.get("nodes", [])
+		if tags.get("amenity") == "parking" and nodes.size() >= 3:
+			var points := PackedVector2Array()
+			for node in nodes:
+				points.append(_latlon_to_local(node.lat, node.lon))
+			_parking_polygons.append(points)
+			var center := Vector2.ZERO
+			for p in points:
+				center += p
+			center /= points.size()
+			var max_r := 0.0
+			for p in points:
+				max_r = maxf(max_r, center.distance_to(p))
+			_parking_bounds.append({"center": center, "radius": max_r})
+			var pidx: int = _parking_polygons.size() - 1
+			for ei in range(points.size()):
+				var ep1: Vector2 = points[ei]
+				var ep2: Vector2 = points[(ei + 1) % points.size()]
+				for cx in range(int(floor(minf(ep1.x, ep2.x) / PARKING_CELL_SIZE)), int(floor(maxf(ep1.x, ep2.x) / PARKING_CELL_SIZE)) + 1):
+					for cy in range(int(floor(minf(ep1.y, ep2.y) / PARKING_CELL_SIZE)), int(floor(maxf(ep1.y, ep2.y) / PARKING_CELL_SIZE)) + 1):
+						var cell_key := Vector2i(cx, cy)
+						if not _parking_spatial_hash.has(cell_key):
+							_parking_spatial_hash[cell_key] = []
+						_parking_spatial_hash[cell_key].append({"idx": pidx, "p1": ep1, "p2": ep2})
+		if tags.has("highway") and nodes.size() >= 2:
+			var road_w: float = ROAD_WIDTHS.get(tags.get("highway", "residential"), 5.0)
+			var raw_pts := PackedVector2Array()
+			raw_pts.resize(nodes.size())
+			for j in range(nodes.size()):
+				raw_pts[j] = _latlon_to_local(nodes[j].lat, nodes[j].lon)
+			var smoothed_pts := _smooth_road_corners(raw_pts)
+			for j in range(smoothed_pts.size() - 1):
+				_add_road_segment_to_spatial_hash({"p1": smoothed_pts[j], "p2": smoothed_pts[j + 1], "width": road_w})
+		if (tags.has("building") or (tags.has("amenity") and not tags.has("highway"))) and nodes.size() >= 3:
+			var bpoints := PackedVector2Array()
+			for node in nodes:
+				bpoints.append(_latlon_to_local(node.lat, node.lon))
+			for j in range(bpoints.size()):
+				_add_building_segment_to_spatial_hash({"p1": bpoints[j], "p2": bpoints[(j + 1) % bpoints.size()]})
+			_add_building_poly_to_hash(bpoints)
+	# Phase 3: Create objects
+	for way in ways:
+		var tags: Dictionary = way.get("tags", {})
+		var nodes: Array = way.get("nodes", [])
+		if nodes.size() < 2:
 			continue
-
-		var local: Vector2 = _latlon_to_local(lat, lon)
-
-		# Фильтруем по чанку
-		if filter_by_chunk:
-			if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
-				continue
-
-		var elevation := 0.0
-		_create_bus_stop(local, elevation, tags, target)
-		bus_stop_count += 1
-
-	if bus_stop_count > 0:
-		print("OSM: Created %d bus stops" % bus_stop_count)
-
-	# Custom models (гаражи, веранды и т.д. из JSON)
-	if chunk_key != "":
-		_place_custom_models_for_chunk(chunk_key, target)
-
-	# Деревья по площади чанка (террейн создаётся позже в _finalize_road_batches_for_chunk)
-	if chunk_key != "":
-		_generate_trees_for_chunk(chunk_key, target)
-
-	# OPTIMIZATION: Помечаем чанк для финализации road batches (когда road_queue опустеет)
+		var way_id_raw: int = int(way.get("id", 0))
+		if way_id_raw in [75621890]:
+			continue
+		if tags.has("highway"):
+			_create_road(nodes, tags, target, null, way_id_raw)
+		elif tags.has("building"):
+			_create_building(nodes, tags, target, null, way_id_raw, chunk_entrance_nodes, chunk_poi_nodes)
+		elif tags.has("amenity") and not tags.has("building"):
+			_create_amenity_building(nodes, tags, target, null)
+		elif tags.has("natural"):
+			_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+		elif tags.has("landuse"):
+			_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
+		elif tags.has("leisure"):
+			_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target})
+		elif tags.has("waterway"):
+			_create_waterway(nodes, tags, target, null)
 	var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
 	if not _pending_batch_chunks.has(batch_chunk_key):
 		_pending_batch_chunks.append(batch_chunk_key)
@@ -3199,7 +3407,7 @@ func _compute_averaged_perpendiculars(points: PackedVector2Array) -> Array[Vecto
 	return perpendiculars
 
 
-func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node, way_id: int = 0) -> void:
+func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node, way_id: int = 0, skip_spatial_hash: bool = false) -> void:
 	if not enable_roads:
 		return
 	# Добавляем в очередь для отложенного создания
@@ -3211,7 +3419,9 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 	})
 
 	# Сегменты дорог сохраняем сразу (нужны для знаков парковки и проверки фонарей)
-	# Используем сглаженные координаты — чтобы spatial hash соответствовал реальной геометрии дорог
+	# Skip if spatial hash was already built by Phase 1+2 worker thread
+	if skip_spatial_hash:
+		return
 	var highway_type: String = tags.get("highway", "residential")
 	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
 	var raw_pts := PackedVector2Array()
@@ -5251,7 +5461,7 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: 
 	im.surface_end()
 	parent.add_child(mesh)
 
-func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, way_id: int = 0, entrance_nodes: Array = [], poi_nodes: Array = []) -> void:
+func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, way_id: int = 0, entrance_nodes: Array = [], poi_nodes: Array = [], skip_spatial_hash: bool = false) -> void:
 	if not enable_buildings or nodes.size() < 3:
 		return
 
@@ -5263,13 +5473,15 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		points.append(local)
 
 	# Сохраняем рёбра здания для проверки расстояния при генерации деревьев
-	for i in range(points.size()):
-		var p1 := points[i]
-		var p2 := points[(i + 1) % points.size()]
-		var seg := {"p1": p1, "p2": p2}
-		_building_segments.append(seg)
-		_add_building_segment_to_spatial_hash(seg)
-	_add_building_poly_to_hash(points)
+	# Skip if spatial hash was already built by Phase 1+2 worker thread
+	if not skip_spatial_hash:
+		for i in range(points.size()):
+			var p1 := points[i]
+			var p2 := points[(i + 1) % points.size()]
+			var seg := {"p1": p1, "p2": p2}
+			_building_segments.append(seg)
+			_add_building_segment_to_spatial_hash(seg)
+		_add_building_poly_to_hash(points)
 
 	# Debug name для отладки конкретных зданий
 	var addr_street: String = str(tags.get("addr:street", ""))
@@ -6168,7 +6380,7 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -
 		return
 	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, is_water)
 
-func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node) -> void:
+func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, skip_spatial_hash: bool = false) -> void:
 	if nodes.size() < 3:
 		return
 
@@ -6180,13 +6392,14 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 		points.append(local)
 
 	# Сохраняем рёбра для проверки расстояния при генерации деревьев
-	for i in range(points.size()):
-		var p1 := points[i]
-		var p2 := points[(i + 1) % points.size()]
-		var seg := {"p1": p1, "p2": p2}
-		_building_segments.append(seg)
-		_add_building_segment_to_spatial_hash(seg)
-	_add_building_poly_to_hash(points)
+	if not skip_spatial_hash:
+		for i in range(points.size()):
+			var p1 := points[i]
+			var p2 := points[(i + 1) % points.size()]
+			var seg := {"p1": p1, "p2": p2}
+			_building_segments.append(seg)
+			_add_building_segment_to_spatial_hash(seg)
+		_add_building_poly_to_hash(points)
 
 	var amenity_type: String = str(tags.get("amenity", ""))
 
@@ -6347,6 +6560,8 @@ func _generate_fence_segment(p1: Vector2, p2: Vector2,
 
 ## Add iron bar fence along polyline to chunk batch (deferred — queues edges for incremental processing)
 func _add_fence_to_batch(points: PackedVector2Array, parent: Node3D) -> void:
+	if not enable_fences:
+		return
 	if points.size() < 3:
 		return
 
@@ -7746,7 +7961,7 @@ func _update_debug_stats(delta: float) -> void:
 ## Обрабатывает очередь дорог (3 дороги за кадр)
 func _process_road_queue() -> void:
 	var queue_start := Time.get_ticks_usec()
-	var TOTAL_BUDGET_USEC := 500000 if _initial_loading else 4000  # Unlimited during initial load
+	var TOTAL_BUDGET_USEC := 6000 if _initial_loading else 4000  # 6ms during initial load, 4ms during gameplay
 
 	# Phase 0: Apply ready road results from worker threads (main thread, time-budgeted)
 	_road_mutex.lock()
@@ -7835,137 +8050,9 @@ func _process_road_queue() -> void:
 		var billboard_mesh: Node3D = _decoration_layer.create_billboard_mesh(item.billboard, item.elevation)
 		_budgeted_add_child(item.parent, billboard_mesh)
 
-	if _road_queue.is_empty() and _pending_road_tasks <= 0:
-		# Check if there are still unapplied results or deferred work
-		_road_mutex.lock()
-		var has_pending := not _road_results.is_empty()
-		_road_mutex.unlock()
-		if has_pending or not _deferred_lamp_queue.is_empty() or not _deferred_manhole_queue.is_empty() or not _deferred_traffic_queue.is_empty() or not _deferred_footway_queue.is_empty() or not _deferred_billboard_queue.is_empty():
-			return  # Wait for results/deferred to be processed first
-
-		# Budget gate: skip finalization if deferred work already consumed most budget
-		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
-			return
-
-		# Round-robin: ONE finalization type per frame, ONE chunk per type
-		# This prevents Godot scene tree from processing too many new nodes at once
-		var did_work := false
-		var phases_checked := 0
-		while not did_work and phases_checked < 8:
-			phases_checked += 1
-			match _finalize_phase:
-				0:  # Roads (1 chunk)
-					_finalize_phase = 1
-					if not _pending_batch_chunks.is_empty():
-						var t_batch := Time.get_ticks_usec()
-						var chunk_key: String = _pending_batch_chunks.pop_front()
-						_finalize_road_batches_for_chunk(chunk_key)
-						_record_perf("fin_roads", Time.get_ticks_usec() - t_batch)
-						did_work = true
-
-				1:  # Curbs
-					_finalize_phase = 2
-					if not _curb_queue.is_empty() or not _curb_smoothed_queue.is_empty() or not _curb_mesh_state.is_empty() or not _curb_geo_batch.is_empty():
-						var t_curb_fin := Time.get_ticks_usec()
-						_process_curb_queue()
-						_record_perf("fin_curbs", Time.get_ticks_usec() - t_curb_fin)
-						did_work = true
-
-				2:  # Lamps (1 chunk)
-					_finalize_phase = 3
-					if not _lamp_batches_to_finalize.is_empty():
-						var t_lamp := Time.get_ticks_usec()
-						var chunk_key: String = _lamp_batches_to_finalize[0]
-						_lamp_batches_to_finalize.remove_at(0)
-						_finalize_lamp_batches_for_chunk(chunk_key)
-						_record_perf("fin_lamps", Time.get_ticks_usec() - t_lamp)
-						did_work = true
-
-				3:  # Buildings (1 surface per frame, incremental)
-					_finalize_phase = 4
-					if _pending_building_tasks <= 0 and _building_results.is_empty():
-						# Enqueue building geo batches
-						if not _building_geo_batch.is_empty():
-							for key in _building_geo_batch.keys():
-								if not _building_geo_finalize_queue.has(key):
-									_building_geo_finalize_queue.append(key)
-
-						if not _building_geo_finalize_queue.is_empty():
-							var t_geo := Time.get_ticks_usec()
-							var chunk_key: String = _building_geo_finalize_queue[0]
-							_building_geo_finalize_queue.remove_at(0)
-							_finalize_building_geo_batch(chunk_key)
-							_record_perf("fin_buildings", Time.get_ticks_usec() - t_geo)
-							# Entrance/windows only after ALL building surfaces done
-							if not _building_geo_batch.has(chunk_key):
-								_finalize_entrance_batch(chunk_key)
-								if _window_batch_data.has(chunk_key):
-									_finalize_window_batches_for_chunk(chunk_key)
-							did_work = true
-						elif not _entrance_batch.is_empty():
-							var ent_key: String = _entrance_batch.keys()[0]
-							_finalize_entrance_batch(ent_key)
-							did_work = true
-						else:
-							# Enqueue remaining windows (chunks without buildings in queue)
-							var window_chunks := _window_batch_data.keys()
-							for chunk_key in window_chunks:
-								_finalize_window_batches_for_chunk(chunk_key)
-
-				4:  # Windows (progressive fill, time-budgeted)
-					_finalize_phase = 5
-					if not _window_finalize_queue.is_empty():
-						var t_window := Time.get_ticks_usec()
-						var budget_end: int = t_window + 2000  # 2ms budget
-						_progress_window_finalize(budget_end)
-						_record_perf("fin_windows", Time.get_ticks_usec() - t_window)
-						did_work = true
-
-				5:  # Trees (1 chunk)
-					_finalize_phase = 6
-					if not _tree_batches_to_finalize.is_empty():
-						var t_tree := Time.get_ticks_usec()
-						var chunk_key: String = _tree_batches_to_finalize[0]
-						_tree_batches_to_finalize.remove_at(0)
-						_finalize_tree_batches_for_chunk(chunk_key)
-						_record_perf("fin_trees", Time.get_ticks_usec() - t_tree)
-						did_work = true
-
-				6:  # Billboards (1 chunk)
-					_finalize_phase = 7
-					if not _billboard_batches_to_finalize.is_empty():
-						var t_bill := Time.get_ticks_usec()
-						var chunk_key: String = _billboard_batches_to_finalize[0]
-						_billboard_batches_to_finalize.remove_at(0)
-						_finalize_billboard_batch_for_chunk(chunk_key)
-						_record_perf("fin_billboards", Time.get_ticks_usec() - t_bill)
-						did_work = true
-
-				7:  # Fences (1 chunk)
-					_finalize_phase = 0
-					if not _fence_batches_to_finalize.is_empty():
-						var chunk_key: String = _fence_batches_to_finalize[0]
-						# Don't finalize if deferred edges still pending for this chunk
-						var has_pending_edges := false
-						for fe in _deferred_fence_edges:
-							if fe.chunk_key == chunk_key:
-								has_pending_edges = true
-								break
-						if has_pending_edges:
-							did_work = true  # keep cycling
-						else:
-							var t_fence := Time.get_ticks_usec()
-							_fence_batches_to_finalize.remove_at(0)
-							_finalize_fence_batches_for_chunk(chunk_key)
-							_record_perf("fin_fences", Time.get_ticks_usec() - t_fence)
-							did_work = true
-
-		return
-
 	# Dispatch roads to worker threads — no time budget needed on main thread!
 	# Limit concurrent tasks to avoid overwhelming thread pool
 	const MAX_CONCURRENT_ROAD_TASKS := 8
-	var dispatched := 0
 
 	# Ensure lon_scale is initialized
 	if _lon_scale == 0.0:
@@ -7994,9 +8081,137 @@ func _process_road_queue() -> void:
 			"lon_scale": _lon_scale,
 			"way_id": item.get("way_id", 0)
 		}
+		_road_mutex.lock()
 		_pending_road_tasks += 1
+		_road_mutex.unlock()
 		WorkerThreadPool.add_task(_compute_road_geometry_thread.bind(task_data))
-		dispatched += 1
+
+	# Check if roads pipeline is fully drained before finalization
+	_road_mutex.lock()
+	var has_road_results := not _road_results.is_empty()
+	var pending_tasks := _pending_road_tasks
+	_road_mutex.unlock()
+	if not _road_queue.is_empty() or has_road_results or pending_tasks > 0:
+		return  # Still dispatching, computing, or applying road geometry
+	if not _deferred_lamp_queue.is_empty() or not _deferred_manhole_queue.is_empty() or not _deferred_traffic_queue.is_empty() or not _deferred_footway_queue.is_empty() or not _deferred_billboard_queue.is_empty():
+		return  # Deferred work still pending
+
+	# Budget gate: skip finalization if deferred work already consumed most budget
+	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+		return
+
+	# Round-robin: ONE finalization type per frame, ONE chunk per type
+	# This prevents Godot scene tree from processing too many new nodes at once
+	var did_work := false
+	var phases_checked := 0
+	while not did_work and phases_checked < 8:
+		phases_checked += 1
+		match _finalize_phase:
+			0:  # Roads (1 chunk)
+				_finalize_phase = 1
+				if not _pending_batch_chunks.is_empty():
+					var t_batch := Time.get_ticks_usec()
+					var chunk_key2: String = _pending_batch_chunks.pop_front()
+					_finalize_road_batches_for_chunk(chunk_key2)
+					_record_perf("fin_roads", Time.get_ticks_usec() - t_batch)
+					did_work = true
+
+			1:  # Curbs
+				_finalize_phase = 2
+				if not _curb_queue.is_empty() or not _curb_smoothed_queue.is_empty() or not _curb_mesh_state.is_empty() or not _curb_geo_batch.is_empty():
+					var t_curb_fin := Time.get_ticks_usec()
+					_process_curb_queue()
+					_record_perf("fin_curbs", Time.get_ticks_usec() - t_curb_fin)
+					did_work = true
+
+			2:  # Lamps (1 chunk)
+				_finalize_phase = 3
+				if not _lamp_batches_to_finalize.is_empty():
+					var t_lamp := Time.get_ticks_usec()
+					var lamp_ck: String = _lamp_batches_to_finalize[0]
+					_lamp_batches_to_finalize.remove_at(0)
+					_finalize_lamp_batches_for_chunk(lamp_ck)
+					_record_perf("fin_lamps", Time.get_ticks_usec() - t_lamp)
+					did_work = true
+
+			3:  # Buildings (1 surface per frame, incremental)
+				_finalize_phase = 4
+				if _pending_building_tasks <= 0 and _building_results.is_empty():
+					# Enqueue building geo batches
+					if not _building_geo_batch.is_empty():
+						for key in _building_geo_batch.keys():
+							if not _building_geo_finalize_queue.has(key):
+								_building_geo_finalize_queue.append(key)
+
+					if not _building_geo_finalize_queue.is_empty():
+						var t_geo := Time.get_ticks_usec()
+						var geo_ck: String = _building_geo_finalize_queue[0]
+						_building_geo_finalize_queue.remove_at(0)
+						_finalize_building_geo_batch(geo_ck)
+						_record_perf("fin_buildings", Time.get_ticks_usec() - t_geo)
+						# Entrance/windows only after ALL building surfaces done
+						if not _building_geo_batch.has(geo_ck):
+							_finalize_entrance_batch(geo_ck)
+							if _window_batch_data.has(geo_ck):
+								_finalize_window_batches_for_chunk(geo_ck)
+						did_work = true
+					elif not _entrance_batch.is_empty():
+						var ent_key: String = _entrance_batch.keys()[0]
+						_finalize_entrance_batch(ent_key)
+						did_work = true
+					else:
+						# Enqueue remaining windows (chunks without buildings in queue)
+						var window_chunks := _window_batch_data.keys()
+						for wck in window_chunks:
+							_finalize_window_batches_for_chunk(wck)
+
+			4:  # Windows (progressive fill, time-budgeted)
+				_finalize_phase = 5
+				if not _window_finalize_queue.is_empty():
+					var t_window := Time.get_ticks_usec()
+					var budget_end: int = t_window + 2000  # 2ms budget
+					_progress_window_finalize(budget_end)
+					_record_perf("fin_windows", Time.get_ticks_usec() - t_window)
+					did_work = true
+
+			5:  # Trees (1 chunk)
+				_finalize_phase = 6
+				if not _tree_batches_to_finalize.is_empty():
+					var t_tree := Time.get_ticks_usec()
+					var tree_ck: String = _tree_batches_to_finalize[0]
+					_tree_batches_to_finalize.remove_at(0)
+					_finalize_tree_batches_for_chunk(tree_ck)
+					_record_perf("fin_trees", Time.get_ticks_usec() - t_tree)
+					did_work = true
+
+			6:  # Billboards (1 chunk)
+				_finalize_phase = 7
+				if not _billboard_batches_to_finalize.is_empty():
+					var t_bill := Time.get_ticks_usec()
+					var bill_ck: String = _billboard_batches_to_finalize[0]
+					_billboard_batches_to_finalize.remove_at(0)
+					_finalize_billboard_batch_for_chunk(bill_ck)
+					_record_perf("fin_billboards", Time.get_ticks_usec() - t_bill)
+					did_work = true
+
+			7:  # Fences (1 chunk)
+				_finalize_phase = 0
+				if not _fence_batches_to_finalize.is_empty():
+					var fence_ck: String = _fence_batches_to_finalize[0]
+					# Don't finalize if deferred edges still pending for this chunk
+					var has_pending_edges := false
+					for fe in _deferred_fence_edges:
+						if fe.chunk_key == fence_ck:
+							has_pending_edges = true
+							break
+					if has_pending_edges:
+						did_work = true  # keep cycling
+					else:
+						var t_fence := Time.get_ticks_usec()
+						_fence_batches_to_finalize.remove_at(0)
+						_finalize_fence_batches_for_chunk(fence_ck)
+						_record_perf("fin_fences", Time.get_ticks_usec() - t_fence)
+						did_work = true
 
 
 ## Обрабатывает очередь бордюров (после того как все перекрёстки определены)
@@ -10589,6 +10804,8 @@ func _get_direction_to_nearest_road(pos: Vector2) -> Vector2:
 
 # Процедурная генерация деревьев в полигоне (парк, лес) - добавляет в очередь
 func _generate_trees_in_polygon(points: PackedVector2Array, parent: Node3D, dense: bool = false) -> void:
+	if not enable_vegetation:
+		return
 	if points.size() < 3:
 		return
 
@@ -11381,6 +11598,8 @@ func _create_chunk_trees_immediate(chunk_key: String, parent: Node3D) -> void:
 
 # Процедурная генерация промышленных зданий внутри территории
 func _generate_industrial_buildings(points: PackedVector2Array, parent: Node3D) -> void:
+	if not enable_buildings:
+		return
 	if points.size() < 4:
 		return
 

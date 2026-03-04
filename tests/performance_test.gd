@@ -99,36 +99,81 @@ func _find_nodes() -> void:
 
 func _apply_render_flags() -> void:
 	var args := OS.get_cmdline_args()
+	var disabled: PackedStringArray = []
+
+	# Render flags (Environment)
 	var env: Environment
 	var we := get_node_or_null("WorldEnvironment") as WorldEnvironment
 	if we:
 		env = we.environment
-	if not env:
-		return
-	var disabled: PackedStringArray = []
-	for arg in args:
-		if arg == "--no-sdfgi":
-			env.sdfgi_enabled = false
-			disabled.append("SDFGI")
-		elif arg == "--no-ssr":
-			env.ssr_enabled = false
-			disabled.append("SSR")
-		elif arg == "--no-ssao":
-			env.ssao_enabled = false
-			disabled.append("SSAO")
-		elif arg == "--no-ssil":
-			env.ssil_enabled = false
-			disabled.append("SSIL")
-		elif arg == "--no-volumetric-fog":
-			env.volumetric_fog_enabled = false
-			disabled.append("VolumetricFog")
-		elif arg == "--no-glow":
-			env.glow_enabled = false
-			disabled.append("Glow")
+	if env:
+		for arg in args:
+			if arg == "--no-sdfgi":
+				env.sdfgi_enabled = false
+				disabled.append("SDFGI")
+			elif arg == "--no-ssr":
+				env.ssr_enabled = false
+				disabled.append("SSR")
+			elif arg == "--no-ssao":
+				env.ssao_enabled = false
+				disabled.append("SSAO")
+			elif arg == "--no-ssil":
+				env.ssil_enabled = false
+				disabled.append("SSIL")
+			elif arg == "--no-volumetric-fog":
+				env.volumetric_fog_enabled = false
+				disabled.append("VolumetricFog")
+			elif arg == "--no-glow":
+				env.glow_enabled = false
+				disabled.append("Glow")
+
+	# Scene feature flags (OSM terrain generator)
+	if osm_terrain:
+		for arg in args:
+			if arg == "--no-buildings":
+				osm_terrain.enable_buildings = false
+				disabled.append("Buildings")
+			elif arg == "--no-vegetation":
+				osm_terrain.enable_vegetation = false
+				disabled.append("Vegetation")
+			elif arg == "--no-lamps":
+				osm_terrain.enable_street_lamps = false
+				disabled.append("Lamps")
+			elif arg == "--no-signs":
+				osm_terrain.enable_traffic_signs = false
+				osm_terrain.enable_crossing_signs = false
+				disabled.append("Signs")
+			elif arg == "--no-traffic-lights":
+				osm_terrain.enable_traffic_lights = false
+				disabled.append("TrafficLights")
+			elif arg == "--no-curbs":
+				osm_terrain.enable_curbs = false
+				disabled.append("Curbs")
+			elif arg == "--no-windows":
+				osm_terrain.enable_windows = false
+				disabled.append("Windows")
+			elif arg == "--no-manholes":
+				osm_terrain.enable_manholes = false
+				disabled.append("Manholes")
+			elif arg == "--no-roads":
+				osm_terrain.enable_roads = false
+				disabled.append("Roads")
+			elif arg == "--no-fences":
+				osm_terrain.enable_fences = false
+				disabled.append("Fences")
+
+	# Traffic flags
+	var traffic_mgr := get_node_or_null("TrafficManager")
+	if traffic_mgr:
+		for arg in args:
+			if arg == "--no-npcs":
+				traffic_mgr.max_npcs = 0
+				disabled.append("NPCs")
+
 	if disabled.is_empty():
-		print("[PerfTest] Render: all effects enabled (matching main.tscn)")
+		print("[PerfTest] All features enabled (baseline)")
 	else:
-		print("[PerfTest] Render: DISABLED %s" % " ".join(disabled))
+		print("[PerfTest] DISABLED: %s" % " ".join(disabled))
 
 
 func _setup_test() -> void:

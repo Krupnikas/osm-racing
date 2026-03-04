@@ -1,4 +1,4 @@
-[gd_scene load_steps=23 format=3 uid="uid://ctest_track_001"]
+[gd_scene load_steps=19 format=3 uid="uid://ctest_track_001"]
 
 [ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://race/test_track_scene.gd" id="1_scene"]
@@ -12,7 +12,7 @@
 [ext_resource type="Script" path="res://camera/chase_camera.gd" id="14_chase_cam"]
 [ext_resource type="PackedScene" uid="uid://hud123" path="res://ui/hud.tscn" id="10_hud"]
 [ext_resource type="Script" path="res://settings/graphics_settings.gd" id="16_graphics"]
-[ext_resource type="Script" path="res://textures/ground_setup.gd" id="17_ground"]
+
 [ext_resource type="Script" path="res://debug/performance_profiler.gd" id="19_profiler"]
 [ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="4_osm"]
 [ext_resource type="Script" path="res://car/lane_assist.gd" id="30_lane_assist"]
@@ -49,30 +49,11 @@ fog_light_color = Color(0.75, 0.8, 0.9, 1)
 fog_density = 0.0003
 fog_sky_affect = 0.15
 
-[sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
-size = Vector3(10000, 0.1, 10000)
-
-[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
-size = Vector2(10000, 10000)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
-albedo_color = Color(0.4, 0.5, 0.4, 1)
-
 [node name="TestTrackScene" type="Node3D"]
 script = ExtResource("1_scene")
 car_path = NodePath("Car")
 hud_path = NodePath("UI/HUD")
 terrain_path = NodePath("OSMTerrain")
-
-[node name="StaticGround" type="StaticBody3D" parent="." groups=["Grass"]]
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="StaticGround"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
-shape = SubResource("BoxShape3D_ground")
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="StaticGround"]
-mesh = SubResource("PlaneMesh_ground")
-surface_material_override/0 = SubResource("StandardMaterial3D_ground")
 
 [node name="Car" parent="." groups=["car", "player"] instance=ExtResource("2_car")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)
@@ -129,10 +110,6 @@ script = ExtResource("16_graphics")
 
 [node name="ColorGrading" type="CanvasLayer" parent="."]
 script = ExtResource("20_color_grading")
-
-[node name="GroundSetup" type="Node" parent="."]
-script = ExtResource("17_ground")
-ground_mesh_path = NodePath("../StaticGround/MeshInstance3D")
 
 [node name="PerformanceProfiler" type="Node" parent="."]
 script = ExtResource("19_profiler")

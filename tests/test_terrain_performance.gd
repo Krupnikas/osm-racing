@@ -55,27 +55,6 @@ func _ready() -> void:
 	_camera.current = true
 	add_child(_camera)
 
-	# Создаём землю (как в main.tscn)
-	var ground := StaticBody3D.new()
-	ground.name = "StaticGround"
-	add_child(ground)
-
-	var ground_collision := CollisionShape3D.new()
-	var ground_box := BoxShape3D.new()
-	ground_box.size = Vector3(10000, 1, 10000)
-	ground_collision.shape = ground_box
-	ground_collision.position = Vector3(0, -0.5, 0)
-	ground.add_child(ground_collision)
-
-	var ground_mesh := MeshInstance3D.new()
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(10000, 10000)
-	ground_mesh.mesh = plane
-	var ground_mat := StandardMaterial3D.new()
-	ground_mat.albedo_color = Color(0.4, 0.5, 0.4)
-	ground_mesh.set_surface_override_material(0, ground_mat)
-	ground.add_child(ground_mesh)
-
 	# Создаём генератор террейна
 	_terrain_generator = OSMTerrainGeneratorScript.new()
 	_terrain_generator.name = "OSMTerrain"

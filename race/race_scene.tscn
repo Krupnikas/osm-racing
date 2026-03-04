@@ -1,4 +1,4 @@
-[gd_scene load_steps=22 format=3 uid="uid://crace_scene_001"]
+[gd_scene load_steps=18 format=3 uid="uid://crace_scene_001"]
 
 [ext_resource type="PackedScene" path="res://addons/gevp/scenes/beetle_car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://race/race_scene.gd" id="1_scene"]
@@ -19,7 +19,7 @@
 [ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="12_night"]
 [ext_resource type="Script" path="res://ui/track_display.gd" id="12_track_display"]
 [ext_resource type="Script" path="res://settings/graphics_settings.gd" id="16_graphics"]
-[ext_resource type="Script" path="res://textures/ground_setup.gd" id="17_ground"]
+
 [ext_resource type="Script" path="res://debug/collision_visualizer.gd" id="18_collision_vis"]
 [ext_resource type="Script" path="res://debug/performance_profiler.gd" id="19_profiler"]
 [ext_resource type="Script" path="res://car/lane_assist.gd" id="30_lane_assist"]
@@ -79,29 +79,10 @@ volumetric_fog_detail_spread = 0.8
 volumetric_fog_sky_affect = 0.0
 volumetric_fog_ambient_inject = 0.0
 
-[sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
-size = Vector3(10000, 1, 10000)
-
-[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
-size = Vector2(10000, 10000)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
-albedo_color = Color(0.4, 0.5, 0.4, 1)
-
 [node name="RaceScene" type="Node3D"]
 script = ExtResource("1_scene")
 race_manager_path = NodePath("RaceManager")
 hud_path = NodePath("UI/HUD")
-
-[node name="StaticGround" type="StaticBody3D" parent="." groups=["Grass"]]
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="StaticGround"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
-shape = SubResource("BoxShape3D_ground")
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="StaticGround"]
-mesh = SubResource("PlaneMesh_ground")
-surface_material_override/0 = SubResource("StandardMaterial3D_ground")
 
 [node name="OSMTerrain" type="Node3D" parent="."]
 script = ExtResource("4_osm")
@@ -200,11 +181,6 @@ script = ExtResource("16_graphics")
 
 [node name="ColorGrading" type="CanvasLayer" parent="."]
 script = ExtResource("20_color_grading")
-
-[node name="GroundSetup" type="Node" parent="."]
-script = ExtResource("17_ground")
-ground_mesh_path = NodePath("../StaticGround/MeshInstance3D")
-night_mode_manager_path = NodePath("../NightModeManager")
 
 [node name="CollisionVisualizer" type="Node" parent="."]
 script = ExtResource("18_collision_vis")

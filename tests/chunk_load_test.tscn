@@ -1,4 +1,4 @@
-[gd_scene load_steps=18 format=3 uid="uid://chunk_load_test_001"]
+[gd_scene load_steps=14 format=3 uid="uid://chunk_load_test_001"]
 
 [ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="car"]
 [ext_resource type="Script" path="res://tests/chunk_load_test.gd" id="test_script"]
@@ -7,7 +7,7 @@
 [ext_resource type="Script" path="res://traffic/traffic_manager.gd" id="traffic"]
 [ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="night"]
 [ext_resource type="Script" path="res://settings/graphics_settings.gd" id="graphics"]
-[ext_resource type="Script" path="res://textures/ground_setup.gd" id="ground"]
+
 [ext_resource type="Script" path="res://tests/bottleneck_analyzer.gd" id="bottleneck"]
 
 [sub_resource type="ProceduralSkyMaterial" id="sky_mat"]
@@ -64,15 +64,6 @@ volumetric_fog_detail_spread = 0.8
 volumetric_fog_sky_affect = 0.0
 volumetric_fog_ambient_inject = 0.0
 
-[sub_resource type="BoxShape3D" id="ground_shape"]
-size = Vector3(10000, 1, 10000)
-
-[sub_resource type="PlaneMesh" id="ground_mesh"]
-size = Vector2(10000, 10000)
-
-[sub_resource type="StandardMaterial3D" id="ground_mat"]
-albedo_color = Color(0.4, 0.5, 0.4, 1)
-
 [node name="ChunkLoadTest" type="Node3D"]
 script = ExtResource("test_script")
 test_duration = 60.0
@@ -81,16 +72,6 @@ fly_speed = 27.78
 fly_height = 38.0
 test_location = Vector2(59.150406, 37.948805)
 auto_quit_after_test = true
-
-[node name="StaticGround" type="StaticBody3D" parent="." groups=["Grass"]]
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="StaticGround"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
-shape = SubResource("ground_shape")
-
-[node name="MeshInstance3D" type="MeshInstance3D" parent="StaticGround"]
-mesh = SubResource("ground_mesh")
-surface_material_override/0 = SubResource("ground_mat")
 
 [node name="OSMTerrain" type="Node3D" parent="." groups=["osm_terrain"]]
 script = ExtResource("osm")
@@ -131,9 +112,6 @@ environment = SubResource("env")
 
 [node name="GraphicsSettings" type="Node" parent="."]
 script = ExtResource("graphics")
-
-[node name="GroundSetup" type="Node" parent="."]
-script = ExtResource("ground")
 
 [node name="BottleneckAnalyzer" type="Node" parent="."]
 script = ExtResource("bottleneck")

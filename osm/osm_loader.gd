@@ -26,11 +26,37 @@ var max_retries := 3
 var pending_query: String = ""
 var current_cache_key: String = ""
 
+# Thread-based cache loading
+var _cache_task_id: int = -1
+var _cache_result: Dictionary = {}
+var _cache_result_ready: bool = false
+var _cache_mutex := Mutex.new()
+
 func _ready() -> void:
 	http_request = HTTPRequest.new()
 	add_child(http_request)
 	http_request.request_completed.connect(_on_request_completed)
 	_ensure_cache_dir()
+
+
+func _process(_delta: float) -> void:
+	# Poll for thread-loaded cache results
+	if _cache_task_id >= 0:
+		_cache_mutex.lock()
+		var ready := _cache_result_ready
+		_cache_mutex.unlock()
+		if ready:
+			var result := _cache_result
+			_cache_task_id = -1
+			_cache_result = {}
+			_cache_result_ready = false
+			if not result.is_empty():
+				result["center_lat"] = center_lat
+				result["center_lon"] = center_lon
+				data_loaded.emit(result)
+			else:
+				# Cache load failed — fall back to network
+				_start_network_request()
 
 
 func _ensure_cache_dir() -> void:
@@ -50,6 +76,33 @@ func _get_cache_path(cache_key: String) -> String:
 	return CACHE_DIR + cache_key
 
 
+## Load from cache on a worker thread (file I/O + JSON parse)
+func _load_from_cache_threaded(cache_key: String) -> void:
+	var cache_path := ProjectSettings.globalize_path(_get_cache_path(cache_key))
+	_cache_task_id = WorkerThreadPool.add_task(
+		_cache_load_task.bind(cache_path),
+		false,  # high_priority
+		"OSMCacheLoad"
+	)
+
+
+## Worker thread task: read file + parse JSON (no scene tree access!)
+func _cache_load_task(cache_path: String) -> void:
+	var result := {}
+	var file := FileAccess.open(cache_path, FileAccess.READ)
+	if file:
+		var json_string := file.get_as_text()
+		file.close()
+		var json := JSON.new()
+		if json.parse(json_string) == OK:
+			result = json.data
+	_cache_mutex.lock()
+	_cache_result = result
+	_cache_result_ready = true
+	_cache_mutex.unlock()
+
+
+## Synchronous cache load (used during initial loading for simplicity)
 func _load_from_cache(cache_key: String) -> Dictionary:
 	var cache_path := _get_cache_path(cache_key)
 	if not FileAccess.file_exists(cache_path):
@@ -89,25 +142,25 @@ func load_area(lat: float, lon: float, radius: float = 500.0) -> void:
 	# Проверяем кеш
 	current_cache_key = _get_cache_key(lat, lon, radius)
 	if use_cache:
-		var cached := _load_from_cache(current_cache_key)
-		if not cached.is_empty():
-			print("OSM: Loaded from cache: " + current_cache_key)
-			# Обновляем центр из кеша
-			cached["center_lat"] = center_lat
-			cached["center_lon"] = center_lon
-			# Эмитим с небольшой задержкой чтобы вызывающий код успел подписаться
-			call_deferred("_emit_cached_data", cached)
+		var cache_path := _get_cache_path(current_cache_key)
+		if FileAccess.file_exists(cache_path):
+			print("OSM: Loading from cache (threaded): " + current_cache_key)
+			_load_from_cache_threaded(current_cache_key)
 			return
 
+	_start_network_request()
+
+
+func _start_network_request() -> void:
 	# Конвертируем радиус в градусы (приблизительно)
-	var lat_delta := radius / 111000.0  # 111км на градус широты
-	var lon_delta := radius / (111000.0 * cos(deg_to_rad(lat)))
+	var lat_delta := radius_meters / 111000.0  # 111км на градус широты
+	var lon_delta := radius_meters / (111000.0 * cos(deg_to_rad(center_lat)))
 
 	var bbox := "%f,%f,%f,%f" % [
-		lat - lat_delta,
-		lon - lon_delta,
-		lat + lat_delta,
-		lon + lon_delta
+		center_lat - lat_delta,
+		center_lon - lon_delta,
+		center_lat + lat_delta,
+		center_lon + lon_delta
 	]
 
 	# Overpass запрос для получения дорог, зданий, водоёмов, зелени, amenity, деревьев, знаков, входов
