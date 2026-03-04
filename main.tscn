@@ -85,7 +85,16 @@ volumetric_fog_detail_spread = 0.8
 volumetric_fog_sky_affect = 0.0
 volumetric_fog_ambient_inject = 0.0
 
+[sub_resource type="WorldBoundaryShape3D" id="WorldBoundaryShape3D_fallback"]
+
 [node name="Main" type="Node3D"]
+
+[node name="FallbackGround" type="StaticBody3D" parent="." groups=["Grass"]]
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="FallbackGround"]
+shape = SubResource("WorldBoundaryShape3D_fallback")
 
 [node name="OSMTerrain" type="Node3D" parent="."]
 script = ExtResource("4_osm")

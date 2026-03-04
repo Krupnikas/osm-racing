@@ -64,12 +64,21 @@ volumetric_fog_detail_spread = 0.8
 volumetric_fog_sky_affect = 0.0
 volumetric_fog_ambient_inject = 0.0
 
+[sub_resource type="WorldBoundaryShape3D" id="WorldBoundaryShape3D_fallback"]
+
 [node name="ChunkLoadTest" type="Node3D"]
 script = ExtResource("test_script")
 test_duration = 60.0
 spike_threshold_ms = 25.0
 fly_speed = 27.78
 fly_height = 38.0
+
+[node name="FallbackGround" type="StaticBody3D" parent="." groups=["Grass"]]
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="FallbackGround"]
+shape = SubResource("WorldBoundaryShape3D_fallback")
 test_location = Vector2(59.150406, 37.948805)
 auto_quit_after_test = true
 

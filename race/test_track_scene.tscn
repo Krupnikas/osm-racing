@@ -49,11 +49,20 @@ fog_light_color = Color(0.75, 0.8, 0.9, 1)
 fog_density = 0.0003
 fog_sky_affect = 0.15
 
+[sub_resource type="WorldBoundaryShape3D" id="WorldBoundaryShape3D_fallback"]
+
 [node name="TestTrackScene" type="Node3D"]
 script = ExtResource("1_scene")
 car_path = NodePath("Car")
 hud_path = NodePath("UI/HUD")
 terrain_path = NodePath("OSMTerrain")
+
+[node name="FallbackGround" type="StaticBody3D" parent="." groups=["Grass"]]
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="FallbackGround"]
+shape = SubResource("WorldBoundaryShape3D_fallback")
 
 [node name="Car" parent="." groups=["car", "player"] instance=ExtResource("2_car")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)
