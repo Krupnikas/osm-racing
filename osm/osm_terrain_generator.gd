@@ -90,7 +90,7 @@ var _camera: Camera3D
 var _profiler: PerformanceProfiler  # Для измерения производительности
 var _loaded_chunks: Dictionary = {}  # key: "x,z" -> value: Node3D (chunk node)
 var _loading_chunks: Dictionary = {}  # key: "x,z" -> value: timestamp (start time in msec)
-const CHUNK_LOAD_TIMEOUT := 30.0  # Таймаут загрузки чанка (секунд)
+const CHUNK_LOAD_TIMEOUT := 10.0  # Таймаут загрузки чанка (секунд)
 var _last_check_pos := Vector3.ZERO
 var _check_interval := 0.5  # Проверка каждые 0.5 сек
 var _check_timer := 0.0
@@ -112,6 +112,9 @@ var _building_segments: Array = []  # Сегменты стен зданий {p1
 var _building_spatial_hash: Dictionary = {}  # Spatial hash для быстрого поиска зданий (сегменты)
 var _building_poly_hash: Dictionary = {}  # Spatial hash полигонов зданий для is_point_in_polygon
 const BUILDING_CELL_SIZE := 20.0  # Размер ячейки spatial hash для зданий
+# Per-chunk tracking of spatial hash cells for cleanup on unload
+# chunk_key -> {"road": [Vector2i], "building": [Vector2i], "building_poly": [Vector2i], "parking": [Vector2i], "intersection": [Vector2i]}
+var _chunk_hash_cells: Dictionary = {}
 var _intersection_positions: Array[Vector2] = []  # Позиции перекрёстков (центры)
 var _intersection_radii: Array[Vector2] = []  # Полуоси эллипсов (x=вдоль широкой дороги, y=вдоль узкой)
 var _intersection_angles: Array[float] = []  # Углы поворота эллипсов (радианы, направление широкой дороги)
@@ -1367,6 +1370,9 @@ func _process(delta: float) -> void:
 		_deferred_add_child_queue.pop_front()
 	_record_perf("add_child_drain", Time.get_ticks_usec() - _ac_t0)
 
+	# Clean up stuck chunk loads in real-time
+	_clean_timed_out_chunks()
+
 	# Общий бюджет на все очереди — 5ms (90fps = 11ms, рендер ~4ms, физика ~2ms)
 	# При начальной загрузке — без ограничений (500ms)
 	var FRAME_BUDGET_USEC := 500000 if _initial_loading else 5000
@@ -1475,10 +1481,13 @@ func _process(delta: float) -> void:
 	var _real_frame_ms := delta * 1000.0
 	if _real_frame_ms > 16.0 and _slow_frame_cooldown <= 0.0:
 		_slow_frame_cooldown = 1.0
-		if not _viewport_rid.is_valid():
+		if not _viewport_rid.is_valid() and get_viewport():
 			_viewport_rid = get_viewport().get_viewport_rid()
-		var sf_render_cpu := RenderingServer.viewport_get_measured_render_time_cpu(_viewport_rid)
-		var sf_render_gpu := RenderingServer.viewport_get_measured_render_time_gpu(_viewport_rid)
+		var sf_render_cpu := 0.0
+		var sf_render_gpu := 0.0
+		if _viewport_rid.is_valid():
+			sf_render_cpu = RenderingServer.viewport_get_measured_render_time_cpu(_viewport_rid)
+			sf_render_gpu = RenderingServer.viewport_get_measured_render_time_gpu(_viewport_rid)
 		var sf_draw_calls := int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
 		var sf_vertices := Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)
 		var sf_objects := int(Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME))
@@ -1599,6 +1608,7 @@ func start_loading() -> void:
 	_parking_polygons.clear()  # Очищаем парковки при новой загрузке
 	_parking_bounds.clear()
 	_parking_spatial_hash.clear()
+	_chunk_hash_cells.clear()
 	_created_lamp_positions.clear()  # Очищаем позиции фонарей
 	_created_bus_stop_positions.clear()  # Очищаем позиции остановок
 	_pending_parking_signs.clear()  # Очищаем отложенные знаки парковки
@@ -2189,6 +2199,22 @@ func _load_chunk_at_position(pos: Vector3) -> void:
 	var chunk_z := int(floor(pos.z / chunk_size))
 	_load_chunk(chunk_x, chunk_z)
 
+func _clean_timed_out_chunks() -> void:
+	if _loading_chunks.is_empty():
+		return
+	var current_time := Time.get_ticks_msec()
+	var timed_out: Array[String] = []
+	for chunk_key in _loading_chunks.keys():
+		var load_start_time: int = _loading_chunks[chunk_key]
+		var elapsed_sec := float(current_time - load_start_time) / 1000.0
+		if elapsed_sec > CHUNK_LOAD_TIMEOUT:
+			timed_out.append(chunk_key)
+	for chunk_key in timed_out:
+		_loading_chunks.erase(chunk_key)
+		_current_load_count = max(0, _current_load_count - 1)
+		print("OSM: Chunk %s timed out after %.0fs, freed slot" % [chunk_key, CHUNK_LOAD_TIMEOUT])
+
+
 func _unload_chunk(chunk_key: String) -> void:
 	if _loaded_chunks.has(chunk_key):
 		_chunk_culling_cooldown.erase(chunk_key)
@@ -2334,6 +2360,9 @@ func _unload_chunk(chunk_key: String) -> void:
 		# Очищаем позиции фонарей и знаков в выгруженном чанке
 		_clear_chunk_objects_positions(chunk_key)
 
+		# Clean up spatial hash cells contributed by this chunk
+		_cleanup_chunk_hash_cells(chunk_key)
+
 		print("OSM: Unloaded chunk %s" % chunk_key)
 
 
@@ -2453,6 +2482,7 @@ func reset_terrain() -> void:
 	_parking_polygons.clear()
 	_parking_bounds.clear()
 	_parking_spatial_hash.clear()
+	_chunk_hash_cells.clear()
 	_deferred_lamp_queue.clear()
 	_deferred_manhole_queue.clear()
 	_deferred_traffic_queue.clear()
@@ -2960,6 +2990,7 @@ func _apply_terrain_gen_result() -> void:
 		if not _parking_spatial_hash.has(cell):
 			_parking_spatial_hash[cell] = []
 		_parking_spatial_hash[cell].append({"idx": base_parking_idx + entry.idx, "p1": entry.p1, "p2": entry.p2})
+		_track_hash_cell(chunk_key, "parking", cell)
 	for rhe in result.road_hash_entries:
 		var seg: Dictionary = rhe.seg
 		_road_segments.append(seg)
@@ -2967,6 +2998,7 @@ func _apply_terrain_gen_result() -> void:
 			if not _road_spatial_hash.has(cell):
 				_road_spatial_hash[cell] = []
 			_road_spatial_hash[cell].append(seg)
+			_track_hash_cell(chunk_key, "road", cell)
 	for bhe in result.building_hash_entries:
 		var seg: Dictionary = bhe.seg
 		_building_segments.append(seg)
@@ -2974,11 +3006,13 @@ func _apply_terrain_gen_result() -> void:
 			if not _building_spatial_hash.has(cell):
 				_building_spatial_hash[cell] = []
 			_building_spatial_hash[cell].append(seg)
+			_track_hash_cell(chunk_key, "building", cell)
 	for bpe in result.building_poly_entries:
 		for cell in bpe.cells:
 			if not _building_poly_hash.has(cell):
 				_building_poly_hash[cell] = []
 			_building_poly_hash[cell].append(bpe.poly)
+			_track_hash_cell(chunk_key, "building_poly", cell)
 
 	# Apply Phase 2: intersections (with global dedup)
 	for li in range(result.new_positions.size()):
@@ -2998,7 +3032,7 @@ func _apply_terrain_gen_result() -> void:
 		_intersection_contours.append(result.new_contours[li])
 		_intersection_curb_contours.append(result.new_curb_contours[li])
 		var he: Dictionary = result.new_hash_entries[li]
-		_add_intersection_to_spatial_hash(pos, he.radii, _intersection_positions.size() - 1)
+		_add_intersection_to_spatial_hash(pos, he.radii, _intersection_positions.size() - 1, chunk_key)
 
 	# Queue Phase 3 for incremental processing across frames
 	_phase3_queue.append({
@@ -3271,6 +3305,7 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 						if not _parking_spatial_hash.has(cell_key):
 							_parking_spatial_hash[cell_key] = []
 						_parking_spatial_hash[cell_key].append({"idx": pidx, "p1": ep1, "p2": ep2})
+						_track_hash_cell(chunk_key, "parking", cell_key)
 		if tags.has("highway") and nodes.size() >= 2:
 			var road_w: float = ROAD_WIDTHS.get(tags.get("highway", "residential"), 5.0)
 			var raw_pts := PackedVector2Array()
@@ -3279,14 +3314,14 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 				raw_pts[j] = _latlon_to_local(nodes[j].lat, nodes[j].lon)
 			var smoothed_pts := _smooth_road_corners(raw_pts)
 			for j in range(smoothed_pts.size() - 1):
-				_add_road_segment_to_spatial_hash({"p1": smoothed_pts[j], "p2": smoothed_pts[j + 1], "width": road_w})
+				_add_road_segment_to_spatial_hash({"p1": smoothed_pts[j], "p2": smoothed_pts[j + 1], "width": road_w}, chunk_key)
 		if (tags.has("building") or (tags.has("amenity") and not tags.has("highway"))) and nodes.size() >= 3:
 			var bpoints := PackedVector2Array()
 			for node in nodes:
 				bpoints.append(_latlon_to_local(node.lat, node.lon))
 			for j in range(bpoints.size()):
-				_add_building_segment_to_spatial_hash({"p1": bpoints[j], "p2": bpoints[(j + 1) % bpoints.size()]})
-			_add_building_poly_to_hash(bpoints)
+				_add_building_segment_to_spatial_hash({"p1": bpoints[j], "p2": bpoints[(j + 1) % bpoints.size()]}, chunk_key)
+			_add_building_poly_to_hash(bpoints, chunk_key)
 	# Phase 3: Create objects
 	for way in ways:
 		var tags: Dictionary = way.get("tags", {})
@@ -7860,10 +7895,13 @@ func _update_debug_stats(delta: float) -> void:
 	var fps_1pct: float = sorted_fps[p1_idx] if p1_idx < sorted_fps.size() else 0.0
 
 	# CPU/GPU render time
-	if not _viewport_rid.is_valid():
+	if not _viewport_rid.is_valid() and get_viewport():
 		_viewport_rid = get_viewport().get_viewport_rid()
-	var render_cpu := RenderingServer.viewport_get_measured_render_time_cpu(_viewport_rid)
-	var render_gpu := RenderingServer.viewport_get_measured_render_time_gpu(_viewport_rid)
+	var render_cpu := 0.0
+	var render_gpu := 0.0
+	if _viewport_rid.is_valid():
+		render_cpu = RenderingServer.viewport_get_measured_render_time_cpu(_viewport_rid)
+		render_gpu = RenderingServer.viewport_get_measured_render_time_gpu(_viewport_rid)
 
 	# Godot process + physics
 	var process_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
@@ -13972,9 +14010,40 @@ func _find_nearest_intersection(pos: Vector2, max_dist: float) -> int:
 	return best_idx
 
 
-## Проверяет, находится ли точка внутри эллипса перекрёстка (с масштабом)
+## Tracks which spatial hash cells a chunk contributed to (for cleanup on unload)
+func _track_hash_cell(chunk_key: String, hash_type: String, cell: Vector2i) -> void:
+	if not _chunk_hash_cells.has(chunk_key):
+		_chunk_hash_cells[chunk_key] = {}
+	if not _chunk_hash_cells[chunk_key].has(hash_type):
+		_chunk_hash_cells[chunk_key][hash_type] = []
+	_chunk_hash_cells[chunk_key][hash_type].append(cell)
+
+
+## Removes all spatial hash entries contributed by a chunk
+func _cleanup_chunk_hash_cells(chunk_key: String) -> void:
+	if not _chunk_hash_cells.has(chunk_key):
+		return
+	var cells: Dictionary = _chunk_hash_cells[chunk_key]
+	if cells.has("road"):
+		for cell in cells["road"]:
+			_road_spatial_hash.erase(cell)
+	if cells.has("building"):
+		for cell in cells["building"]:
+			_building_spatial_hash.erase(cell)
+	if cells.has("building_poly"):
+		for cell in cells["building_poly"]:
+			_building_poly_hash.erase(cell)
+	if cells.has("parking"):
+		for cell in cells["parking"]:
+			_parking_spatial_hash.erase(cell)
+	if cells.has("intersection"):
+		for cell in cells["intersection"]:
+			_intersection_spatial_hash.erase(cell)
+	_chunk_hash_cells.erase(chunk_key)
+
+
 ## Добавляет перекрёсток в spatial hash
-func _add_intersection_to_spatial_hash(pos: Vector2, radii: Vector2, idx: int) -> void:
+func _add_intersection_to_spatial_hash(pos: Vector2, radii: Vector2, idx: int, chunk_key: String = "") -> void:
 	# Определяем bounding box перекрёстка с учётом максимального радиуса
 	var max_radius := maxf(radii.x, radii.y) * 1.5  # С запасом для scale
 	var min_cell_x := int(floor((pos.x - max_radius) / INTERSECTION_CELL_SIZE))
@@ -13989,6 +14058,8 @@ func _add_intersection_to_spatial_hash(pos: Vector2, radii: Vector2, idx: int) -
 			if not _intersection_spatial_hash.has(key):
 				_intersection_spatial_hash[key] = []
 			_intersection_spatial_hash[key].append(idx)
+			if chunk_key != "":
+				_track_hash_cell(chunk_key, "intersection", key)
 
 
 ## Получает индексы перекрёстков рядом с точкой через spatial hash
@@ -14002,7 +14073,7 @@ func _get_nearby_intersections(pos: Vector2) -> Array:
 
 
 ## Добавляет сегмент дороги в spatial hash для быстрого поиска
-func _add_road_segment_to_spatial_hash(seg: Dictionary) -> void:
+func _add_road_segment_to_spatial_hash(seg: Dictionary, chunk_key: String = "") -> void:
 	var p1: Vector2 = seg.p1
 	var p2: Vector2 = seg.p2
 	var width: float = seg.width
@@ -14025,6 +14096,8 @@ func _add_road_segment_to_spatial_hash(seg: Dictionary) -> void:
 			if not _road_spatial_hash.has(key):
 				_road_spatial_hash[key] = []
 			_road_spatial_hash[key].append(seg)
+			if chunk_key != "":
+				_track_hash_cell(chunk_key, "road", key)
 
 
 ## Получает сегменты дорог рядом с точкой через spatial hash
@@ -14112,7 +14185,7 @@ func _is_point_on_road(pos: Vector2, margin: float = 0.5) -> bool:
 
 
 ## Добавляет сегмент стены здания в spatial hash
-func _add_building_segment_to_spatial_hash(seg: Dictionary) -> void:
+func _add_building_segment_to_spatial_hash(seg: Dictionary, chunk_key: String = "") -> void:
 	var p1: Vector2 = seg.p1
 	var p2: Vector2 = seg.p2
 
@@ -14132,10 +14205,12 @@ func _add_building_segment_to_spatial_hash(seg: Dictionary) -> void:
 			if not _building_spatial_hash.has(key):
 				_building_spatial_hash[key] = []
 			_building_spatial_hash[key].append(seg)
+			if chunk_key != "":
+				_track_hash_cell(chunk_key, "building", key)
 
 
 ## Добавляет полигон здания в spatial hash для проверки is_point_in_polygon
-func _add_building_poly_to_hash(poly: PackedVector2Array) -> void:
+func _add_building_poly_to_hash(poly: PackedVector2Array, chunk_key: String = "") -> void:
 	var min_x := poly[0].x
 	var max_x := poly[0].x
 	var min_y := poly[0].y
@@ -14155,6 +14230,8 @@ func _add_building_poly_to_hash(poly: PackedVector2Array) -> void:
 			if not _building_poly_hash.has(key):
 				_building_poly_hash[key] = []
 			_building_poly_hash[key].append(poly)
+			if chunk_key != "":
+				_track_hash_cell(chunk_key, "building_poly", key)
 
 
 ## Проверяет, находится ли точка слишком близко к любому зданию

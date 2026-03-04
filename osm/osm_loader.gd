@@ -34,6 +34,7 @@ var _cache_mutex := Mutex.new()
 
 func _ready() -> void:
 	http_request = HTTPRequest.new()
+	http_request.timeout = 8.0  # 8s HTTP timeout for faster failover
 	add_child(http_request)
 	http_request.request_completed.connect(_on_request_completed)
 	_ensure_cache_dir()
