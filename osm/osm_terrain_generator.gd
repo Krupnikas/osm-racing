@@ -6801,8 +6801,13 @@ func _finalize_fence_batches_for_chunk(chunk_key: String) -> void:
 		arrays[Mesh.ARRAY_INDEX] = lod1.indices
 		var mesh := ArrayMesh.new()
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		# LOD1: no vis_max (always visible while chunk loaded). Godot computes
+		# visibility_range distance from camera to AABB center — per-chunk fence
+		# batches produce large AABBs whose center can be 100m+ from any actual
+		# fence, causing vis_max=150 to cull the mesh even when standing next to it.
+		# Chunk unload at 700m provides natural distance culling instead.
 		_rs_add_mesh(chunk_key, mesh, _fence_material,
-			RenderingServer.SHADOW_CASTING_SETTING_OFF, 150.0, 50.0)
+			RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 50.0)
 
 	# Collision: build StaticBody3D with shapes off-tree, then add once
 	var edges: Array = batch.edges
