@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="../ui/assets/zhazhda-speed.png" alt="Жажда Скорости: Под Землёй" width="100%">
+</p>
+
 # OSM Racing
 
 3D гоночная игра на движке Godot 4 с загрузкой карт из OpenStreetMap.
