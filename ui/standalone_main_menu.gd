@@ -42,20 +42,33 @@ func _ready() -> void:
 	# Добавляем кнопку "Тестовые трассы" в главное меню
 	_add_test_tracks_button()
 
-	# Автостарт через командную строку: --autostart [location_index]
-	var args := OS.get_cmdline_args()
+	# Автостарт через командную строку: --autostart [location_index] [--lat X --lon Y]
+	var args := OS.get_cmdline_user_args()
+	var cmd_lat := 0.0
+	var cmd_lon := 0.0
 	for i in range(args.size()):
 		if args[i] == "--perftest":
 			print("StandaloneMenu: Starting performance test")
 			get_tree().change_scene_to_file("res://tests/performance_test.tscn")
 			return
-		if args[i] == "--autostart" and i + 1 < args.size():
-			var idx := int(args[i + 1])
-			var locations := LOCATIONS.keys()
-			if idx >= 0 and idx < locations.size():
-				print("StandaloneMenu: Autostart location %d: %s" % [idx, locations[idx]])
-				_start_free_roam(locations[idx])
+		if args[i] == "--lat" and i + 1 < args.size():
+			cmd_lat = float(args[i + 1])
+		if args[i] == "--lon" and i + 1 < args.size():
+			cmd_lon = float(args[i + 1])
+	var has_custom_coords := cmd_lat != 0.0 and cmd_lon != 0.0
+	for i in range(args.size()):
+		if args[i] == "--autostart":
+			if has_custom_coords:
+				print("StandaloneMenu: Autostart at --lat %.6f --lon %.6f" % [cmd_lat, cmd_lon])
+				_start_free_roam_at_coords(cmd_lat, cmd_lon)
 				return
+			elif i + 1 < args.size():
+				var idx := int(args[i + 1])
+				var locations := LOCATIONS.keys()
+				if idx >= 0 and idx < locations.size():
+					print("StandaloneMenu: Autostart location %d: %s" % [idx, locations[idx]])
+					_start_free_roam(locations[idx])
+					return
 
 
 func _populate_tracks(mode: String = "") -> void:
@@ -187,6 +200,18 @@ func _on_tbilisi_pressed() -> void:
 
 func _on_dubai_pressed() -> void:
 	_start_free_roam("Дубай (Крик)")
+
+
+func _start_free_roam_at_coords(lat: float, lon: float) -> void:
+	"""Запустить свободную езду по произвольным координатам (--lat --lon)"""
+	print("MainMenu: Starting free roam at %.6f, %.6f" % [lat, lon])
+	RaceState.free_roam_location = LOCATIONS.keys()[0]
+	RaceState.free_roam_lat = lat
+	RaceState.free_roam_lon = lon
+	RaceState.selected_track = null
+	if MusicManager:
+		MusicManager.play_next_track()
+	get_tree().change_scene_to_file.call_deferred("res://main.tscn")
 
 
 func _start_free_roam(location_name: String) -> void:

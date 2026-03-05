@@ -30,6 +30,7 @@ var _is_loading := false
 var _game_started := false  # Игра уже была запущена
 var _is_apply_settings_reload := false  # Флаг перезагрузки через Apply Settings
 var _selected_location := "Череповец"
+var _custom_coords := false  # --lat/--lon заданы через CLI
 var _pending_race_track = null  # Трек для автозапуска после перезагрузки сцены
 var _standalone_mode := false  # Загружены из standalone меню (ESC обрабатывает PauseMenu)
 
@@ -81,17 +82,25 @@ func _ready() -> void:
 	# Автостарт через командную строку: --autostart [location_index]
 	# В Godot пользовательские аргументы идут после '--'
 	# Пример: godot -- --autostart 0
-	var args := OS.get_cmdline_args()
+	var args := OS.get_cmdline_user_args()  # Аргументы после '--'
 	print("MainMenu: Args: ", args)
 
-	# Проверяем есть ли --autostart в пользовательских аргументах
+	# Парсим CLI аргументы: --autostart [N], --lat X --lon Y, --terrain-only
 	var autostart_idx := -1
 	var terrain_only := false
+	var cmd_lat := 0.0
+	var cmd_lon := 0.0
+	var has_cmd_coords := false
 	for i in range(args.size()):
 		if args[i] == "--autostart":
 			autostart_idx = i
 		elif args[i] == "--terrain-only":
 			terrain_only = true
+		elif args[i] == "--lat" and i + 1 < args.size():
+			cmd_lat = float(args[i + 1])
+		elif args[i] == "--lon" and i + 1 < args.size():
+			cmd_lon = float(args[i + 1])
+	has_cmd_coords = cmd_lat != 0.0 and cmd_lon != 0.0
 
 	# --terrain-only: отключаем здания, деревья, фонари (для тестирования elevation)
 	if terrain_only and _terrain_generator:
@@ -100,8 +109,19 @@ func _ready() -> void:
 		_terrain_generator.enable_street_lamps = false
 		print("MainMenu: --terrain-only mode: buildings/vegetation/lamps disabled")
 
+	# CLI координаты имеют наивысший приоритет
+	if has_cmd_coords:
+		print("MainMenu: CLI coordinates --lat %.6f --lon %.6f" % [cmd_lat, cmd_lon])
+		_custom_coords = true
+		if _terrain_generator:
+			_terrain_generator.start_lat = cmd_lat
+			_terrain_generator.start_lon = cmd_lon
+		_selected_location = LOCATIONS.keys()[0]  # Fallback name
+		RaceState.free_roam_location = ""  # Очищаем чтобы не перехватил
+		await get_tree().process_frame
+		_start_loading()
 	# Проверяем загрузку свободной езды из standalone меню
-	if RaceState.free_roam_location != "":
+	elif RaceState.free_roam_location != "":
 		print("MainMenu: Free roam from standalone menu: ", RaceState.free_roam_location)
 		_standalone_mode = true  # ESC будет обрабатывать PauseMenu
 		_selected_location = RaceState.free_roam_location
@@ -211,13 +231,13 @@ func _start_loading() -> void:
 
 	# Устанавливаем координаты для генератора
 	if _terrain_generator:
-		print("MainMenu: Setting coordinates and starting terrain loading...")
-		var coords: Array = LOCATIONS[_selected_location]
-		_terrain_generator.start_lat = coords[0]
-		_terrain_generator.start_lon = coords[1]
-		print("MainMenu: Calling terrain_generator.start_loading()...")
+		if not _custom_coords:
+			var coords: Array = LOCATIONS[_selected_location]
+			_terrain_generator.start_lat = coords[0]
+			_terrain_generator.start_lon = coords[1]
+		print("MainMenu: Loading at %.6f, %.6f" % [_terrain_generator.start_lat, _terrain_generator.start_lon])
+		_custom_coords = false  # Сбрасываем для следующих загрузок
 		_terrain_generator.start_loading()
-		print("MainMenu: terrain_generator.start_loading() returned")
 	else:
 		print("MainMenu: No terrain generator, starting game immediately")
 		# Если нет генератора - сразу показываем игру

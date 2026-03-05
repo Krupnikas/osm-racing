@@ -5,22 +5,41 @@ extends Label
 @export var start_lon := 37.949370
 
 var _car: Node3D
+var _terrain_gen: Node3D
+var _chunk_size := 300.0
 
 func _ready() -> void:
 	if car_path:
 		_car = get_node(car_path)
+	# Находим terrain generator для синхронизации координат
+	_terrain_gen = get_tree().current_scene.find_child("OSMTerrain", true, false)
+	if _terrain_gen:
+		start_lat = _terrain_gen.start_lat
+		start_lon = _terrain_gen.start_lon
+		_chunk_size = _terrain_gen.chunk_size
 
 func _process(_delta: float) -> void:
 	if not _car:
 		return
 
+	# Синхронизируем координаты с terrain generator (могут обновиться после загрузки)
+	if _terrain_gen:
+		start_lat = _terrain_gen.start_lat
+		start_lon = _terrain_gen.start_lon
+
 	var pos := _car.global_position
 	var coords := local_to_latlon(pos.x, pos.z)
 
-	text = "Lat: %.6f\nLon: %.6f\nAlt: %.1fm" % [coords.x, coords.y, pos.y]
+	# Вычисляем индекс чанка
+	var chunk_x := int(floor(pos.x / _chunk_size))
+	var chunk_z := int(floor(pos.z / _chunk_size))
+
+	text = "Lat: %.6f  Lon: %.6f\nChunk: %d,%d  Alt: %.1fm" % [coords.x, coords.y, chunk_x, chunk_z, pos.y]
 
 func local_to_latlon(x: float, z: float) -> Vector2:
 	# Обратная конвертация из локальных метров в lat/lon
-	var lat := start_lat + z / 111000.0
+	# В _generate_terrain: dz = (lat - start_lat) * 111000.0, возвращается -dz
+	# Значит z = -(lat - start_lat) * 111000, lat = start_lat - z / 111000
+	var lat := start_lat - z / 111000.0
 	var lon := start_lon + x / (111000.0 * cos(deg_to_rad(start_lat)))
 	return Vector2(lat, lon)

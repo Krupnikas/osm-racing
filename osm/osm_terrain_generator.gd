@@ -132,8 +132,8 @@ var _pending_parking_signs: Array = []  # Отложенные знаки пар
 var _crossing_sign_front_mat: StandardMaterial3D
 var _crossing_sign_back_mat: StandardMaterial3D
 var _parking_sign_front_mat: StandardMaterial3D
-var _deferred_lamp_queue: Array = []  # Deferred lamp generation from road apply
-var _deferred_manhole_queue: Array = []  # Deferred manhole generation from road apply
+var _deferred_lamp_queue: Dictionary = {}  # chunk_key → Array[{points, width, parent}]
+var _deferred_manhole_queue: Dictionary = {}  # chunk_key → Array[{points, width, parent}]
 var _deferred_traffic_queue: Array = []  # Deferred traffic network extraction
 var _finalization_state := 0  # 0=not started, 1=lamps, 2=signs, 3=done
 
@@ -169,6 +169,9 @@ var _pending_road_tasks: int = 0  # Счётчик активных задач
 var _road_batch_data: Dictionary = {}  # key: chunk_key -> { "highway": {vertices, uvs, normals, indices}, "primary": {...}, ...}
 var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batches (нужно финализировать)
 var _chunk_terrain_roads: Dictionary = {}  # chunk_key → Array[{points: PackedVector2Array, width: float}] — для отложенного выреза террейна
+var _deferred_terrain_chunks: Array[String] = []  # Чанки ожидающие terrain clipping (ждут соседей)
+var _chunk_roads_ready: Dictionary = {}  # chunk_key → true — дорожные коридоры готовы для terrain clipping
+var _chunk_pending_deferred: Dictionary = {}  # chunk_key → int — счётчик pending deferred items (lamps, footway, manholes, billboard, traffic)
 
 # Window batching system - ONE MultiMesh per chunk instead of per-building
 var _window_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], colors: Array[Color], parent: Node3D}
@@ -325,13 +328,13 @@ var _phase3_queue: Array = []  # [{result, parent, chunk_key, way_idx, phase}]
 var _frame_start_usec: int = 0  # Set at top of _process() for budget checks in sub-functions
 
 # Очереди отложенного создания нод (бюджет: N нод за кадр)
-var _deferred_building_collisions: Array = []  # [{parent, collisions, idx}]
-var _deferred_lamp_lights: Array = []  # [{container, lights, idx, chunk_key, is_night}]
-var _deferred_tree_collisions: Array = []  # [{parent, collisions, idx}]
-var _deferred_road_collisions: Array = []  # [{body, vertices, indices}]
-var _deferred_terrain_collisions: Array = []  # [{parent, vertices, indices}]
-var _deferred_footway_queue: Array = []  # [{smoothed_points, width, tags, parent}]
-var _deferred_billboard_queue: Array = []  # [{billboard, elevation, parent}]
+var _deferred_building_collisions: Dictionary = {}  # chunk_key → Array[{parent, collisions, idx}]
+var _deferred_lamp_lights: Dictionary = {}  # chunk_key → Array[{container, lights, idx, chunk_key, is_night}]
+var _deferred_tree_collisions: Dictionary = {}  # chunk_key → Array[{parent, collisions, idx}]
+var _deferred_road_collisions: Dictionary = {}  # chunk_key → Array[{body, vertices, indices}]
+var _deferred_terrain_collisions: Dictionary = {}  # chunk_key → Array[{parent, vertices, indices}]
+var _deferred_footway_queue: Dictionary = {}  # chunk_key → Array[{smoothed_points, width, tags, parent}]
+var _deferred_billboard_queue: Dictionary = {}  # chunk_key → Array[{billboard, elevation, parent}]
 var _finalize_phase: int = 0  # Round-robin: 0=roads, 1=curbs, 2=lamps, 3=buildings, 4=windows, 5=trees, 6=billboards
 var _chunk_activation_pending: Dictionary = {}  # chunk_key -> state (-1=waiting, >=0=RS activation index)
 var _chunk_culling_cooldown: Dictionary = {}  # chunk_key -> timestamp (ms) — don't cull recently activated chunks
@@ -341,7 +344,7 @@ const ADD_CHILD_BUDGET_NORMAL := 2
 var _add_child_budget: int = 2  # Текущий бюджет (увеличен при начальной загрузке)
 var _add_child_count: int = 0
 var _deferred_add_child_queue: Array = []  # [{parent: Node, child: Node}]
-var _deferred_fence_edges: Array = []  # [{chunk_key, p1, p2, edge_idx}] — incremental fence generation
+var _deferred_fence_edges: Dictionary = {}  # chunk_key → Array[{chunk_key, p1, p2, edge_idx}]
 
 # RenderingServer direct instances — bypass scene tree for zero-spike mesh display
 var _chunk_rs_instances: Dictionary = {}  # chunk_key -> Array[RID]
@@ -1386,6 +1389,27 @@ func _process(delta: float) -> void:
 		t_road = Time.get_ticks_usec() - t0
 		_record_perf("road_queue", t_road)
 
+	# Apply threaded terrain generation results FIRST (Phase 1+2: road/building spatial hash)
+	# Must run before vegetation/infrastructure so trees & lamps can check road hash
+	if not _terrain_gen_results.is_empty():
+		t0 = Time.get_ticks_usec()
+		_apply_terrain_gen_result()
+		_record_perf("terrain_gen_apply", Time.get_ticks_usec() - t0)
+
+	# Process Phase 3 queue (ways, intersections, points, finalize)
+	# Must run before vegetation so procedural trees see all roads from this chunk
+	if not _phase3_queue.is_empty() and (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
+		t0 = Time.get_ticks_usec()
+		_process_phase3_queue()
+		_record_perf("phase3_queue", Time.get_ticks_usec() - t0)
+
+	# Retry deferred terrain chunks (waiting for neighbors to finish Phase 3)
+	if not _deferred_terrain_chunks.is_empty():
+		var retry: Array[String] = _deferred_terrain_chunks.duplicate()
+		_deferred_terrain_chunks.clear()
+		for ck in retry:
+			_create_deferred_terrain(ck)  # Will re-defer if neighbors still loading
+
 	# Обрабатываем очередь terrain объектов
 	var t_terrain := 0
 	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
@@ -1430,18 +1454,6 @@ func _process(delta: float) -> void:
 	# Лампы — отдельно, с бюджетом
 	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
 		_process_deferred_lamp_lights()
-
-	# Apply threaded terrain generation results (Phase 1+2 done on worker thread)
-	if not _terrain_gen_results.is_empty():
-		t0 = Time.get_ticks_usec()
-		_apply_terrain_gen_result()
-		_record_perf("terrain_gen_apply", Time.get_ticks_usec() - t0)
-
-	# Process Phase 3 queue incrementally (ways, intersections, points, finalize)
-	if not _phase3_queue.is_empty() and (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
-		t0 = Time.get_ticks_usec()
-		_process_phase3_queue()
-		_record_perf("phase3_queue", Time.get_ticks_usec() - t0)
 
 	# Применяем готовые результаты клиппинга террейна из worker threads
 	var t_terrain_gen := 0
@@ -1611,6 +1623,13 @@ func start_loading() -> void:
 	_deferred_manhole_queue.clear()
 	_deferred_traffic_queue.clear()
 	_deferred_billboard_queue.clear()
+	_deferred_footway_queue.clear()
+	_deferred_building_collisions.clear()
+	_deferred_tree_collisions.clear()
+	_deferred_lamp_lights.clear()
+	_deferred_road_collisions.clear()
+	_deferred_terrain_collisions.clear()
+	_deferred_fence_edges.clear()
 	_chunk_activation_pending.clear()
 	_chunk_culling_cooldown.clear()
 	_intersection_positions.clear()  # Очищаем перекрёстки
@@ -1629,6 +1648,8 @@ func start_loading() -> void:
 	_curb_collision_mutex.unlock()
 	_road_batch_data.clear()  # Очищаем road batch data
 	_chunk_terrain_roads.clear()
+	_deferred_terrain_chunks.clear()
+	_chunk_roads_ready.clear()
 	# Clear threaded terrain gen results
 	_terrain_thread_mutex.lock()
 	_terrain_gen_results.clear()
@@ -1701,12 +1722,12 @@ func _check_initial_load_complete() -> void:
 	var pending_road_snapshot: int = _pending_road_tasks
 	var road_results_pending: int = _road_results.size()
 	_road_mutex.unlock()
-	var total_queued: int = _building_results.size() + _road_queue.size() + road_results_pending + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + pending_road_snapshot + _pending_veg_tasks + _pending_terrain_tasks + _deferred_lamp_queue.size() + _deferred_manhole_queue.size() + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_footway_queue.size() + _deferred_billboard_queue.size() + _chunk_activation_pending.size() + _deferred_lamp_lights.size() + _phase3_queue.size()
+	var total_queued: int = _building_results.size() + _road_queue.size() + road_results_pending + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + pending_road_snapshot + _pending_veg_tasks + _pending_terrain_tasks + _deferred_total_size(_deferred_lamp_queue) + _deferred_total_size(_deferred_manhole_queue) + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_total_size(_deferred_footway_queue) + _deferred_total_size(_deferred_billboard_queue) + _chunk_activation_pending.size() + _deferred_total_size(_deferred_lamp_lights) + _phase3_queue.size()
 
 	# DEBUG: Детальное логирование очередей
 	if loaded_count >= total_chunks and total_queued > 0:
 		print("OSM DEBUG: Chunks loaded %d/%d, queues=%d:" % [loaded_count, total_chunks, total_queued])
-		print("  data: bld=%d road=%d(thr:%d,res:%d) terr=%d infra=%d pBld=%d pRoad=%d pVeg=%d pTerr=%d lamp=%d manhole=%d traffic=%d" % [_building_results.size(), _road_queue.size(), pending_road_snapshot, road_results_pending, _terrain_objects_queue.size(), _infrastructure_queue.size(), _pending_building_tasks, pending_road_snapshot, _pending_veg_tasks, _pending_terrain_tasks, _deferred_lamp_queue.size(), _deferred_manhole_queue.size(), _deferred_traffic_queue.size()])
+		print("  data: bld=%d road=%d(thr:%d,res:%d) terr=%d infra=%d pBld=%d pRoad=%d pVeg=%d pTerr=%d lamp=%d manhole=%d traffic=%d" % [_building_results.size(), _road_queue.size(), pending_road_snapshot, road_results_pending, _terrain_objects_queue.size(), _infrastructure_queue.size(), _pending_building_tasks, pending_road_snapshot, _pending_veg_tasks, _pending_terrain_tasks, _deferred_total_size(_deferred_lamp_queue), _deferred_total_size(_deferred_manhole_queue), _deferred_traffic_queue.size()])
 		print("  finalize: roadBatch=%d bldGeo=%d curb=%d lamp=%d tree=%d billboard=%d window=%d" % [_pending_batch_chunks.size(), _building_geo_finalize_queue.size(), _curb_geo_batch.size(), _lamp_batches_to_finalize.size(), _tree_batches_to_finalize.size(), _billboard_batches_to_finalize.size(), _window_finalize_queue.size()])
 
 	# DEBUG: Проверяем зависшие чанки в _loading_chunks
@@ -1791,43 +1812,46 @@ func _check_initial_load_complete() -> void:
 			initial_load_progress.emit(0.95, "Финализация: создание света фонарей...")
 			# Создаём все отложенные SpotLight3D сразу (без бюджета)
 			var lamp_light_count := 0
-			while not _deferred_lamp_lights.is_empty():
-				var item: Dictionary = _deferred_lamp_lights[0]
-				var container: Node3D = item["container"]
-				if not is_instance_valid(container):
-					_deferred_lamp_lights.pop_front()
-					continue
-				var lights: Array = item["lights"]
-				var chunk_key: String = item["chunk_key"]
-				var idx: int = item.get("idx", 0)
-				while idx < lights.size():
-					var light_data: Dictionary = lights[idx]
-					var light := SpotLight3D.new()
-					light.position = light_data.position
-					light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
-					light.rotation_degrees.x = -75
-					light.spot_range = 15.0
-					light.spot_angle = 70.0
-					light.spot_attenuation = 1.0
-					light.light_energy = 2.6
-					light.light_color = Color(1.0, 0.65, 0.2)
-					light.light_volumetric_fog_energy = 16.0
-					light.shadow_enabled = false
-					light.light_bake_mode = Light3D.BAKE_DISABLED
-					light.distance_fade_enabled = true
-					light.distance_fade_begin = 120.0
-					light.distance_fade_shadow = 30.0
-					light.distance_fade_length = 30.0
-					light.visible = _is_night_mode and not light_data.broken
-					light.set_meta("broken", light_data.broken)
-					light.add_child(_create_lamp_bulb())
-					light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
-					container.add_child(light)
-					if _lamp_lights_by_chunk.has(chunk_key):
-						_lamp_lights_by_chunk[chunk_key].append(light)
-					lamp_light_count += 1
-					idx += 1
-				_deferred_lamp_lights.pop_front()
+			for ll_ck2 in _deferred_lamp_lights.keys():
+				var ll_arr2: Array = _deferred_lamp_lights[ll_ck2]
+				while not ll_arr2.is_empty():
+					var item: Dictionary = ll_arr2[0]
+					var container: Node3D = item["container"]
+					if not is_instance_valid(container):
+						ll_arr2.pop_front()
+						continue
+					var lights: Array = item["lights"]
+					var chunk_key: String = item["chunk_key"]
+					var idx: int = item.get("idx", 0)
+					while idx < lights.size():
+						var light_data: Dictionary = lights[idx]
+						var light := SpotLight3D.new()
+						light.position = light_data.position
+						light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
+						light.rotation_degrees.x = -75
+						light.spot_range = 15.0
+						light.spot_angle = 70.0
+						light.spot_attenuation = 1.0
+						light.light_energy = 2.6
+						light.light_color = Color(1.0, 0.65, 0.2)
+						light.light_volumetric_fog_energy = 16.0
+						light.shadow_enabled = false
+						light.light_bake_mode = Light3D.BAKE_DISABLED
+						light.distance_fade_enabled = true
+						light.distance_fade_begin = 120.0
+						light.distance_fade_shadow = 30.0
+						light.distance_fade_length = 30.0
+						light.visible = _is_night_mode and not light_data.broken
+						light.set_meta("broken", light_data.broken)
+						light.add_child(_create_lamp_bulb())
+						light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
+						container.add_child(light)
+						if _lamp_lights_by_chunk.has(chunk_key):
+							_lamp_lights_by_chunk[chunk_key].append(light)
+						lamp_light_count += 1
+						idx += 1
+					ll_arr2.pop_front()
+			_deferred_lamp_lights.clear()
 			print("OSM: Created %d lamp lights during finalization" % lamp_light_count)
 			_finalization_state = 2
 			initial_load_progress.emit(0.98, "Финализация: создание знаков парковки (%d)..." % _pending_parking_signs.size())
@@ -2187,7 +2211,7 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 	var gen := _load_generation  # Захватываем текущую генерацию
 	loader.data_loaded.connect(_on_chunk_data_loaded.bind(chunk_key, loader, gen))
 	loader.load_failed.connect(_on_chunk_load_failed.bind(chunk_key, loader, gen))
-	loader.load_area(chunk_lat, chunk_lon, chunk_size / 2 + 100)  # +100м overlap для зданий на границах
+	loader.load_area(chunk_lat, chunk_lon, chunk_size / 2 + chunk_size / 2)  # +150м overlap (половина чанка)
 
 func _load_chunk_at_position(pos: Vector3) -> void:
 	var chunk_x := int(floor(pos.x / chunk_size))
@@ -2258,8 +2282,7 @@ func _unload_chunk(chunk_key: String) -> void:
 		var fence_finalize_idx := _fence_batches_to_finalize.find(chunk_key)
 		if fence_finalize_idx >= 0:
 			_fence_batches_to_finalize.remove_at(fence_finalize_idx)
-		_deferred_fence_edges = _deferred_fence_edges.filter(
-			func(item): return item.chunk_key != chunk_key)
+		_deferred_fence_edges.erase(chunk_key)
 
 		# Clean up building geometry merge batch
 		if _building_geo_batch.has(chunk_key):
@@ -2310,21 +2333,16 @@ func _unload_chunk(chunk_key: String) -> void:
 				filtered_p3.append(p3)
 		_phase3_queue = filtered_p3
 
-		# Clean up deferred node queues for this chunk
-		_deferred_building_collisions = _deferred_building_collisions.filter(
-			func(item): return is_instance_valid(item.get("parent")))
-		_deferred_tree_collisions = _deferred_tree_collisions.filter(
-			func(item): return is_instance_valid(item.get("parent")))
-		_deferred_lamp_lights = _deferred_lamp_lights.filter(
-			func(item): return is_instance_valid(item.get("container")))
-		_deferred_road_collisions = _deferred_road_collisions.filter(
-			func(item): return is_instance_valid(item.get("body")))
-		_deferred_terrain_collisions = _deferred_terrain_collisions.filter(
-			func(item): return is_instance_valid(item.get("parent")))
-		_deferred_footway_queue = _deferred_footway_queue.filter(
-			func(item): return is_instance_valid(item.get("parent")))
-		_deferred_billboard_queue = _deferred_billboard_queue.filter(
-			func(item): return is_instance_valid(item.get("parent")))
+		# Clean up deferred node queues for this chunk (O(1) per-chunk erase)
+		_deferred_building_collisions.erase(chunk_key)
+		_deferred_tree_collisions.erase(chunk_key)
+		_deferred_lamp_lights.erase(chunk_key)
+		_deferred_road_collisions.erase(chunk_key)
+		_deferred_terrain_collisions.erase(chunk_key)
+		_deferred_footway_queue.erase(chunk_key)
+		_deferred_billboard_queue.erase(chunk_key)
+		_deferred_lamp_queue.erase(chunk_key)
+		_deferred_manhole_queue.erase(chunk_key)
 		_deferred_add_child_queue = _deferred_add_child_queue.filter(
 			func(item): return is_instance_valid(item.get("parent")) and is_instance_valid(item.get("child")))
 
@@ -2500,11 +2518,19 @@ func reset_terrain() -> void:
 	_fence_geo_batch.clear()
 	_fence_batches_to_finalize.clear()
 	_deferred_fence_edges.clear()
+	_deferred_building_collisions.clear()
+	_deferred_tree_collisions.clear()
+	_deferred_lamp_lights.clear()
+	_deferred_road_collisions.clear()
+	_deferred_terrain_collisions.clear()
+	_deferred_footway_queue.clear()
 	_window_batch_data.clear()
 	_window_batch_materials.clear()
 	_pending_batch_chunks.clear()
 	_road_batch_data.clear()
 	_chunk_terrain_roads.clear()
+	_deferred_terrain_chunks.clear()
+	_chunk_roads_ready.clear()
 
 	# Reset draw call stats (prevent stale stats across location changes)
 	for key in _draw_call_stats:
@@ -3128,6 +3154,8 @@ func _process_phase3_queue() -> bool:
 			elif tags.has("waterway"):
 				_create_waterway(nodes, tags, target, null)
 		# Done with ways — move to intersections
+		# Маркируем что дорожные коридоры для этого чанка готовы (для terrain clipping)
+		_chunk_roads_ready[chunk_key] = true
 		entry.phase = "intersections"
 		entry.way_idx = 0
 		# Pre-build intersection keys list for iteration
@@ -3213,7 +3241,7 @@ func _process_phase3_queue() -> bool:
 			elif tags.has("traffic_sign"):
 				_create_traffic_sign(local, 0.0, tags, target)
 			elif tags.get("highway") == "street_lamp":
-				if not _is_point_in_any_parking(local):
+				if not _is_point_in_any_parking(local) and not _is_point_near_road(local, 0.1):
 					if chunk_key != "":
 						_add_lamp_to_batch(chunk_key, Vector3(local.x, 0.0, local.y), Vector3.FORWARD, target)
 					else:
@@ -3657,7 +3685,8 @@ func _apply_road_result(result: Dictionary) -> void:
 		# _is_point_on_vehicle_road (spatial hash + intersection contours per point)
 		var cleaned: PackedVector2Array = _remove_polyline_zigzag(smoothed_points)
 		if cleaned.size() >= 2:
-			_deferred_footway_queue.append({
+			var fw_ck := _get_chunk_key_from_node(parent)
+			_deferred_append(_deferred_footway_queue, fw_ck, {
 				"smoothed_points": cleaned,
 				"width": width,
 				"tags": result.get("tags", {}),
@@ -3757,11 +3786,13 @@ func _apply_road_result(result: Dictionary) -> void:
 
 	# Lamps (major roads only) - deferred to avoid blocking apply
 	if highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary"]:
-		_deferred_lamp_queue.append({"points": smoothed_points, "width": width, "parent": parent})
+		var lamp_ck := _get_chunk_key_from_node(parent)
+		_deferred_append(_deferred_lamp_queue, lamp_ck, {"points": smoothed_points, "width": width, "parent": parent})
 
 	# Manholes - deferred
 	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
-		_deferred_manhole_queue.append({"points": smoothed_points, "width": width, "parent": parent})
+		var mh_ck := _get_chunk_key_from_node(parent)
+		_deferred_append(_deferred_manhole_queue, mh_ck, {"points": smoothed_points, "width": width, "parent": parent})
 
 	# Road network for NPC - deferred
 	_deferred_traffic_queue.append({"points": smoothed_points, "tags": result.tags, "elevation_info": elevation_info})
@@ -4886,7 +4917,7 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	_budgeted_add_child(parent, road_body)
 
 	# Collision shape — отложенное создание (ConcavePolygonShape3D ~5-26ms)
-	_deferred_road_collisions.append({
+	_deferred_append(_deferred_road_collisions, chunk_key, {
 		"body": road_body,
 		"vertices": batch["vertices"],
 		"indices": batch["indices"]
@@ -4913,15 +4944,36 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 	var parent_node: Node3D = _loaded_chunks.get(chunk_key, null)
 	if not parent_node or not is_instance_valid(parent_node):
 		return
-	# Собираем сглажённые коридоры из текущего чанка И соседних
-	# Коридоры хранятся во всех чанках которые пересекают (см. _apply_road_result)
-	var terrain_roads: Array = []
+	# Проверяем что все соседние чанки завершили Phase 3 (дороги готовы)
+	# Если сосед ещё загружается — откладываем terrain clipping
 	var ck_parts: PackedStringArray = chunk_key.split(",")
 	var ck_x := int(ck_parts[0])
 	var ck_z := int(ck_parts[1])
+	# Проверяем что у соседних чанков дороги готовы (ждём макс 5 секунд)
+	var neighbor_not_ready := false
+	var now_ms := Time.get_ticks_msec()
 	for dx in range(-1, 2):
 		for dz in range(-1, 2):
+			if dx == 0 and dz == 0:
+				continue
 			var nk := "%d,%d" % [ck_x + dx, ck_z + dz]
+			if _loading_chunks.has(nk):
+				# Ждём соседа только если он загружается менее 5 сек
+				var load_start: int = _loading_chunks[nk]
+				if (now_ms - load_start) < 5000:
+					neighbor_not_ready = true
+					break
+		if neighbor_not_ready:
+			break
+	if neighbor_not_ready:
+		if not _deferred_terrain_chunks.has(chunk_key):
+			_deferred_terrain_chunks.append(chunk_key)
+		return
+	# Все соседи готовы — собираем коридоры
+	var terrain_roads: Array = []
+	for dx2 in range(-1, 2):
+		for dz2 in range(-1, 2):
+			var nk := "%d,%d" % [ck_x + dx2, ck_z + dz2]
 			if _chunk_terrain_roads.has(nk):
 				terrain_roads.append_array(_chunk_terrain_roads[nk])
 	var ch_min_x := float(ck_x) * chunk_size
@@ -5293,7 +5345,11 @@ func _process_deferred_nodes() -> void:
 	if not _deferred_road_collisions.is_empty():
 		if _add_child_count >= _add_child_budget:
 			return
-		var item: Dictionary = _deferred_road_collisions.pop_front()
+		var rc_ck: String = _deferred_road_collisions.keys()[0]
+		var rc_arr: Array = _deferred_road_collisions[rc_ck]
+		var item: Dictionary = rc_arr.pop_front()
+		if rc_arr.is_empty():
+			_deferred_road_collisions.erase(rc_ck)
 		if is_instance_valid(item["body"]):
 			var verts: PackedVector3Array = item["vertices"]
 			var idxs: PackedInt32Array = item["indices"]
@@ -5312,7 +5368,11 @@ func _process_deferred_nodes() -> void:
 	if not _deferred_terrain_collisions.is_empty():
 		if _add_child_count >= _add_child_budget:
 			return
-		var item: Dictionary = _deferred_terrain_collisions.pop_front()
+		var tc_ck: String = _deferred_terrain_collisions.keys()[0]
+		var tc_arr: Array = _deferred_terrain_collisions[tc_ck]
+		var item: Dictionary = tc_arr.pop_front()
+		if tc_arr.is_empty():
+			_deferred_terrain_collisions.erase(tc_ck)
 		var t_parent: Node3D = item["parent"]
 		if is_instance_valid(t_parent):
 			var verts: PackedVector3Array = item["vertices"]
@@ -5337,109 +5397,136 @@ func _process_deferred_nodes() -> void:
 		return
 
 	# 2. Building collisions (budgeted)
-	while not _deferred_building_collisions.is_empty():
+	var bc_done_keys: Array[String] = []
+	for bc_ck in _deferred_building_collisions.keys():
 		if _add_child_count >= _add_child_budget or (Time.get_ticks_usec() - start) > BUDGET_USEC:
-			return
-		var item: Dictionary = _deferred_building_collisions[0]
-		var parent: Node3D = item["parent"]
-		if not is_instance_valid(parent):
-			_deferred_building_collisions.pop_front()
-			continue
-		var collisions: Array = item["collisions"]
-		var idx: int = item["idx"]
-		while idx < collisions.size() and _add_child_count < _add_child_budget:
-			if (Time.get_ticks_usec() - start) > BUDGET_USEC:
-				item["idx"] = idx
+			break
+		var bc_arr: Array = _deferred_building_collisions[bc_ck]
+		while not bc_arr.is_empty():
+			if _add_child_count >= _add_child_budget or (Time.get_ticks_usec() - start) > BUDGET_USEC:
 				return
-			var coll_data: Dictionary = collisions[idx]
-			var body := StaticBody3D.new()
-			body.collision_layer = 2
-			body.collision_mask = 0
-			_budgeted_add_child(parent, body)
-			_create_building_collisions_deferred.call_deferred(
-				body, coll_data["points"], coll_data["base_elev"], coll_data["building_height"])
-			idx += 1
-		if idx >= collisions.size():
-			_deferred_building_collisions.pop_front()
-		else:
-			item["idx"] = idx
-			return
-
-	# 3. Tree collisions (budgeted)
-	while not _deferred_tree_collisions.is_empty():
-		if _add_child_count >= _add_child_budget or (Time.get_ticks_usec() - start) > BUDGET_USEC:
-			return
-		var item: Dictionary = _deferred_tree_collisions[0]
-		var parent_node: Node3D = item["parent"]
-		if not is_instance_valid(parent_node):
-			_deferred_tree_collisions.pop_front()
-			continue
-		var collisions: Array = item["collisions"]
-		var idx: int = item["idx"]
-		while idx < collisions.size() and _add_child_count < _add_child_budget:
-			var collision_data: Dictionary = collisions[idx]
-			var coll_pos: Vector3 = collision_data["position"]
-			if _is_point_near_road(Vector2(coll_pos.x, coll_pos.z), 60.0):
+			var item: Dictionary = bc_arr[0]
+			var parent: Node3D = item["parent"]
+			if not is_instance_valid(parent):
+				bc_arr.pop_front()
+				continue
+			var collisions: Array = item["collisions"]
+			var idx: int = item["idx"]
+			while idx < collisions.size() and _add_child_count < _add_child_budget:
+				if (Time.get_ticks_usec() - start) > BUDGET_USEC:
+					item["idx"] = idx
+					return
+				var coll_data: Dictionary = collisions[idx]
 				var body := StaticBody3D.new()
 				body.collision_layer = 2
 				body.collision_mask = 0
-				body.position = coll_pos
-				var collision := CollisionShape3D.new()
-				var cyl_shape := CylinderShape3D.new()
-				cyl_shape.radius = collision_data["radius"]
-				cyl_shape.height = 8.0
-				collision.position = Vector3(0, 4.0, 0)
-				collision.shape = cyl_shape
-				body.add_child(collision)
-				_budgeted_add_child(parent_node, body)
-			idx += 1
-		if idx >= collisions.size():
-			_deferred_tree_collisions.pop_front()
-		else:
-			item["idx"] = idx
-			return
+				_budgeted_add_child(parent, body)
+				_create_building_collisions_deferred.call_deferred(
+					body, coll_data["points"], coll_data["base_elev"], coll_data["building_height"])
+				idx += 1
+			if idx >= collisions.size():
+				bc_arr.pop_front()
+			else:
+				item["idx"] = idx
+				return
+		if bc_arr.is_empty():
+			bc_done_keys.append(bc_ck)
+	for bc_ck in bc_done_keys:
+		_deferred_building_collisions.erase(bc_ck)
+
+	# 3. Tree collisions (budgeted)
+	var tree_done_keys: Array[String] = []
+	for tree_ck in _deferred_tree_collisions.keys():
+		if _add_child_count >= _add_child_budget or (Time.get_ticks_usec() - start) > BUDGET_USEC:
+			break
+		var tree_arr: Array = _deferred_tree_collisions[tree_ck]
+		while not tree_arr.is_empty():
+			if _add_child_count >= _add_child_budget or (Time.get_ticks_usec() - start) > BUDGET_USEC:
+				return
+			var item: Dictionary = tree_arr[0]
+			var parent_node: Node3D = item["parent"]
+			if not is_instance_valid(parent_node):
+				tree_arr.pop_front()
+				continue
+			var collisions: Array = item["collisions"]
+			var idx: int = item["idx"]
+			while idx < collisions.size() and _add_child_count < _add_child_budget:
+				var collision_data: Dictionary = collisions[idx]
+				var coll_pos: Vector3 = collision_data["position"]
+				if _is_point_near_road(Vector2(coll_pos.x, coll_pos.z), 60.0):
+					var body := StaticBody3D.new()
+					body.collision_layer = 2
+					body.collision_mask = 0
+					body.position = coll_pos
+					var collision := CollisionShape3D.new()
+					var cyl_shape := CylinderShape3D.new()
+					cyl_shape.radius = collision_data["radius"]
+					cyl_shape.height = 8.0
+					collision.position = Vector3(0, 4.0, 0)
+					collision.shape = cyl_shape
+					body.add_child(collision)
+					_budgeted_add_child(parent_node, body)
+				idx += 1
+			if idx >= collisions.size():
+				tree_arr.pop_front()
+			else:
+				item["idx"] = idx
+				return
+		if tree_arr.is_empty():
+			tree_done_keys.append(tree_ck)
+	for tree_ck in tree_done_keys:
+		_deferred_tree_collisions.erase(tree_ck)
 
 
 ## Создаёт все отложенные SpotLight3D фонарей за один проход (без бюджета).
 ## Вызывается из _process() отдельно от _process_deferred_nodes.
 func _process_deferred_lamp_lights() -> void:
 	var t0 := Time.get_ticks_usec()
-	while not _deferred_lamp_lights.is_empty():
-		var item: Dictionary = _deferred_lamp_lights[0]
-		var container: Node3D = item["container"]
-		if not is_instance_valid(container):
-			_deferred_lamp_lights.pop_front()
-			continue
-		var lights: Array = item["lights"]
-		var chunk_key: String = item["chunk_key"]
-		for light_data: Dictionary in lights:
-			var light := SpotLight3D.new()
-			light.position = light_data.position
-			light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
-			light.rotation_degrees.x = -75
-			light.spot_range = 15.0
-			light.spot_angle = 70.0
-			light.spot_attenuation = 1.0
-			light.light_energy = 2.6
-			light.light_color = Color(1.0, 0.65, 0.2)
-			light.light_volumetric_fog_energy = 16.0
-			light.shadow_enabled = false
-			light.light_bake_mode = Light3D.BAKE_DISABLED
-			light.distance_fade_enabled = true
-			light.distance_fade_begin = 120.0
-			light.distance_fade_shadow = 30.0
-			light.distance_fade_length = 30.0
-			light.visible = _is_night_mode and not light_data.broken
-			light.set_meta("broken", light_data.broken)
-			light.add_child(_create_lamp_bulb())
-			light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
-			container.add_child(light)
-			if _lamp_lights_by_chunk.has(chunk_key):
-				_lamp_lights_by_chunk[chunk_key].append(light)
-		_deferred_lamp_lights.pop_front()
-		# 2ms budget — remaining lamps processed next frame (unlimited during initial load)
+	var ll_done_keys: Array[String] = []
+	for ll_ck in _deferred_lamp_lights.keys():
+		var ll_arr: Array = _deferred_lamp_lights[ll_ck]
+		while not ll_arr.is_empty():
+			var item: Dictionary = ll_arr[0]
+			var container: Node3D = item["container"]
+			if not is_instance_valid(container):
+				ll_arr.pop_front()
+				continue
+			var lights: Array = item["lights"]
+			var chunk_key: String = item["chunk_key"]
+			for light_data: Dictionary in lights:
+				var light := SpotLight3D.new()
+				light.position = light_data.position
+				light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
+				light.rotation_degrees.x = -75
+				light.spot_range = 15.0
+				light.spot_angle = 70.0
+				light.spot_attenuation = 1.0
+				light.light_energy = 2.6
+				light.light_color = Color(1.0, 0.65, 0.2)
+				light.light_volumetric_fog_energy = 16.0
+				light.shadow_enabled = false
+				light.light_bake_mode = Light3D.BAKE_DISABLED
+				light.distance_fade_enabled = true
+				light.distance_fade_begin = 120.0
+				light.distance_fade_shadow = 30.0
+				light.distance_fade_length = 30.0
+				light.visible = _is_night_mode and not light_data.broken
+				light.set_meta("broken", light_data.broken)
+				light.add_child(_create_lamp_bulb())
+				light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
+				container.add_child(light)
+				if _lamp_lights_by_chunk.has(chunk_key):
+					_lamp_lights_by_chunk[chunk_key].append(light)
+			ll_arr.pop_front()
+			# 2ms budget — remaining lamps processed next frame (unlimited during initial load)
+			if not _initial_loading and (Time.get_ticks_usec() - t0) > 2000:
+				break
+		if ll_arr.is_empty():
+			ll_done_keys.append(ll_ck)
 		if not _initial_loading and (Time.get_ticks_usec() - t0) > 2000:
 			break
+	for ll_ck in ll_done_keys:
+		_deferred_lamp_lights.erase(ll_ck)
 
 
 # Старая версия без текстур (для совместимости)
@@ -6625,7 +6712,7 @@ func _add_fence_to_batch(points: PackedVector2Array, parent: Node3D) -> void:
 			continue
 
 		batch.edges.append({"p1": p1, "p2": p2})
-		_deferred_fence_edges.append({"chunk_key": chunk_key, "p1": p1, "p2": p2, "edge_idx": i})
+		_deferred_append(_deferred_fence_edges, chunk_key, {"chunk_key": chunk_key, "p1": p1, "p2": p2, "edge_idx": i})
 
 	if not _fence_batches_to_finalize.has(chunk_key):
 		_fence_batches_to_finalize.append(chunk_key)
@@ -6637,39 +6724,46 @@ func _add_fence_to_batch(points: PackedVector2Array, parent: Node3D) -> void:
 var _fence_edge_cursor: int = 0  # section index within current edge (for mid-edge resume)
 
 func _process_deferred_fence_edges(start_usec: int, budget_usec: int) -> void:
-	while not _deferred_fence_edges.is_empty():
-		var item: Dictionary = _deferred_fence_edges[0]
-		var chunk_key: String = item.chunk_key
+	var fe_done_keys: Array[String] = []
+	for fe_ck in _deferred_fence_edges.keys():
+		var fe_arr: Array = _deferred_fence_edges[fe_ck]
+		while not fe_arr.is_empty():
+			var item: Dictionary = fe_arr[0]
+			var chunk_key: String = item.chunk_key
 
-		# Skip if chunk was unloaded
-		if not _fence_geo_batch.has(chunk_key):
-			_deferred_fence_edges.pop_front()
+			# Skip if chunk was unloaded
+			if not _fence_geo_batch.has(chunk_key):
+				fe_arr.pop_front()
+				_fence_edge_cursor = 0
+				continue
+
+			var batch: Dictionary = _fence_geo_batch[chunk_key]
+			var p1: Vector2 = item.p1
+			var p2: Vector2 = item.p2
+			var edge_idx: int = item.edge_idx
+			var seg_len := p1.distance_to(p2)
+			var num_sections := maxi(1, int(round(seg_len / 2.25)))
+
+			# Process sections starting from cursor (supports mid-edge resume)
+			while _fence_edge_cursor < num_sections:
+				if (Time.get_ticks_usec() - start_usec) > budget_usec:
+					return  # Budget exhausted, resume next frame from _fence_edge_cursor
+				var j := _fence_edge_cursor
+				var t1 := float(j) / float(num_sections)
+				var t2 := float(j + 1) / float(num_sections)
+				var sp1 := p1.lerp(p2, t1)
+				var sp2 := p1.lerp(p2, t2)
+				var seed_val := int(sp1.x * 1000.0) ^ int(sp1.y * 1000.0) ^ (edge_idx * 997 + j)
+				_generate_fence_segment(sp1, sp2, batch.lod0, batch.lod1, seed_val)
+				_fence_edge_cursor += 1
+
+			# Edge fully processed
+			fe_arr.pop_front()
 			_fence_edge_cursor = 0
-			continue
-
-		var batch: Dictionary = _fence_geo_batch[chunk_key]
-		var p1: Vector2 = item.p1
-		var p2: Vector2 = item.p2
-		var edge_idx: int = item.edge_idx
-		var seg_len := p1.distance_to(p2)
-		var num_sections := maxi(1, int(round(seg_len / 2.25)))
-
-		# Process sections starting from cursor (supports mid-edge resume)
-		while _fence_edge_cursor < num_sections:
-			if (Time.get_ticks_usec() - start_usec) > budget_usec:
-				return  # Budget exhausted, resume next frame from _fence_edge_cursor
-			var j := _fence_edge_cursor
-			var t1 := float(j) / float(num_sections)
-			var t2 := float(j + 1) / float(num_sections)
-			var sp1 := p1.lerp(p2, t1)
-			var sp2 := p1.lerp(p2, t2)
-			var seed_val := int(sp1.x * 1000.0) ^ int(sp1.y * 1000.0) ^ (edge_idx * 997 + j)
-			_generate_fence_segment(sp1, sp2, batch.lod0, batch.lod1, seed_val)
-			_fence_edge_cursor += 1
-
-		# Edge fully processed
-		_deferred_fence_edges.pop_front()
-		_fence_edge_cursor = 0
+		if fe_arr.is_empty():
+			fe_done_keys.append(fe_ck)
+	for fe_ck in fe_done_keys:
+		_deferred_fence_edges.erase(fe_ck)
 
 
 ## Finalize fence batch: create two RS instances (LOD0 + LOD1) per chunk
@@ -7778,7 +7872,7 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 	var all_baked: bool = batch.get("_all_baked", false)
 
 	if not batch["collisions"].is_empty():
-		_deferred_building_collisions.append({
+		_deferred_append(_deferred_building_collisions, chunk_key, {
 			"parent": parent,
 			"collisions": batch["collisions"],
 			"idx": 0
@@ -8021,49 +8115,75 @@ func _process_road_queue() -> void:
 
 	# Process deferred footway splitting incrementally (budget: remaining time up to 2.5ms from start)
 	var fw_budget_end := queue_start + 2500
-	while not _deferred_footway_queue.is_empty():
+	var fw_done_keys: Array[String] = []
+	for fw_ck in _deferred_footway_queue.keys():
 		if Time.get_ticks_usec() > fw_budget_end:
 			break
-		var fw_item: Dictionary = _deferred_footway_queue[0]
-		if not is_instance_valid(fw_item.parent):
-			_deferred_footway_queue.pop_front()
-			continue
-		var done := _process_footway_incremental(fw_item, fw_budget_end)
-		if done:
-			_deferred_footway_queue.pop_front()
+		var fw_arr: Array = _deferred_footway_queue[fw_ck]
+		while not fw_arr.is_empty():
+			if Time.get_ticks_usec() > fw_budget_end:
+				break
+			var fw_item: Dictionary = fw_arr[0]
+			if not is_instance_valid(fw_item.parent):
+				fw_arr.pop_front()
+				continue
+			var done := _process_footway_incremental(fw_item, fw_budget_end)
+			if done:
+				fw_arr.pop_front()
+		if fw_arr.is_empty():
+			fw_done_keys.append(fw_ck)
+	for fw_ck in fw_done_keys:
+		_deferred_footway_queue.erase(fw_ck)
 
 	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 		return
 
 	# Process deferred lamp/manhole generation with time budget
-	while not _deferred_lamp_queue.is_empty():
+	var lamp_done_keys: Array[String] = []
+	for lamp_ck in _deferred_lamp_queue.keys():
 		if (Time.get_ticks_usec() - queue_start) > 3000:
 			break
-		var item: Dictionary = _deferred_lamp_queue[0]
-		# Проверяем что parent (чанк) ещё существует — мог быть выгружен
-		if not is_instance_valid(item.parent):
-			_deferred_lamp_queue.pop_front()
-			continue
-		# Process incrementally — only process a portion of the road per frame
-		var start_idx: int = item.get("_lamp_seg_idx", 0)
-		var processed: int = _generate_street_lamps_incremental(item.points, item.width, item.parent, start_idx, queue_start, 3000)
-		if processed >= item.points.size() - 1:
-			_deferred_lamp_queue.pop_front()  # Fully processed
-		else:
-			item["_lamp_seg_idx"] = processed  # Resume next frame
+		var lamp_arr: Array = _deferred_lamp_queue[lamp_ck]
+		while not lamp_arr.is_empty():
+			if (Time.get_ticks_usec() - queue_start) > 3000:
+				break
+			var item: Dictionary = lamp_arr[0]
+			if not is_instance_valid(item.parent):
+				lamp_arr.pop_front()
+				continue
+			var start_idx: int = item.get("_lamp_seg_idx", 0)
+			var processed: int = _generate_street_lamps_incremental(item.points, item.width, item.parent, start_idx, queue_start, 3000)
+			if processed >= item.points.size() - 1:
+				lamp_arr.pop_front()
+			else:
+				item["_lamp_seg_idx"] = processed
+				break  # Resume next frame
+		if lamp_arr.is_empty():
+			lamp_done_keys.append(lamp_ck)
+	for lamp_ck in lamp_done_keys:
+		_deferred_lamp_queue.erase(lamp_ck)
 
 	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 		return
 
-	while not _deferred_manhole_queue.is_empty():
+	var mh_done_keys: Array[String] = []
+	for mh_ck in _deferred_manhole_queue.keys():
 		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 			break
-		var item: Dictionary = _deferred_manhole_queue[0]
-		if not is_instance_valid(item.parent):
-			_deferred_manhole_queue.pop_front()
-			continue
-		_deferred_manhole_queue.pop_front()
-		_generate_manholes_fast(item.points, item.width, item.parent)
+		var mh_arr: Array = _deferred_manhole_queue[mh_ck]
+		while not mh_arr.is_empty():
+			if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+				break
+			var item: Dictionary = mh_arr[0]
+			if not is_instance_valid(item.parent):
+				mh_arr.pop_front()
+				continue
+			mh_arr.pop_front()
+			_generate_manholes_fast(item.points, item.width, item.parent)
+		if mh_arr.is_empty():
+			mh_done_keys.append(mh_ck)
+	for mh_ck in mh_done_keys:
+		_deferred_manhole_queue.erase(mh_ck)
 	while not _deferred_traffic_queue.is_empty():
 		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 			break
@@ -8074,14 +8194,23 @@ func _process_road_queue() -> void:
 		return
 
 	# Process deferred billboard creation with time budget
-	while not _deferred_billboard_queue.is_empty():
+	var bb_done_keys: Array[String] = []
+	for bb_ck in _deferred_billboard_queue.keys():
 		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 			break
-		var item: Dictionary = _deferred_billboard_queue.pop_front()
-		if not is_instance_valid(item.parent):
-			continue
-		var billboard_mesh: Node3D = _decoration_layer.create_billboard_mesh(item.billboard, item.elevation)
-		_budgeted_add_child(item.parent, billboard_mesh)
+		var bb_arr: Array = _deferred_billboard_queue[bb_ck]
+		while not bb_arr.is_empty():
+			if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+				break
+			var item: Dictionary = bb_arr.pop_front()
+			if not is_instance_valid(item.parent):
+				continue
+			var billboard_mesh: Node3D = _decoration_layer.create_billboard_mesh(item.billboard, item.elevation)
+			_budgeted_add_child(item.parent, billboard_mesh)
+		if bb_arr.is_empty():
+			bb_done_keys.append(bb_ck)
+	for bb_ck in bb_done_keys:
+		_deferred_billboard_queue.erase(bb_ck)
 
 	# Dispatch roads to worker threads — no time budget needed on main thread!
 	# Limit concurrent tasks to avoid overwhelming thread pool
@@ -8126,8 +8255,6 @@ func _process_road_queue() -> void:
 	_road_mutex.unlock()
 	if not _road_queue.is_empty() or has_road_results or pending_tasks > 0:
 		return  # Still dispatching, computing, or applying road geometry
-	if not _deferred_lamp_queue.is_empty() or not _deferred_manhole_queue.is_empty() or not _deferred_traffic_queue.is_empty() or not _deferred_footway_queue.is_empty() or not _deferred_billboard_queue.is_empty():
-		return  # Deferred work still pending
 
 	# Budget gate: skip finalization if deferred work already consumed most budget
 	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
@@ -8232,11 +8359,7 @@ func _process_road_queue() -> void:
 				if not _fence_batches_to_finalize.is_empty():
 					var fence_ck: String = _fence_batches_to_finalize[0]
 					# Don't finalize if deferred edges still pending for this chunk
-					var has_pending_edges := false
-					for fe in _deferred_fence_edges:
-						if fe.chunk_key == fence_ck:
-							has_pending_edges = true
-							break
+					var has_pending_edges: bool = _deferred_fence_edges.has(fence_ck) and not (_deferred_fence_edges[fence_ck] as Array).is_empty()
 					if has_pending_edges:
 						did_work = true  # keep cycling
 					else:
@@ -10119,6 +10242,18 @@ func _get_chunk_key_from_node(node: Node3D) -> String:
 		return node_name.substr(6)  # Возвращаем "x,z" часть
 	return ""
 
+## Per-chunk deferred dict helpers
+func _deferred_append(dict: Dictionary, chunk_key: String, item: Dictionary) -> void:
+	if not dict.has(chunk_key):
+		dict[chunk_key] = []
+	dict[chunk_key].append(item)
+
+func _deferred_total_size(dict: Dictionary) -> int:
+	var total := 0
+	for arr in dict.values():
+		total += arr.size()
+	return total
+
 ## Create a StaticBody3D collision for a lamp pole at given transform
 func _create_lamp_collision(xform: Transform3D) -> StaticBody3D:
 	var body := StaticBody3D.new()
@@ -10245,7 +10380,7 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 
 	# Lights — отложенное создание через очередь
 	if batch.light_data.size() > 0:
-		_deferred_lamp_lights.append({
+		_deferred_append(_deferred_lamp_lights, chunk_key, {
 			"container": lights_container,
 			"lights": batch.light_data,
 			"idx": 0,
@@ -10279,7 +10414,7 @@ func _update_lamp_night_mode(is_night: bool) -> void:
 	var total_by_chunk := 0
 	for chunk_key2 in _lamp_lights_by_chunk.keys():
 		total_by_chunk += _lamp_lights_by_chunk[chunk_key2].size()
-	print("OSM: Updated lamp night mode (is_night=%s) by_chunk=%d immediate=%d deferred_pending=%d" % [is_night, total_by_chunk, _lamp_batch_lights.size(), _deferred_lamp_lights.size()])
+	print("OSM: Updated lamp night mode (is_night=%s) by_chunk=%d immediate=%d deferred_pending=%d" % [is_night, total_by_chunk, _lamp_batch_lights.size(), _deferred_total_size(_deferred_lamp_lights)])
 
 ## Add tree to batch for MultiMesh rendering
 func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, parent: Node3D, is_pine: bool = false) -> void:
@@ -10407,7 +10542,7 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 
 	# Коллизии деревьев — отложенное создание через очередь
 	if not batch["collisions"].is_empty():
-		_deferred_tree_collisions.append({
+		_deferred_append(_deferred_tree_collisions, chunk_key, {
 			"parent": parent,
 			"collisions": batch["collisions"],
 			"idx": 0
@@ -10450,7 +10585,7 @@ func _finalize_billboard_batch_for_chunk(chunk_key: String) -> void:
 
 	# Складываем билборды в deferred очередь — создаём по N за кадр
 	for billboard in billboards:
-		_deferred_billboard_queue.append({
+		_deferred_append(_deferred_billboard_queue, chunk_key, {
 			"billboard": billboard,
 			"elevation": 0.0,
 			"parent": parent
@@ -11552,7 +11687,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	_rs_add_mesh(chunk_key, arr_mesh, material)
 
 	# Коллизия — отложенная (ConcavePolygonShape3D из реальной геометрии)
-	_deferred_terrain_collisions.append({
+	_deferred_append(_deferred_terrain_collisions, chunk_key, {
 		"parent": parent,
 		"vertices": all_vertices,
 		"indices": all_indices
@@ -11768,14 +11903,14 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 
 		# Skip lamps inside intersection contours (where bezier curbs are)
 		var left_in_intersection := _is_point_in_intersection_shape(lamp_pos_left) >= 0
-		if not left_in_intersection and not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road(lamp_pos_left, 0.0):
+		if not left_in_intersection and not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road(lamp_pos_left, 0.1):
 			var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
 			var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
 			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
 			if _loaded_chunks.has(chunk_key):
 				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_left.x, 0.0, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[chunk_key])
 
-		if both_sides and _is_point_in_intersection_shape(lamp_pos_right) < 0 and not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road(lamp_pos_right, 0.0):
+		if both_sides and _is_point_in_intersection_shape(lamp_pos_right) < 0 and not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road(lamp_pos_right, 0.1):
 			var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
 			var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
 			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
@@ -14591,7 +14726,7 @@ func _process_chunk_activation() -> void:
 
 		if state == -1:
 			# Проверяем есть ли ещё finalize очереди для этого чанка
-			var still_pending := _pending_batch_chunks.has(chunk_key) or _lamp_batches_to_finalize.has(chunk_key) or _tree_batches_to_finalize.has(chunk_key) or _billboard_batches_to_finalize.has(chunk_key) or _building_geo_finalize_queue.has(chunk_key) or _fence_batches_to_finalize.has(chunk_key)
+			var still_pending := _pending_batch_chunks.has(chunk_key) or _lamp_batches_to_finalize.has(chunk_key) or _tree_batches_to_finalize.has(chunk_key) or _billboard_batches_to_finalize.has(chunk_key) or _building_geo_finalize_queue.has(chunk_key) or _fence_batches_to_finalize.has(chunk_key) or _deferred_footway_queue.has(chunk_key) or _deferred_lamp_queue.has(chunk_key) or _deferred_manhole_queue.has(chunk_key) or _deferred_billboard_queue.has(chunk_key) or _deferred_building_collisions.has(chunk_key) or _deferred_tree_collisions.has(chunk_key) or _deferred_road_collisions.has(chunk_key) or _deferred_terrain_collisions.has(chunk_key) or _deferred_lamp_lights.has(chunk_key) or _deferred_fence_edges.has(chunk_key)
 			if not still_pending:
 				_chunk_activation_pending[chunk_key] = 0  # начинаем пакетную активацию
 		else:
