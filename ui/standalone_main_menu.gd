@@ -17,6 +17,8 @@ const LOCATIONS := {
 }
 
 var _current_mode: String = "sprint"  # "sprint" или "checkpoint"
+var _map_selected_lat: float = 0.0
+var _map_selected_lon: float = 0.0
 
 
 func _ready() -> void:
@@ -39,7 +41,8 @@ func _ready() -> void:
 	# Генерируем кнопки трасс для режима гонок
 	_populate_tracks()
 
-	# Добавляем кнопку "Тестовые трассы" в главное меню
+	# Добавляем кнопку "Выбрать на карте" и "Тестовые трассы" в главное меню
+	_add_map_button()
 	_add_test_tracks_button()
 
 	# Автостарт через командную строку: --autostart [location_index] [--lat X --lon Y]
@@ -99,6 +102,29 @@ func _populate_tracks(mode: String = "") -> void:
 		btn.add_theme_font_size_override("font_size", 24)
 		btn.pressed.connect(_on_track_selected.bind(track))
 		container.add_child(btn)
+
+
+func _add_map_button() -> void:
+	"""Добавить кнопку 'Выбрать на карте' в главное меню"""
+	var vbox = get_node_or_null("VBox")
+	if not vbox:
+		return
+	var start_button = vbox.get_node_or_null("StartButton")
+	if not start_button:
+		return
+
+	var btn := Button.new()
+	btn.name = "MapButton"
+	btn.text = "🗺 ВЫБРАТЬ НА КАРТЕ"
+	btn.custom_minimum_size = Vector2(400, 70)
+	btn.add_theme_color_override("font_color", Color(1, 1, 1, 1))
+	btn.add_theme_color_override("font_hover_color", Color(0.5, 1, 0.5, 1))
+	btn.add_theme_font_size_override("font_size", 36)
+	btn.pressed.connect(_on_map_pressed)
+
+	var start_index := start_button.get_index()
+	vbox.add_child(btn)
+	vbox.move_child(btn, start_index + 1)
 
 
 func _add_test_tracks_button() -> void:
@@ -439,3 +465,88 @@ func _on_test_track_selected(track: Dictionary) -> void:
 	# Загружаем сцену (кастомную или стандартную тестовую)
 	var scene_path: String = track.get("scene_path", "res://race/test_track_scene.tscn")
 	get_tree().change_scene_to_file(scene_path)
+
+
+# === Карта мира ===
+
+func _on_map_pressed() -> void:
+	"""Открыть карту мира"""
+	$VBox.visible = false
+	var map_panel = get_node_or_null("MapPanel")
+	if not map_panel:
+		_create_map_panel()
+		map_panel = $MapPanel
+	map_panel.visible = true
+	$MapPanel/WorldMap.show_map()
+
+
+func _create_map_panel() -> void:
+	"""Создать полноэкранную панель с картой мира"""
+	var panel := Panel.new()
+	panel.name = "MapPanel"
+	panel.set_anchors_preset(Control.PRESET_FULL_RECT)
+	panel.visible = false
+	add_child(panel)
+
+	# WorldMap control
+	var world_map_script := preload("res://ui/world_map.gd")
+	var world_map := Control.new()
+	world_map.set_script(world_map_script)
+	world_map.name = "WorldMap"
+	world_map.set_anchors_preset(Control.PRESET_FULL_RECT)
+	panel.add_child(world_map)
+
+	world_map.location_selected.connect(_on_map_location_selected)
+
+	# Кнопка "Назад" (верхний левый угол)
+	var back_btn := Button.new()
+	back_btn.name = "BackButton"
+	back_btn.text = "← Назад"
+	back_btn.custom_minimum_size = Vector2(150, 50)
+	back_btn.add_theme_font_size_override("font_size", 24)
+	back_btn.position = Vector2(20, 50)
+	back_btn.pressed.connect(_on_map_back_pressed)
+	panel.add_child(back_btn)
+
+	# Кнопка "НАЧАТЬ ЗДЕСЬ" (внизу по центру, скрыта до выбора точки)
+	var start_btn := Button.new()
+	start_btn.name = "StartHereButton"
+	start_btn.text = "▶ НАЧАТЬ ЗДЕСЬ"
+	start_btn.custom_minimum_size = Vector2(350, 70)
+	start_btn.add_theme_font_size_override("font_size", 32)
+	start_btn.add_theme_color_override("font_color", Color(1, 1, 1))
+	start_btn.add_theme_color_override("font_hover_color", Color(0.5, 1, 0.5, 1))
+	start_btn.anchor_left = 0.5
+	start_btn.anchor_right = 0.5
+	start_btn.anchor_top = 1.0
+	start_btn.anchor_bottom = 1.0
+	start_btn.offset_left = -175
+	start_btn.offset_right = 175
+	start_btn.offset_top = -120
+	start_btn.offset_bottom = -50
+	start_btn.visible = false
+	start_btn.pressed.connect(_on_start_here_pressed)
+	panel.add_child(start_btn)
+
+
+func _on_map_back_pressed() -> void:
+	"""Закрыть карту, вернуться в главное меню"""
+	$MapPanel/WorldMap.hide_map()
+	$MapPanel.visible = false
+	$MapPanel/StartHereButton.visible = false
+	$VBox.visible = true
+
+
+func _on_map_location_selected(lat: float, lon: float) -> void:
+	"""Пользователь выбрал точку на карте"""
+	_map_selected_lat = lat
+	_map_selected_lon = lon
+	$MapPanel/StartHereButton.visible = true
+	$MapPanel/StartHereButton.text = "▶ НАЧАТЬ ЗДЕСЬ (%.4f, %.4f)" % [lat, lon]
+
+
+func _on_start_here_pressed() -> void:
+	"""Начать свободную езду в выбранной на карте точке"""
+	$MapPanel/WorldMap.hide_map()
+	$MapPanel.visible = false
+	_start_free_roam_at_coords(_map_selected_lat, _map_selected_lon)
