@@ -129,6 +129,8 @@ func _ready() -> void:
 		if _terrain_generator:
 			_terrain_generator.start_lat = RaceState.free_roam_lat
 			_terrain_generator.start_lon = RaceState.free_roam_lon
+		# Помечаем что координаты уже установлены (не перезаписывать из LOCATIONS)
+		_custom_coords = true
 		# Очищаем состояние
 		RaceState.free_roam_location = ""
 		RaceState.free_roam_lat = 0.0
