@@ -1,7 +1,7 @@
 [gd_scene load_steps=4 format=3 uid="uid://npc_lada2109"]
 
 [ext_resource type="Script" path="res://traffic/npc_car.gd" id="1_npc_lada2109"]
-[ext_resource type="PackedScene" uid="uid://bvnqxj3m4y5oa" path="res://car/models/lada_2109_dps/scene.gltf" id="2_lada2109_model"]
+[ext_resource type="PackedScene" uid="uid://dqre3ltcbgv5a" path="res://car/models/lada_2109_dps/scene.gltf" id="2_lada2109_model"]
 [ext_resource type="Script" path="res://car/lada_2109_setup.gd" id="3_lada2109_setup"]
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_lada2109"]

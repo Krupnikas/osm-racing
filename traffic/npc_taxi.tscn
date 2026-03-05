@@ -1,7 +1,7 @@
 [gd_scene load_steps=4 format=3 uid="uid://npc_taxi"]
 
 [ext_resource type="Script" path="res://traffic/npc_car.gd" id="1_npc_taxi"]
-[ext_resource type="PackedScene" uid="uid://taxi_model" path="res://car/models/lada_2109_taxi/scene.gltf" id="2_taxi_model"]
+[ext_resource type="PackedScene" uid="uid://2xm5d26k0fdv" path="res://car/models/lada_2109_taxi/scene.gltf" id="2_taxi_model"]
 [ext_resource type="Script" path="res://car/lada_2109_setup.gd" id="3_taxi_setup"]
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_taxi"]

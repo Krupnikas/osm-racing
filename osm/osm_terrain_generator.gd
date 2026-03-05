@@ -546,10 +546,8 @@ func _init_textures() -> void:
 
 	# Текстуры дорог — PBR текстуры из ambientCG (CC0)
 	# Asphalt026B — дороги, Asphalt022 — тротуары
-	var road_albedo_img := Image.load_from_file("res://textures/road/Asphalt026B_1K-JPG_Color.jpg")
-	var road_albedo_tex: Texture2D = ImageTexture.create_from_image(road_albedo_img) if road_albedo_img else null
-	var sidewalk_albedo_img := Image.load_from_file("res://textures/road/Asphalt022_1K-JPG_Color.jpg")
-	var sidewalk_albedo_tex: Texture2D = ImageTexture.create_from_image(sidewalk_albedo_img) if sidewalk_albedo_img else null
+	var road_albedo_tex: Texture2D = load("res://textures/road/Asphalt026B_1K-JPG_Color.jpg")
+	var sidewalk_albedo_tex: Texture2D = load("res://textures/road/Asphalt022_1K-JPG_Color.jpg")
 
 	# Все типы дорог используют одну PBR текстуру асфальта
 	_road_textures["highway"] = road_albedo_tex
@@ -572,26 +570,26 @@ func _init_textures() -> void:
 
 	# Текстуры зданий — PBR текстуры из ambientCG (CC0)
 	# Bricks053 — светлые здания (panel), Bricks026 — кирпичные (brick)
-	var panel_albedo_img := Image.load_from_file("res://textures/walls/Bricks053_1K-JPG_Color.jpg")
-	var panel_normal_img := Image.load_from_file("res://textures/walls/Bricks053_1K-JPG_NormalGL.jpg")
-	var panel_rough_img := Image.load_from_file("res://textures/walls/Bricks053_1K-JPG_Roughness.jpg")
-	var brick_albedo_img := Image.load_from_file("res://textures/walls/Bricks026_1K-JPG_Color.jpg")
-	var brick_normal_img := Image.load_from_file("res://textures/walls/Bricks026_1K-JPG_NormalGL.jpg")
-	var brick_rough_img := Image.load_from_file("res://textures/walls/Bricks026_1K-JPG_Roughness.jpg")
+	var panel_albedo_tex: Texture2D = load("res://textures/walls/Bricks053_1K-JPG_Color.jpg")
+	var panel_normal_tex: Texture2D = load("res://textures/walls/Bricks053_1K-JPG_NormalGL.jpg")
+	var panel_rough_tex: Texture2D = load("res://textures/walls/Bricks053_1K-JPG_Roughness.jpg")
+	var brick_albedo_tex: Texture2D = load("res://textures/walls/Bricks026_1K-JPG_Color.jpg")
+	var brick_normal_tex: Texture2D = load("res://textures/walls/Bricks026_1K-JPG_NormalGL.jpg")
+	var brick_rough_tex: Texture2D = load("res://textures/walls/Bricks026_1K-JPG_Roughness.jpg")
 
-	_building_textures["panel"] = ImageTexture.create_from_image(panel_albedo_img) if panel_albedo_img else TextureGeneratorScript.create_panel_building_no_windows(256, 5)
-	_building_textures["brick"] = ImageTexture.create_from_image(brick_albedo_img) if brick_albedo_img else TextureGeneratorScript.create_brick_building_no_windows(256)
-	_building_textures["wall"] = ImageTexture.create_from_image(panel_albedo_img) if panel_albedo_img else TextureGeneratorScript.create_wall_texture(256)
+	_building_textures["panel"] = panel_albedo_tex if panel_albedo_tex else TextureGeneratorScript.create_panel_building_no_windows(256, 5)
+	_building_textures["brick"] = brick_albedo_tex if brick_albedo_tex else TextureGeneratorScript.create_brick_building_no_windows(256)
+	_building_textures["wall"] = panel_albedo_tex if panel_albedo_tex else TextureGeneratorScript.create_wall_texture(256)
 	_building_textures["roof"] = TextureGeneratorScript.create_roof_texture(256)
 
 	# Normal/Roughness maps для стен
 	var _wall_normal_textures := {}
 	var _wall_roughness_textures := {}
-	_wall_normal_textures["panel"] = ImageTexture.create_from_image(panel_normal_img) if panel_normal_img else null
-	_wall_normal_textures["brick"] = ImageTexture.create_from_image(brick_normal_img) if brick_normal_img else null
+	_wall_normal_textures["panel"] = panel_normal_tex
+	_wall_normal_textures["brick"] = brick_normal_tex
 	_wall_normal_textures["wall"] = _wall_normal_textures["panel"]
-	_wall_roughness_textures["panel"] = ImageTexture.create_from_image(panel_rough_img) if panel_rough_img else null
-	_wall_roughness_textures["brick"] = ImageTexture.create_from_image(brick_rough_img) if brick_rough_img else null
+	_wall_roughness_textures["panel"] = panel_rough_tex
+	_wall_roughness_textures["brick"] = brick_rough_tex
 	_wall_roughness_textures["wall"] = _wall_roughness_textures["panel"]
 
 	# Shared материалы зданий (создаются один раз, переиспользуются для merged meshes)
@@ -678,31 +676,28 @@ func _init_textures() -> void:
 	_fence_material.cull_mode = BaseMaterial3D.CULL_BACK
 
 	# Текстуры земли - загружаем PBR текстуру травы (Ground037 — дикая трава с проплешинами)
-	var grass_img := Image.load_from_file("res://textures/Ground037_1K-JPG_Color.jpg")
-	if grass_img:
-		_ground_textures["grass"] = ImageTexture.create_from_image(grass_img)
-	else:
-		_ground_textures["grass"] = TextureGeneratorScript.create_forest_texture(256)
-	var grass_normal_img := Image.load_from_file("res://textures/Ground037_1K-JPG_NormalGL.jpg")
-	if grass_normal_img:
-		_ground_textures["grass_normal"] = ImageTexture.create_from_image(grass_normal_img)
-	var grass_rough_img := Image.load_from_file("res://textures/Ground037_1K-JPG_Roughness.jpg")
-	if grass_rough_img:
-		_ground_textures["grass_roughness"] = ImageTexture.create_from_image(grass_rough_img)
+	var grass_tex: Texture2D = load("res://textures/Ground037_1K-JPG_Color.jpg")
+	_ground_textures["grass"] = grass_tex if grass_tex else TextureGeneratorScript.create_forest_texture(256)
+	var grass_normal_tex: Texture2D = load("res://textures/Ground037_1K-JPG_NormalGL.jpg")
+	if grass_normal_tex:
+		_ground_textures["grass_normal"] = grass_normal_tex
+	var grass_rough_tex: Texture2D = load("res://textures/Ground037_1K-JPG_Roughness.jpg")
+	if grass_rough_tex:
+		_ground_textures["grass_roughness"] = grass_rough_tex
 	_ground_textures["forest"] = TextureGeneratorScript.create_forest_texture(256)
 	_ground_textures["water"] = TextureGeneratorScript.create_water_texture(256)
 
 	# Normal maps — PBR normal из ambientCG
-	var road_normal_img := Image.load_from_file("res://textures/road/Asphalt026B_1K-JPG_NormalGL.jpg")
-	_normal_textures["asphalt"] = ImageTexture.create_from_image(road_normal_img) if road_normal_img else TextureGeneratorScript.create_asphalt_normal(256)
-	var sidewalk_normal_img := Image.load_from_file("res://textures/road/Asphalt022_1K-JPG_NormalGL.jpg")
-	_normal_textures["sidewalk"] = ImageTexture.create_from_image(sidewalk_normal_img) if sidewalk_normal_img else _normal_textures["asphalt"]
+	var road_normal_tex: Texture2D = load("res://textures/road/Asphalt026B_1K-JPG_NormalGL.jpg")
+	_normal_textures["asphalt"] = road_normal_tex if road_normal_tex else TextureGeneratorScript.create_asphalt_normal(256)
+	var sidewalk_normal_tex: Texture2D = load("res://textures/road/Asphalt022_1K-JPG_NormalGL.jpg")
+	_normal_textures["sidewalk"] = sidewalk_normal_tex if sidewalk_normal_tex else _normal_textures["asphalt"]
 
 	# Roughness maps — PBR roughness из ambientCG
-	var road_rough_img := Image.load_from_file("res://textures/road/Asphalt026B_1K-JPG_Roughness.jpg")
-	_road_textures["road_roughness"] = ImageTexture.create_from_image(road_rough_img) if road_rough_img else null
-	var sidewalk_rough_img := Image.load_from_file("res://textures/road/Asphalt022_1K-JPG_Roughness.jpg")
-	_road_textures["sidewalk_roughness"] = ImageTexture.create_from_image(sidewalk_rough_img) if sidewalk_rough_img else null
+	var road_rough_tex: Texture2D = load("res://textures/road/Asphalt026B_1K-JPG_Roughness.jpg")
+	_road_textures["road_roughness"] = road_rough_tex
+	var sidewalk_rough_tex: Texture2D = load("res://textures/road/Asphalt022_1K-JPG_Roughness.jpg")
+	_road_textures["sidewalk_roughness"] = sidewalk_rough_tex
 	_normal_textures["brick"] = TextureGeneratorScript.create_brick_normal(256)
 	_normal_textures["concrete"] = TextureGeneratorScript.create_concrete_normal(256)
 	_normal_textures["panel"] = TextureGeneratorScript.create_panel_building_normal(256, 5, 4)  # Было 512
@@ -12996,20 +12991,17 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 		businesses_to_process.append({"tags": tags, "poi_position": null})
 
 	# 2. Ищем POI nodes внутри здания
-	if loader != null:
-		var pois_inside = _find_pois_inside_building(points, loader, poi_nodes)
-		var skip_override = null
-		if way_id > 0 and _decoration_layer:
-			skip_override = _decoration_layer.get_building_override_for_way(way_id)
-		for poi in pois_inside:
-			var poi_id_val = poi.get("id", 0)
-			if skip_override and not skip_override.skip_pois.is_empty():
-				if poi_id_val in skip_override.skip_pois:
-					print("BusinessSign: Skipping POI %s (suppressed by override for way %d)" % [str(poi_id_val), way_id])
-					continue
-			businesses_to_process.append({"tags": poi.tags, "poi_position": poi.position, "poi_id": poi_id_val})
-	else:
-		print("BusinessSign WARNING: loader is null, cannot search for POIs")
+	var pois_inside = _find_pois_inside_building(points, loader, poi_nodes)
+	var skip_override = null
+	if way_id > 0 and _decoration_layer:
+		skip_override = _decoration_layer.get_building_override_for_way(way_id)
+	for poi in pois_inside:
+		var poi_id_val = poi.get("id", 0)
+		if skip_override and not skip_override.skip_pois.is_empty():
+			if poi_id_val in skip_override.skip_pois:
+				print("BusinessSign: Skipping POI %s (suppressed by override for way %d)" % [str(poi_id_val), way_id])
+				continue
+		businesses_to_process.append({"tags": poi.tags, "poi_position": poi.position, "poi_id": poi_id_val})
 
 	if businesses_to_process.is_empty():
 		return
