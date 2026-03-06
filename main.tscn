@@ -30,6 +30,7 @@
 [ext_resource type="Script" path="res://settings/color_grading.gd" id="20_color_grading"]
 [ext_resource type="Script" path="res://ui/postprocess_overlay.gd" id="24_postprocess"]
 [ext_resource type="Script" path="res://car/lane_assist.gd" id="30_lane_assist"]
+[ext_resource type="Script" path="res://main.gd" id="25_main"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.4, 0.6, 0.9, 1)
@@ -88,6 +89,7 @@ volumetric_fog_ambient_inject = 0.0
 [sub_resource type="WorldBoundaryShape3D" id="WorldBoundaryShape3D_fallback"]
 
 [node name="Main" type="Node3D"]
+script = ExtResource("25_main")
 
 [node name="FallbackGround" type="StaticBody3D" parent="." groups=["Grass"]]
 collision_layer = 1
