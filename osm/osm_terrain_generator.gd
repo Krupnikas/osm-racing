@@ -1985,6 +1985,26 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 		if dist > max_dist:
 			_chunks_to_unload.append(chunk_key)
 
+	# Отменяем загрузку далёких чанков (ещё не загрузились — только HTTP в процессе)
+	var cancel_keys: Array[String] = []
+	for chunk_key in _loading_chunks:
+		var coords: Array = chunk_key.split(",")
+		var chunk_x := int(coords[0])
+		var chunk_z := int(coords[1])
+		var chunk_center := Vector3(chunk_x * chunk_size + chunk_size / 2, 0, chunk_z * chunk_size + chunk_size / 2)
+		var dist := player_pos.distance_to(chunk_center)
+		var max_dist := unload_distance
+		if move_dir.length_squared() > 0.5:
+			var to_chunk := (chunk_center - player_pos).normalized()
+			if to_chunk.dot(move_dir) < -0.3:
+				max_dist = 300.0
+		if dist > max_dist:
+			cancel_keys.append(chunk_key)
+	for chunk_key in cancel_keys:
+		print("OSM: Cancelling loading chunk %s (too far)" % chunk_key)
+		_loading_chunks.erase(chunk_key)
+		_current_load_count = maxi(0, _current_load_count - 1)
+
 
 ## Старая сложная предиктивная загрузка (отключена)
 func _update_chunks_predictive(player_pos: Vector3, velocity: Vector3) -> void:
@@ -2623,6 +2643,12 @@ func _on_chunk_load_failed(error: String, chunk_key: String, loader: Node, gen: 
 		loader.queue_free()
 		return
 
+	# Если чанк уже был отменён — просто освобождаем loader
+	if not _loading_chunks.has(chunk_key):
+		print("OSM: Ignoring failed cancelled chunk %s" % chunk_key)
+		loader.queue_free()
+		return
+
 	push_error("OSM chunk %s load failed: %s" % [chunk_key, error])
 	_loading_chunks.erase(chunk_key)
 	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
@@ -2637,6 +2663,12 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	# Игнорируем callback если это от старой загрузки (после reset_terrain)
 	if gen != _load_generation:
 		print("OSM: Ignoring stale chunk %s (gen %d != %d)" % [chunk_key, gen, _load_generation])
+		loader.queue_free()
+		return
+
+	# Если чанк был отменён (убрали из _loading_chunks, потому что уехали далеко) — игнорируем
+	if not _loading_chunks.has(chunk_key):
+		print("OSM: Ignoring cancelled chunk %s (no longer in _loading_chunks)" % chunk_key)
 		loader.queue_free()
 		return
 
