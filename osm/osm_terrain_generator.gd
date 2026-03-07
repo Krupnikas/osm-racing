@@ -1363,12 +1363,15 @@ func _process(delta: float) -> void:
 	var _frame_start := Time.get_ticks_usec()
 	_current_frame_perf.clear()
 	_slow_frame_cooldown -= delta
-	# Кешируем позицию камеры для приоритизации чанков
+	# Кешируем позицию и направление камеры для приоритизации чанков
 	var _vp := get_viewport()
 	if _vp:
 		var _cam := _vp.get_camera_3d()
 		if _cam:
 			_cached_cam_pos = _cam.global_position
+			var fwd := -_cam.global_transform.basis.z
+			fwd.y = 0.0
+			_cached_cam_fwd = fwd.normalized() if fwd.length_squared() > 0.001 else Vector3.FORWARD
 
 	# Reset add_child budget and drain deferred queue (with time budget)
 	_add_child_budget = 9999 if _initial_loading else ADD_CHILD_BUDGET_NORMAL
@@ -1699,14 +1702,17 @@ func start_loading() -> void:
 	else:
 		print("OSM: Loading chunks around spawn point (0, 0, 0)")
 
-	_initial_chunks_needed = _get_needed_chunks(spawn_pos)
+	_initial_chunks_needed = _get_initial_chunks(spawn_pos)
+	# Сортируем начальные чанки: ближайшие к камере первыми
+	if _initial_chunks_needed.size() > 1:
+		_initial_chunks_needed.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
 	print("OSM: Need to load %d chunks for initial area" % _initial_chunks_needed.size())
 
 	print("OSM: Emitting initial_load_started signal...")
 	initial_load_started.emit()
 	print("OSM: initial_load_started signal emitted")
 
-	# Загружаем начальные чанки
+	# Загружаем начальные чанки (уже отсортированы по приоритету)
 	var chunks_to_load := 0
 	for chunk_key in _initial_chunks_needed:
 		if not _loaded_chunks.has(chunk_key) and not _loading_chunks.has(chunk_key):
@@ -1902,13 +1908,18 @@ func _update_chunks(player_pos: Vector3) -> void:
 	# Определяем какие чанки нужны
 	var needed_chunks := _get_needed_chunks(player_pos)
 
-	# Загружаем недостающие
+	# Загружаем недостающие — ближайшие к камере первыми
+	var chunks_to_load: Array[String] = []
 	for chunk_key in needed_chunks:
 		if not _loaded_chunks.has(chunk_key) and not _loading_chunks.has(chunk_key):
-			var coords: Array = chunk_key.split(",")
-			var chunk_x := int(coords[0])
-			var chunk_z := int(coords[1])
-			_load_chunk(chunk_x, chunk_z)
+			chunks_to_load.append(chunk_key)
+	if chunks_to_load.size() > 1:
+		chunks_to_load.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
+	for chunk_key in chunks_to_load:
+		var coords: Array = chunk_key.split(",")
+		var chunk_x := int(coords[0])
+		var chunk_z := int(coords[1])
+		_load_chunk(chunk_x, chunk_z)
 
 	# Выгружаем далёкие чанки
 	for chunk_key in _loaded_chunks:
@@ -1920,6 +1931,17 @@ func _update_chunks(player_pos: Vector3) -> void:
 		var chunk_center := Vector3(chunk_x * chunk_size + chunk_size / 2, 0, chunk_z * chunk_size + chunk_size / 2)
 		if player_pos.distance_to(chunk_center) > unload_distance:
 			_chunks_to_unload.append(chunk_key)
+
+## Фиксированные 16 чанков для начальной загрузки (4×4, по 2 в каждую сторону)
+func _get_initial_chunks(player_pos: Vector3) -> Array[String]:
+	var result: Array[String] = []
+	var player_chunk_x := int(floor(player_pos.x / chunk_size))
+	var player_chunk_z := int(floor(player_pos.z / chunk_size))
+	for dx in range(-2, 2):
+		for dz in range(-2, 2):
+			result.append("%d,%d" % [player_chunk_x + dx, player_chunk_z + dz])
+	return result
+
 
 func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 	var result: Array[String] = []
@@ -1933,9 +1955,6 @@ func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 		for dz in range(-radius_chunks, radius_chunks + 1):
 			var cx := player_chunk_x + dx
 			var cz := player_chunk_z + dz
-			# DEBUG: шахматный порядок
-			if (cx + cz) % 2 == 0:
-				continue
 			var chunk_center := Vector3(cx * chunk_size + chunk_size / 2, 0, cz * chunk_size + chunk_size / 2)
 			if player_pos.distance_to(chunk_center) <= load_distance:
 				result.append("%d,%d" % [cx, cz])
@@ -1959,13 +1978,18 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 			if chunk_key not in needed_chunks:
 				needed_chunks.append(chunk_key)
 
-	# Загружаем недостающие
+	# Загружаем недостающие — ближайшие к камере первыми
+	var chunks_to_load: Array[String] = []
 	for chunk_key in needed_chunks:
 		if not _loaded_chunks.has(chunk_key) and not _loading_chunks.has(chunk_key):
-			var coords: Array = chunk_key.split(",")
-			var chunk_x := int(coords[0])
-			var chunk_z := int(coords[1])
-			_load_chunk(chunk_x, chunk_z)
+			chunks_to_load.append(chunk_key)
+	if chunks_to_load.size() > 1:
+		chunks_to_load.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
+	for chunk_key in chunks_to_load:
+		var coords: Array = chunk_key.split(",")
+		var chunk_x := int(coords[0])
+		var chunk_z := int(coords[1])
+		_load_chunk(chunk_x, chunk_z)
 
 	# Выгружаем далёкие чанки — сзади быстрее (300м), спереди дальше (unload_distance)
 	var move_dir := velocity.normalized() if speed > min_speed_for_prediction else Vector3.ZERO
@@ -8607,18 +8631,18 @@ func _process_road_queue() -> void:
 		_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
 
 	while not _road_queue.is_empty() and _pending_road_tasks < MAX_CONCURRENT_ROAD_TASKS:
-		# Prioritize roads from visible chunks closest to camera (scan up to 200 items)
+		# Prioritize roads from chunks closest to camera (scan up to 200 items)
 		var _rq_idx := 0
 		var _rq_scan := mini(_road_queue.size(), 200)
-		var _rq_best_dist := INF
+		var _rq_best_score := INF
 		for _ri in _rq_scan:
 			var _rq_parent: Node3D = _road_queue[_ri].get("parent")
-			if is_instance_valid(_rq_parent) and _rq_parent.visible:
+			if is_instance_valid(_rq_parent):
 				var _rq_ck := _rq_parent.name.substr(6) if _rq_parent.name.begins_with("Chunk_") else ""
 				if _rq_ck != "":
-					var _rq_d := _chunk_dist_sq(_rq_ck)
-					if _rq_d < _rq_best_dist:
-						_rq_best_dist = _rq_d
+					var _rq_s := _chunk_priority_score(_rq_ck)
+					if _rq_s < _rq_best_score:
+						_rq_best_score = _rq_s
 						_rq_idx = _ri
 		var item: Dictionary = _road_queue[_rq_idx]
 		_road_queue.remove_at(_rq_idx)
@@ -8671,7 +8695,7 @@ func _process_road_queue() -> void:
 				_finalize_phase = 1
 				if not _pending_batch_chunks.is_empty():
 					var t_batch := Time.get_ticks_usec()
-					var _pbc_idx := _pick_visible_chunk_idx(_pending_batch_chunks)
+					var _pbc_idx := _pick_closest_chunk_idx(_pending_batch_chunks)
 					var chunk_key2: String = _pending_batch_chunks[_pbc_idx]
 					_pending_batch_chunks.remove_at(_pbc_idx)
 					_finalize_road_batches_for_chunk(chunk_key2)
@@ -8690,7 +8714,7 @@ func _process_road_queue() -> void:
 				_finalize_phase = 3
 				if not _lamp_batches_to_finalize.is_empty():
 					var t_lamp := Time.get_ticks_usec()
-					var _lb_idx := _pick_visible_chunk_idx(_lamp_batches_to_finalize)
+					var _lb_idx := _pick_closest_chunk_idx(_lamp_batches_to_finalize)
 					var lamp_ck: String = _lamp_batches_to_finalize[_lb_idx]
 					_lamp_batches_to_finalize.remove_at(_lb_idx)
 					_finalize_lamp_batches_for_chunk(lamp_ck)
@@ -8708,7 +8732,7 @@ func _process_road_queue() -> void:
 
 					if not _building_geo_finalize_queue.is_empty():
 						var t_geo := Time.get_ticks_usec()
-						var _bg_idx := _pick_visible_chunk_idx(_building_geo_finalize_queue)
+						var _bg_idx := _pick_closest_chunk_idx(_building_geo_finalize_queue)
 						var geo_ck: String = _building_geo_finalize_queue[_bg_idx]
 						_building_geo_finalize_queue.remove_at(_bg_idx)
 						_finalize_building_geo_batch(geo_ck)
@@ -8742,7 +8766,7 @@ func _process_road_queue() -> void:
 				_finalize_phase = 6
 				if not _tree_batches_to_finalize.is_empty():
 					var t_tree := Time.get_ticks_usec()
-					var _tb_idx := _pick_visible_chunk_idx(_tree_batches_to_finalize)
+					var _tb_idx := _pick_closest_chunk_idx(_tree_batches_to_finalize)
 					var tree_ck: String = _tree_batches_to_finalize[_tb_idx]
 					_tree_batches_to_finalize.remove_at(_tb_idx)
 					_finalize_tree_batches_for_chunk(tree_ck)
@@ -8753,7 +8777,7 @@ func _process_road_queue() -> void:
 				_finalize_phase = 7
 				if not _billboard_batches_to_finalize.is_empty():
 					var t_bill := Time.get_ticks_usec()
-					var _bb_idx := _pick_visible_chunk_idx(_billboard_batches_to_finalize)
+					var _bb_idx := _pick_closest_chunk_idx(_billboard_batches_to_finalize)
 					var bill_ck: String = _billboard_batches_to_finalize[_bb_idx]
 					_billboard_batches_to_finalize.remove_at(_bb_idx)
 					_finalize_billboard_batch_for_chunk(bill_ck)
@@ -8763,7 +8787,7 @@ func _process_road_queue() -> void:
 			7:  # Fences (1 chunk — visible first)
 				_finalize_phase = 0
 				if not _fence_batches_to_finalize.is_empty():
-					var _fc_idx := _pick_visible_chunk_idx(_fence_batches_to_finalize)
+					var _fc_idx := _pick_closest_chunk_idx(_fence_batches_to_finalize)
 					var fence_ck: String = _fence_batches_to_finalize[_fc_idx]
 					# Don't finalize if deferred edges still pending for this chunk
 					var has_pending_edges: bool = _deferred_fence_edges.has(fence_ck) and not (_deferred_fence_edges[fence_ck] as Array).is_empty()
@@ -14256,49 +14280,44 @@ func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) 
 	return (p1 * 2.0 + (-p0 + p2) * t + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 + (-p0 + p1 * 3.0 - p2 * 3.0 + p3) * t3) * 0.5
 
 
-## Проверяет, виден ли чанк (visible в scene tree)
-func _is_chunk_visible(chunk_key: String) -> bool:
-	if not _loaded_chunks.has(chunk_key):
-		return false
-	var node: Node3D = _loaded_chunks[chunk_key]
-	return is_instance_valid(node) and node.visible
-
-## Расстояние от камеры до центра чанка (XZ плоскость). Кеш позиции обновляется в _process.
+## Приоритет чанка: чем меньше значение, тем выше приоритет.
+## Чанки перед камерой получают бонус (score уменьшается), сзади — штраф.
 var _cached_cam_pos := Vector3.ZERO
-func _chunk_dist_sq(chunk_key: String) -> float:
+var _cached_cam_fwd := Vector3.FORWARD
+func _chunk_priority_score(chunk_key: String) -> float:
 	var parts := chunk_key.split(",")
 	var cx := float(int(parts[0])) * chunk_size + chunk_size * 0.5
 	var cz := float(int(parts[1])) * chunk_size + chunk_size * 0.5
 	var dx := cx - _cached_cam_pos.x
 	var dz := cz - _cached_cam_pos.z
-	return dx * dx + dz * dz
+	var dist_sq := dx * dx + dz * dz
+	# Направление к чанку относительно камеры: dot > 0 = впереди, < 0 = сзади
+	var dist := sqrt(dist_sq) + 0.001
+	var dot := (dx * _cached_cam_fwd.x + dz * _cached_cam_fwd.z) / dist
+	# Чанки сзади камеры (dot < 0) получают штраф ×3
+	if dot < 0.0:
+		return dist_sq * 3.0
+	return dist_sq
 
-## Находит индекс ближайшего видимого чанка в массиве ключей. Возвращает 0 если нет видимых.
-func _pick_visible_chunk_idx(queue: Array) -> int:
-	var best_idx := -1
-	var best_dist := INF
-	for i in queue.size():
-		if _is_chunk_visible(queue[i]):
-			var d := _chunk_dist_sq(queue[i])
-			if d < best_dist:
-				best_dist = d
-				best_idx = i
-	return best_idx if best_idx >= 0 else 0
+## Находит индекс чанка с наивысшим приоритетом (ближайший перед камерой). Возвращает 0 если пусто.
+func _pick_closest_chunk_idx(queue: Array) -> int:
+	if queue.size() <= 1:
+		return 0
+	var best_idx := 0
+	var best_score := _chunk_priority_score(queue[0])
+	for i in range(1, queue.size()):
+		var s := _chunk_priority_score(queue[i])
+		if s < best_score:
+			best_score = s
+			best_idx = i
+	return best_idx
 
-## Возвращает ключи Dictionary: видимые (ближние первые), затем остальные
+## Возвращает ключи Dictionary отсортированные по приоритету (ближние перед камерой первые)
 func _get_prioritized_keys(dict: Dictionary) -> Array:
-	var visible_keys: Array = []
-	var other_keys: Array = []
-	for ck in dict:
-		if _is_chunk_visible(ck):
-			visible_keys.append(ck)
-		else:
-			other_keys.append(ck)
-	# Сортируем видимые по расстоянию (ближние первые)
-	if visible_keys.size() > 1:
-		visible_keys.sort_custom(func(a, b): return _chunk_dist_sq(a) < _chunk_dist_sq(b))
-	visible_keys.append_array(other_keys)
-	return visible_keys
+	var keys: Array = dict.keys()
+	if keys.size() > 1:
+		keys.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
+	return keys
 
 ## Возвращает Rect2 для чанка по его ключу "cx,cz"
 func _get_chunk_rect_from_key(chunk_key: String) -> Rect2:
@@ -15338,7 +15357,12 @@ func _process_chunk_activation() -> void:
 	# During gameplay: drip-feed 4 per frame to avoid Vulkan upload spikes
 	var rs_per_frame := 999999 if _initial_loading else 4
 
-	for chunk_key in _chunk_activation_pending.keys():
+	# Сортируем по приоритету: ближайшие к камере первыми
+	var activation_keys: Array = _chunk_activation_pending.keys()
+	if activation_keys.size() > 1:
+		activation_keys.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
+
+	for chunk_key in activation_keys:
 		var state: int = _chunk_activation_pending[chunk_key]
 
 		if state == -1:
@@ -15568,8 +15592,9 @@ func _update_chunk_culling() -> void:
 	var cam_pos := _culling_camera.global_position
 
 	for chunk_key in _loaded_chunks.keys():
-		# Пропускаем чанки в процессе lazy activation
+		# Чанки в процессе lazy activation — считаем видимыми (они уже рендерятся)
 		if _chunk_activation_pending.has(chunk_key):
+			visible_count += 1
 			continue
 		# Don't cull recently activated chunks (3s cooldown to prevent appear/disappear/appear)
 		if _chunk_culling_cooldown.has(chunk_key):

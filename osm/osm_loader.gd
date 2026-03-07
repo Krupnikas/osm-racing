@@ -11,6 +11,17 @@ const OVERPASS_SERVERS := [
 	"https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 
+# Глобальная ротация серверов и rate limit (shared между всеми инстансами)
+static var _next_server_index := 0  # Round-robin: каждый новый запрос → следующий сервер
+static var _server_cooldown_until: Array[int] = [0, 0, 0]  # msec timestamp до которого сервер заблокирован
+static var _request_queue: Array[OSMLoader] = []  # Глобальная очередь запросов
+static var _active_requests: int = 0  # Сколько HTTP запросов сейчас в полёте
+const MAX_ACTIVE_REQUESTS := 2  # Макс одновременных HTTP запросов (все серверы суммарно)
+const REQUEST_INTERVAL_MS := 1200  # Минимальный интервал между запросами к одному серверу
+const RATE_LIMIT_COOLDOWN_MS := 10000  # Cooldown сервера после 429/ошибки
+static var _last_request_time: Array[int] = [0, 0, 0]  # Время последнего запроса к каждому серверу
+static var _queue_processor: OSMLoader = null  # Один инстанс обрабатывает очередь
+
 # Кеширование
 const CACHE_DIR := "user://osm_cache/"
 const CACHE_VERSION := 6  # v6: добавлен poi node id
@@ -22,9 +33,10 @@ var center_lon: float
 var radius_meters: float
 var current_server_index := 0
 var retry_count := 0
-var max_retries := 3
+var max_retries := 6  # 2 полных прохода по 3 серверам
 var pending_query: String = ""
 var current_cache_key: String = ""
+var _waiting_in_queue := false
 
 # Thread-based cache loading
 var _cache_task_id: int = -1
@@ -34,7 +46,7 @@ var _cache_mutex := Mutex.new()
 
 func _ready() -> void:
 	http_request = HTTPRequest.new()
-	http_request.timeout = 5.0  # 5s HTTP timeout per server attempt
+	http_request.timeout = 10.0  # 10s HTTP timeout per server attempt
 	add_child(http_request)
 	http_request.request_completed.connect(_on_request_completed)
 	_ensure_cache_dir()
@@ -58,6 +70,60 @@ func _process(_delta: float) -> void:
 			else:
 				# Cache load failed — fall back to network
 				_start_network_request()
+
+	# Один инстанс обрабатывает глобальную очередь
+	if _queue_processor == self:
+		_process_global_queue()
+
+
+func _exit_tree() -> void:
+	# Убираем себя из очереди при удалении
+	_request_queue.erase(self)
+	if _queue_processor == self:
+		_queue_processor = null
+
+
+## Обработка глобальной очереди запросов
+func _process_global_queue() -> void:
+	if _request_queue.is_empty():
+		return
+	if _active_requests >= MAX_ACTIVE_REQUESTS:
+		return
+
+	var now := Time.get_ticks_msec()
+
+	# Ищем свободный сервер для следующего в очереди
+	var server_idx := _pick_available_server(now)
+	if server_idx < 0:
+		return  # Все серверы на cooldown или rate limited
+
+	# Берём первого из очереди
+	var loader: OSMLoader = _request_queue.pop_front()
+	if not is_instance_valid(loader):
+		return  # Loader был удалён пока ждал
+	loader._waiting_in_queue = false
+	loader.current_server_index = server_idx
+	_last_request_time[server_idx] = now
+	_active_requests += 1
+	loader._send_request_immediate()
+
+
+## Выбирает сервер с учётом cooldown и минимального интервала
+static func _pick_available_server(now: int) -> int:
+	var best_idx := -1
+	var best_wait := 999999
+	for i in OVERPASS_SERVERS.size():
+		# Сервер на cooldown (rate limited)
+		if now < _server_cooldown_until[i]:
+			continue
+		# Проверяем минимальный интервал
+		var elapsed := now - _last_request_time[i]
+		if elapsed >= REQUEST_INTERVAL_MS:
+			# Сервер свободен — берём с наименьшим временем ожидания
+			if elapsed > best_wait or best_idx < 0:
+				best_idx = i
+				best_wait = elapsed
+	return best_idx
 
 
 func _ensure_cache_dir() -> void:
@@ -195,39 +261,66 @@ out skel qt;
 """ % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
-	current_server_index = 0
 	retry_count = 0
-	_send_request()
+
+	# Встаём в глобальную очередь вместо немедленного запроса
+	_waiting_in_queue = true
+	if not _request_queue.has(self):
+		_request_queue.append(self)
+
+	# Назначаем обработчик очереди если ещё нет
+	if _queue_processor == null or not is_instance_valid(_queue_processor):
+		_queue_processor = self
 
 
 func _emit_cached_data(cached: Dictionary) -> void:
 	data_loaded.emit(cached)
 
-func _send_request() -> void:
+
+## Отправляет запрос немедленно (вызывается из очереди, сервер уже выбран)
+func _send_request_immediate() -> void:
 	var server_url: String = OVERPASS_SERVERS[current_server_index]
 	var headers := ["Content-Type: application/x-www-form-urlencoded"]
 	var body := "data=" + pending_query.uri_encode()
 
-	print("OSM: Trying server %s (attempt %d)" % [server_url, retry_count + 1])
+	var server_name := server_url.split("/")[2]  # "overpass.kumi.systems" etc
+	print("OSM: [%s] attempt %d (active: %d, queued: %d)" % [
+		server_name, retry_count + 1, _active_requests, _request_queue.size()])
 	var error := http_request.request(server_url, headers, HTTPClient.METHOD_POST, body)
 
 	if error != OK:
+		_active_requests = maxi(0, _active_requests - 1)
 		_try_next_server("HTTP request failed: " + str(error))
+
 
 func _try_next_server(reason: String) -> void:
 	print("OSM: Server failed - %s" % reason)
 	retry_count += 1
 
 	if retry_count < max_retries:
-		current_server_index = (current_server_index + 1) % OVERPASS_SERVERS.size()
-		print("OSM: Retrying with next server...")
-		_send_request()
+		# Возвращаемся в очередь — сервер выберется автоматически
+		_waiting_in_queue = true
+		if not _request_queue.has(self):
+			_request_queue.append(self)
 	else:
 		load_failed.emit("All servers failed after %d attempts. Last error: %s" % [max_retries, reason])
 
+
 func _on_request_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	_active_requests = maxi(0, _active_requests - 1)
+
 	if result != HTTPRequest.RESULT_SUCCESS:
 		_try_next_server("Request failed with result: " + str(result))
+		return
+
+	if response_code == 429 or response_code == 503:
+		# Rate limited — ставим cooldown на этот сервер
+		var now := Time.get_ticks_msec()
+		_server_cooldown_until[current_server_index] = now + RATE_LIMIT_COOLDOWN_MS
+		print("OSM: Server %s rate limited (HTTP %d), cooldown %ds" % [
+			OVERPASS_SERVERS[current_server_index].split("/")[2],
+			response_code, RATE_LIMIT_COOLDOWN_MS / 1000])
+		_try_next_server("HTTP %d (rate limited)" % response_code)
 		return
 
 	if response_code != 200:
