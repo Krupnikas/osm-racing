@@ -166,7 +166,7 @@ var _culling_visible_count := 0  # Количество видимых чанк�
 var _culling_culled_count := 0   # Количество скрытых чанков (для HUD)
 
 # Отложенная генерация дорог и других тяжёлых объектов
-var _road_queue: Array = []  # Очередь {nodes, tags, parent}
+var _road_queue: Dictionary = {}  # Per-chunk road queue: chunk_key -> Array of {nodes, tags, parent, way_id}
 var _curb_queue: Array = []  # Очередь бордюров (создаются после детекции перекрёстков)
 
 # Threaded road processing — smoothing + geometry in worker threads
@@ -1552,7 +1552,7 @@ func _process(delta: float) -> void:
 			sf_phys_bodies, sf_phys_pairs, sf_vram])
 		# Queues
 		print("  Queues: roads=%d terrain=%d infra=%d buildings=%d curbs=%d" % [
-			_road_queue.size(), _terrain_objects_queue.size(), _infrastructure_queue.size(),
+			_road_queue_total_size(), _terrain_objects_queue.size(), _infrastructure_queue.size(),
 			_building_results.size(), _curb_queue.size() + _curb_smoothed_queue.size()])
 		# Loaded chunks
 		print("  Chunks loaded: %d, loading: %d" % [_loaded_chunks.size(), _loading_chunks.size()])
@@ -1758,12 +1758,12 @@ func _check_initial_load_complete() -> void:
 	var pending_road_snapshot: int = _pending_road_tasks
 	var road_results_pending: int = _road_results.size()
 	_road_mutex.unlock()
-	var total_queued: int = _building_results.size() + _road_queue.size() + road_results_pending + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + pending_road_snapshot + _pending_veg_tasks + _pending_terrain_tasks + _deferred_total_size(_deferred_lamp_queue) + _deferred_total_size(_deferred_manhole_queue) + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_total_size(_deferred_footway_queue) + _deferred_total_size(_deferred_billboard_queue) + _chunk_activation_pending.size() + _deferred_total_size(_deferred_lamp_lights) + _phase3_queue.size()
+	var total_queued: int = _building_results.size() + _road_queue_total_size() + road_results_pending + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + pending_road_snapshot + _pending_veg_tasks + _pending_terrain_tasks + _deferred_total_size(_deferred_lamp_queue) + _deferred_total_size(_deferred_manhole_queue) + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_total_size(_deferred_footway_queue) + _deferred_total_size(_deferred_billboard_queue) + _chunk_activation_pending.size() + _deferred_total_size(_deferred_lamp_lights) + _phase3_queue.size()
 
 	# DEBUG: Детальное логирование очередей
 	if loaded_count >= total_chunks and total_queued > 0:
 		print("OSM DEBUG: Chunks loaded %d/%d, queues=%d:" % [loaded_count, total_chunks, total_queued])
-		print("  data: bld=%d road=%d(thr:%d,res:%d) terr=%d infra=%d pBld=%d pRoad=%d pVeg=%d pTerr=%d lamp=%d manhole=%d traffic=%d" % [_building_results.size(), _road_queue.size(), pending_road_snapshot, road_results_pending, _terrain_objects_queue.size(), _infrastructure_queue.size(), _pending_building_tasks, pending_road_snapshot, _pending_veg_tasks, _pending_terrain_tasks, _deferred_total_size(_deferred_lamp_queue), _deferred_total_size(_deferred_manhole_queue), _deferred_traffic_queue.size()])
+		print("  data: bld=%d road=%d(thr:%d,res:%d) terr=%d infra=%d pBld=%d pRoad=%d pVeg=%d pTerr=%d lamp=%d manhole=%d traffic=%d" % [_building_results.size(), _road_queue_total_size(), pending_road_snapshot, road_results_pending, _terrain_objects_queue.size(), _infrastructure_queue.size(), _pending_building_tasks, pending_road_snapshot, _pending_veg_tasks, _pending_terrain_tasks, _deferred_total_size(_deferred_lamp_queue), _deferred_total_size(_deferred_manhole_queue), _deferred_traffic_queue.size()])
 		print("  finalize: roadBatch=%d bldGeo=%d curb=%d lamp=%d tree=%d billboard=%d window=%d" % [_pending_batch_chunks.size(), _building_geo_finalize_queue.size(), _curb_geo_batch.size(), _lamp_batches_to_finalize.size(), _tree_batches_to_finalize.size(), _billboard_batches_to_finalize.size(), _window_finalize_queue.size()])
 
 	# DEBUG: Проверяем зависшие чанки в _loading_chunks
@@ -1815,13 +1815,49 @@ func _check_initial_load_complete() -> void:
 
 	# Все начальные чанки загружены?
 	if loaded_count >= total_chunks:
-		# Проверяем что все очереди обработаны (для плавности старта)
-		# Visual queues: must be empty before hiding loading screen
-		# Deferred collisions/lights are NOT blocking — they continue in background
-		# Note: _deferred_lamp_lights, _deferred_lamp_queue, _deferred_manhole_queue are NOT blocking — they continue in background
-		# Note: _chunk_activation_pending IS blocking during initial load (bulk-activated instantly)
-		#   so it completes fast and ensures all RS instances are visible before gameplay
-		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and road_results_pending <= 0 and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and pending_road_snapshot <= 0 and _pending_veg_tasks <= 0 and _pending_batch_chunks.is_empty() and _building_geo_finalize_queue.is_empty() and _curb_geo_batch.is_empty() and _lamp_batches_to_finalize.is_empty() and _tree_batches_to_finalize.is_empty() and _billboard_batches_to_finalize.is_empty() and _window_finalize_queue.is_empty() and _phase3_queue.is_empty() and _chunk_activation_pending.is_empty()
+		# Ждём только очереди для НАЧАЛЬНЫХ 16 чанков, остальные достроятся на фоне
+		var initial_set: Dictionary = {}
+		for ck in _initial_chunks_needed:
+			initial_set[ck] = true
+		var initial_queued := false
+		# phase3 — есть ли наши чанки
+		for p3 in _phase3_queue:
+			if initial_set.has(p3.chunk_key):
+				initial_queued = true
+				break
+		# Finalization arrays — содержат ли начальные чанки
+		if not initial_queued:
+			for ck in _pending_batch_chunks:
+				if initial_set.has(ck):
+					initial_queued = true
+					break
+		if not initial_queued:
+			for ck in _building_geo_finalize_queue:
+				if initial_set.has(ck):
+					initial_queued = true
+					break
+		if not initial_queued:
+			for ck in _lamp_batches_to_finalize:
+				if initial_set.has(ck):
+					initial_queued = true
+					break
+		if not initial_queued:
+			for ck in _tree_batches_to_finalize:
+				if initial_set.has(ck):
+					initial_queued = true
+					break
+		if not initial_queued:
+			for ck in _billboard_batches_to_finalize:
+				if initial_set.has(ck):
+					initial_queued = true
+					break
+		# Activation pending для начальных
+		if not initial_queued:
+			for ck in _chunk_activation_pending:
+				if initial_set.has(ck):
+					initial_queued = true
+					break
+		var queues_empty := not initial_queued
 		if not queues_empty:
 			# Отслеживаем зависание очереди
 			if total_queued == _last_queue_size:
@@ -2396,7 +2432,7 @@ func _unload_chunk(chunk_key: String) -> void:
 		# (parent will be freed → items would be skipped anyway, but this frees queue slots)
 		var chunk_node_ref: Node3D = _loaded_chunks[chunk_key] if _loaded_chunks.has(chunk_key) else null
 		if chunk_node_ref:
-			_road_queue = _road_queue.filter(func(item): return item.get("parent") != chunk_node_ref)
+			_road_queue.erase(chunk_key)
 			_terrain_objects_queue = _terrain_objects_queue.filter(func(item): return item.get("parent") != chunk_node_ref)
 			_infrastructure_queue = _infrastructure_queue.filter(func(item): return item.get("parent") != chunk_node_ref)
 			_curb_queue = _curb_queue.filter(func(item): return item.get("parent") != chunk_node_ref)
@@ -3237,6 +3273,24 @@ func _process_phase3_queue() -> bool:
 	var budget_us: int = 500000 if _initial_loading else 4000
 	var t0 := Time.get_ticks_usec()
 
+	# Приоритизируем: ближайший processable чанк перед камерой первый
+	var best_idx := -1
+	var best_score := INF
+	for pi in _phase3_queue.size():
+		var ck: String = _phase3_queue[pi].chunk_key
+		if not _should_process_chunk(ck):
+			continue
+		var ps := _chunk_priority_score(ck)
+		if ps < best_score:
+			best_score = ps
+			best_idx = pi
+	if best_idx < 0:
+		return false  # Все чанки culled — ничего не делаем
+	if best_idx != 0:
+		var tmp: Dictionary = _phase3_queue[0]
+		_phase3_queue[0] = _phase3_queue[best_idx]
+		_phase3_queue[best_idx] = tmp
+
 	var entry: Dictionary = _phase3_queue[0]
 	var result: Dictionary = entry.result
 	var parent: Node3D = entry.parent
@@ -3631,8 +3685,13 @@ func _compute_averaged_perpendiculars(points: PackedVector2Array) -> Array[Vecto
 func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node, way_id: int = 0, skip_spatial_hash: bool = false) -> void:
 	if not enable_roads:
 		return
-	# Добавляем в очередь для отложенного создания
-	_road_queue.append({
+	# Добавляем в очередь для отложенного создания (per-chunk)
+	var rq_ck := ""
+	if parent.name.begins_with("Chunk_"):
+		rq_ck = parent.name.substr(6)
+	if not _road_queue.has(rq_ck):
+		_road_queue[rq_ck] = []
+	_road_queue[rq_ck].append({
 		"nodes": nodes,
 		"tags": tags,
 		"parent": parent,
@@ -5522,56 +5581,60 @@ func _process_deferred_nodes() -> void:
 	if not _deferred_road_collisions.is_empty():
 		if _add_child_count >= _add_child_budget:
 			return
-		var rc_ck: String = _get_prioritized_keys(_deferred_road_collisions)[0]
-		var rc_arr: Array = _deferred_road_collisions[rc_ck]
-		var item: Dictionary = rc_arr.pop_front()
-		if rc_arr.is_empty():
-			_deferred_road_collisions.erase(rc_ck)
-		if is_instance_valid(item["body"]):
-			var verts: PackedVector3Array = item["vertices"]
-			var idxs: PackedInt32Array = item["indices"]
-			var faces := PackedVector3Array()
-			faces.resize(idxs.size())
-			for fi in range(idxs.size()):
-				faces[fi] = verts[idxs[fi]]
-			var shape := ConcavePolygonShape3D.new()
-			shape.set_faces(faces)
-			var col_shape := CollisionShape3D.new()
-			col_shape.shape = shape
-			_budgeted_add_child(item["body"], col_shape)
-		_record_perf("deferred_road_coll", Time.get_ticks_usec() - start)
-		return  # 1 heavy collision за кадр
+		var _rc_keys := _get_prioritized_keys(_deferred_road_collisions)
+		if not _rc_keys.is_empty():
+			var rc_ck: String = _rc_keys[0]
+			var rc_arr: Array = _deferred_road_collisions[rc_ck]
+			var item: Dictionary = rc_arr.pop_front()
+			if rc_arr.is_empty():
+				_deferred_road_collisions.erase(rc_ck)
+			if is_instance_valid(item["body"]):
+				var verts: PackedVector3Array = item["vertices"]
+				var idxs: PackedInt32Array = item["indices"]
+				var faces := PackedVector3Array()
+				faces.resize(idxs.size())
+				for fi in range(idxs.size()):
+					faces[fi] = verts[idxs[fi]]
+				var shape := ConcavePolygonShape3D.new()
+				shape.set_faces(faces)
+				var col_shape := CollisionShape3D.new()
+				col_shape.shape = shape
+				_budgeted_add_child(item["body"], col_shape)
+			_record_perf("deferred_road_coll", Time.get_ticks_usec() - start)
+			return  # 1 heavy collision за кадр
 
 	if not _deferred_terrain_collisions.is_empty():
 		if _add_child_count >= _add_child_budget:
 			return
-		var tc_ck: String = _get_prioritized_keys(_deferred_terrain_collisions)[0]
-		var tc_arr: Array = _deferred_terrain_collisions[tc_ck]
-		var item: Dictionary = tc_arr.pop_front()
-		if tc_arr.is_empty():
-			_deferred_terrain_collisions.erase(tc_ck)
-		var t_parent: Node3D = item["parent"]
-		if is_instance_valid(t_parent):
-			var verts: PackedVector3Array = item["vertices"]
-			var idxs: PackedInt32Array = item["indices"]
-			var faces := PackedVector3Array()
-			for i in range(0, idxs.size(), 3):
-				faces.append(verts[idxs[i]])
-				faces.append(verts[idxs[i + 1]])
-				faces.append(verts[idxs[i + 2]])
-			var body := StaticBody3D.new()
-			body.name = "TerrainCollision"
-			body.collision_layer = 1
-			body.collision_mask = 0
-			body.add_to_group("Grass")  # GEVP/tire tracks — определение поверхности
-			var col_shape := CollisionShape3D.new()
-			var concave := ConcavePolygonShape3D.new()
-			concave.set_faces(faces)
-			col_shape.shape = concave
-			body.add_child(col_shape)
-			_budgeted_add_child(t_parent, body)
-		_record_perf("deferred_terrain_coll", Time.get_ticks_usec() - start)
-		return
+		var _tc_keys := _get_prioritized_keys(_deferred_terrain_collisions)
+		if not _tc_keys.is_empty():
+			var tc_ck: String = _tc_keys[0]
+			var tc_arr: Array = _deferred_terrain_collisions[tc_ck]
+			var item: Dictionary = tc_arr.pop_front()
+			if tc_arr.is_empty():
+				_deferred_terrain_collisions.erase(tc_ck)
+			var t_parent: Node3D = item["parent"]
+			if is_instance_valid(t_parent):
+				var verts: PackedVector3Array = item["vertices"]
+				var idxs: PackedInt32Array = item["indices"]
+				var faces := PackedVector3Array()
+				for i in range(0, idxs.size(), 3):
+					faces.append(verts[idxs[i]])
+					faces.append(verts[idxs[i + 1]])
+					faces.append(verts[idxs[i + 2]])
+				var body := StaticBody3D.new()
+				body.name = "TerrainCollision"
+				body.collision_layer = 1
+				body.collision_mask = 0
+				body.add_to_group("Grass")  # GEVP/tire tracks — определение поверхности
+				var col_shape := CollisionShape3D.new()
+				var concave := ConcavePolygonShape3D.new()
+				concave.set_faces(faces)
+				col_shape.shape = concave
+				body.add_child(col_shape)
+				_budgeted_add_child(t_parent, body)
+			_record_perf("deferred_terrain_coll", Time.get_ticks_usec() - start)
+			return
 
 	# 2. Building collisions (budgeted)
 	var bc_done_keys: Array[String] = []
@@ -8409,7 +8472,7 @@ func _update_debug_stats(delta: float) -> void:
 	var vram := Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0
 
 	# Размеры очередей
-	var road_q := _road_queue.size()
+	var road_q := _road_queue_total_size()
 	var terrain_q := _terrain_objects_queue.size()
 	var infra_q := _infrastructure_queue.size()
 	var building_q := _building_results.size() + _building_geo_finalize_queue.size()
@@ -8495,6 +8558,12 @@ func _update_debug_stats(delta: float) -> void:
 	]
 
 
+func _road_queue_total_size() -> int:
+	var total := 0
+	for ck in _road_queue:
+		total += (_road_queue[ck] as Array).size()
+	return total
+
 ## Обрабатывает очередь дорог (3 дороги за кадр)
 func _process_road_queue() -> void:
 	var queue_start := Time.get_ticks_usec()
@@ -8505,6 +8574,7 @@ func _process_road_queue() -> void:
 	var n_ready := _road_results.size()
 	_road_mutex.unlock()
 
+	var road_apply_budget: int = 4000 if _initial_loading else 2000  # 4ms initial, 2ms gameplay
 	var applied := 0
 	while applied < n_ready:
 		_road_mutex.lock()
@@ -8515,7 +8585,7 @@ func _process_road_queue() -> void:
 		_road_mutex.unlock()
 		_apply_road_result(result)
 		applied += 1
-		if (Time.get_ticks_usec() - queue_start) > 2000:
+		if (Time.get_ticks_usec() - queue_start) > road_apply_budget:
 			break
 	_record_perf("road_apply", Time.get_ticks_usec() - queue_start)
 
@@ -8630,55 +8700,50 @@ func _process_road_queue() -> void:
 	if _lon_scale == 0.0:
 		_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
 
-	while not _road_queue.is_empty() and _pending_road_tasks < MAX_CONCURRENT_ROAD_TASKS:
-		# Prioritize roads from chunks closest to camera (scan up to 200 items)
-		var _rq_idx := 0
-		var _rq_scan := mini(_road_queue.size(), 200)
-		var _rq_best_score := INF
-		for _ri in _rq_scan:
-			var _rq_parent: Node3D = _road_queue[_ri].get("parent")
-			if is_instance_valid(_rq_parent):
-				var _rq_ck := _rq_parent.name.substr(6) if _rq_parent.name.begins_with("Chunk_") else ""
-				if _rq_ck != "":
-					var _rq_s := _chunk_priority_score(_rq_ck)
-					if _rq_s < _rq_best_score:
-						_rq_best_score = _rq_s
-						_rq_idx = _ri
-		var item: Dictionary = _road_queue[_rq_idx]
-		_road_queue.remove_at(_rq_idx)
-		if not is_instance_valid(item.get("parent")):
-			continue
+	# Pick processable chunk with best priority score (once per frame)
+	if not _road_queue.is_empty() and _pending_road_tasks < MAX_CONCURRENT_ROAD_TASKS:
+		var best_ck := ""
+		var best_score := INF
+		for rq_ck in _road_queue:
+			if not _should_process_chunk(rq_ck):
+				continue
+			var rq_s := _chunk_priority_score(rq_ck)
+			if rq_s < best_score:
+				best_score = rq_s
+				best_ck = rq_ck
+		# Dispatch multiple roads from best chunk until worker limit
+		if best_ck != "":
+			var rq_arr: Array = _road_queue[best_ck]
+			while not rq_arr.is_empty() and _pending_road_tasks < MAX_CONCURRENT_ROAD_TASKS:
+				var item: Dictionary = rq_arr.pop_front()
+				if not is_instance_valid(item.get("parent")):
+					continue
+				var parent: Node3D = item.parent
+				var task_data := {
+					"nodes": item.nodes,
+					"tags": item.tags,
+					"parent": parent,
+					"chunk_key": best_ck,
+					"chunk_size": chunk_size,
+					"start_lat": start_lat,
+					"start_lon": start_lon,
+					"lon_scale": _lon_scale,
+					"way_id": item.get("way_id", 0)
+				}
+				_road_mutex.lock()
+				_pending_road_tasks += 1
+				_road_mutex.unlock()
+				WorkerThreadPool.add_task(_compute_road_geometry_thread.bind(task_data))
+			if rq_arr.is_empty():
+				_road_queue.erase(best_ck)
 
-		var parent: Node3D = item.parent
-		var chunk_key := ""
-		if parent.name.begins_with("Chunk_"):
-			chunk_key = parent.name.substr(6)
-		else:
-			chunk_key = "initial"
-
-		var task_data := {
-			"nodes": item.nodes,
-			"tags": item.tags,
-			"parent": parent,
-			"chunk_key": chunk_key,
-			"chunk_size": chunk_size,
-			"start_lat": start_lat,
-			"start_lon": start_lon,
-			"lon_scale": _lon_scale,
-			"way_id": item.get("way_id", 0)
-		}
-		_road_mutex.lock()
-		_pending_road_tasks += 1
-		_road_mutex.unlock()
-		WorkerThreadPool.add_task(_compute_road_geometry_thread.bind(task_data))
-
-	# Check if roads pipeline is fully drained before finalization
+	# Check if roads pipeline has active work before finalization
 	_road_mutex.lock()
 	var has_road_results := not _road_results.is_empty()
 	var pending_tasks := _pending_road_tasks
 	_road_mutex.unlock()
-	if not _road_queue.is_empty() or has_road_results or pending_tasks > 0:
-		return  # Still dispatching, computing, or applying road geometry
+	if has_road_results or pending_tasks > 0:
+		return  # Still computing or applying road geometry
 
 	# Budget gate: skip finalization if deferred work already consumed most budget
 	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
@@ -8694,13 +8759,14 @@ func _process_road_queue() -> void:
 			0:  # Roads (1 chunk — visible first)
 				_finalize_phase = 1
 				if not _pending_batch_chunks.is_empty():
-					var t_batch := Time.get_ticks_usec()
 					var _pbc_idx := _pick_closest_chunk_idx(_pending_batch_chunks)
-					var chunk_key2: String = _pending_batch_chunks[_pbc_idx]
-					_pending_batch_chunks.remove_at(_pbc_idx)
-					_finalize_road_batches_for_chunk(chunk_key2)
-					_record_perf("fin_roads", Time.get_ticks_usec() - t_batch)
-					did_work = true
+					if _pbc_idx >= 0:
+						var t_batch := Time.get_ticks_usec()
+						var chunk_key2: String = _pending_batch_chunks[_pbc_idx]
+						_pending_batch_chunks.remove_at(_pbc_idx)
+						_finalize_road_batches_for_chunk(chunk_key2)
+						_record_perf("fin_roads", Time.get_ticks_usec() - t_batch)
+						did_work = true
 
 			1:  # Curbs
 				_finalize_phase = 2
@@ -8713,13 +8779,14 @@ func _process_road_queue() -> void:
 			2:  # Lamps (1 chunk — visible first)
 				_finalize_phase = 3
 				if not _lamp_batches_to_finalize.is_empty():
-					var t_lamp := Time.get_ticks_usec()
 					var _lb_idx := _pick_closest_chunk_idx(_lamp_batches_to_finalize)
-					var lamp_ck: String = _lamp_batches_to_finalize[_lb_idx]
-					_lamp_batches_to_finalize.remove_at(_lb_idx)
-					_finalize_lamp_batches_for_chunk(lamp_ck)
-					_record_perf("fin_lamps", Time.get_ticks_usec() - t_lamp)
-					did_work = true
+					if _lb_idx >= 0:
+						var t_lamp := Time.get_ticks_usec()
+						var lamp_ck: String = _lamp_batches_to_finalize[_lb_idx]
+						_lamp_batches_to_finalize.remove_at(_lb_idx)
+						_finalize_lamp_batches_for_chunk(lamp_ck)
+						_record_perf("fin_lamps", Time.get_ticks_usec() - t_lamp)
+						did_work = true
 
 			3:  # Buildings (1 surface per frame, incremental)
 				_finalize_phase = 4
@@ -8731,18 +8798,19 @@ func _process_road_queue() -> void:
 								_building_geo_finalize_queue.append(key)
 
 					if not _building_geo_finalize_queue.is_empty():
-						var t_geo := Time.get_ticks_usec()
 						var _bg_idx := _pick_closest_chunk_idx(_building_geo_finalize_queue)
-						var geo_ck: String = _building_geo_finalize_queue[_bg_idx]
-						_building_geo_finalize_queue.remove_at(_bg_idx)
-						_finalize_building_geo_batch(geo_ck)
-						_record_perf("fin_buildings", Time.get_ticks_usec() - t_geo)
-						# Entrance/windows only after ALL building surfaces done
-						if not _building_geo_batch.has(geo_ck):
-							_finalize_entrance_batch(geo_ck)
-							if _window_batch_data.has(geo_ck):
-								_finalize_window_batches_for_chunk(geo_ck)
-						did_work = true
+						if _bg_idx >= 0:
+							var t_geo := Time.get_ticks_usec()
+							var geo_ck: String = _building_geo_finalize_queue[_bg_idx]
+							_building_geo_finalize_queue.remove_at(_bg_idx)
+							_finalize_building_geo_batch(geo_ck)
+							_record_perf("fin_buildings", Time.get_ticks_usec() - t_geo)
+							# Entrance/windows only after ALL building surfaces done
+							if not _building_geo_batch.has(geo_ck):
+								_finalize_entrance_batch(geo_ck)
+								if _window_batch_data.has(geo_ck):
+									_finalize_window_batches_for_chunk(geo_ck)
+							did_work = true
 					elif not _entrance_batch.is_empty():
 						var ent_key: String = _entrance_batch.keys()[0]
 						_finalize_entrance_batch(ent_key)
@@ -8765,40 +8833,43 @@ func _process_road_queue() -> void:
 			5:  # Trees (1 chunk — visible first)
 				_finalize_phase = 6
 				if not _tree_batches_to_finalize.is_empty():
-					var t_tree := Time.get_ticks_usec()
 					var _tb_idx := _pick_closest_chunk_idx(_tree_batches_to_finalize)
-					var tree_ck: String = _tree_batches_to_finalize[_tb_idx]
-					_tree_batches_to_finalize.remove_at(_tb_idx)
-					_finalize_tree_batches_for_chunk(tree_ck)
-					_record_perf("fin_trees", Time.get_ticks_usec() - t_tree)
-					did_work = true
+					if _tb_idx >= 0:
+						var t_tree := Time.get_ticks_usec()
+						var tree_ck: String = _tree_batches_to_finalize[_tb_idx]
+						_tree_batches_to_finalize.remove_at(_tb_idx)
+						_finalize_tree_batches_for_chunk(tree_ck)
+						_record_perf("fin_trees", Time.get_ticks_usec() - t_tree)
+						did_work = true
 
 			6:  # Billboards (1 chunk — visible first)
 				_finalize_phase = 7
 				if not _billboard_batches_to_finalize.is_empty():
-					var t_bill := Time.get_ticks_usec()
 					var _bb_idx := _pick_closest_chunk_idx(_billboard_batches_to_finalize)
-					var bill_ck: String = _billboard_batches_to_finalize[_bb_idx]
-					_billboard_batches_to_finalize.remove_at(_bb_idx)
-					_finalize_billboard_batch_for_chunk(bill_ck)
-					_record_perf("fin_billboards", Time.get_ticks_usec() - t_bill)
-					did_work = true
+					if _bb_idx >= 0:
+						var t_bill := Time.get_ticks_usec()
+						var bill_ck: String = _billboard_batches_to_finalize[_bb_idx]
+						_billboard_batches_to_finalize.remove_at(_bb_idx)
+						_finalize_billboard_batch_for_chunk(bill_ck)
+						_record_perf("fin_billboards", Time.get_ticks_usec() - t_bill)
+						did_work = true
 
 			7:  # Fences (1 chunk — visible first)
 				_finalize_phase = 0
 				if not _fence_batches_to_finalize.is_empty():
 					var _fc_idx := _pick_closest_chunk_idx(_fence_batches_to_finalize)
-					var fence_ck: String = _fence_batches_to_finalize[_fc_idx]
-					# Don't finalize if deferred edges still pending for this chunk
-					var has_pending_edges: bool = _deferred_fence_edges.has(fence_ck) and not (_deferred_fence_edges[fence_ck] as Array).is_empty()
-					if has_pending_edges:
-						did_work = true  # keep cycling
-					else:
-						var t_fence := Time.get_ticks_usec()
-						_fence_batches_to_finalize.remove_at(_fc_idx)
-						_finalize_fence_batches_for_chunk(fence_ck)
-						_record_perf("fin_fences", Time.get_ticks_usec() - t_fence)
-						did_work = true
+					if _fc_idx >= 0:
+						var fence_ck: String = _fence_batches_to_finalize[_fc_idx]
+						# Don't finalize if deferred edges still pending for this chunk
+						var has_pending_edges: bool = _deferred_fence_edges.has(fence_ck) and not (_deferred_fence_edges[fence_ck] as Array).is_empty()
+						if has_pending_edges:
+							did_work = true  # keep cycling
+						else:
+							var t_fence := Time.get_ticks_usec()
+							_fence_batches_to_finalize.remove_at(_fc_idx)
+							_finalize_fence_batches_for_chunk(fence_ck)
+							_record_perf("fin_fences", Time.get_ticks_usec() - t_fence)
+							did_work = true
 
 
 ## Обрабатывает очередь бордюров (после того как все перекрёстки определены)
@@ -14280,6 +14351,27 @@ func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) 
 	return (p1 * 2.0 + (-p0 + p2) * t + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 + (-p0 + p1 * 3.0 - p2 * 3.0 + p3) * t3) * 0.5
 
 
+## Проверяет, стоит ли обрабатывать чанк (не culled). Culled чанки пропускаются.
+## Всегда обрабатываем: initial loading, activation pending, visible чанки.
+func _should_process_chunk(chunk_key: String) -> bool:
+	# Во время initial loading — обрабатываем всё
+	if _initial_loading:
+		return true
+	# Если нет в loaded — обрабатываем (ещё не можем culling)
+	if not _loaded_chunks.has(chunk_key):
+		return true
+	var node: Node3D = _loaded_chunks[chunk_key]
+	if not is_instance_valid(node):
+		return true
+	# Activation pending — обрабатываем (ещё не visible, но нужно)
+	if _chunk_activation_pending.has(chunk_key):
+		return true
+	# Visible чанки — обрабатываем
+	if node.visible:
+		return true
+	# Culled (node.visible=false, не pending) — пропускаем
+	return false
+
 ## Приоритет чанка: чем меньше значение, тем выше приоритет.
 ## Чанки перед камерой получают бонус (score уменьшается), сзади — штраф.
 var _cached_cam_pos := Vector3.ZERO
@@ -14299,13 +14391,13 @@ func _chunk_priority_score(chunk_key: String) -> float:
 		return dist_sq * 3.0
 	return dist_sq
 
-## Находит индекс чанка с наивысшим приоритетом (ближайший перед камерой). Возвращает 0 если пусто.
+## Находит индекс processable чанка с наивысшим приоритетом. Возвращает -1 если все culled.
 func _pick_closest_chunk_idx(queue: Array) -> int:
-	if queue.size() <= 1:
-		return 0
-	var best_idx := 0
-	var best_score := _chunk_priority_score(queue[0])
-	for i in range(1, queue.size()):
+	var best_idx := -1
+	var best_score := INF
+	for i in queue.size():
+		if not _should_process_chunk(queue[i]):
+			continue
 		var s := _chunk_priority_score(queue[i])
 		if s < best_score:
 			best_score = s
@@ -14315,9 +14407,14 @@ func _pick_closest_chunk_idx(queue: Array) -> int:
 ## Возвращает ключи Dictionary отсортированные по приоритету (ближние перед камерой первые)
 func _get_prioritized_keys(dict: Dictionary) -> Array:
 	var keys: Array = dict.keys()
-	if keys.size() > 1:
-		keys.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
-	return keys
+	# Filter out culled chunks — don't waste budget on invisible chunks
+	var filtered: Array = []
+	for k in keys:
+		if _should_process_chunk(k):
+			filtered.append(k)
+	if filtered.size() > 1:
+		filtered.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
+	return filtered
 
 ## Возвращает Rect2 для чанка по его ключу "cx,cz"
 func _get_chunk_rect_from_key(chunk_key: String) -> Rect2:
@@ -15667,10 +15764,64 @@ func _update_chunk_culling() -> void:
 			if _chunk_rs_instances.has(chunk_key):
 				for rid in _chunk_rs_instances[chunk_key]:
 					RenderingServer.instance_set_visible(rid, want_visible)
+			# Clean queues when chunk becomes culled — free resources for visible chunks
+			if not want_visible:
+				_purge_chunk_queues(chunk_key)
 
 	# Сохраняем для HUD
 	_culling_visible_count = visible_count
 	_culling_culled_count = culled_count
+
+
+## Purge all queued work for a chunk that became culled
+func _purge_chunk_queues(chunk_key: String) -> void:
+	# Per-chunk Dictionary queues — O(1) erase
+	_road_queue.erase(chunk_key)
+	_deferred_lamp_queue.erase(chunk_key)
+	_deferred_manhole_queue.erase(chunk_key)
+	_deferred_footway_queue.erase(chunk_key)
+	_deferred_billboard_queue.erase(chunk_key)
+	_deferred_building_collisions.erase(chunk_key)
+	_deferred_tree_collisions.erase(chunk_key)
+	_deferred_road_collisions.erase(chunk_key)
+	_deferred_terrain_collisions.erase(chunk_key)
+	_deferred_lamp_lights.erase(chunk_key)
+	_deferred_fence_edges.erase(chunk_key)
+	# Road batch data
+	_road_batch_data.erase(chunk_key)
+	_entrance_batch.erase(chunk_key)
+	_window_batch_data.erase(chunk_key)
+	# Array-based finalization queues — remove chunk_key if present
+	var pbc_idx := _pending_batch_chunks.find(chunk_key)
+	if pbc_idx >= 0:
+		_pending_batch_chunks.remove_at(pbc_idx)
+	var bgf_idx := _building_geo_finalize_queue.find(chunk_key)
+	if bgf_idx >= 0:
+		_building_geo_finalize_queue.remove_at(bgf_idx)
+	var lb_idx := _lamp_batches_to_finalize.find(chunk_key)
+	if lb_idx >= 0:
+		_lamp_batches_to_finalize.remove_at(lb_idx)
+	var tb_idx := _tree_batches_to_finalize.find(chunk_key)
+	if tb_idx >= 0:
+		_tree_batches_to_finalize.remove_at(tb_idx)
+	var bb_idx := _billboard_batches_to_finalize.find(chunk_key)
+	if bb_idx >= 0:
+		_billboard_batches_to_finalize.remove_at(bb_idx)
+	var fb_idx := _fence_batches_to_finalize.find(chunk_key)
+	if fb_idx >= 0:
+		_fence_batches_to_finalize.remove_at(fb_idx)
+	# Building geo batch
+	_building_geo_batch.erase(chunk_key)
+	# Lamp batch data
+	_lamp_batch_data.erase(chunk_key)
+	# Tree batch data
+	_tree_batch_data.erase(chunk_key)
+	# Phase3 queue — remove entries for this chunk
+	var p3_i := _phase3_queue.size() - 1
+	while p3_i >= 0:
+		if _phase3_queue[p3_i].chunk_key == chunk_key:
+			_phase3_queue.remove_at(p3_i)
+		p3_i -= 1
 
 
 ## Проверяет, находится ли текущая локация в Череповце
