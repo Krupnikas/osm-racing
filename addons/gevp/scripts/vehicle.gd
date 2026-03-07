@@ -1170,8 +1170,7 @@ func _ensure_burnout_effect() -> void:
 		return
 
 	var burnout_effect: Node = BURNOUT_EFFECT_SCENE.instantiate()
-	if burnout_effect.get("vehicle") != null:
-		burnout_effect.set("vehicle", self)
+	burnout_effect.set("vehicle", self)
 	add_child(burnout_effect)
 
 func calculate_center_of_gravity(front_distribution : float) -> Vector3:

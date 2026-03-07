@@ -36,6 +36,7 @@ material = SubResource("StandardMaterial3D_burnout")
 size = Vector2(0.22, 0.22)
 
 [node name="BurnoutDust" type="GPUParticles3D"]
+local_coords = false
 emitting = false
 amount = 600
 lifetime = 1.1

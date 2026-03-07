@@ -6,7 +6,7 @@ const LOOP_ORDER := ["idle", "low_on", "med_on", "high_on", "low_off", "med_off"
 @export var vehicle: Vehicle
 @export var engine_sound_path: NodePath = NodePath("../EngineSound")
 @export var show_overlay := false
-@export var capture_trace := true
+@export var capture_trace := false
 @export var trace_path := "user://bmw_engine_sound_trace.csv"
 @export var trace_archive_dir := "user://bmw_engine_sound_traces"
 @export_range(2.0, 60.0, 1.0) var sample_rate_hz := 20.0
