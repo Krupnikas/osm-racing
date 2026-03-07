@@ -47,9 +47,9 @@ var _manhole_opacity: Texture2D
 @export var start_lat := 59.150066
 @export var start_lon := 37.949370
 var _lon_scale := 0.0  # Cached cos(deg_to_rad(start_lat)) * 111000.0
-@export var chunk_size := 300.0  # Размер чанка в метрах
+@export var chunk_size := 100.0  # Размер чанка в метрах
 @export var load_distance := 500.0  # Дистанция подгрузки чанков
-@export var unload_distance := 800.0  # Дистанция выгрузки чанков
+@export var unload_distance := 700.0  # Дистанция выгрузки чанков
 @export var render_distance := 400.0  # Дальность прорисовки (и начало тумана)
 @export var fog_enabled := true  # Включить туман для скрытия края мира
 @export var car_path: NodePath
@@ -162,6 +162,8 @@ var _culling_update_timer: float = 0.0  # Таймер обновления cull
 const CULLING_UPDATE_INTERVAL := 0.2  # Обновлять каждые 200ms (5 раз в секунду)
 
 var _culling_debug_counter := 0
+var _culling_visible_count := 0  # Количество видимых чанков (для HUD)
+var _culling_culled_count := 0   # Количество скрытых чанков (для HUD)
 
 # Отложенная генерация дорог и других тяжёлых объектов
 var _road_queue: Array = []  # Очередь {nodes, tags, parent}
@@ -1361,6 +1363,12 @@ func _process(delta: float) -> void:
 	var _frame_start := Time.get_ticks_usec()
 	_current_frame_perf.clear()
 	_slow_frame_cooldown -= delta
+	# Кешируем позицию камеры для приоритизации чанков
+	var _vp := get_viewport()
+	if _vp:
+		var _cam := _vp.get_camera_3d()
+		if _cam:
+			_cached_cam_pos = _cam.global_position
 
 	# Reset add_child budget and drain deferred queue (with time budget)
 	_add_child_budget = 9999 if _initial_loading else ADD_CHILD_BUDGET_NORMAL
@@ -1571,12 +1579,14 @@ func _process(delta: float) -> void:
 	if _loading_paused:
 		return
 
-	# Выгружаем 1 чанк за кадр (из очереди) — spread across frames
+	# Выгружаем до 3 чанков за кадр (из очереди) — spread across frames
 	var _unload_t0 := Time.get_ticks_usec()
-	if not _chunks_to_unload.is_empty():
+	var unloaded := 0
+	while not _chunks_to_unload.is_empty() and unloaded < 3:
 		var unload_key: String = _chunks_to_unload.pop_front()
 		if _loaded_chunks.has(unload_key):
 			_unload_chunk(unload_key)
+		unloaded += 1
 	_record_perf("chunk_unload", Time.get_ticks_usec() - _unload_t0)
 
 	_check_timer += delta
@@ -1900,7 +1910,7 @@ func _update_chunks(player_pos: Vector3) -> void:
 			var chunk_z := int(coords[1])
 			_load_chunk(chunk_x, chunk_z)
 
-	# Выгружаем далёкие чанки (ставим в очередь — 1 за кадр)
+	# Выгружаем далёкие чанки
 	for chunk_key in _loaded_chunks:
 		if _chunks_to_unload.has(chunk_key):
 			continue
@@ -1908,8 +1918,7 @@ func _update_chunks(player_pos: Vector3) -> void:
 		var chunk_x := int(coords[0])
 		var chunk_z := int(coords[1])
 		var chunk_center := Vector3(chunk_x * chunk_size + chunk_size / 2, 0, chunk_z * chunk_size + chunk_size / 2)
-		var dist := player_pos.distance_to(chunk_center)
-		if dist > unload_distance:
+		if player_pos.distance_to(chunk_center) > unload_distance:
 			_chunks_to_unload.append(chunk_key)
 
 func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
@@ -1924,7 +1933,7 @@ func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 		for dz in range(-radius_chunks, radius_chunks + 1):
 			var cx := player_chunk_x + dx
 			var cz := player_chunk_z + dz
-			# DEBUG: шахматный порядок — пропускаем чанки где (x+z) чётное
+			# DEBUG: шахматный порядок
 			if (cx + cz) % 2 == 0:
 				continue
 			var chunk_center := Vector3(cx * chunk_size + chunk_size / 2, 0, cz * chunk_size + chunk_size / 2)
@@ -1958,7 +1967,8 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 			var chunk_z := int(coords[1])
 			_load_chunk(chunk_x, chunk_z)
 
-	# Выгружаем далёкие чанки (ставим в очередь — 1 за кадр)
+	# Выгружаем далёкие чанки — сзади быстрее (300м), спереди дальше (unload_distance)
+	var move_dir := velocity.normalized() if speed > min_speed_for_prediction else Vector3.ZERO
 	for chunk_key in _loaded_chunks:
 		if _chunks_to_unload.has(chunk_key):
 			continue
@@ -1967,7 +1977,12 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 		var chunk_z := int(coords[1])
 		var chunk_center := Vector3(chunk_x * chunk_size + chunk_size / 2, 0, chunk_z * chunk_size + chunk_size / 2)
 		var dist := player_pos.distance_to(chunk_center)
-		if dist > unload_distance:
+		var max_dist := unload_distance
+		if move_dir.length_squared() > 0.5:
+			var to_chunk := (chunk_center - player_pos).normalized()
+			if to_chunk.dot(move_dir) < -0.3:  # Чанк сзади
+				max_dist = 300.0
+		if dist > max_dist:
 			_chunks_to_unload.append(chunk_key)
 
 
@@ -2235,7 +2250,7 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 	var gen := _load_generation  # Захватываем текущую генерацию
 	loader.data_loaded.connect(_on_chunk_data_loaded.bind(chunk_key, loader, gen))
 	loader.load_failed.connect(_on_chunk_load_failed.bind(chunk_key, loader, gen))
-	loader.load_area(chunk_lat, chunk_lon, chunk_size / 2 + chunk_size / 2)  # +150м overlap (половина чанка)
+	loader.load_area(chunk_lat, chunk_lon, maxf(chunk_size, 150.0) + chunk_size / 2)  # overlap не менее 150м с каждой стороны
 
 func _load_chunk_at_position(pos: Vector3) -> void:
 	var chunk_x := int(floor(pos.x / chunk_size))
@@ -2328,6 +2343,30 @@ func _unload_chunk(chunk_key: String) -> void:
 		var pending_idx := _pending_batch_chunks.find(chunk_key)
 		if pending_idx >= 0:
 			_pending_batch_chunks.remove_at(pending_idx)
+
+		# Clean up road batch data & entrance batch
+		_road_batch_data.erase(chunk_key)
+		_entrance_batch.erase(chunk_key)
+
+		# Purge flat queues: remove items belonging to this chunk's node
+		# (parent will be freed → items would be skipped anyway, but this frees queue slots)
+		var chunk_node_ref: Node3D = _loaded_chunks[chunk_key] if _loaded_chunks.has(chunk_key) else null
+		if chunk_node_ref:
+			_road_queue = _road_queue.filter(func(item): return item.get("parent") != chunk_node_ref)
+			_terrain_objects_queue = _terrain_objects_queue.filter(func(item): return item.get("parent") != chunk_node_ref)
+			_infrastructure_queue = _infrastructure_queue.filter(func(item): return item.get("parent") != chunk_node_ref)
+			_curb_queue = _curb_queue.filter(func(item): return item.get("parent") != chunk_node_ref)
+			_curb_smoothed_queue = _curb_smoothed_queue.filter(func(item): return item.get("parent") != chunk_node_ref)
+
+		# Purge road thread results for this chunk (under mutex)
+		# Note: _pending_road_tasks already decremented by worker thread when result was added
+		_road_mutex.lock()
+		var _filtered_rr: Array = []
+		for rr in _road_results:
+			if rr.get("chunk_key", "") != chunk_key:
+				_filtered_rr.append(rr)
+		_road_results = _filtered_rr
+		_road_mutex.unlock()
 
 		# Clean up terrain roads data for this chunk
 		_chunk_terrain_roads.erase(chunk_key)
@@ -5427,7 +5466,7 @@ func _process_deferred_nodes() -> void:
 	if not _deferred_road_collisions.is_empty():
 		if _add_child_count >= _add_child_budget:
 			return
-		var rc_ck: String = _deferred_road_collisions.keys()[0]
+		var rc_ck: String = _get_prioritized_keys(_deferred_road_collisions)[0]
 		var rc_arr: Array = _deferred_road_collisions[rc_ck]
 		var item: Dictionary = rc_arr.pop_front()
 		if rc_arr.is_empty():
@@ -5450,7 +5489,7 @@ func _process_deferred_nodes() -> void:
 	if not _deferred_terrain_collisions.is_empty():
 		if _add_child_count >= _add_child_budget:
 			return
-		var tc_ck: String = _deferred_terrain_collisions.keys()[0]
+		var tc_ck: String = _get_prioritized_keys(_deferred_terrain_collisions)[0]
 		var tc_arr: Array = _deferred_terrain_collisions[tc_ck]
 		var item: Dictionary = tc_arr.pop_front()
 		if tc_arr.is_empty():
@@ -5480,7 +5519,7 @@ func _process_deferred_nodes() -> void:
 
 	# 2. Building collisions (budgeted)
 	var bc_done_keys: Array[String] = []
-	for bc_ck in _deferred_building_collisions.keys():
+	for bc_ck in _get_prioritized_keys(_deferred_building_collisions):
 		if _add_child_count >= _add_child_budget or (Time.get_ticks_usec() - start) > BUDGET_USEC:
 			break
 		var bc_arr: Array = _deferred_building_collisions[bc_ck]
@@ -5518,7 +5557,7 @@ func _process_deferred_nodes() -> void:
 
 	# 3. Tree collisions (budgeted)
 	var tree_done_keys: Array[String] = []
-	for tree_ck in _deferred_tree_collisions.keys():
+	for tree_ck in _get_prioritized_keys(_deferred_tree_collisions):
 		if _add_child_count >= _add_child_budget or (Time.get_ticks_usec() - start) > BUDGET_USEC:
 			break
 		var tree_arr: Array = _deferred_tree_collisions[tree_ck]
@@ -5565,7 +5604,7 @@ func _process_deferred_nodes() -> void:
 func _process_deferred_lamp_lights() -> void:
 	var t0 := Time.get_ticks_usec()
 	var ll_done_keys: Array[String] = []
-	for ll_ck in _deferred_lamp_lights.keys():
+	for ll_ck in _get_prioritized_keys(_deferred_lamp_lights):
 		var ll_arr: Array = _deferred_lamp_lights[ll_ck]
 		while not ll_arr.is_empty():
 			var item: Dictionary = ll_arr[0]
@@ -6821,7 +6860,7 @@ var _fence_edge_cursor: int = 0  # section index within current edge (for mid-ed
 
 func _process_deferred_fence_edges(start_usec: int, budget_usec: int) -> void:
 	var fe_done_keys: Array[String] = []
-	for fe_ck in _deferred_fence_edges.keys():
+	for fe_ck in _get_prioritized_keys(_deferred_fence_edges):
 		var fe_arr: Array = _deferred_fence_edges[fe_ck]
 		while not fe_arr.is_empty():
 			var item: Dictionary = fe_arr[0]
@@ -8317,7 +8356,7 @@ func _update_debug_stats(delta: float) -> void:
 	var road_q := _road_queue.size()
 	var terrain_q := _terrain_objects_queue.size()
 	var infra_q := _infrastructure_queue.size()
-	var building_q := _building_results.size()
+	var building_q := _building_results.size() + _building_geo_finalize_queue.size()
 	var curb_q := _curb_queue.size() + _curb_smoothed_queue.size()
 
 	# Определяем bottleneck (GPU timing на macOS/Metal может возвращать 0)
@@ -8377,13 +8416,25 @@ func _update_debug_stats(delta: float) -> void:
 		if cam:
 			cam_name = cam.name
 
-	_debug_label.text = "FPS: %.0f (avg:%.0f 1%%:%.0f min:%.0f) | Cam: %s\nFrame: %.1fms [%s] CPU:%.1f GPU:%.1f\nProcess: %.1fms | Physics: %.1fms\nDraw: %d | Verts: %s | VRAM: %.0fMB\nBodies: %d | Pairs: %d | Nodes: %d\nQueues: R:%d T:%d I:%d B:%d C:%d TG:%d | Chunks: %d\n_process avg/max (ms):%s" % [
+	var chunks_loaded := _loaded_chunks.size()
+	var chunks_loading := _loading_chunks.size()
+	var chunks_activating := _chunk_activation_pending.size()
+	var chunks_visible := _culling_visible_count
+	var chunks_culled := _culling_culled_count
+	# Считаем чанки с незавершённой финализацией (видимые но неполные)
+	var chunks_incomplete := 0
+	for ck in _loaded_chunks:
+		if _pending_batch_chunks.has(ck) or _lamp_batches_to_finalize.has(ck) or _tree_batches_to_finalize.has(ck) or _billboard_batches_to_finalize.has(ck) or _building_geo_finalize_queue.has(ck) or _fence_batches_to_finalize.has(ck) or _deferred_footway_queue.has(ck) or _deferred_lamp_queue.has(ck) or _deferred_manhole_queue.has(ck) or _deferred_billboard_queue.has(ck) or _deferred_building_collisions.has(ck) or _deferred_tree_collisions.has(ck) or _deferred_road_collisions.has(ck) or _deferred_terrain_collisions.has(ck) or _deferred_lamp_lights.has(ck) or _deferred_fence_edges.has(ck):
+			chunks_incomplete += 1
+
+	_debug_label.text = "FPS: %.0f (avg:%.0f 1%%:%.0f min:%.0f) | Cam: %s\nFrame: %.1fms [%s] CPU:%.1f GPU:%.1f\nProcess: %.1fms | Physics: %.1fms\nDraw: %d | Verts: %s | VRAM: %.0fMB\nBodies: %d | Pairs: %d | Nodes: %d\nQueues: R:%d T:%d I:%d B:%d C:%d TG:%d\nChunks: %d loaded (%d incomplete) | %d loading | %d activating | %d visible | %d culled\n_process avg/max (ms):%s" % [
 		fps, avg_fps, fps_1pct, min_fps, cam_name,
 		frame_ms, bottleneck, render_cpu, render_gpu,
 		process_ms, physics_ms,
 		draw_calls, vertices_str, vram,
 		phys_bodies, phys_pairs, nodes,
-		road_q, terrain_q, infra_q, building_q, curb_q, tgen_q, _loaded_chunks.size(),
+		road_q, terrain_q, infra_q, building_q, curb_q, tgen_q,
+		chunks_loaded, chunks_incomplete, chunks_loading, chunks_activating, chunks_visible, chunks_culled,
 		func_lines
 	]
 
@@ -8419,7 +8470,7 @@ func _process_road_queue() -> void:
 	# Process deferred footway splitting incrementally (budget: remaining time up to 2.5ms from start)
 	var fw_budget_end := queue_start + 2500
 	var fw_done_keys: Array[String] = []
-	for fw_ck in _deferred_footway_queue.keys():
+	for fw_ck in _get_prioritized_keys(_deferred_footway_queue):
 		if Time.get_ticks_usec() > fw_budget_end:
 			break
 		var fw_arr: Array = _deferred_footway_queue[fw_ck]
@@ -8443,7 +8494,7 @@ func _process_road_queue() -> void:
 
 	# Process deferred lamp/manhole generation with time budget
 	var lamp_done_keys: Array[String] = []
-	for lamp_ck in _deferred_lamp_queue.keys():
+	for lamp_ck in _get_prioritized_keys(_deferred_lamp_queue):
 		if (Time.get_ticks_usec() - queue_start) > 3000:
 			break
 		var lamp_arr: Array = _deferred_lamp_queue[lamp_ck]
@@ -8470,7 +8521,7 @@ func _process_road_queue() -> void:
 		return
 
 	var mh_done_keys: Array[String] = []
-	for mh_ck in _deferred_manhole_queue.keys():
+	for mh_ck in _get_prioritized_keys(_deferred_manhole_queue):
 		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 			break
 		var mh_arr: Array = _deferred_manhole_queue[mh_ck]
@@ -8498,7 +8549,7 @@ func _process_road_queue() -> void:
 
 	# Process deferred billboard creation with time budget
 	var bb_done_keys: Array[String] = []
-	for bb_ck in _deferred_billboard_queue.keys():
+	for bb_ck in _get_prioritized_keys(_deferred_billboard_queue):
 		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 			break
 		var bb_arr: Array = _deferred_billboard_queue[bb_ck]
@@ -8524,7 +8575,21 @@ func _process_road_queue() -> void:
 		_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
 
 	while not _road_queue.is_empty() and _pending_road_tasks < MAX_CONCURRENT_ROAD_TASKS:
-		var item: Dictionary = _road_queue.pop_front()
+		# Prioritize roads from visible chunks closest to camera (scan up to 200 items)
+		var _rq_idx := 0
+		var _rq_scan := mini(_road_queue.size(), 200)
+		var _rq_best_dist := INF
+		for _ri in _rq_scan:
+			var _rq_parent: Node3D = _road_queue[_ri].get("parent")
+			if is_instance_valid(_rq_parent) and _rq_parent.visible:
+				var _rq_ck := _rq_parent.name.substr(6) if _rq_parent.name.begins_with("Chunk_") else ""
+				if _rq_ck != "":
+					var _rq_d := _chunk_dist_sq(_rq_ck)
+					if _rq_d < _rq_best_dist:
+						_rq_best_dist = _rq_d
+						_rq_idx = _ri
+		var item: Dictionary = _road_queue[_rq_idx]
+		_road_queue.remove_at(_rq_idx)
 		if not is_instance_valid(item.get("parent")):
 			continue
 
@@ -8570,11 +8635,13 @@ func _process_road_queue() -> void:
 	while not did_work and phases_checked < 8:
 		phases_checked += 1
 		match _finalize_phase:
-			0:  # Roads (1 chunk)
+			0:  # Roads (1 chunk — visible first)
 				_finalize_phase = 1
 				if not _pending_batch_chunks.is_empty():
 					var t_batch := Time.get_ticks_usec()
-					var chunk_key2: String = _pending_batch_chunks.pop_front()
+					var _pbc_idx := _pick_visible_chunk_idx(_pending_batch_chunks)
+					var chunk_key2: String = _pending_batch_chunks[_pbc_idx]
+					_pending_batch_chunks.remove_at(_pbc_idx)
 					_finalize_road_batches_for_chunk(chunk_key2)
 					_record_perf("fin_roads", Time.get_ticks_usec() - t_batch)
 					did_work = true
@@ -8587,12 +8654,13 @@ func _process_road_queue() -> void:
 					_record_perf("fin_curbs", Time.get_ticks_usec() - t_curb_fin)
 					did_work = true
 
-			2:  # Lamps (1 chunk)
+			2:  # Lamps (1 chunk — visible first)
 				_finalize_phase = 3
 				if not _lamp_batches_to_finalize.is_empty():
 					var t_lamp := Time.get_ticks_usec()
-					var lamp_ck: String = _lamp_batches_to_finalize[0]
-					_lamp_batches_to_finalize.remove_at(0)
+					var _lb_idx := _pick_visible_chunk_idx(_lamp_batches_to_finalize)
+					var lamp_ck: String = _lamp_batches_to_finalize[_lb_idx]
+					_lamp_batches_to_finalize.remove_at(_lb_idx)
 					_finalize_lamp_batches_for_chunk(lamp_ck)
 					_record_perf("fin_lamps", Time.get_ticks_usec() - t_lamp)
 					did_work = true
@@ -8608,8 +8676,9 @@ func _process_road_queue() -> void:
 
 					if not _building_geo_finalize_queue.is_empty():
 						var t_geo := Time.get_ticks_usec()
-						var geo_ck: String = _building_geo_finalize_queue[0]
-						_building_geo_finalize_queue.remove_at(0)
+						var _bg_idx := _pick_visible_chunk_idx(_building_geo_finalize_queue)
+						var geo_ck: String = _building_geo_finalize_queue[_bg_idx]
+						_building_geo_finalize_queue.remove_at(_bg_idx)
 						_finalize_building_geo_batch(geo_ck)
 						_record_perf("fin_buildings", Time.get_ticks_usec() - t_geo)
 						# Entrance/windows only after ALL building surfaces done
@@ -8637,37 +8706,40 @@ func _process_road_queue() -> void:
 					_record_perf("fin_windows", Time.get_ticks_usec() - t_window)
 					did_work = true
 
-			5:  # Trees (1 chunk)
+			5:  # Trees (1 chunk — visible first)
 				_finalize_phase = 6
 				if not _tree_batches_to_finalize.is_empty():
 					var t_tree := Time.get_ticks_usec()
-					var tree_ck: String = _tree_batches_to_finalize[0]
-					_tree_batches_to_finalize.remove_at(0)
+					var _tb_idx := _pick_visible_chunk_idx(_tree_batches_to_finalize)
+					var tree_ck: String = _tree_batches_to_finalize[_tb_idx]
+					_tree_batches_to_finalize.remove_at(_tb_idx)
 					_finalize_tree_batches_for_chunk(tree_ck)
 					_record_perf("fin_trees", Time.get_ticks_usec() - t_tree)
 					did_work = true
 
-			6:  # Billboards (1 chunk)
+			6:  # Billboards (1 chunk — visible first)
 				_finalize_phase = 7
 				if not _billboard_batches_to_finalize.is_empty():
 					var t_bill := Time.get_ticks_usec()
-					var bill_ck: String = _billboard_batches_to_finalize[0]
-					_billboard_batches_to_finalize.remove_at(0)
+					var _bb_idx := _pick_visible_chunk_idx(_billboard_batches_to_finalize)
+					var bill_ck: String = _billboard_batches_to_finalize[_bb_idx]
+					_billboard_batches_to_finalize.remove_at(_bb_idx)
 					_finalize_billboard_batch_for_chunk(bill_ck)
 					_record_perf("fin_billboards", Time.get_ticks_usec() - t_bill)
 					did_work = true
 
-			7:  # Fences (1 chunk)
+			7:  # Fences (1 chunk — visible first)
 				_finalize_phase = 0
 				if not _fence_batches_to_finalize.is_empty():
-					var fence_ck: String = _fence_batches_to_finalize[0]
+					var _fc_idx := _pick_visible_chunk_idx(_fence_batches_to_finalize)
+					var fence_ck: String = _fence_batches_to_finalize[_fc_idx]
 					# Don't finalize if deferred edges still pending for this chunk
 					var has_pending_edges: bool = _deferred_fence_edges.has(fence_ck) and not (_deferred_fence_edges[fence_ck] as Array).is_empty()
 					if has_pending_edges:
 						did_work = true  # keep cycling
 					else:
 						var t_fence := Time.get_ticks_usec()
-						_fence_batches_to_finalize.remove_at(0)
+						_fence_batches_to_finalize.remove_at(_fc_idx)
 						_finalize_fence_batches_for_chunk(fence_ck)
 						_record_perf("fin_fences", Time.get_ticks_usec() - t_fence)
 						did_work = true
@@ -13143,7 +13215,7 @@ func _setup_render_distance() -> void:
 	# Зазор между load и unload нужен чтобы не флаттерить загрузку/выгрузку
 	load_distance = render_distance + 100.0  # Загружаем чуть дальше видимости
 	unload_distance = render_distance + chunk_size  # Выгружаем с запасом на chunk_size
-	print("OSM: Chunk distances - load: %.0f, unload: %.0f" % [load_distance, unload_distance])
+	print("OSM: Chunk size: %.0f, distances - load: %.0f, unload: %.0f" % [chunk_size, load_distance, unload_distance])
 
 	# Настраиваем камеру
 	if _camera:
@@ -14151,6 +14223,50 @@ func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) 
 	var t3: float = t2 * t
 	return (p1 * 2.0 + (-p0 + p2) * t + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 + (-p0 + p1 * 3.0 - p2 * 3.0 + p3) * t3) * 0.5
 
+
+## Проверяет, виден ли чанк (visible в scene tree)
+func _is_chunk_visible(chunk_key: String) -> bool:
+	if not _loaded_chunks.has(chunk_key):
+		return false
+	var node: Node3D = _loaded_chunks[chunk_key]
+	return is_instance_valid(node) and node.visible
+
+## Расстояние от камеры до центра чанка (XZ плоскость). Кеш позиции обновляется в _process.
+var _cached_cam_pos := Vector3.ZERO
+func _chunk_dist_sq(chunk_key: String) -> float:
+	var parts := chunk_key.split(",")
+	var cx := float(int(parts[0])) * chunk_size + chunk_size * 0.5
+	var cz := float(int(parts[1])) * chunk_size + chunk_size * 0.5
+	var dx := cx - _cached_cam_pos.x
+	var dz := cz - _cached_cam_pos.z
+	return dx * dx + dz * dz
+
+## Находит индекс ближайшего видимого чанка в массиве ключей. Возвращает 0 если нет видимых.
+func _pick_visible_chunk_idx(queue: Array) -> int:
+	var best_idx := -1
+	var best_dist := INF
+	for i in queue.size():
+		if _is_chunk_visible(queue[i]):
+			var d := _chunk_dist_sq(queue[i])
+			if d < best_dist:
+				best_dist = d
+				best_idx = i
+	return best_idx if best_idx >= 0 else 0
+
+## Возвращает ключи Dictionary: видимые (ближние первые), затем остальные
+func _get_prioritized_keys(dict: Dictionary) -> Array:
+	var visible_keys: Array = []
+	var other_keys: Array = []
+	for ck in dict:
+		if _is_chunk_visible(ck):
+			visible_keys.append(ck)
+		else:
+			other_keys.append(ck)
+	# Сортируем видимые по расстоянию (ближние первые)
+	if visible_keys.size() > 1:
+		visible_keys.sort_custom(func(a, b): return _chunk_dist_sq(a) < _chunk_dist_sq(b))
+	visible_keys.append_array(other_keys)
+	return visible_keys
 
 ## Возвращает Rect2 для чанка по его ключу "cx,cz"
 func _get_chunk_rect_from_key(chunk_key: String) -> Rect2:
@@ -15381,6 +15497,8 @@ func _print_draw_call_stats() -> void:
 ## Использует реальные frustum planes камеры + dot product для чанков позади
 func _update_chunk_culling() -> void:
 	if not enable_frustum_culling:
+		_culling_visible_count = _loaded_chunks.size()
+		_culling_culled_count = 0
 		for chunk_node in _loaded_chunks.values():
 			if is_instance_valid(chunk_node):
 				chunk_node.visible = true
@@ -15493,13 +15611,9 @@ func _update_chunk_culling() -> void:
 				for rid in _chunk_rs_instances[chunk_key]:
 					RenderingServer.instance_set_visible(rid, want_visible)
 
-	# DEBUG: раз в 5 секунд (~25 вызовов culling при 200ms интервале)
-	_culling_debug_counter += 1
-	if _culling_debug_counter >= 25:
-		_culling_debug_counter = 0
-		print("Culling: %d visible, %d culled (frustum), loaded: %d" % [
-			visible_count, culled_count, _loaded_chunks.size()
-		])
+	# Сохраняем для HUD
+	_culling_visible_count = visible_count
+	_culling_culled_count = culled_count
 
 
 ## Проверяет, находится ли текущая локация в Череповце
