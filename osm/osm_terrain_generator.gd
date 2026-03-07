@@ -15033,27 +15033,12 @@ func _track_hash_cell(chunk_key: String, hash_type: String, cell: Vector2i) -> v
 func _cleanup_chunk_hash_cells(chunk_key: String) -> void:
 	if not _chunk_hash_cells.has(chunk_key):
 		return
-	var cells: Dictionary = _chunk_hash_cells[chunk_key]
-	if cells.has("road"):
-		for cell in cells["road"]:
-			_road_spatial_hash.erase(cell)
-	if cells.has("building"):
-		for cell in cells["building"]:
-			_building_spatial_hash.erase(cell)
-	if cells.has("building_poly"):
-		for cell in cells["building_poly"]:
-			_building_poly_hash.erase(cell)
-	if cells.has("parking"):
-		for cell in cells["parking"]:
-			_parking_spatial_hash.erase(cell)
-	if cells.has("water"):
-		for cell in cells["water"]:
-			_water_spatial_hash.erase(cell)
-	if cells.has("intersection"):
-		for cell in cells["intersection"]:
-			_intersection_spatial_hash.erase(cell)
+	# Global spatial hashes are NOT erased on chunk unload — cells are shared
+	# between overlapping chunks, erasing them destroys data other chunks need
+	# (minimap, footway splitting, lamp placement all read the global hash).
+	# Global hashes are only cleared on full reset (start_loading / reset_terrain).
 	_chunk_hash_cells.erase(chunk_key)
-	# Per-chunk hashes
+	# Per-chunk hashes (independent, safe to erase)
 	_chunk_road_hashes.erase(chunk_key)
 	_chunk_building_hashes.erase(chunk_key)
 	_chunk_building_poly_hashes.erase(chunk_key)
