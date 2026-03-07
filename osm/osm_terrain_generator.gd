@@ -15861,6 +15861,9 @@ func _update_chunk_culling() -> void:
 
 ## Purge all queued work for a chunk that became culled
 func _purge_chunk_queues(chunk_key: String) -> void:
+	# Don't purge initial chunks that haven't completed yet
+	if _initial_loading and not _initial_chunks_completed.has(chunk_key):
+		return
 	# Per-chunk Dictionary queues — O(1) erase
 	_road_queue.erase(chunk_key)
 	_deferred_lamp_queue.erase(chunk_key)
