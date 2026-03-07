@@ -3492,7 +3492,7 @@ func _process_phase3_queue() -> bool:
 					"residential", "unclassified": ho = 0.006
 					"service": ho = 0.004
 				max_height_offset = maxf(max_height_offset, ho)
-			var intersection_idx := _find_nearest_intersection(pos, 2.0)
+			var intersection_idx := _find_nearest_intersection(pos, 2.0, chunk_key)
 			var sign_offset := Vector2(5, 5)
 			if intersection_idx >= 0:
 				var angle: float = _intersection_angles[intersection_idx]
@@ -3523,16 +3523,16 @@ func _process_phase3_queue() -> bool:
 			if filter_by_chunk:
 				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
 					continue
+			var pt_ck := chunk_key if not chunk_key.is_empty() else "%d,%d" % [int(floor(local.x / chunk_size)), int(floor(local.y / chunk_size))]
 			if tags.get("natural") == "tree":
-				if not _is_point_near_road(local, 3.0) and not _is_point_in_water(local):
-					var tree_ck := chunk_key if not chunk_key.is_empty() else "%d,%d" % [int(floor(local.x / chunk_size)), int(floor(local.y / chunk_size))]
-					_add_tree_to_batch(tree_ck, local, 0.0, target)
+				if not _is_point_near_road(local, 3.0, pt_ck) and not _is_point_in_water(local, pt_ck):
+					_add_tree_to_batch(pt_ck, local, 0.0, target)
 			elif tags.get("amenity") == "waste_disposal":
 				_create_garbage_container(local, 0.0, target)
 			elif tags.has("traffic_sign"):
 				_create_traffic_sign(local, 0.0, tags, target)
 			elif tags.get("highway") == "street_lamp":
-				if not _is_point_in_any_parking(local) and not _is_point_near_road(local, 0.1) and not _is_point_in_water(local):
+				if not _is_point_in_any_parking(local, pt_ck) and not _is_point_near_road(local, 0.1, pt_ck) and not _is_point_in_water(local, pt_ck):
 					if chunk_key != "":
 						_add_lamp_to_batch(chunk_key, Vector3(local.x, 0.0, local.y), Vector3.FORWARD, target)
 					else:
@@ -4775,7 +4775,7 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 ## Incremental footway splitting: processes N points per frame to stay under budget.
 ## Item dict stores progress state: _pt_idx, _on_road, _in_parking.
 ## Returns true when fully processed, false when needs more frames.
-func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
+func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String = "") -> bool:
 	var smoothed_points: PackedVector2Array = item.smoothed_points
 	var width: float = item.width * 2.0  # Визуальная ширина x2 (ROAD_WIDTHS хранит логическую)
 	var parent: Node3D = item.parent
@@ -4792,8 +4792,8 @@ func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
 			item["_in_parking"] = in_parking
 			return false  # resume next frame
 		var p: Vector2 = smoothed_points[pt_idx]
-		on_road.append(_is_point_on_vehicle_road(p))
-		in_parking.append(_is_point_in_any_parking(p))
+		on_road.append(_is_point_on_vehicle_road(p, 1.0, ck))
+		in_parking.append(_is_point_in_any_parking(p, ck))
 		pt_idx += 1
 
 	# Phase 2: postprocess parking adjacency + split + vertex gen (fast, no budget needed)
@@ -4834,15 +4834,15 @@ func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
 	var has_before_off: bool = not on_road[0]
 	for i in range(1, smoothed_points.size()):
 		if on_road[i] != current_on:
-			var edge_pt := _find_road_edge_point(smoothed_points[i - 1], current_on, smoothed_points[i])
+			var edge_pt := _find_road_edge_point(smoothed_points[i - 1], current_on, smoothed_points[i], ck)
 			current_pts.append(edge_pt)
 			if current_pts.size() >= 2:
 				if current_on:
-					var is_full: bool = is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, smoothed_points[i]))
+					var is_full: bool = is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, smoothed_points[i], ck))
 					if is_full:
 						_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
 						if enable_crossing_signs:
-							_enqueue_crossing_signs(current_pts, parent)
+							_enqueue_crossing_signs(current_pts, parent, ck)
 				else:
 					last_off_road_pt = smoothed_points[i - 1]
 					has_before_off = true
@@ -4857,10 +4857,10 @@ func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
 	if current_pts.size() >= 2:
 		if current_on:
 			var last_pt: Vector2 = smoothed_points[smoothed_points.size() - 1]
-			if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, last_pt)):
+			if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, last_pt, ck)):
 				_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
 				if enable_crossing_signs:
-					_enqueue_crossing_signs(current_pts, parent)
+					_enqueue_crossing_signs(current_pts, parent, ck)
 	return true
 
 
@@ -5779,7 +5779,7 @@ func _process_deferred_nodes() -> void:
 			while idx < collisions.size() and _add_child_count < _add_child_budget:
 				var collision_data: Dictionary = collisions[idx]
 				var coll_pos: Vector3 = collision_data["position"]
-				if _is_point_near_road(Vector2(coll_pos.x, coll_pos.z), 60.0):
+				if _is_point_near_road(Vector2(coll_pos.x, coll_pos.z), 60.0, tree_ck):
 					var body := StaticBody3D.new()
 					body.collision_layer = 2
 					body.collision_mask = 0
@@ -6566,7 +6566,7 @@ func _on_sign_hit(other_body: Node, rigid_body: RigidBody3D) -> void:
 
 
 ## Ставит два знака пешеходного перехода (по одному на каждое направление движения)
-func _enqueue_crossing_signs(crossing_pts: PackedVector2Array, parent: Node3D) -> void:
+func _enqueue_crossing_signs(crossing_pts: PackedVector2Array, parent: Node3D, ck: String = "") -> void:
 	if crossing_pts.size() < 2:
 		return
 	var mid := (crossing_pts[0] + crossing_pts[crossing_pts.size() - 1]) * 0.5
@@ -6580,7 +6580,7 @@ func _enqueue_crossing_signs(crossing_pts: PackedVector2Array, parent: Node3D) -
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			var key := Vector2i(cell_x + dx, cell_y + dy)
-			var segs := _query_road_hash(key)
+			var segs := _query_road_hash(key, ck)
 			for seg in segs:
 				if seg.width < 4.0:
 					continue
@@ -8732,7 +8732,7 @@ func _process_road_queue() -> void:
 			if not is_instance_valid(fw_item.parent):
 				fw_arr.pop_front()
 				continue
-			var done := _process_footway_incremental(fw_item, fw_budget_end)
+			var done := _process_footway_incremental(fw_item, fw_budget_end, fw_ck)
 			if done:
 				fw_arr.pop_front()
 		if fw_arr.is_empty():
@@ -9082,6 +9082,7 @@ func _init_curb_mesh_state(item: Dictionary) -> void:
 	var points: PackedVector2Array = item.points
 	var road_width: float = item.width
 	var curb_height: float = item.curb_height
+	var curb_ck := _get_chunk_key_from_node(item.parent) if item.has("parent") else ""
 
 	var curb_width := 0.15
 	var hash_val := int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
@@ -9099,10 +9100,10 @@ func _init_curb_mesh_state(item: Dictionary) -> void:
 		var left2 := p2 + offset
 		var right1 := p1 - offset
 		var right2 := p2 - offset
-		if _is_point_in_intersection_shape(left1, true) < 0 and \
-		   _is_point_in_intersection_shape(left2, true) < 0 and \
-		   _is_point_in_intersection_shape(right1, true) < 0 and \
-		   _is_point_in_intersection_shape(right2, true) < 0:
+		if _is_point_in_intersection_shape(left1, true, curb_ck) < 0 and \
+		   _is_point_in_intersection_shape(left2, true, curb_ck) < 0 and \
+		   _is_point_in_intersection_shape(right1, true, curb_ck) < 0 and \
+		   _is_point_in_intersection_shape(right2, true, curb_ck) < 0:
 			valid_segments.append(i)
 
 	# Разбиваем на группы непрерывных сегментов
@@ -11950,6 +11951,7 @@ func _create_trees_immediate(points: PackedVector2Array, parent: Node3D, dense: 
 	estimated_trees = mini(estimated_trees, max_trees)
 	# Bbox может быть гораздо больше реального полигона — увеличиваем попытки в 3x
 	var max_attempts := estimated_trees * 3
+	var tree_ck := _get_chunk_key_from_node(parent)
 
 	for i in range(max_attempts):
 		var hash1 := fmod(float(seed_value + i * 7919) * 0.61803398875, 1.0)
@@ -11965,7 +11967,7 @@ func _create_trees_immediate(points: PackedVector2Array, parent: Node3D, dense: 
 		var in_poly := Geometry2D.is_point_in_polygon(test_point, points)
 		if not in_poly:
 			continue
-		if _is_point_near_road(test_point, 3.0):
+		if _is_point_near_road(test_point, 3.0, tree_ck):
 			continue
 
 		var elevation := 0.0
@@ -11973,9 +11975,8 @@ func _create_trees_immediate(points: PackedVector2Array, parent: Node3D, dense: 
 		# Детерминистичный выбор типа: pine ~15% в лесах
 		var is_pine := dense and fmod(hash1 * 97.0 + hash2 * 53.0, 1.0) < PINE_MIX_RATIO
 
-		var chunk_key := _get_chunk_key_from_node(parent)
-		if chunk_key != "":
-			_add_tree_to_batch(chunk_key, test_point, elevation, parent, is_pine)
+		if tree_ck != "":
+			_add_tree_to_batch(tree_ck, test_point, elevation, parent, is_pine)
 
 		tree_count += 1
 
@@ -11985,7 +11986,7 @@ func _create_trees_immediate(points: PackedVector2Array, parent: Node3D, dense: 
 
 # Возвращает расстояние от точки до ближайшего края дороги
 # Отрицательное = внутри дороги, положительное = снаружи
-func _get_distance_to_road_edge(point: Vector2) -> float:
+func _get_distance_to_road_edge(point: Vector2, ck: String = "") -> float:
 	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
 	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
 	var min_edge_dist := 999.0
@@ -11993,7 +11994,7 @@ func _get_distance_to_road_edge(point: Vector2) -> float:
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			var key := Vector2i(cell_x + dx, cell_y + dy)
-			var segs := _query_road_hash(key)
+			var segs := _query_road_hash(key, ck)
 			for seg in segs:
 				var s_p1: Vector2 = seg.p1
 				var s_p2: Vector2 = seg.p2
@@ -12007,14 +12008,14 @@ func _get_distance_to_road_edge(point: Vector2) -> float:
 
 
 # Проверка близости к дороге через spatial hash (быстрая версия)
-func _is_point_near_road_fast(point: Vector2, min_distance: float) -> bool:
+func _is_point_near_road_fast(point: Vector2, min_distance: float, ck: String = "") -> bool:
 	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
 	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
 
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			var key := Vector2i(cell_x + dx, cell_y + dy)
-			var segs := _query_road_hash(key)
+			var segs := _query_road_hash(key, ck)
 			for seg in segs:
 				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
 				var dist := point.distance_to(closest)
@@ -12027,9 +12028,9 @@ func _is_point_near_road_fast(point: Vector2, min_distance: float) -> bool:
 # Проверяет, находится ли точка внутри коридора автомобильной дороги (width >= 4.0)
 # или внутри контура перекрёстка
 # margin: запас за пределами края дороги (0 = точно по краю)
-func _is_point_on_vehicle_road(point: Vector2, margin: float = 1.0) -> bool:
+func _is_point_on_vehicle_road(point: Vector2, margin: float = 1.0, ck: String = "") -> bool:
 	# 0. Парковки: footpath поверх парковки остаётся тротуаром (не crossing)
-	if _is_point_in_any_parking(point):
+	if _is_point_in_any_parking(point, ck):
 		return false
 	# 1. Проверка прямых участков дорог через spatial hash
 	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
@@ -12037,7 +12038,7 @@ func _is_point_on_vehicle_road(point: Vector2, margin: float = 1.0) -> bool:
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			var key := Vector2i(cell_x + dx, cell_y + dy)
-			var segs := _query_road_hash(key)
+			var segs := _query_road_hash(key, ck)
 			for seg in segs:
 				var s_width: float = seg.width
 				if s_width < 4.0:
@@ -12060,7 +12061,7 @@ func _is_point_on_vehicle_road(point: Vector2, margin: float = 1.0) -> bool:
 
 # Проверяет, является ли on_road участок footpath полным пересечением дороги:
 # before_pt и after_pt лежат по разные стороны от ближайшей дороги.
-func _is_full_road_crossing(before_pt: Vector2, after_pt: Vector2) -> bool:
+func _is_full_road_crossing(before_pt: Vector2, after_pt: Vector2, ck: String = "") -> bool:
 	var mid := (before_pt + after_pt) * 0.5
 	var cell_x := int(floor(mid.x / ROAD_CELL_SIZE))
 	var cell_y := int(floor(mid.y / ROAD_CELL_SIZE))
@@ -12070,7 +12071,7 @@ func _is_full_road_crossing(before_pt: Vector2, after_pt: Vector2) -> bool:
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			var key := Vector2i(cell_x + dx, cell_y + dy)
-			var segs := _query_road_hash(key)
+			var segs := _query_road_hash(key, ck)
 			for seg in segs:
 				if seg.width < 4.0:
 					continue
@@ -12090,13 +12091,13 @@ func _is_full_road_crossing(before_pt: Vector2, after_pt: Vector2) -> bool:
 
 
 # Находит точку на отрезке [p1, p2], где проходит край дороги (binary search)
-func _find_road_edge_point(p1: Vector2, p1_on_road: bool, p2: Vector2) -> Vector2:
+func _find_road_edge_point(p1: Vector2, p1_on_road: bool, p2: Vector2, ck: String = "") -> Vector2:
 	var t_lo := 0.0
 	var t_hi := 1.0
 	for _iter in 8:
 		var t_mid := (t_lo + t_hi) / 2.0
 		var p_mid := p1.lerp(p2, t_mid)
-		var mid_on := _is_point_on_vehicle_road(p_mid, 0.0)
+		var mid_on := _is_point_on_vehicle_road(p_mid, 0.0, ck)
 		if mid_on == p1_on_road:
 			t_lo = t_mid
 		else:
@@ -12455,19 +12456,19 @@ func _create_chunk_trees_immediate(chunk_key: String, parent: Node3D) -> void:
 		var test_point := Vector2(test_x, test_y)
 
 		# Пропускаем если близко к дороге (2м от края дороги)
-		if _is_point_near_road(test_point, 2.0):
+		if _is_point_near_road(test_point, 2.0, chunk_key):
 			continue
 
 		# Пропускаем если близко к зданию (2м от стены)
-		if _is_point_near_building(test_point, 2.0):
+		if _is_point_near_building(test_point, 2.0, chunk_key):
 			continue
 
 		# Пропускаем если на парковке
-		if _is_point_in_any_parking(test_point):
+		if _is_point_in_any_parking(test_point, chunk_key):
 			continue
 
 		# Пропускаем если в водоёме
-		if _is_point_in_water(test_point):
+		if _is_point_in_water(test_point, chunk_key):
 			continue
 
 		var elevation := 0.0
@@ -12615,21 +12616,20 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 		var lamp_pos_right := road_pos - perp * lamp_offset
 		var both_sides := road_width >= 12.0  # primary and wider — both sides
 
-		# Skip lamps inside intersection contours (where bezier curbs are)
-		var left_in_intersection := _is_point_in_intersection_shape(lamp_pos_left) >= 0
-		if not left_in_intersection and not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road(lamp_pos_left, 0.1) and not _is_point_in_water(lamp_pos_left):
-			var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
-			var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
-			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
-			if _loaded_chunks.has(chunk_key):
-				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_left.x, 0.0, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[chunk_key])
+		# Compute chunk_key once, pass to all spatial checks (single-chunk O(1) lookup)
+		var left_ck := "%d,%d" % [int(floor(lamp_pos_left.x / chunk_size)), int(floor(lamp_pos_left.y / chunk_size))]
 
-		if both_sides and _is_point_in_intersection_shape(lamp_pos_right) < 0 and not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road(lamp_pos_right, 0.1) and not _is_point_in_water(lamp_pos_right):
-			var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
-			var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
-			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
-			if _loaded_chunks.has(chunk_key):
-				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_right.x, 0.0, lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[chunk_key])
+		# Skip lamps inside intersection contours (where bezier curbs are)
+		var left_in_intersection := _is_point_in_intersection_shape(lamp_pos_left, false, left_ck) >= 0
+		if not left_in_intersection and not _is_point_in_any_parking(lamp_pos_left, left_ck) and not _is_point_near_road(lamp_pos_left, 0.1, left_ck) and not _is_point_in_water(lamp_pos_left, left_ck):
+			if _loaded_chunks.has(left_ck):
+				_add_lamp_to_batch(left_ck, Vector3(lamp_pos_left.x, 0.0, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[left_ck])
+
+		if both_sides:
+			var right_ck := "%d,%d" % [int(floor(lamp_pos_right.x / chunk_size)), int(floor(lamp_pos_right.y / chunk_size))]
+			if _is_point_in_intersection_shape(lamp_pos_right, false, right_ck) < 0 and not _is_point_in_any_parking(lamp_pos_right, right_ck) and not _is_point_near_road(lamp_pos_right, 0.1, right_ck) and not _is_point_in_water(lamp_pos_right, right_ck):
+				if _loaded_chunks.has(right_ck):
+					_add_lamp_to_batch(right_ck, Vector3(lamp_pos_right.x, 0.0, lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[right_ck])
 
 		next_lamp_dist += lamp_spacing
 
@@ -12931,21 +12931,23 @@ func _create_pending_parking_signs() -> void:
 	_pending_parking_signs.clear()
 
 
-func _is_point_in_any_parking(point: Vector2) -> bool:
+func _is_point_in_any_parking(point: Vector2, ck: String = "") -> bool:
 	const PARKING_BUFFER := 10.0
 	var cell_x := int(floor(point.x / PARKING_CELL_SIZE))
 	var cell_y := int(floor(point.y / PARKING_CELL_SIZE))
 
-	for dx in range(-1, 2):
-		for dy in range(-1, 2):
-			var key := Vector2i(cell_x + dx, cell_y + dy)
-			# Query all loaded chunks' parking hashes
-			for ck in _chunk_parking_hashes:
-				var data: Dictionary = _chunk_parking_hashes[ck]
-				var h: Dictionary = data.get("hash", {})
+	var chunks_to_check: Array = [ck] if ck != "" else _chunk_parking_hashes.keys()
+	for c in chunks_to_check:
+		if not _chunk_parking_hashes.has(c):
+			continue
+		var data: Dictionary = _chunk_parking_hashes[c]
+		var h: Dictionary = data.get("hash", {})
+		var polys: Array = data.get("polys", [])
+		for dx in range(-1, 2):
+			for dy in range(-1, 2):
+				var key := Vector2i(cell_x + dx, cell_y + dy)
 				if not h.has(key):
 					continue
-				var polys: Array = data.get("polys", [])
 				for entry in h[key]:
 					var pidx: int = entry.idx
 					var closest := Geometry2D.get_closest_point_to_segment(point, entry.p1, entry.p2)
@@ -12959,18 +12961,21 @@ func _is_point_in_any_parking(point: Vector2) -> bool:
 
 
 ## Проверяет, находится ли точка внутри водного полигона (main thread)
-func _is_point_in_water(point: Vector2) -> bool:
+func _is_point_in_water(point: Vector2, ck: String = "") -> bool:
 	var cell_x := int(floor(point.x / WATER_CELL_SIZE))
 	var cell_y := int(floor(point.y / WATER_CELL_SIZE))
-	for dx in range(-1, 2):
-		for dy in range(-1, 2):
-			var key := Vector2i(cell_x + dx, cell_y + dy)
-			for ck in _chunk_water_hashes:
-				var data: Dictionary = _chunk_water_hashes[ck]
-				var h: Dictionary = data.get("hash", {})
+	var chunks_to_check: Array = [ck] if ck != "" else _chunk_water_hashes.keys()
+	for c in chunks_to_check:
+		if not _chunk_water_hashes.has(c):
+			continue
+		var data: Dictionary = _chunk_water_hashes[c]
+		var h: Dictionary = data.get("hash", {})
+		var polys: Array = data.get("polys", [])
+		for dx in range(-1, 2):
+			for dy in range(-1, 2):
+				var key := Vector2i(cell_x + dx, cell_y + dy)
 				if not h.has(key):
 					continue
-				var polys: Array = data.get("polys", [])
 				for entry in h[key]:
 					var widx: int = entry.idx
 					if widx < polys.size():
@@ -13001,14 +13006,14 @@ static func _is_point_in_water_threadsafe(point: Vector2, water_hash: Dictionary
 	return false
 
 
-func _is_point_near_road(point: Vector2, min_distance: float) -> bool:
+func _is_point_near_road(point: Vector2, min_distance: float, ck: String = "") -> bool:
 	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
 	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
 
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			var key := Vector2i(cell_x + dx, cell_y + dy)
-			var segs := _query_road_hash(key)
+			var segs := _query_road_hash(key, ck)
 			for seg in segs:
 				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
 				var dist := point.distance_to(closest)
@@ -14936,14 +14941,14 @@ func _create_chunk_boundary_mesh(chunk_key: String) -> void:
 
 ## Проверяет, находится ли точка рядом с перекрёстком (через spatial hash)
 ## Возвращает индекс перекрёстка или -1
-func _find_nearby_intersection(pos: Vector2, radius: float = 15.0) -> int:
+func _find_nearby_intersection(pos: Vector2, radius: float = 15.0, ck: String = "") -> int:
 	var cell_x := int(floor(pos.x / INTERSECTION_CELL_SIZE))
 	var cell_y := int(floor(pos.y / INTERSECTION_CELL_SIZE))
 	var cells_needed := int(ceil(radius / INTERSECTION_CELL_SIZE))
 	for cx in range(cell_x - cells_needed, cell_x + cells_needed + 1):
 		for cy in range(cell_y - cells_needed, cell_y + cells_needed + 1):
 			var key := Vector2i(cx, cy)
-			var indices := _query_intersection_hash(key)
+			var indices := _query_intersection_hash(key, ck)
 			for i in indices:
 				if i < _intersection_positions.size() and pos.distance_to(_intersection_positions[i]) < radius:
 					return i
@@ -14958,7 +14963,7 @@ func _is_equal_intersection(intersection_idx: int) -> bool:
 
 
 ## Ищет ближайший перекрёсток в пределах радиуса (через spatial hash)
-func _find_nearest_intersection(pos: Vector2, max_dist: float) -> int:
+func _find_nearest_intersection(pos: Vector2, max_dist: float, ck: String = "") -> int:
 	var best_idx := -1
 	var best_dist := max_dist
 	# Search 3x3 cells around pos for nearby intersections
@@ -14967,7 +14972,7 @@ func _find_nearest_intersection(pos: Vector2, max_dist: float) -> int:
 	for cx in range(cell_x - 1, cell_x + 2):
 		for cy in range(cell_y - 1, cell_y + 2):
 			var key := Vector2i(cx, cy)
-			var indices := _query_intersection_hash(key)
+			var indices := _query_intersection_hash(key, ck)
 			for i in indices:
 				if i >= _intersection_positions.size():
 					continue
@@ -14978,58 +14983,61 @@ func _find_nearest_intersection(pos: Vector2, max_dist: float) -> int:
 	return best_idx
 
 
-## Query road segments from all loaded per-chunk hashes for a given cell
-func _query_road_hash(key: Vector2i) -> Array:
+## Query road segments from per-chunk hashes. If ck given — single chunk, else all loaded.
+func _query_road_hash(key: Vector2i, ck: String = "") -> Array:
+	if ck != "":
+		var h: Dictionary = _chunk_road_hashes.get(ck, {})
+		if h.has(key):
+			return h[key]
+		return []
 	var result: Array = []
-	for ck in _chunk_road_hashes:
-		var h: Dictionary = _chunk_road_hashes[ck]
+	for c in _chunk_road_hashes:
+		var h: Dictionary = _chunk_road_hashes[c]
 		if h.has(key):
 			result.append_array(h[key])
 	return result
 
-## Query building segments from all loaded per-chunk hashes for a given cell
-func _query_building_hash(key: Vector2i) -> Array:
+## Query building segments from per-chunk hashes. If ck given — single chunk.
+func _query_building_hash(key: Vector2i, ck: String = "") -> Array:
+	if ck != "":
+		var h: Dictionary = _chunk_building_hashes.get(ck, {})
+		if h.has(key):
+			return h[key]
+		return []
 	var result: Array = []
-	for ck in _chunk_building_hashes:
-		var h: Dictionary = _chunk_building_hashes[ck]
+	for c in _chunk_building_hashes:
+		var h: Dictionary = _chunk_building_hashes[c]
 		if h.has(key):
 			result.append_array(h[key])
 	return result
 
-## Query building polygons from all loaded per-chunk hashes for a given cell
-func _query_building_poly_hash(key: Vector2i) -> Array:
-	var result: Array = []
-	for ck in _chunk_building_poly_hashes:
-		var h: Dictionary = _chunk_building_poly_hashes[ck]
-		if h.has(key):
-			result.append_array(h[key])
-	return result
+## Query parking data from per-chunk hashes. If ck given — single chunk.
+## Returns {"entries": Array, "polys": Array} for single chunk, or merged entries for all.
+func _query_parking_in_chunk(key: Vector2i, ck: String) -> Dictionary:
+	var data: Dictionary = _chunk_parking_hashes.get(ck, {})
+	var h: Dictionary = data.get("hash", {})
+	if h.has(key):
+		return {"entries": h[key], "polys": data.get("polys", [])}
+	return {"entries": [], "polys": data.get("polys", [])}
 
-## Query parking entries from all loaded per-chunk hashes for a given cell
-func _query_parking_hash(key: Vector2i) -> Array:
-	var result: Array = []
-	for ck in _chunk_parking_hashes:
-		var data: Dictionary = _chunk_parking_hashes[ck]
-		var h: Dictionary = data.get("hash", {})
-		if h.has(key):
-			result.append_array(h[key])
-	return result
+## Query water data from per-chunk hashes. If ck given — single chunk.
+func _query_water_in_chunk(key: Vector2i, ck: String) -> Dictionary:
+	var data: Dictionary = _chunk_water_hashes.get(ck, {})
+	var h: Dictionary = data.get("hash", {})
+	if h.has(key):
+		return {"entries": h[key], "polys": data.get("polys", [])}
+	return {"entries": [], "polys": data.get("polys", [])}
 
-## Query water entries from all loaded per-chunk hashes for a given cell
-func _query_water_hash(key: Vector2i) -> Array:
-	var result: Array = []
-	for ck in _chunk_water_hashes:
-		var data: Dictionary = _chunk_water_hashes[ck]
-		var h: Dictionary = data.get("hash", {})
+## Query intersection indices from per-chunk hashes. If ck given — single chunk.
+func _query_intersection_hash(key: Vector2i, ck: String = "") -> Array:
+	if ck != "":
+		var h: Dictionary = _chunk_intersection_hashes.get(ck, {})
 		if h.has(key):
-			result.append_array(h[key])
-	return result
-
-## Query intersection indices from all loaded per-chunk hashes for a given cell
-func _query_intersection_hash(key: Vector2i) -> Array:
+			return h[key]
+		return []
 	var result: Array = []
-	for ck in _chunk_intersection_hashes:
-		var h: Dictionary = _chunk_intersection_hashes[ck]
+	for c in _chunk_intersection_hashes:
+		var h: Dictionary = _chunk_intersection_hashes[c]
 		if h.has(key):
 			result.append_array(h[key])
 	return result
@@ -15071,11 +15079,11 @@ func _add_intersection_to_spatial_hash(pos: Vector2, radii: Vector2, idx: int, c
 
 
 ## Получает индексы перекрёстков рядом с точкой через spatial hash
-func _get_nearby_intersections(pos: Vector2) -> Array:
+func _get_nearby_intersections(pos: Vector2, ck: String = "") -> Array:
 	var cell_x := int(floor(pos.x / INTERSECTION_CELL_SIZE))
 	var cell_y := int(floor(pos.y / INTERSECTION_CELL_SIZE))
 	var key := Vector2i(cell_x, cell_y)
-	return _query_intersection_hash(key)
+	return _query_intersection_hash(key, ck)
 
 
 ## Добавляет сегмент дороги в per-chunk spatial hash
@@ -15109,11 +15117,11 @@ func _add_road_segment_to_spatial_hash(seg: Dictionary, chunk_key: String = "") 
 
 
 ## Получает сегменты дорог рядом с точкой через spatial hash
-func _get_nearby_road_segments(pos: Vector2) -> Array:
+func _get_nearby_road_segments(pos: Vector2, ck: String = "") -> Array:
 	var cell_x := int(floor(pos.x / ROAD_CELL_SIZE))
 	var cell_y := int(floor(pos.y / ROAD_CELL_SIZE))
 	var key := Vector2i(cell_x, cell_y)
-	return _query_road_hash(key)
+	return _query_road_hash(key, ck)
 
 
 ## Публичный метод для получения сегментов дорог в радиусе (для миникарты)
@@ -15247,14 +15255,14 @@ func _add_building_poly_to_hash(poly: PackedVector2Array, chunk_key: String = ""
 
 
 ## Проверяет, находится ли точка слишком близко к любому зданию
-func _is_point_near_building(point: Vector2, min_distance: float) -> bool:
+func _is_point_near_building(point: Vector2, min_distance: float, ck: String = "") -> bool:
 	var cell_x := int(floor(point.x / BUILDING_CELL_SIZE))
 	var cell_y := int(floor(point.y / BUILDING_CELL_SIZE))
 
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			var key := Vector2i(cell_x + dx, cell_y + dy)
-			var segs := _query_building_hash(key)
+			var segs := _query_building_hash(key, ck)
 			for seg in segs:
 				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
 				if point.distance_to(closest) < min_distance:
@@ -15410,8 +15418,8 @@ func _build_intersection_contour(intersection_idx: int) -> PackedVector2Array:
 ## Проверяет, находится ли точка внутри контура перекрёстка (ray-casting point-in-polygon)
 ## Сначала проверяет контуры, для перекрёстков без контура fallback на эллипс
 ## Возвращает индекс перекрёстка или -1
-func _is_point_in_intersection_shape(pos: Vector2, use_curb_contour: bool = false) -> int:
-	var nearby := _get_nearby_intersections(pos)
+func _is_point_in_intersection_shape(pos: Vector2, use_curb_contour: bool = false, ck: String = "") -> int:
+	var nearby := _get_nearby_intersections(pos, ck)
 	for i in nearby:
 		# Пробуем контур
 		var contour: PackedVector2Array
