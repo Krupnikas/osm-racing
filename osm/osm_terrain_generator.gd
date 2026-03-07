@@ -67,6 +67,8 @@ const WINDOW_SPACING := 2.5       # Center-to-center distance (meters)
 const WINDOW_RECESS_DEPTH := 0.15 # How far window sits behind wall surface (meters)
 const WINDOW_CUT_MARGIN := 0.02   # Wall cutout is this much larger than window on each side
 const WINDOW_FLOOR_HEIGHT := 3.0  # Floor-to-floor height (meters)
+const WATER_Y := -1.0             # Water surface level (1m below ground)
+const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slope from 0.22 to -1.0)
 @export var enable_roads := true  # Включить дороги
 @export var enable_curbs := true  # Включить бордюры
 @export var enable_vegetation := true  # Включить деревья/растительность
@@ -92,12 +94,14 @@ var _loaded_chunks: Dictionary = {}  # key: "x,z" -> value: Node3D (chunk node)
 var _loading_chunks: Dictionary = {}  # key: "x,z" -> value: timestamp (start time in msec)
 const CHUNK_LOAD_TIMEOUT := 10.0  # Таймаут загрузки чанка (секунд)
 var _last_check_pos := Vector3.ZERO
+var _last_player_pos := Vector3.ZERO
 var _check_interval := 0.5  # Проверка каждые 0.5 сек
 var _check_timer := 0.0
 var _chunks_to_unload: Array[String] = []  # Очередь на выгрузку (1 чанк за кадр)
 var _initial_loading := false  # Флаг начальной загрузки
 var _initial_chunks_needed: Array[String] = []  # Чанки нужные для старта
 var _initial_chunks_loaded: int = 0  # Количество загруженных начальных чанков
+var _initial_chunks_completed: Dictionary = {}  # Чанки завершившие phase3 (для отслеживания прогресса даже после unload)
 var _loading_paused := false  # Загрузка НЕ на паузе - автоматический старт
 var _load_generation := 0  # Инкрементируется при reset для игнорирования старых callback'ов
 # _entrance_nodes/_poi_nodes removed — now passed as local params to avoid data race during frame budgeting
@@ -112,6 +116,9 @@ var _building_segments: Array = []  # Сегменты стен зданий {p1
 var _building_spatial_hash: Dictionary = {}  # Spatial hash для быстрого поиска зданий (сегменты)
 var _building_poly_hash: Dictionary = {}  # Spatial hash полигонов зданий для is_point_in_polygon
 const BUILDING_CELL_SIZE := 20.0  # Размер ячейки spatial hash для зданий
+var _water_polygons: Array[PackedVector2Array] = []  # Все водные полигоны (для is_point_in_polygon)
+var _water_spatial_hash: Dictionary = {}  # Spatial hash: Vector2i → Array of {idx: int, p1: Vector2, p2: Vector2}
+const WATER_CELL_SIZE := 30.0
 # Per-chunk tracking of spatial hash cells for cleanup on unload
 # chunk_key -> {"road": [Vector2i], "building": [Vector2i], "building_poly": [Vector2i], "parking": [Vector2i], "intersection": [Vector2i]}
 var _chunk_hash_cells: Dictionary = {}
@@ -169,6 +176,7 @@ var _pending_road_tasks: int = 0  # Счётчик активных задач
 var _road_batch_data: Dictionary = {}  # key: chunk_key -> { "highway": {vertices, uvs, normals, indices}, "primary": {...}, ...}
 var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batches (нужно финализировать)
 var _chunk_terrain_roads: Dictionary = {}  # chunk_key → Array[{points: PackedVector2Array, width: float}] — для отложенного выреза террейна
+var _chunk_water_polygons: Dictionary = {}  # chunk_key → Array[PackedVector2Array] — водоёмы для выреза террейна + берег
 var _deferred_terrain_chunks: Array[String] = []  # Чанки ожидающие terrain clipping (ждут соседей)
 var _chunk_roads_ready: Dictionary = {}  # chunk_key → true — дорожные коридоры готовы для terrain clipping
 var _chunk_pending_deferred: Dictionary = {}  # chunk_key → int — счётчик pending deferred items (lamps, footway, manholes, billboard, traffic)
@@ -314,6 +322,9 @@ var _current_frame_perf: Dictionary = {}  # name → float (мс), заполн�
 # Slow frame tracking
 var _slow_frame_cooldown := 0.0  # Ограничиваем частоту логирования (не чаще 1 раз в сек)
 
+# Per-chunk profiling: chunk_key → {start_ms, phase12_thread_ms, phase12_apply_ms, phase3_ms, finalize_ms, activate_ms, total_ms, ways, buildings, roads}
+var _chunk_profile: Dictionary = {}
+
 # Terrain clipping via WorkerThreadPool — результаты из worker потоков
 var _terrain_thread_results: Array = []  # Results from terrain worker threads
 var _terrain_thread_mutex: Mutex
@@ -325,7 +336,6 @@ var _pending_terrain_gen_tasks: int = 0
 
 # Phase 3 incremental queue — process ways/objects across frames with time budget
 var _phase3_queue: Array = []  # [{result, parent, chunk_key, way_idx, phase}]
-var _frame_start_usec: int = 0  # Set at top of _process() for budget checks in sub-functions
 
 # Очереди отложенного создания нод (бюджет: N нод за кадр)
 var _deferred_building_collisions: Dictionary = {}  # chunk_key → Array[{parent, collisions, idx}]
@@ -1349,7 +1359,6 @@ func _input(event: InputEvent) -> void:
 
 func _process(delta: float) -> void:
 	var _frame_start := Time.get_ticks_usec()
-	_frame_start_usec = _frame_start
 	_current_frame_perf.clear()
 	_slow_frame_cooldown -= delta
 
@@ -1371,23 +1380,19 @@ func _process(delta: float) -> void:
 	# Clean up stuck chunk loads in real-time
 	_clean_timed_out_chunks()
 
-	# Общий бюджет на все очереди — 5ms (90fps = 11ms, рендер ~4ms, физика ~2ms)
-	# При начальной загрузке — без ограничений (500ms)
-	var FRAME_BUDGET_USEC := 500000 if _initial_loading else 5000
-
 	# Обрабатываем готовые здания из worker threads (даже на паузе)
+	# Each queue below manages its own time budget independently
 	var t0 := Time.get_ticks_usec()
 	_process_building_results()
 	var t_building := Time.get_ticks_usec() - t0
 	_record_perf("building_results", t_building)
 
-	# Обрабатываем очередь дорог
+	# Обрабатываем очередь дорог (has own 4ms/6ms budget)
 	var t_road := 0
-	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
-		t0 = Time.get_ticks_usec()
-		_process_road_queue()
-		t_road = Time.get_ticks_usec() - t0
-		_record_perf("road_queue", t_road)
+	t0 = Time.get_ticks_usec()
+	_process_road_queue()
+	t_road = Time.get_ticks_usec() - t0
+	_record_perf("road_queue", t_road)
 
 	# Apply threaded terrain generation results FIRST (Phase 1+2: road/building spatial hash)
 	# Must run before vegetation/infrastructure so trees & lamps can check road hash
@@ -1398,33 +1403,25 @@ func _process(delta: float) -> void:
 
 	# Process Phase 3 queue (ways, intersections, points, finalize)
 	# Must run before vegetation so procedural trees see all roads from this chunk
-	if not _phase3_queue.is_empty() and (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
+	# Critical pipeline step — always runs (has own internal 4ms budget)
+	if not _phase3_queue.is_empty():
 		t0 = Time.get_ticks_usec()
 		_process_phase3_queue()
 		_record_perf("phase3_queue", Time.get_ticks_usec() - t0)
 
-	# Retry deferred terrain chunks (waiting for neighbors to finish Phase 3)
-	if not _deferred_terrain_chunks.is_empty():
-		var retry: Array[String] = _deferred_terrain_chunks.duplicate()
-		_deferred_terrain_chunks.clear()
-		for ck in retry:
-			_create_deferred_terrain(ck)  # Will re-defer if neighbors still loading
-
-	# Обрабатываем очередь terrain объектов
+	# Обрабатываем очередь terrain объектов (has own 2ms budget)
 	var t_terrain := 0
-	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
-		t0 = Time.get_ticks_usec()
-		_process_terrain_objects_queue()
-		t_terrain = Time.get_ticks_usec() - t0
-		_record_perf("terrain_queue", t_terrain)
+	t0 = Time.get_ticks_usec()
+	_process_terrain_objects_queue()
+	t_terrain = Time.get_ticks_usec() - t0
+	_record_perf("terrain_queue", t_terrain)
 
-	# Обрабатываем очередь инфраструктуры
+	# Обрабатываем очередь инфраструктуры (has own 2ms budget)
 	var t_infra := 0
-	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
-		t0 = Time.get_ticks_usec()
-		_process_infrastructure_queue()
-		t_infra = Time.get_ticks_usec() - t0
-		_record_perf("infra_queue", t_infra)
+	t0 = Time.get_ticks_usec()
+	_process_infrastructure_queue()
+	t_infra = Time.get_ticks_usec() - t0
+	_record_perf("infra_queue", t_infra)
 
 	# Диспетчер растительности (отправка в воркер-треды, мгновенно)
 	var t_veg := 0
@@ -1446,31 +1443,34 @@ func _process(delta: float) -> void:
 	_record_perf("curb_collisions", t_curb)
 
 	# Создаём отложенные ноды с бюджетом (buildings, trees, roads collision)
-	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
-		t0 = Time.get_ticks_usec()
-		_process_deferred_nodes()
-		_record_perf("deferred_nodes", Time.get_ticks_usec() - t0)
+	# Each sub-queue has own budget — always runs
+	t0 = Time.get_ticks_usec()
+	_process_deferred_nodes()
+	_record_perf("deferred_nodes", Time.get_ticks_usec() - t0)
 
-	# Лампы — отдельно, с бюджетом
-	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
-		_process_deferred_lamp_lights()
+	# Лампы — отдельно
+	t0 = Time.get_ticks_usec()
+	_process_deferred_lamp_lights()
+	_record_perf("lamp_lights", Time.get_ticks_usec() - t0)
 
 	# Применяем готовые результаты клиппинга террейна из worker threads
+	# Critical pipeline step — terrain mesh finalization (has own 3ms budget)
 	var t_terrain_gen := 0
-	if (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
-		t0 = Time.get_ticks_usec()
-		_apply_terrain_thread_results()
-		t_terrain_gen = Time.get_ticks_usec() - t0
-		_record_perf("terrain_gen", t_terrain_gen)
+	t0 = Time.get_ticks_usec()
+	_apply_terrain_thread_results()
+	t_terrain_gen = Time.get_ticks_usec() - t0
+	_record_perf("terrain_gen", t_terrain_gen)
 
-	# Process deferred fence edges incrementally (2ms budget, skip if over frame budget)
-	if not _deferred_fence_edges.is_empty() and (Time.get_ticks_usec() - _frame_start) < FRAME_BUDGET_USEC:
+	# Process deferred fence edges incrementally (own 2ms budget)
+	if not _deferred_fence_edges.is_empty():
 		t0 = Time.get_ticks_usec()
 		_process_deferred_fence_edges(t0, 2000)
 		_record_perf("fence_gen", Time.get_ticks_usec() - t0)
 
 	# Lazy chunk activation — включаем видимость через N кадров после финализации
+	t0 = Time.get_ticks_usec()
 	_process_chunk_activation()
+	_record_perf("chunk_activation", Time.get_ticks_usec() - t0)
 
 	# Camera-based frustum culling для чанков (каждые 200ms)
 	_culling_update_timer += delta
@@ -1515,16 +1515,25 @@ func _process(delta: float) -> void:
 		print("===== SLOW FRAME #%d (delta=%.1fms, %.0f FPS) [%s] =====" % [
 			Engine.get_process_frames(), _real_frame_ms, Engine.get_frames_per_second(), sf_bottleneck])
 		print("  Render: CPU=%.1fms GPU=%.1fms" % [sf_render_cpu, sf_render_gpu])
-		# Our _process breakdown (этот кадр)
+		# Our _process breakdown — print ALL subsystems from _current_frame_perf
 		print("  OSM _process: %.1fms breakdown:" % _frame_time)
-		print("    building_results=%.2fms road_queue=%.2fms terrain_queue=%.2fms" % [
-			t_building / 1000.0, t_road / 1000.0, t_terrain / 1000.0])
-		print("    infra_queue=%.2fms vegetation_queue=%.2fms veg_results_apply=%.2fms" % [
-			t_infra / 1000.0, t_veg / 1000.0, t_veg_apply / 1000.0])
-		print("    curb_collisions=%.2fms terrain_gen=%.2fms" % [t_curb / 1000.0, t_terrain_gen / 1000.0])
-		# Unaccounted time (разница между total и суммой подсистем)
-		var accounted: float = float(t_building + t_road + t_terrain + t_infra + t_veg + t_veg_apply + t_curb + t_terrain_gen) / 1000.0
-		print("    unaccounted=%.2fms (overhead/other)" % maxf(0.0, _frame_time - accounted))
+		# Sort by time descending so biggest contributors are first
+		var perf_items: Array = []
+		var accounted_ms := 0.0
+		for pk in _current_frame_perf:
+			if pk == "total_frame":
+				continue
+			var pv: float = _current_frame_perf[pk]
+			if pv >= 0.01:
+				perf_items.append({"name": pk, "ms": pv})
+				accounted_ms += pv
+		perf_items.sort_custom(func(a, b): return a.ms > b.ms)
+		var perf_parts: PackedStringArray = []
+		for pi in perf_items:
+			perf_parts.append("%s=%.2fms" % [pi.name, pi.ms])
+		if perf_parts.size() > 0:
+			print("    %s" % " | ".join(perf_parts))
+		print("    unaccounted=%.2fms" % maxf(0.0, _frame_time - accounted_ms))
 		# Scene stats
 		print("  Scene: draws=%d verts=%.1fM objects=%d nodes=%d resources=%d" % [
 			sf_draw_calls, sf_vertices / 1_000_000.0, sf_objects, sf_nodes, sf_resources])
@@ -1587,9 +1596,15 @@ func _process(delta: float) -> void:
 			if current_cam:
 				player_pos = current_cam.global_position
 
-	# Проверяем нужны ли новые чанки
+	# Проверяем нужны ли новые чанки (с предиктивной загрузкой по направлению)
 	var _uc_t0 := Time.get_ticks_usec()
-	_update_chunks(player_pos)
+	var velocity := Vector3.ZERO
+	if _car and _car is RigidBody3D:
+		velocity = _car.linear_velocity
+	elif delta > 0.001:
+		velocity = (player_pos - _last_player_pos) / delta
+	_last_player_pos = player_pos
+	_update_chunks_simple_predictive(player_pos, velocity)
 	_record_perf("update_chunks", Time.get_ticks_usec() - _uc_t0)
 
 	# Обновляем тени зданий и деревьев по расстоянию до игрока
@@ -1612,9 +1627,13 @@ func start_loading() -> void:
 	_loading_paused = false
 	_initial_loading = true
 	_initial_chunks_loaded = 0
+	_initial_chunks_completed.clear()
+	_chunk_profile.clear()
 	_parking_polygons.clear()  # Очищаем парковки при новой загрузке
 	_parking_bounds.clear()
 	_parking_spatial_hash.clear()
+	_water_polygons.clear()
+	_water_spatial_hash.clear()
 	_chunk_hash_cells.clear()
 	_created_lamp_positions.clear()  # Очищаем позиции фонарей
 	_created_bus_stop_positions.clear()  # Очищаем позиции остановок
@@ -1648,6 +1667,7 @@ func start_loading() -> void:
 	_curb_collision_mutex.unlock()
 	_road_batch_data.clear()  # Очищаем road batch data
 	_chunk_terrain_roads.clear()
+	_chunk_water_polygons.clear()
 	_deferred_terrain_chunks.clear()
 	_chunk_roads_ready.clear()
 	# Clear threaded terrain gen results
@@ -1704,10 +1724,10 @@ func _check_initial_load_complete() -> void:
 	if not _initial_loading:
 		return
 
-	# Считаем сколько начальных чанков загружено
+	# Считаем сколько начальных чанков завершили phase3 (не зависит от unload)
 	var loaded_count := 0
 	for chunk_key in _initial_chunks_needed:
-		if _loaded_chunks.has(chunk_key):
+		if _initial_chunks_completed.has(chunk_key):
 			loaded_count += 1
 
 	_initial_chunks_loaded = loaded_count
@@ -1734,7 +1754,7 @@ func _check_initial_load_complete() -> void:
 	if loaded_count < total_chunks:
 		var missing_chunks: Array[String] = []
 		for chunk_key in _initial_chunks_needed:
-			if not _loaded_chunks.has(chunk_key):
+			if not _initial_chunks_completed.has(chunk_key):
 				missing_chunks.append(chunk_key)
 
 		if missing_chunks.size() > 0:
@@ -1782,7 +1802,10 @@ func _check_initial_load_complete() -> void:
 		# Проверяем что все очереди обработаны (для плавности старта)
 		# Visual queues: must be empty before hiding loading screen
 		# Deferred collisions/lights are NOT blocking — they continue in background
-		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and road_results_pending <= 0 and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and pending_road_snapshot <= 0 and _pending_veg_tasks <= 0 and _pending_batch_chunks.is_empty() and _building_geo_finalize_queue.is_empty() and _curb_geo_batch.is_empty() and _lamp_batches_to_finalize.is_empty() and _tree_batches_to_finalize.is_empty() and _billboard_batches_to_finalize.is_empty() and _window_finalize_queue.is_empty() and _deferred_footway_queue.is_empty() and _deferred_billboard_queue.is_empty() and _chunk_activation_pending.is_empty() and _phase3_queue.is_empty()
+		# Note: _deferred_lamp_lights, _deferred_lamp_queue, _deferred_manhole_queue are NOT blocking — they continue in background
+		# Note: _chunk_activation_pending IS blocking during initial load (bulk-activated instantly)
+		#   so it completes fast and ensures all RS instances are visible before gameplay
+		var queues_empty := _building_results.is_empty() and _road_queue.is_empty() and road_results_pending <= 0 and _terrain_objects_queue.is_empty() and _infrastructure_queue.is_empty() and _pending_building_tasks <= 0 and pending_road_snapshot <= 0 and _pending_veg_tasks <= 0 and _pending_batch_chunks.is_empty() and _building_geo_finalize_queue.is_empty() and _curb_geo_batch.is_empty() and _lamp_batches_to_finalize.is_empty() and _tree_batches_to_finalize.is_empty() and _billboard_batches_to_finalize.is_empty() and _window_finalize_queue.is_empty() and _phase3_queue.is_empty() and _chunk_activation_pending.is_empty()
 		if not queues_empty:
 			# Отслеживаем зависание очереди
 			if total_queued == _last_queue_size:
@@ -1901,6 +1924,9 @@ func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 		for dz in range(-radius_chunks, radius_chunks + 1):
 			var cx := player_chunk_x + dx
 			var cz := player_chunk_z + dz
+			# DEBUG: шахматный порядок — пропускаем чанки где (x+z) чётное
+			if (cx + cz) % 2 == 0:
+				continue
 			var chunk_center := Vector3(cx * chunk_size + chunk_size / 2, 0, cz * chunk_size + chunk_size / 2)
 			if player_pos.distance_to(chunk_center) <= load_distance:
 				result.append("%d,%d" % [cx, cz])
@@ -1932,19 +1958,17 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 			var chunk_z := int(coords[1])
 			_load_chunk(chunk_x, chunk_z)
 
-	# Выгружаем далёкие чанки (простая радиальная выгрузка)
-	var chunks_to_unload: Array[String] = []
+	# Выгружаем далёкие чанки (ставим в очередь — 1 за кадр)
 	for chunk_key in _loaded_chunks:
+		if _chunks_to_unload.has(chunk_key):
+			continue
 		var coords: Array = chunk_key.split(",")
 		var chunk_x := int(coords[0])
 		var chunk_z := int(coords[1])
 		var chunk_center := Vector3(chunk_x * chunk_size + chunk_size / 2, 0, chunk_z * chunk_size + chunk_size / 2)
 		var dist := player_pos.distance_to(chunk_center)
 		if dist > unload_distance:
-			chunks_to_unload.append(chunk_key)
-
-	for chunk_key in chunks_to_unload:
-		_unload_chunk(chunk_key)
+			_chunks_to_unload.append(chunk_key)
 
 
 ## Старая сложная предиктивная загрузка (отключена)
@@ -2307,6 +2331,7 @@ func _unload_chunk(chunk_key: String) -> void:
 
 		# Clean up terrain roads data for this chunk
 		_chunk_terrain_roads.erase(chunk_key)
+		_chunk_water_polygons.erase(chunk_key)
 
 		# Clean up pending terrain thread results for this chunk
 		_terrain_thread_mutex.lock()
@@ -2448,6 +2473,8 @@ func reset_terrain() -> void:
 	_initial_loading = false
 	_initial_chunks_needed.clear()
 	_initial_chunks_loaded = 0
+	_initial_chunks_completed.clear()
+	_chunk_profile.clear()
 	_loading_paused = true
 	_finalization_state = 0  # Сбрасываем состояние финализации
 	# Предиктивная загрузка
@@ -2495,6 +2522,8 @@ func reset_terrain() -> void:
 	_parking_polygons.clear()
 	_parking_bounds.clear()
 	_parking_spatial_hash.clear()
+	_water_polygons.clear()
+	_water_spatial_hash.clear()
 	_chunk_hash_cells.clear()
 	_deferred_lamp_queue.clear()
 	_deferred_manhole_queue.clear()
@@ -2529,6 +2558,7 @@ func reset_terrain() -> void:
 	_pending_batch_chunks.clear()
 	_road_batch_data.clear()
 	_chunk_terrain_roads.clear()
+	_chunk_water_polygons.clear()
 	_deferred_terrain_chunks.clear()
 	_chunk_roads_ready.clear()
 
@@ -2575,6 +2605,17 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	# НЕ удаляем из _loading_chunks здесь — удалим в _generate_chunk_async после генерации
 	# Это предотвращает повторную загрузку пока идёт генерация с frame budgeting
 	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
+
+	# Per-chunk profiling
+	_chunk_profile[chunk_key] = {
+		"start_ms": Time.get_ticks_msec(),
+		"phase12_thread_ms": 0.0,
+		"phase12_apply_ms": 0.0,
+		"phase3_ms": 0.0,
+		"finalize_ms": 0.0,
+		"activate_ms": 0.0,
+		"ways": 0, "buildings": 0, "roads": 0, "amenities": 0,
+	}
 
 	# Создаём контейнер для чанка (невидимый — активируется после финализации)
 	var chunk_node := Node3D.new()
@@ -2626,6 +2667,7 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 ## Worker thread: Phase 1 (spatial hash) + Phase 2 (intersections).
 ## Pure computation — no scene tree access!
 func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
+	var _thread_t0 := Time.get_ticks_usec()
 	var osm_data: Dictionary = task_data.osm_data
 	var chunk_key: String = task_data.chunk_key
 	var gen: int = task_data.gen
@@ -2915,6 +2957,7 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 		"node_positions": node_positions,
 		"node_road_types": node_road_types,
 	}
+	result["thread_time_ms"] = (Time.get_ticks_usec() - _thread_t0) / 1000.0
 	_terrain_thread_mutex.lock()
 	_terrain_gen_results.append(result)
 	_terrain_thread_mutex.unlock()
@@ -2976,14 +3019,36 @@ func _build_intersection_contour_from_data(center: Vector2, roads: Array) -> Pac
 
 ## Apply terrain gen thread results on main thread. Called from _process().
 func _apply_terrain_gen_result() -> void:
+	# Drain ALL ready results — this is cheap work (spatial hash copy)
 	_terrain_thread_mutex.lock()
 	if _terrain_gen_results.is_empty():
 		_terrain_thread_mutex.unlock()
 		return
-	var result: Dictionary = _terrain_gen_results.pop_front()
+	var batch: Array = _terrain_gen_results.duplicate()
+	_terrain_gen_results.clear()
 	_terrain_thread_mutex.unlock()
-	_pending_terrain_gen_tasks -= 1
 
+	# Apply with 4ms budget (spatial hash + intersection dedup)
+	var TGEN_APPLY_BUDGET_USEC := 500000 if _initial_loading else 4000
+	var tg_start := Time.get_ticks_usec()
+	var tg_applied := 0
+	for result in batch:
+		_pending_terrain_gen_tasks -= 1
+		_apply_single_terrain_gen_result(result)
+		tg_applied += 1
+		if tg_applied > 1 and (Time.get_ticks_usec() - tg_start) > TGEN_APPLY_BUDGET_USEC:
+			break
+
+	# Return unprocessed back to queue
+	if tg_applied < batch.size():
+		_terrain_thread_mutex.lock()
+		var remaining: Array = batch.slice(tg_applied)
+		remaining.append_array(_terrain_gen_results)
+		_terrain_gen_results = remaining
+		_terrain_thread_mutex.unlock()
+
+
+func _apply_single_terrain_gen_result(result: Dictionary) -> void:
 	var chunk_key: String = result.chunk_key
 	var gen: int = result.gen
 	if gen >= 0 and gen != _load_generation:
@@ -3055,10 +3120,15 @@ func _apply_terrain_gen_result() -> void:
 		var he: Dictionary = result.new_hash_entries[li]
 		_add_intersection_to_spatial_hash(pos, he.radii, _intersection_positions.size() - 1, chunk_key)
 
+	# Record profiling: thread time and apply time
+	if _chunk_profile.has(chunk_key):
+		_chunk_profile[chunk_key]["phase12_thread_ms"] = result.get("thread_time_ms", 0.0)
+
 	# Queue Phase 3 for incremental processing across frames
 	_phase3_queue.append({
 		"result": result, "parent": parent, "chunk_key": chunk_key, "gen": gen,
 		"way_idx": 0, "phase": "ways",  # phases: ways, intersections, points, bus_stops, finalize
+		"phase3_work_us": 0,  # Cumulative work time (excludes queue waiting)
 	})
 
 
@@ -3068,9 +3138,8 @@ func _process_phase3_queue() -> bool:
 	if _phase3_queue.is_empty():
 		return false
 
-	# Budget: remaining frame time or 4ms, whichever is less
-	var remaining_us: int = maxi(0, (500000 if _initial_loading else 5000) - (Time.get_ticks_usec() - _frame_start_usec))
-	var budget_us: int = mini(remaining_us, 8000 if _initial_loading else 4000)  # Cap per-call: 8ms loading, 4ms gameplay
+	# Own budget: unlimited during initial loading, 4ms during gameplay
+	var budget_us: int = 500000 if _initial_loading else 4000
 	var t0 := Time.get_ticks_usec()
 
 	var entry: Dictionary = _phase3_queue[0]
@@ -3115,27 +3184,17 @@ func _process_phase3_queue() -> bool:
 			if nodes.size() < 2:
 				continue
 			if filter_by_chunk:
-				var dominated_by_chunk := false
-				if tags.has("highway"):
-					for node in nodes:
-						var local: Vector2 = _latlon_to_local(node.lat, node.lon)
-						if local.x >= chunk_min_x and local.x < chunk_max_x and local.y >= chunk_min_z and local.y < chunk_max_z:
-							dominated_by_chunk = true
-							break
-				elif tags.has("waterway"):
-					for node in nodes:
-						var local: Vector2 = _latlon_to_local(node.lat, node.lon)
-						if local.x >= chunk_min_x and local.x < chunk_max_x and local.y >= chunk_min_z and local.y < chunk_max_z:
-							dominated_by_chunk = true
-							break
+				# highway и waterway — рисуем ВСЕ из overlap данных, клиппинг к bbox внутри _create_road/_create_waterway
+				if tags.has("highway") or tags.has("waterway"):
+					pass  # Не фильтруем — каждый чанк рисует свой клипнутый кусок
 				elif tags.has("building") or tags.has("amenity"):
 					var center := _get_way_center(nodes)
-					dominated_by_chunk = center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z
+					if not (center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z):
+						continue
 				else:
 					var center := _get_way_center(nodes)
-					dominated_by_chunk = center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z
-				if not dominated_by_chunk:
-					continue
+					if not (center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z):
+						continue
 			var way_id_raw: int = int(way.get("id", 0))
 			if way_id_raw in [75621890]:
 				continue
@@ -3233,7 +3292,7 @@ func _process_phase3_queue() -> bool:
 				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
 					continue
 			if tags.get("natural") == "tree":
-				if not _is_point_near_road(local, 3.0):
+				if not _is_point_near_road(local, 3.0) and not _is_point_in_water(local):
 					var tree_ck := chunk_key if not chunk_key.is_empty() else "%d,%d" % [int(floor(local.x / chunk_size)), int(floor(local.y / chunk_size))]
 					_add_tree_to_batch(tree_ck, local, 0.0, target)
 			elif tags.get("amenity") == "waste_disposal":
@@ -3241,7 +3300,7 @@ func _process_phase3_queue() -> bool:
 			elif tags.has("traffic_sign"):
 				_create_traffic_sign(local, 0.0, tags, target)
 			elif tags.get("highway") == "street_lamp":
-				if not _is_point_in_any_parking(local) and not _is_point_near_road(local, 0.1):
+				if not _is_point_in_any_parking(local) and not _is_point_near_road(local, 0.1) and not _is_point_in_water(local):
 					if chunk_key != "":
 						_add_lamp_to_batch(chunk_key, Vector3(local.x, 0.0, local.y), Vector3.FORWARD, target)
 					else:
@@ -3280,6 +3339,15 @@ func _process_phase3_queue() -> bool:
 		# Finalize chunk state
 		_loading_chunks.erase(chunk_key)
 		_loaded_chunks[chunk_key] = parent
+		_initial_chunks_completed[chunk_key] = true
+		# Per-chunk profiling: record phase3 total time
+		if _chunk_profile.has(chunk_key):
+			var cp: Dictionary = _chunk_profile[chunk_key]
+			var ways_data: Array = result.get("osm_data", {}).get("ways", [])
+			cp["ways"] = ways_data.size()
+			var total_ms: int = Time.get_ticks_msec() - cp.get("start_ms", 0)
+			print("CHUNK_PROFILE %s: total=%dms (thread=%.0fms, phase3=%dms) ways=%d" % [
+				chunk_key, total_ms, cp.get("phase12_thread_ms", 0.0), total_ms - int(cp.get("phase12_thread_ms", 0.0)), cp.get("ways", 0)])
 		if gen >= 0 and gen != _load_generation:
 			_phase3_queue.pop_front()
 			return true
@@ -3564,6 +3632,24 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	# Smoothing (thread-safe: pure math)
 	var smoothed_points: PackedVector2Array = _smooth_road_corners(local_points)
 
+	# Клипаем smoothed_points к bbox чанка (используется для curbs, corridors, lamps)
+	if chunk_key != "initial" and chunk_key != "":
+		var ck_parts_sm: PackedStringArray = chunk_key.split(",")
+		var ck_x_sm := int(ck_parts_sm[0])
+		var ck_z_sm := int(ck_parts_sm[1])
+		var sm_margin := width * 0.5 + 1.0
+		smoothed_points = _clip_polyline_to_rect(smoothed_points,
+			float(ck_x_sm) * t_chunk_size - sm_margin,
+			float(ck_x_sm + 1) * t_chunk_size + sm_margin,
+			float(ck_z_sm) * t_chunk_size - sm_margin,
+			float(ck_z_sm + 1) * t_chunk_size + sm_margin)
+		if smoothed_points.size() < 2:
+			# Дорога полностью вне чанка — уменьшаем счётчик и выходим
+			_road_mutex.lock()
+			_pending_road_tasks -= 1
+			_road_mutex.unlock()
+			return
+
 	# Build geometry if not bridge
 	var vertices := PackedVector3Array()
 	var uvs := PackedVector2Array()
@@ -3578,7 +3664,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			var ck_parts: PackedStringArray = chunk_key.split(",")
 			var ck_x := int(ck_parts[0])
 			var ck_z := int(ck_parts[1])
-			var margin := width + 5.0
+			var margin := width * 0.5 + 1.0
 			points = _clip_polyline_to_rect(points,
 				float(ck_x) * t_chunk_size - margin,
 				float(ck_x + 1) * t_chunk_size + margin,
@@ -3751,26 +3837,11 @@ func _apply_road_result(result: Dictionary) -> void:
 				corridor.append(validated[i] - perps[i] * half_w)
 			for i in range(n_pts - 1, -1, -1):
 				corridor.append(validated[i] + perps[i] * half_w)
-			# Регистрируем во ВСЕХ чанках, которые коридор пересекает
-			var corr_min_x := corridor[0].x
-			var corr_max_x := corridor[0].x
-			var corr_min_z := corridor[0].y
-			var corr_max_z := corridor[0].y
-			for ci in range(1, corridor.size()):
-				corr_min_x = minf(corr_min_x, corridor[ci].x)
-				corr_max_x = maxf(corr_max_x, corridor[ci].x)
-				corr_min_z = minf(corr_min_z, corridor[ci].y)
-				corr_max_z = maxf(corr_max_z, corridor[ci].y)
-			var ck0_x := int(floorf(corr_min_x / chunk_size))
-			var ck1_x := int(floorf(corr_max_x / chunk_size))
-			var ck0_z := int(floorf(corr_min_z / chunk_size))
-			var ck1_z := int(floorf(corr_max_z / chunk_size))
-			for cx in range(ck0_x, ck1_x + 1):
-				for cz in range(ck0_z, ck1_z + 1):
-					var ck := "%d,%d" % [cx, cz]
-					if not _chunk_terrain_roads.has(ck):
-						_chunk_terrain_roads[ck] = []
-					_chunk_terrain_roads[ck].append(corridor)
+			# Регистрируем только в своём чанке (terrain использует только свои данные)
+			var ck := _get_chunk_key_from_node(parent)
+			if not _chunk_terrain_roads.has(ck):
+				_chunk_terrain_roads[ck] = []
+			_chunk_terrain_roads[ck].append(corridor)
 
 	# Curbs
 	if curb_height > 0.0:
@@ -3784,15 +3855,21 @@ func _apply_road_result(result: Dictionary) -> void:
 			"bridge_info": elevation_info
 		})
 
-	# Lamps (major roads only) - deferred to avoid blocking apply
+	# Lamps (major roads only) - clip to chunk rect, deferred
 	if highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary"]:
 		var lamp_ck := _get_chunk_key_from_node(parent)
-		_deferred_append(_deferred_lamp_queue, lamp_ck, {"points": smoothed_points, "width": width, "parent": parent})
+		var lamp_rect := _get_chunk_rect_from_key(lamp_ck)
+		var lamp_pts := _clip_polyline_to_rect(smoothed_points, lamp_rect.position.x, lamp_rect.end.x, lamp_rect.position.y, lamp_rect.end.y)
+		if lamp_pts.size() >= 2:
+			_deferred_append(_deferred_lamp_queue, lamp_ck, {"points": lamp_pts, "width": width, "parent": parent})
 
-	# Manholes - deferred
+	# Manholes - clip to chunk rect, deferred
 	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
 		var mh_ck := _get_chunk_key_from_node(parent)
-		_deferred_append(_deferred_manhole_queue, mh_ck, {"points": smoothed_points, "width": width, "parent": parent})
+		var mh_rect := _get_chunk_rect_from_key(mh_ck)
+		var mh_pts := _clip_polyline_to_rect(smoothed_points, mh_rect.position.x, mh_rect.end.x, mh_rect.position.y, mh_rect.end.y)
+		if mh_pts.size() >= 2:
+			_deferred_append(_deferred_manhole_queue, mh_ck, {"points": mh_pts, "width": width, "parent": parent})
 
 	# Road network for NPC - deferred
 	_deferred_traffic_queue.append({"points": smoothed_points, "tags": result.tags, "elevation_info": elevation_info})
@@ -4388,7 +4465,7 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 		var ck_parts: PackedStringArray = chunk_key.split(",")
 		var ck_x := int(ck_parts[0])
 		var ck_z := int(ck_parts[1])
-		var margin := width + 5.0  # Запас на ширину дороги + бордюры
+		var margin := width * 0.5 + 1.0  # Полуширина дороги + 1м на бордюры
 		var clip_min_x := float(ck_x) * chunk_size - margin
 		var clip_max_x := float(ck_x + 1) * chunk_size + margin
 		var clip_min_z := float(ck_z) * chunk_size - margin
@@ -4588,7 +4665,7 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 		var ck_parts: PackedStringArray = chunk_key.split(",")
 		var ck_x := int(ck_parts[0])
 		var ck_z := int(ck_parts[1])
-		var margin := width + 5.0
+		var margin := width * 0.5 + 1.0
 		var clip_min_x := float(ck_x) * chunk_size - margin
 		var clip_max_x := float(ck_x + 1) * chunk_size + margin
 		var clip_min_z := float(ck_z) * chunk_size - margin
@@ -4949,33 +5026,11 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 	var ck_parts: PackedStringArray = chunk_key.split(",")
 	var ck_x := int(ck_parts[0])
 	var ck_z := int(ck_parts[1])
-	# Проверяем что у соседних чанков дороги готовы (ждём макс 5 секунд)
-	var neighbor_not_ready := false
-	var now_ms := Time.get_ticks_msec()
-	for dx in range(-1, 2):
-		for dz in range(-1, 2):
-			if dx == 0 and dz == 0:
-				continue
-			var nk := "%d,%d" % [ck_x + dx, ck_z + dz]
-			if _loading_chunks.has(nk):
-				# Ждём соседа только если он загружается менее 5 сек
-				var load_start: int = _loading_chunks[nk]
-				if (now_ms - load_start) < 5000:
-					neighbor_not_ready = true
-					break
-		if neighbor_not_ready:
-			break
-	if neighbor_not_ready:
-		if not _deferred_terrain_chunks.has(chunk_key):
-			_deferred_terrain_chunks.append(chunk_key)
-		return
-	# Все соседи готовы — собираем коридоры
+	# Собираем коридоры дорог только из своего чанка
+	# Каждый чанк рисует только свои дороги (dominated_by_chunk), terrain тоже свой
 	var terrain_roads: Array = []
-	for dx2 in range(-1, 2):
-		for dz2 in range(-1, 2):
-			var nk := "%d,%d" % [ck_x + dx2, ck_z + dz2]
-			if _chunk_terrain_roads.has(nk):
-				terrain_roads.append_array(_chunk_terrain_roads[nk])
+	if _chunk_terrain_roads.has(chunk_key):
+		terrain_roads = _chunk_terrain_roads[chunk_key]
 	var ch_min_x := float(ck_x) * chunk_size
 	var ch_max_x := ch_min_x + chunk_size
 	var ch_min_z := float(ck_z) * chunk_size
@@ -5004,6 +5059,32 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 		if in_chunk:
 			relevant_parking.append(parking_poly)
 
+	# Собираем водные полигоны из 3x3 соседей, расширенные на SHORE_WIDTH для выреза
+	var relevant_water_shore: Array[PackedVector2Array] = []
+	for dx2 in range(-1, 2):
+		for dz2 in range(-1, 2):
+			var nk := "%d,%d" % [ck_x + dx2, ck_z + dz2]
+			if _chunk_water_polygons.has(nk):
+				for water_poly in _chunk_water_polygons[nk]:
+					if water_poly.size() < 3:
+						continue
+					# Проверяем пересечение с чанком (грубая проверка по AABB)
+					var in_chunk := false
+					for wp in water_poly:
+						if wp.x >= ch_min_x - SHORE_WIDTH - 5.0 and wp.x <= ch_max_x + SHORE_WIDTH + 5.0 and wp.y >= ch_min_z - SHORE_WIDTH - 5.0 and wp.y <= ch_max_z + SHORE_WIDTH + 5.0:
+							in_chunk = true
+							break
+					if in_chunk:
+						# Расширяем полигон на SHORE_WIDTH для выреза из террейна
+						# offset_polygon: positive delta расширяет CCW, сужает CW
+						var delta := SHORE_WIDTH
+						if not _is_polygon_ccw(water_poly):
+							delta = -delta
+						var expanded := Geometry2D.offset_polygon(water_poly, delta)
+						for ep in expanded:
+							if ep.size() >= 3:
+								relevant_water_shore.append(ep)
+
 	# Отправляем клиппинг в worker thread (тяжёлая операция O(n²))
 	var chunk_rect := PackedVector2Array([
 		Vector2(ch_min_x, ch_min_z),
@@ -5016,6 +5097,7 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 		"road_polylines": terrain_roads,
 		"contours": relevant_contours,
 		"parking": relevant_parking,
+		"water_shore": relevant_water_shore,
 		"chunk_rect": chunk_rect,
 		"chunk_size": chunk_size
 	}
@@ -5300,7 +5382,7 @@ func _apply_curb_collisions() -> void:
 	_curb_collision_mutex.unlock()
 
 	# Time-budgeted curb collision application (1ms)
-	const CURB_COLLISION_BUDGET_USEC := 1000
+	var CURB_COLLISION_BUDGET_USEC := 500000 if _initial_loading else 1000
 	var curb_start := Time.get_ticks_usec()
 	var applied := 0
 	for i in range(results.size()):
@@ -5338,7 +5420,7 @@ func _apply_curb_collisions() -> void:
 ## Создаёт отложенные ноды с бюджетом — building/tree/lamp/road collisions.
 ## Вместо 170-500 нод за кадр создаём ~25 нод за кадр.
 func _process_deferred_nodes() -> void:
-	const BUDGET_USEC := 2000  # 2ms
+	var BUDGET_USEC := 500000 if _initial_loading else 2000
 	var start := Time.get_ticks_usec()
 
 	# 1. Road/terrain collisions (тяжёлые — 1 за кадр, ConcavePolygonShape3D ~5-15ms)
@@ -6394,13 +6476,22 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -
 		points.append(local)
 
 	# Трава уже покрыта per-chunk terrain, пропускаем чтобы не было z-fighting
-	if texture_key == "grass":
+	if texture_key == "grass" and natural_type not in ["wood", "tree_row"]:
 		return
-	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, is_water)
 
-	# Генерируем густые деревья внутри лесных полигонов
-	if natural_type in ["wood", "tree_row"]:
-		_generate_trees_in_polygon(points, parent, true)
+	# Клипаем полигон по границам чанка
+	var chunk_key := _get_chunk_key_from_node(parent)
+	var clipped_polys := _clip_polygon_to_chunk(points, chunk_key)
+	for clipped in clipped_polys:
+		if is_water:
+			_register_water_polygon(clipped, parent)
+			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
+			_create_shore_mesh(clipped, parent)
+		elif texture_key != "grass":
+			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
+		# Генерируем густые деревья внутри лесных полигонов
+		if natural_type in ["wood", "tree_row"]:
+			_generate_trees_in_polygon(clipped, parent, true)
 
 
 ## Немедленное создание землепользования (вызывается из очереди)
@@ -6417,19 +6508,24 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
+	# Клипаем полигон по границам чанка
+	var chunk_key := _get_chunk_key_from_node(parent)
+
 	# Индустриальные и коммерческие зоны - рисуем забор и генерируем здания внутри
 	if landuse_type in ["industrial", "commercial"]:
-		_add_fence_to_batch(points, parent)
-		_generate_industrial_buildings(points, parent)
+		var clipped_ind := _clip_polygon_to_chunk(points, chunk_key)
+		for clipped in clipped_ind:
+			_add_fence_to_batch(clipped, parent)
+			_generate_industrial_buildings(clipped, parent)
 		return
 
 	var texture_key := "grass"
 	var is_water := false
 	match landuse_type:
 		"residential":
-			texture_key = "grass"  # Жилые районы - трава
+			texture_key = "grass"
 		"farmland", "farm":
-			texture_key = "grass"  # Поля - трава (позже можно добавить специальную текстуру)
+			texture_key = "grass"
 		"forest":
 			texture_key = "forest"
 		"grass", "meadow", "recreation_ground":
@@ -6441,20 +6537,30 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 			texture_key = "grass"
 
 	# Деревья для конкретных landuse зон по way_id (из JSON оверрайдов)
+	var has_tree_override := false
+	var dense_override := false
 	if _decoration_layer and way_id > 0:
 		var tree_override = _decoration_layer.get_landuse_tree_override(way_id)
 		if tree_override:
-			var dense_override: bool = tree_override.get("dense", false)
-			_generate_trees_in_polygon(points, parent, dense_override)
+			has_tree_override = true
+			dense_override = tree_override.get("dense", false)
 
 	# Трава уже покрыта per-chunk terrain, пропускаем чтобы не было z-fighting
-	if texture_key == "grass":
+	if texture_key == "grass" and not has_tree_override and landuse_type != "forest":
 		return
-	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, is_water)
 
-	# Генерируем густые деревья внутри лесных полигонов
-	if landuse_type == "forest":
-		_generate_trees_in_polygon(points, parent, true)
+	var clipped_polys := _clip_polygon_to_chunk(points, chunk_key)
+	for clipped in clipped_polys:
+		if has_tree_override:
+			_generate_trees_in_polygon(clipped, parent, dense_override)
+		if is_water:
+			_register_water_polygon(clipped, parent)
+			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
+			_create_shore_mesh(clipped, parent)
+		elif texture_key != "grass":
+			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
+		if landuse_type == "forest":
+			_generate_trees_in_polygon(clipped, parent, true)
 
 
 ## Немедленное создание объекта отдыха (вызывается из очереди)
@@ -6484,24 +6590,33 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	# Добавляем коллизию с группой Park для высокого сопротивления качению
-	if leisure_type in ["park", "garden", "pitch"]:
-		_create_park_collision(points, parent)
+	# Клипаем полигон по границам чанка
+	var chunk_key := _get_chunk_key_from_node(parent)
+	var clipped_polys := _clip_polygon_to_chunk(points, chunk_key)
 
-	# Генерируем деревья в парках и садах
-	if leisure_type in ["park", "garden"]:
-		_generate_trees_in_polygon(points, parent, false)
+	for clipped in clipped_polys:
+		# Добавляем коллизию с группой Park для высокого сопротивления качению
+		if leisure_type in ["park", "garden", "pitch"]:
+			_create_park_collision(clipped, parent)
+		# Генерируем деревья в парках и садах
+		if leisure_type in ["park", "garden"]:
+			_generate_trees_in_polygon(clipped, parent, false)
 
 	# Трава уже покрыта per-chunk terrain, пропускаем чтобы не было z-fighting
 	if texture_key == "grass":
 		return
-	_create_polygon_mesh_with_texture(points, texture_key, -0.02, parent, is_water)
+
+	for clipped in clipped_polys:
+		if is_water:
+			_register_water_polygon(clipped, parent)
+			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
+			_create_shore_mesh(clipped, parent)
+		else:
+			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
 
 func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, skip_spatial_hash: bool = false) -> void:
 	if nodes.size() < 3:
 		return
-
-		var ck: String = _get_chunk_key_from_node(parent)
 
 	var points: PackedVector2Array = []
 	for node in nodes:
@@ -6522,8 +6637,7 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 
 	# Территории (школы, детсады, университеты, пожарные станции, полиция) - рисуем забор, а не здание
 	# Здание внутри рисуется отдельно если есть building тег
-	var territory_types := ["school", "kindergarten", "college", "university", "fire_station", "police"]
-	if amenity_type in territory_types:
+	if amenity_type in ["school", "kindergarten", "college", "university", "fire_station", "police"]:
 		_add_fence_to_batch(points, parent)
 		return
 
@@ -6536,49 +6650,31 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 		_create_parking(points, parent)
 		return
 
-	# Остальные amenity - создаём как маленькие здания
-	var building_height: float
-	var color: Color
-
+	# Остальные amenity - создаём как маленькие здания (через thread pool)
+	var building_height: float = 8.0
 	match amenity_type:
 		"hospital":
 			building_height = 18.0
-			color = Color(0.95, 0.95, 0.95)  # Белый
 		"clinic":
 			building_height = 12.0
-			color = Color(0.9, 0.9, 0.95)  # Бело-голубой
-		"police":
+		"police", "fire_station":
 			building_height = 10.0
-			color = Color(0.3, 0.4, 0.6)  # Тёмно-синий
-		"fire_station":
-			building_height = 10.0
-			color = Color(0.85, 0.3, 0.25)  # Красный
 		"place_of_worship", "church":
 			building_height = 20.0
-			color = Color(0.95, 0.9, 0.75)  # Золотистый
 		"bank":
 			building_height = 12.0
-			color = Color(0.5, 0.6, 0.5)  # Серо-зелёный
 		"post_office":
 			building_height = 8.0
-			color = Color(0.3, 0.45, 0.7)  # Синий
 		"restaurant", "cafe", "fast_food", "bar", "pub":
 			building_height = 5.0
-			color = Color(0.8, 0.6, 0.4)  # Оранжево-коричневый
-		"fuel":
-			building_height = 4.0
-			color = Color(0.85, 0.75, 0.3)  # Жёлтый
 		"theatre", "cinema":
 			building_height = 15.0
-			color = Color(0.6, 0.35, 0.5)  # Пурпурный
 		"library":
 			building_height = 10.0
-			color = Color(0.55, 0.45, 0.35)  # Коричневый
-		_:
-			building_height = 8.0
-			color = Color(0.6, 0.5, 0.5)
 
-	_create_3d_building(points, color, building_height, parent, 0.0)
+	# Use threaded building generation (same as regular buildings) to avoid main thread stalls
+	_queue_building_for_thread(points, building_height, "brick", parent, 0.0)
+
 
 ## ─── Iron bar fence system ───────────────────────────────────────────
 
@@ -6939,6 +7035,192 @@ func _create_fence(points: PackedVector2Array, parent: Node3D) -> void:
 
 	parent.add_child(body)
 
+## Конвертирует линию водотока + ширину в замкнутый полигон (для рендера и клиппинга)
+func _waterway_to_polygon(points: PackedVector2Array, width: float) -> PackedVector2Array:
+	if points.size() < 2:
+		return PackedVector2Array()
+	var half_w := width * 0.5
+	var left_side: PackedVector2Array = []
+	var right_side: PackedVector2Array = []
+	for i in range(points.size()):
+		var dir: Vector2
+		if i == 0:
+			dir = (points[1] - points[0]).normalized()
+		elif i == points.size() - 1:
+			dir = (points[i] - points[i - 1]).normalized()
+		else:
+			dir = (points[i + 1] - points[i - 1]).normalized()
+		var perp := Vector2(-dir.y, dir.x) * half_w
+		left_side.append(points[i] + perp)
+		right_side.append(points[i] - perp)
+	# Замыкаем: left forward + right backward
+	var result: PackedVector2Array = []
+	for p in left_side:
+		result.append(p)
+	for i in range(right_side.size() - 1, -1, -1):
+		result.append(right_side[i])
+	return result
+
+
+## Регистрирует водный полигон в _chunk_water_polygons для terrain clipping и spatial hash
+func _register_water_polygon(points: PackedVector2Array, parent: Node3D) -> void:
+	var ck := _get_chunk_key_from_node(parent)
+	if ck.is_empty():
+		return
+	if not _chunk_water_polygons.has(ck):
+		_chunk_water_polygons[ck] = []
+	_chunk_water_polygons[ck].append(points)
+
+	# Добавляем в глобальный массив и spatial hash
+	var water_idx := _water_polygons.size()
+	_water_polygons.append(points)
+	for i in range(points.size()):
+		var p1 := points[i]
+		var p2 := points[(i + 1) % points.size()]
+		var seg_min_x := minf(p1.x, p2.x)
+		var seg_max_x := maxf(p1.x, p2.x)
+		var seg_min_y := minf(p1.y, p2.y)
+		var seg_max_y := maxf(p1.y, p2.y)
+		var cell_min_x := int(floor(seg_min_x / WATER_CELL_SIZE))
+		var cell_max_x := int(floor(seg_max_x / WATER_CELL_SIZE))
+		var cell_min_y := int(floor(seg_min_y / WATER_CELL_SIZE))
+		var cell_max_y := int(floor(seg_max_y / WATER_CELL_SIZE))
+		for cx in range(cell_min_x, cell_max_x + 1):
+			for cy in range(cell_min_y, cell_max_y + 1):
+				var cell := Vector2i(cx, cy)
+				if not _water_spatial_hash.has(cell):
+					_water_spatial_hash[cell] = []
+				_water_spatial_hash[cell].append({"idx": water_idx, "p1": p1, "p2": p2})
+				_track_hash_cell(ck, "water", cell)
+
+
+## Генерирует наклонный берег вокруг водного полигона (от Y=0.22 до Y=-1.0)
+func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
+	if water_poly.size() < 3:
+		return
+	# Убираем дубликат последней точки
+	var poly := PackedVector2Array(water_poly)
+	if poly.size() > 1 and poly[0].distance_to(poly[poly.size() - 1]) < 0.1:
+		poly.remove_at(poly.size() - 1)
+	if poly.size() < 3:
+		return
+
+	var pn := poly.size()
+	var sidewalk_h := 0.22  # Верхний край берега (уровень тротуара/террейна)
+	var water_h := WATER_Y  # Нижний край берега (уровень воды)
+
+	# Определяем направление полигона для правильной ориентации наружных нормалей
+	var ccw := _is_polygon_ccw(poly)
+	var out_sign := 1.0 if ccw else -1.0
+
+	# Вычисляем miter-точки для внешнего контура (расширение на SHORE_WIDTH)
+	var outer: PackedVector2Array = PackedVector2Array()
+	outer.resize(pn)
+	for vi in range(pn):
+		var d_prev := (poly[vi] - poly[(vi - 1 + pn) % pn]).normalized()
+		var d_next := (poly[(vi + 1) % pn] - poly[vi]).normalized()
+		var out_prev := Vector2(d_prev.y, -d_prev.x) * out_sign
+		var out_next := Vector2(d_next.y, -d_next.x) * out_sign
+		var avg := out_prev + out_next
+		if avg.length_squared() > 0.001:
+			var n := avg.normalized()
+			var dot := n.dot(out_next)
+			if dot > 0.2:
+				outer[vi] = poly[vi] + n * (SHORE_WIDTH / dot)
+			else:
+				outer[vi] = poly[vi] + out_next * SHORE_WIDTH
+		else:
+			outer[vi] = poly[vi] + Vector2(d_next.y, -d_next.x) * out_sign * SHORE_WIDTH
+		# Ограничиваем miter чтобы не было слишком длинных шипов
+		if outer[vi].distance_to(poly[vi]) > SHORE_WIDTH * 3.0:
+			var dir_out := (outer[vi] - poly[vi]).normalized()
+			outer[vi] = poly[vi] + dir_out * SHORE_WIDTH * 3.0
+
+	# Генерируем slope mesh: для каждого ребра — quad (2 треугольника)
+	# Outer edge на Y=sidewalk_h, inner edge (water_poly) на Y=water_h
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var idxs := PackedInt32Array()
+
+	for ei in range(pn):
+		var i0 := ei
+		var i1 := (ei + 1) % pn
+		# Inner = water edge, outer = shore top edge
+		var in0 := poly[i0]
+		var in1 := poly[i1]
+		var out0 := outer[i0]
+		var out1 := outer[i1]
+		# Нормаль наклонной поверхности (примерно 45° наружу-вверх)
+		var edge_dir := (in1 - in0).normalized()
+		var outward_2d := Vector2(edge_dir.y, -edge_dir.x) * out_sign
+		# Slope normal: outward + up, normalized
+		var slope_normal := Vector3(outward_2d.x, 1.0, outward_2d.y).normalized()
+
+		var ci := verts.size()
+		# 4 вершины: out0_top, out1_top, in1_bottom, in0_bottom
+		verts.append(Vector3(out0.x, sidewalk_h, out0.y))
+		verts.append(Vector3(out1.x, sidewalk_h, out1.y))
+		verts.append(Vector3(in1.x, water_h, in1.y))
+		verts.append(Vector3(in0.x, water_h, in0.y))
+		for _j in 4:
+			norms.append(slope_normal)
+		# UV: горизонтальная длина и вертикальная от 0 (верх) до 1 (низ)
+		var seg_len := out0.distance_to(out1)
+		uvs.append(Vector2(0.0, 0.0))
+		uvs.append(Vector2(seg_len * 0.25, 0.0))
+		uvs.append(Vector2(seg_len * 0.25, 1.0))
+		uvs.append(Vector2(0.0, 1.0))
+		# Два треугольника: 0,2,1 и 0,3,2
+		idxs.append(ci + 0); idxs.append(ci + 2); idxs.append(ci + 1)
+		idxs.append(ci + 0); idxs.append(ci + 3); idxs.append(ci + 2)
+
+	if verts.is_empty():
+		return
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = norms
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = idxs
+
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	# Материал: земля/песок
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.45, 0.35, 0.25)
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+	var ck := _get_chunk_key_from_node(parent)
+	if not ck.is_empty():
+		_rs_add_mesh(ck, arr_mesh, material)
+	else:
+		var mesh := MeshInstance3D.new()
+		mesh.mesh = arr_mesh
+		mesh.material_override = material
+		parent.add_child(mesh)
+
+	# Коллизия для берега (чтобы машина могла ехать по склону)
+	var shore_body := StaticBody3D.new()
+	shore_body.name = "ShoreCollision"
+	shore_body.collision_layer = 1
+	shore_body.collision_mask = 0
+	shore_body.add_to_group("Grass")
+	var faces := PackedVector3Array()
+	for i in range(0, idxs.size(), 3):
+		faces.append(verts[idxs[i]])
+		faces.append(verts[idxs[i + 1]])
+		faces.append(verts[idxs[i + 2]])
+	var col_shape := CollisionShape3D.new()
+	var concave := ConcavePolygonShape3D.new()
+	concave.set_faces(faces)
+	col_shape.shape = concave
+	shore_body.add_child(col_shape)
+	parent.add_child(shore_body)
+
+
 func _create_waterway(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node) -> void:
 	var waterway_type: String = tags.get("waterway", "")
 	var width: float
@@ -6955,7 +7237,23 @@ func _create_waterway(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		_:
 			width = 5.0
 
-	_create_path_mesh(nodes, width, COLORS["water"], 0.03, parent, null)
+	# Конвертируем центральную линию в полигон
+	var points: PackedVector2Array = []
+	for node in nodes:
+		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
+		points.append(local)
+
+	var poly := _waterway_to_polygon(points, width)
+	if poly.size() < 3:
+		return
+
+	# Клипаем полигон по границам чанка
+	var chunk_key := _get_chunk_key_from_node(parent)
+	var clipped_polys := _clip_polygon_to_chunk(poly, chunk_key)
+	for clipped in clipped_polys:
+		_register_water_polygon(clipped, parent)
+		_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
+		_create_shore_mesh(clipped, parent)
 
 func _create_3d_building(points: PackedVector2Array, color: Color, building_height: float, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
 	# Минимум 4 точки для нормального здания (3 - треугольник, плохо)
@@ -8093,7 +8391,7 @@ func _update_debug_stats(delta: float) -> void:
 ## Обрабатывает очередь дорог (3 дороги за кадр)
 func _process_road_queue() -> void:
 	var queue_start := Time.get_ticks_usec()
-	var TOTAL_BUDGET_USEC := 6000 if _initial_loading else 4000  # 6ms during initial load, 4ms during gameplay
+	var TOTAL_BUDGET_USEC := 500000 if _initial_loading else 4000  # unlimited during initial load, 4ms during gameplay
 
 	# Phase 0: Apply ready road results from worker threads (main thread, time-budgeted)
 	_road_mutex.lock()
@@ -8398,7 +8696,7 @@ func _process_curb_queue() -> void:
 				var ck_parts: PackedStringArray = ck.split(",")
 				var ck_x := int(ck_parts[0])
 				var ck_z := int(ck_parts[1])
-				var margin: float = item.width + 5.0
+				var margin: float = item.width * 0.5 + 1.0
 				var clip_min_x: float = float(ck_x) * chunk_size - margin
 				var clip_max_x: float = float(ck_x + 1) * chunk_size + margin
 				var clip_min_z: float = float(ck_z) * chunk_size - margin
@@ -8868,8 +9166,8 @@ func _process_terrain_objects_queue() -> void:
 		_sort_queue_by_distance(_terrain_objects_queue, _car.global_position)
 		_record_perf("terrain_sort", Time.get_ticks_usec() - t0)
 
-	# Time budget: максимум 2ms на terrain объекты, минимум 1 за кадр
-	const TERRAIN_TIME_BUDGET_USEC := 2000
+	# Time budget: unlimited during initial loading, 2ms during gameplay
+	var TERRAIN_TIME_BUDGET_USEC := 500000 if _initial_loading else 2000
 	var start_time := Time.get_ticks_usec()
 	var processed := 0
 	var deferred: Array = []
@@ -8918,8 +9216,8 @@ func _process_infrastructure_queue() -> void:
 		_sort_infrastructure_by_distance(_infrastructure_queue, _car.global_position)
 		_record_perf("infra_sort", Time.get_ticks_usec() - t0)
 
-	# Time budget: до 2ms на инфраструктуру, минимум 1 за кадр
-	const INFRA_TIME_BUDGET_USEC := 2000
+	# Time budget: unlimited during initial loading, 2ms during gameplay
+	var INFRA_TIME_BUDGET_USEC := 500000 if _initial_loading else 2000
 	var start_time := Time.get_ticks_usec()
 	var processed := 0
 
@@ -9009,6 +9307,8 @@ func _process_vegetation_queue() -> void:
 					"road_spatial_hash": _road_spatial_hash,
 					"building_spatial_hash": _building_spatial_hash,
 					"building_poly_hash": _building_poly_hash,
+					"water_spatial_hash": _water_spatial_hash,
+					"water_polygons": _water_polygons,
 					"parent": item.parent
 				}
 				_pending_veg_tasks += 1
@@ -9022,6 +9322,8 @@ func _process_vegetation_queue() -> void:
 					"building_poly_hash": _building_poly_hash,
 					"parking_spatial_hash": _parking_spatial_hash,
 					"parking_polygons": _parking_polygons,
+					"water_spatial_hash": _water_spatial_hash,
+					"water_polygons": _water_polygons,
 					"parent": item.parent
 				}
 				_pending_veg_tasks += 1
@@ -9038,7 +9340,7 @@ func _apply_veg_thread_results() -> void:
 	_veg_thread_results.clear()
 	_veg_mutex.unlock()
 
-	const VEG_APPLY_BUDGET_USEC := 2000
+	var VEG_APPLY_BUDGET_USEC := 500000 if _initial_loading else 2000
 	var apply_start := Time.get_ticks_usec()
 	var applied := 0
 
@@ -10079,6 +10381,33 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 
 	parent.add_child(mesh)
 
+	# Для воды добавляем коллизию с группой Water
+	if is_water and vertices.size() >= 3 and tri_indices.size() >= 3:
+		_create_water_collision(vertices, tri_indices, parent)
+
+
+## Создаёт коллизию для водной поверхности с группой "Water"
+func _create_water_collision(vertices: PackedVector3Array, indices: PackedInt32Array, parent: Node3D) -> void:
+	var faces := PackedVector3Array()
+	for i in range(0, indices.size(), 3):
+		faces.append(vertices[indices[i]])
+		faces.append(vertices[indices[i + 1]])
+		faces.append(vertices[indices[i + 2]])
+	if faces.is_empty():
+		return
+	var body := StaticBody3D.new()
+	body.name = "WaterCollision"
+	body.collision_layer = 1
+	body.collision_mask = 0
+	body.add_to_group("Water")
+	var col_shape := CollisionShape3D.new()
+	var concave := ConcavePolygonShape3D.new()
+	concave.set_faces(faces)
+	col_shape.shape = concave
+	body.add_child(col_shape)
+	parent.add_child(body)
+
+
 ## Создаёт коллизию для парка с группой "Park" (очень высокое сопротивление качению)
 func _create_park_collision(points: PackedVector2Array, parent: Node3D) -> void:
 	if points.size() < 3:
@@ -11062,6 +11391,8 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 	var road_hash: Dictionary = task_data.road_spatial_hash
 	var building_hash: Dictionary = task_data.building_spatial_hash
 	var poly_hash: Dictionary = task_data.building_poly_hash
+	var water_hash: Dictionary = task_data.get("water_spatial_hash", {})
+	var water_polys: Array = task_data.get("water_polygons", [])
 
 	var min_x := points[0].x
 	var max_x := points[0].x
@@ -11113,6 +11444,8 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 			continue
 		if _is_point_near_building_threadsafe(test_point, 2.0, building_hash, poly_hash):
 			continue
+		if _is_point_in_water_threadsafe(test_point, water_hash, water_polys):
+			continue
 
 		var elevation := 0.0
 		var is_pine := dense and fmod(hash1 * 97.0 + hash2 * 53.0, 1.0) < PINE_MIX_RATIO
@@ -11162,6 +11495,8 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 	var poly_hash: Dictionary = task_data.building_poly_hash
 	var parking_hash: Dictionary = task_data.parking_spatial_hash
 	var parking_polys: Array = task_data.parking_polygons
+	var water_hash: Dictionary = task_data.get("water_spatial_hash", {})
+	var water_polys: Array = task_data.get("water_polygons", [])
 
 	var coords: Array = chunk_key.split(",")
 	var chunk_x := int(coords[0])
@@ -11196,6 +11531,8 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 		if _is_point_near_building_threadsafe(test_point, 2.0, building_hash, poly_hash):
 			continue
 		if _is_point_in_any_parking_threadsafe(test_point, parking_hash, parking_polys):
+			continue
+		if _is_point_in_water_threadsafe(test_point, water_hash, water_polys):
 			continue
 
 		var elevation := 0.0
@@ -11489,7 +11826,23 @@ func _compute_terrain_clipping_thread(task_data: Dictionary) -> void:
 			if terrain_polys.is_empty():
 				break
 
-	# 4. Финальная фильтрация мелких осколков
+	# 4. Вырезаем водоёмы + берег (расширенные полигоны)
+	var water_shore: Array = task_data.get("water_shore", [])
+	if not terrain_polys.is_empty():
+		for water_shore_poly in water_shore:
+			if water_shore_poly.size() < 3:
+				continue
+			var new_polys: Array[PackedVector2Array] = []
+			for poly in terrain_polys:
+				var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, water_shore_poly)
+				for cp in clipped:
+					if cp.size() >= 3:
+						new_polys.append(cp)
+			terrain_polys = new_polys
+			if terrain_polys.is_empty():
+				break
+
+	# 5. Финальная фильтрация мелких осколков
 	var filtered_polys: Array[PackedVector2Array] = []
 	for poly in terrain_polys:
 		if poly.size() >= 3 and absf(_polygon_area(poly)) >= 2.0:
@@ -11511,23 +11864,42 @@ func _apply_terrain_thread_results() -> void:
 	if _terrain_thread_results.is_empty():
 		_terrain_thread_mutex.unlock()
 		return
-	# Забираем один результат за кадр чтобы избежать спайков
-	var result: Dictionary = _terrain_thread_results.pop_front()
+	var batch: Array = _terrain_thread_results.duplicate()
+	_terrain_thread_results.clear()
 	_terrain_thread_mutex.unlock()
 
-	_pending_terrain_tasks -= 1
-	var chunk_key: String = result.chunk_key
-	var terrain_polys: Array[PackedVector2Array] = result.terrain_polys
+	# Apply with 3ms budget (terrain finalization includes triangulation + curbs)
+	var TERRAIN_APPLY_BUDGET_USEC := 500000 if _initial_loading else 3000
+	var t0 := Time.get_ticks_usec()
+	var applied := 0
 
-	var parent: Node3D = _loaded_chunks.get(chunk_key, null)
-	if not parent or not is_instance_valid(parent):
-		return
+	for result in batch:
+		_pending_terrain_tasks -= 1
+		var chunk_key: String = result.chunk_key
+		var terrain_polys: Array[PackedVector2Array] = result.terrain_polys
 
-	if terrain_polys.is_empty():
-		print("OSM: ChunkTerrain %s: no polygons after clipping" % chunk_key)
-		return
+		var parent: Node3D = _loaded_chunks.get(chunk_key, null)
+		if not parent or not is_instance_valid(parent):
+			applied += 1
+			continue
 
-	_finalize_terrain_mesh(chunk_key, parent, terrain_polys)
+		if terrain_polys.is_empty():
+			print("OSM: ChunkTerrain %s: no polygons after clipping" % chunk_key)
+			applied += 1
+			continue
+
+		_finalize_terrain_mesh(chunk_key, parent, terrain_polys)
+		applied += 1
+		if applied > 1 and (Time.get_ticks_usec() - t0) > TERRAIN_APPLY_BUDGET_USEC:
+			break
+
+	# Return unprocessed back to front of queue (preserve order)
+	if applied < batch.size():
+		_terrain_thread_mutex.lock()
+		var remaining: Array = batch.slice(applied)
+		remaining.append_array(_terrain_thread_results)
+		_terrain_thread_results = remaining
+		_terrain_thread_mutex.unlock()
 
 
 ## Финализация террейн меша: триангуляция + бордюры + ArrayMesh + коллизия.
@@ -11761,6 +12133,10 @@ func _create_chunk_trees_immediate(chunk_key: String, parent: Node3D) -> void:
 		if _is_point_in_any_parking(test_point):
 			continue
 
+		# Пропускаем если в водоёме
+		if _is_point_in_water(test_point):
+			continue
+
 		var elevation := 0.0
 		_add_tree_to_batch(chunk_key, test_point, elevation, parent)
 
@@ -11908,14 +12284,14 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 
 		# Skip lamps inside intersection contours (where bezier curbs are)
 		var left_in_intersection := _is_point_in_intersection_shape(lamp_pos_left) >= 0
-		if not left_in_intersection and not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road(lamp_pos_left, 0.1):
+		if not left_in_intersection and not _is_point_in_any_parking(lamp_pos_left) and not _is_point_near_road(lamp_pos_left, 0.1) and not _is_point_in_water(lamp_pos_left):
 			var chunk_x := int(floor(lamp_pos_left.x / chunk_size))
 			var chunk_z := int(floor(lamp_pos_left.y / chunk_size))
 			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
 			if _loaded_chunks.has(chunk_key):
 				_add_lamp_to_batch(chunk_key, Vector3(lamp_pos_left.x, 0.0, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[chunk_key])
 
-		if both_sides and _is_point_in_intersection_shape(lamp_pos_right) < 0 and not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road(lamp_pos_right, 0.1):
+		if both_sides and _is_point_in_intersection_shape(lamp_pos_right) < 0 and not _is_point_in_any_parking(lamp_pos_right) and not _is_point_near_road(lamp_pos_right, 0.1) and not _is_point_in_water(lamp_pos_right):
 			var chunk_x := int(floor(lamp_pos_right.x / chunk_size))
 			var chunk_z := int(floor(lamp_pos_right.y / chunk_size))
 			var chunk_key := "%d,%d" % [chunk_x, chunk_z]
@@ -12246,6 +12622,48 @@ func _is_point_in_any_parking(point: Vector2) -> bool:
 					if pidx < _parking_polygons.size():
 						var parking: PackedVector2Array = _parking_polygons[pidx]
 						if parking.size() >= 3 and Geometry2D.is_point_in_polygon(point, parking):
+							return true
+	return false
+
+
+## Проверяет, находится ли точка внутри водного полигона (main thread)
+func _is_point_in_water(point: Vector2) -> bool:
+	var cell_x := int(floor(point.x / WATER_CELL_SIZE))
+	var cell_y := int(floor(point.y / WATER_CELL_SIZE))
+	var checked: Dictionary = {}
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not _water_spatial_hash.has(key):
+				continue
+			for entry in _water_spatial_hash[key]:
+				var widx: int = entry.idx
+				if not checked.has(widx):
+					checked[widx] = true
+					if widx < _water_polygons.size():
+						var wp: PackedVector2Array = _water_polygons[widx]
+						if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
+							return true
+	return false
+
+
+## Проверяет, находится ли точка внутри водного полигона (thread-safe)
+static func _is_point_in_water_threadsafe(point: Vector2, water_hash: Dictionary, water_polys: Array) -> bool:
+	var cell_x := int(floor(point.x / WATER_CELL_SIZE))
+	var cell_y := int(floor(point.y / WATER_CELL_SIZE))
+	var checked: Dictionary = {}
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not water_hash.has(key):
+				continue
+			for entry in water_hash[key]:
+				var widx: int = entry.idx
+				if not checked.has(widx):
+					checked[widx] = true
+					if widx < water_polys.size():
+						var wp: PackedVector2Array = water_polys[widx]
+						if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
 							return true
 	return false
 
@@ -13734,6 +14152,29 @@ func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) 
 	return (p1 * 2.0 + (-p0 + p2) * t + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 + (-p0 + p1 * 3.0 - p2 * 3.0 + p3) * t3) * 0.5
 
 
+## Возвращает Rect2 для чанка по его ключу "cx,cz"
+func _get_chunk_rect_from_key(chunk_key: String) -> Rect2:
+	var parts := chunk_key.split(",")
+	var cx := int(parts[0])
+	var cz := int(parts[1])
+	return Rect2(float(cx) * chunk_size, float(cz) * chunk_size, chunk_size, chunk_size)
+
+## Клиппинг полигона по границам чанка. Возвращает массив клипнутых полигонов.
+func _clip_polygon_to_chunk(poly: PackedVector2Array, chunk_key: String) -> Array[PackedVector2Array]:
+	var rect := _get_chunk_rect_from_key(chunk_key)
+	var rect_poly := PackedVector2Array([
+		Vector2(rect.position.x, rect.position.y),
+		Vector2(rect.end.x, rect.position.y),
+		Vector2(rect.end.x, rect.end.y),
+		Vector2(rect.position.x, rect.end.y),
+	])
+	var result: Array[PackedVector2Array] = []
+	var clipped := Geometry2D.intersect_polygons(poly, rect_poly)
+	for p in clipped:
+		if p.size() >= 3:
+			result.append(p)
+	return result
+
 ## Smooths road geometry using Catmull-Rom spline interpolation
 ## This creates smooth curves through all points
 ## Клиппинг полилинии по прямоугольнику.
@@ -14114,12 +14555,20 @@ func _create_chunk_boundary_mesh(chunk_key: String) -> void:
 	_chunk_boundary_meshes[chunk_key] = mesh_instance
 
 
-## Проверяет, находится ли точка рядом с перекрёстком
+## Проверяет, находится ли точка рядом с перекрёстком (через spatial hash)
 ## Возвращает индекс перекрёстка или -1
 func _find_nearby_intersection(pos: Vector2, radius: float = 15.0) -> int:
-	for i in range(_intersection_positions.size()):
-		if pos.distance_to(_intersection_positions[i]) < radius:
-			return i
+	var cell_x := int(floor(pos.x / INTERSECTION_CELL_SIZE))
+	var cell_y := int(floor(pos.y / INTERSECTION_CELL_SIZE))
+	var cells_needed := int(ceil(radius / INTERSECTION_CELL_SIZE))
+	for cx in range(cell_x - cells_needed, cell_x + cells_needed + 1):
+		for cy in range(cell_y - cells_needed, cell_y + cells_needed + 1):
+			var key := Vector2i(cx, cy)
+			if not _intersection_spatial_hash.has(key):
+				continue
+			for i in _intersection_spatial_hash[key]:
+				if i < _intersection_positions.size() and pos.distance_to(_intersection_positions[i]) < radius:
+					return i
 	return -1
 
 
@@ -14130,15 +14579,25 @@ func _is_equal_intersection(intersection_idx: int) -> bool:
 	return _intersection_types[intersection_idx]
 
 
-## Ищет ближайший перекрёсток в пределах радиуса
+## Ищет ближайший перекрёсток в пределах радиуса (через spatial hash)
 func _find_nearest_intersection(pos: Vector2, max_dist: float) -> int:
 	var best_idx := -1
 	var best_dist := max_dist
-	for i in range(_intersection_positions.size()):
-		var dist := pos.distance_to(_intersection_positions[i])
-		if dist < best_dist:
-			best_dist = dist
-			best_idx = i
+	# Search 3x3 cells around pos for nearby intersections
+	var cell_x := int(floor(pos.x / INTERSECTION_CELL_SIZE))
+	var cell_y := int(floor(pos.y / INTERSECTION_CELL_SIZE))
+	for cx in range(cell_x - 1, cell_x + 2):
+		for cy in range(cell_y - 1, cell_y + 2):
+			var key := Vector2i(cx, cy)
+			if not _intersection_spatial_hash.has(key):
+				continue
+			for i in _intersection_spatial_hash[key]:
+				if i >= _intersection_positions.size():
+					continue
+				var dist := pos.distance_to(_intersection_positions[i])
+				if dist < best_dist:
+					best_dist = dist
+					best_idx = i
 	return best_idx
 
 
@@ -14168,6 +14627,9 @@ func _cleanup_chunk_hash_cells(chunk_key: String) -> void:
 	if cells.has("parking"):
 		for cell in cells["parking"]:
 			_parking_spatial_hash.erase(cell)
+	if cells.has("water"):
+		for cell in cells["water"]:
+			_water_spatial_hash.erase(cell)
 	if cells.has("intersection"):
 		for cell in cells["intersection"]:
 			_intersection_spatial_hash.erase(cell)
@@ -14724,7 +15186,9 @@ func _process_chunk_activation() -> void:
 	# Состояния в _chunk_activation_pending:
 	# -1 = ждём финализации
 	# >= 0 = индекс следующего RS instance для активации
-	const RS_PER_FRAME := 4  # RS instances за кадр (размазываем Vulkan upload)
+	# During initial loading: activate ALL instances immediately (loading screen hides stutter)
+	# During gameplay: drip-feed 4 per frame to avoid Vulkan upload spikes
+	var rs_per_frame := 999999 if _initial_loading else 4
 
 	for chunk_key in _chunk_activation_pending.keys():
 		var state: int = _chunk_activation_pending[chunk_key]
@@ -14747,7 +15211,7 @@ func _process_chunk_activation() -> void:
 				continue
 
 			var instances: Array = _chunk_rs_instances[chunk_key]
-			var end_idx: int = mini(state + RS_PER_FRAME, instances.size())
+			var end_idx: int = mini(state + rs_per_frame, instances.size())
 			var i := state
 			while i < end_idx:
 				RenderingServer.instance_set_visible(instances[i], true)

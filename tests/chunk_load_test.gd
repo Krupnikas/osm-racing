@@ -41,8 +41,16 @@ var peak_chunk_count: int = 0
 
 func _ready() -> void:
 	seed(12345)
+	# CLI override: --test-lat=50.0614 --test-lon=19.9383
+	var all_args := OS.get_cmdline_args()
+	all_args.append_array(OS.get_cmdline_user_args())
+	for arg in all_args:
+		if arg.begins_with("--test-lat="):
+			test_location.x = float(arg.substr(11))
+		elif arg.begins_with("--test-lon="):
+			test_location.y = float(arg.substr(11))
 	print("\n========== CHUNK LOAD PERFORMANCE TEST ==========")
-	print("Location: Cherepovets (%.4f, %.4f)" % [test_location.x, test_location.y])
+	print("Location: (%.4f, %.4f)" % [test_location.x, test_location.y])
 	print("Phase 1: Initial load (camera stationary, profiled separately)")
 	print("Phase 2: Flying south %.0f km/h at %.0fm for %.0fs" % [fly_speed * 3.6, fly_height, test_duration])
 	print("Spike threshold: %.1f ms" % spike_threshold_ms)
@@ -186,6 +194,12 @@ func _setup_test() -> void:
 	print("\n--- PHASE 1: INITIAL LOAD ---")
 	print("[ChunkLoadTest] Camera stationary, profiling initial chunk load...")
 
+	# Apply CLI lat/lon to OSMTerrain before loading
+	if "start_lat" in osm_terrain:
+		osm_terrain.start_lat = test_location.x
+	if "start_lon" in osm_terrain:
+		osm_terrain.start_lon = test_location.y
+
 	var signal_connected := false
 	if osm_terrain.has_signal("initial_load_complete"):
 		osm_terrain.initial_load_complete.connect(_on_terrain_loaded)
@@ -197,14 +211,14 @@ func _setup_test() -> void:
 	if osm_terrain.has_method("start_loading"):
 		osm_terrain.start_loading()
 
-	# Fallback timeout
+	# Fallback timeout (60s for dense areas like Krakow center)
 	if signal_connected:
-		await get_tree().create_timer(20.0).timeout
+		await get_tree().create_timer(60.0).timeout
 		if current_phase == Phase.LOADING:
-			print("[ChunkLoadTest] Fallback: 20s timeout, starting flight phase")
+			print("[ChunkLoadTest] Fallback: 60s timeout, starting flight phase")
 			_on_terrain_loaded()
 	else:
-		await get_tree().create_timer(20.0).timeout
+		await get_tree().create_timer(60.0).timeout
 		_on_terrain_loaded()
 
 
@@ -247,6 +261,10 @@ func _start_flight() -> void:
 	current_phase = Phase.FLYING
 	test_running = true
 	test_time = 0.0
+	# Force _initial_loading = false so gameplay budgets apply during flying
+	if osm_terrain and "_initial_loading" in osm_terrain and osm_terrain._initial_loading:
+		print("[ChunkLoadTest] Forcing _initial_loading = false for gameplay budgets")
+		osm_terrain._initial_loading = false
 
 	if osm_terrain and "_loaded_chunks" in osm_terrain:
 		initial_chunk_count = osm_terrain._loaded_chunks.size()
