@@ -16,8 +16,8 @@ static var _next_server_index := 0  # Round-robin: каждый новый за�
 static var _server_cooldown_until: Array[int] = [0, 0, 0]  # msec timestamp до которого сервер заблокирован
 static var _request_queue: Array[OSMLoader] = []  # Глобальная очередь запросов
 static var _active_requests: int = 0  # Сколько HTTP запросов сейчас в полёте
-const MAX_ACTIVE_REQUESTS := 2  # Макс одновременных HTTP запросов (все серверы суммарно)
-const REQUEST_INTERVAL_MS := 1200  # Минимальный интервал между запросами к одному серверу
+const MAX_ACTIVE_REQUESTS := 3  # Макс одновременных HTTP запросов (1 на сервер)
+const REQUEST_INTERVAL_MS := 1000  # Минимальный интервал между запросами к одному серверу
 const RATE_LIMIT_COOLDOWN_MS := 10000  # Cooldown сервера после 429/ошибки
 static var _last_request_time: Array[int] = [0, 0, 0]  # Время последнего запроса к каждому серверу
 static var _queue_processor: OSMLoader = null  # Один инстанс обрабатывает очередь
@@ -71,9 +71,10 @@ func _process(_delta: float) -> void:
 				# Cache load failed — fall back to network
 				_start_network_request()
 
-	# Один инстанс обрабатывает глобальную очередь
+	# Один инстанс обрабатывает глобальную очередь (dispatch multiple per frame)
 	if _queue_processor == self:
-		_process_global_queue()
+		for _qi in MAX_ACTIVE_REQUESTS:
+			_process_global_queue()
 
 
 func _exit_tree() -> void:
