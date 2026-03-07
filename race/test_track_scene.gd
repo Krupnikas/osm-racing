@@ -29,6 +29,8 @@ const SPAWN_ROTATIONS := {
 
 
 func _ready() -> void:
+	CarSpawner.replace_player_car(self)
+
 	await get_tree().process_frame
 
 	if car_path:
