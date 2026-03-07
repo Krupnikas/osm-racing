@@ -123,6 +123,12 @@ const WATER_CELL_SIZE := 30.0
 # Per-chunk tracking of spatial hash cells for cleanup on unload
 # chunk_key -> {"road": [Vector2i], "building": [Vector2i], "building_poly": [Vector2i], "parking": [Vector2i], "intersection": [Vector2i]}
 var _chunk_hash_cells: Dictionary = {}
+# Per-chunk spatial hashes (independent, include overlap data — used by vegetation threads)
+var _chunk_road_hashes: Dictionary = {}  # chunk_key → Dictionary (Vector2i → Array of seg)
+var _chunk_building_hashes: Dictionary = {}  # chunk_key → Dictionary
+var _chunk_building_poly_hashes: Dictionary = {}  # chunk_key → Dictionary
+var _chunk_parking_hashes: Dictionary = {}  # chunk_key → Dictionary
+var _chunk_water_hashes: Dictionary = {}  # chunk_key → Dictionary
 var _intersection_positions: Array[Vector2] = []  # Позиции перекрёстков (центры)
 var _intersection_radii: Array[Vector2] = []  # Полуоси эллипсов (x=вдоль широкой дороги, y=вдоль узкой)
 var _intersection_angles: Array[float] = []  # Углы поворота эллипсов (радианы, направление широкой дороги)
@@ -1649,6 +1655,11 @@ func start_loading() -> void:
 	_water_polygons.clear()
 	_water_spatial_hash.clear()
 	_chunk_hash_cells.clear()
+	_chunk_road_hashes.clear()
+	_chunk_building_hashes.clear()
+	_chunk_building_poly_hashes.clear()
+	_chunk_parking_hashes.clear()
+	_chunk_water_hashes.clear()
 	_created_lamp_positions.clear()  # Очищаем позиции фонарей
 	_created_bus_stop_positions.clear()  # Очищаем позиции остановок
 	_pending_parking_signs.clear()  # Очищаем отложенные знаки парковки
@@ -2699,6 +2710,11 @@ func reset_terrain() -> void:
 	_water_polygons.clear()
 	_water_spatial_hash.clear()
 	_chunk_hash_cells.clear()
+	_chunk_road_hashes.clear()
+	_chunk_building_hashes.clear()
+	_chunk_building_poly_hashes.clear()
+	_chunk_parking_hashes.clear()
+	_chunk_water_hashes.clear()
 	_deferred_lamp_queue.clear()
 	_deferred_manhole_queue.clear()
 	_deferred_traffic_queue.clear()
@@ -3266,12 +3282,24 @@ func _apply_single_terrain_gen_result(result: Dictionary) -> void:
 		_parking_polygons.append(pp)
 	for pb in result.parking_bounds:
 		_parking_bounds.append(pb)
+	var chunk_parking_hash: Dictionary = {}
+	var chunk_parking_polys: Array = []
+	for pp in result.parking_polygons:
+		chunk_parking_polys.append(pp)
 	for entry in result.parking_hash_entries:
 		var cell: Vector2i = entry.cell
 		if not _parking_spatial_hash.has(cell):
 			_parking_spatial_hash[cell] = []
 		_parking_spatial_hash[cell].append({"idx": base_parking_idx + entry.idx, "p1": entry.p1, "p2": entry.p2})
 		_track_hash_cell(chunk_key, "parking", cell)
+		if not chunk_parking_hash.has(cell):
+			chunk_parking_hash[cell] = []
+		chunk_parking_hash[cell].append({"idx": entry.idx, "p1": entry.p1, "p2": entry.p2})
+	_chunk_parking_hashes[chunk_key] = {"hash": chunk_parking_hash, "polys": chunk_parking_polys}
+	# Per-chunk hashes (independent, for vegetation threads)
+	var chunk_road_hash: Dictionary = {}
+	var chunk_building_hash: Dictionary = {}
+	var chunk_building_poly_hash: Dictionary = {}
 	for rhe in result.road_hash_entries:
 		var seg: Dictionary = rhe.seg
 		_road_segments.append(seg)
@@ -3280,6 +3308,9 @@ func _apply_single_terrain_gen_result(result: Dictionary) -> void:
 				_road_spatial_hash[cell] = []
 			_road_spatial_hash[cell].append(seg)
 			_track_hash_cell(chunk_key, "road", cell)
+			if not chunk_road_hash.has(cell):
+				chunk_road_hash[cell] = []
+			chunk_road_hash[cell].append(seg)
 	for bhe in result.building_hash_entries:
 		var seg: Dictionary = bhe.seg
 		_building_segments.append(seg)
@@ -3288,12 +3319,21 @@ func _apply_single_terrain_gen_result(result: Dictionary) -> void:
 				_building_spatial_hash[cell] = []
 			_building_spatial_hash[cell].append(seg)
 			_track_hash_cell(chunk_key, "building", cell)
+			if not chunk_building_hash.has(cell):
+				chunk_building_hash[cell] = []
+			chunk_building_hash[cell].append(seg)
 	for bpe in result.building_poly_entries:
 		for cell in bpe.cells:
 			if not _building_poly_hash.has(cell):
 				_building_poly_hash[cell] = []
 			_building_poly_hash[cell].append(bpe.poly)
 			_track_hash_cell(chunk_key, "building_poly", cell)
+			if not chunk_building_poly_hash.has(cell):
+				chunk_building_poly_hash[cell] = []
+			chunk_building_poly_hash[cell].append(bpe.poly)
+	_chunk_road_hashes[chunk_key] = chunk_road_hash
+	_chunk_building_hashes[chunk_key] = chunk_building_hash
+	_chunk_building_poly_hashes[chunk_key] = chunk_building_poly_hash
 
 	# Apply Phase 2: intersections (with global dedup)
 	for li in range(result.new_positions.size()):
@@ -4813,7 +4853,9 @@ func _process_footway_incremental(item: Dictionary, budget_end: int) -> bool:
 	var is_tagged_crossing: bool = item.tags.get("footway", "") == "crossing"
 
 	# Path: целиком через polygon clipping (обрезается road corridors как terrain)
-	_add_path_clipped_to_batch(smoothed_points, width, 0.23, parent)
+	# Skip path polygon for tagged crossings — only crossing strips are needed
+	if not is_tagged_crossing:
+		_add_path_clipped_to_batch(smoothed_points, width, 0.23, parent)
 
 	# Crossing: splitting по on_road для определения on-road portions (зебра)
 	var current_pts := PackedVector2Array()
@@ -5009,7 +5051,7 @@ func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, he
 	if polys.is_empty():
 		return
 
-	# 3. Клипим road corridors (обрезаем тротуар по дорогам)
+	# 3. Клипим road corridors (обрезаем тротуар по дорогам, с запасом 0.5м)
 	if chunk_key != "initial":
 		var terrain_roads: Array = []
 		for dx in range(-1, 2):
@@ -5020,15 +5062,20 @@ func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, he
 		for road_corridor in terrain_roads:
 			if road_corridor.size() < 4:
 				continue
-			var new_polys: Array[PackedVector2Array] = []
-			for poly in polys:
-				var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, road_corridor)
-				for cp in clipped:
-					if cp.size() >= 3:
-						new_polys.append(cp)
-			polys = new_polys
-			if polys.is_empty():
-				return
+			# Inflate corridor by 0.5m to avoid thin slivers at road edge
+			var inflated: Array[PackedVector2Array] = Geometry2D.offset_polygon(road_corridor, 0.5)
+			if inflated.is_empty():
+				inflated = [road_corridor]
+			for inf_poly in inflated:
+				var new_polys: Array[PackedVector2Array] = []
+				for poly in polys:
+					var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, inf_poly)
+					for cp in clipped:
+						if cp.size() >= 3:
+							new_polys.append(cp)
+				polys = new_polys
+				if polys.is_empty():
+					return
 
 	# 4. Клипим intersection contours
 	if not polys.is_empty():
@@ -9572,8 +9619,12 @@ func _process_vegetation_queue() -> void:
 			if ck == "":
 				ck = candidate.get("chunk_key", "")
 			# Проверяем что дороги и здания для этого чанка финализированы
+			if ck != "" and _road_queue.has(ck):
+				continue  # Дороги ещё в очереди на dispatching в worker threads
 			if ck != "" and _road_batch_data.has(ck):
-				continue  # Дороги ещё не финализированы
+				continue  # Дороги ещё не финализированы в mesh
+			if ck != "" and _pending_batch_chunks.has(ck):
+				continue  # Batch ещё не финализирован (road workers могут быть в полёте)
 			if ck != "" and _building_geo_batch.has(ck):
 				continue  # Здания ещё не финализированы
 			item = candidate
@@ -9592,6 +9643,14 @@ func _process_vegetation_queue() -> void:
 
 		var veg_type: String = item.get("type", "")
 
+		# Per-chunk hashes (each chunk has its own, includes overlap data)
+		var ck_road_hash: Dictionary = _chunk_road_hashes.get(chunk_key, {})
+		var ck_building_hash: Dictionary = _chunk_building_hashes.get(chunk_key, {})
+		var ck_building_poly_hash: Dictionary = _chunk_building_poly_hashes.get(chunk_key, {})
+		var ck_parking_data: Dictionary = _chunk_parking_hashes.get(chunk_key, {})
+		var ck_parking_hash: Dictionary = ck_parking_data.get("hash", {})
+		var ck_parking_polys: Array = ck_parking_data.get("polys", [])
+
 		match veg_type:
 			"trees":
 				var task_data := {
@@ -9599,9 +9658,9 @@ func _process_vegetation_queue() -> void:
 					"dense": item.dense,
 					"chunk_key": chunk_key,
 					"chunk_size": chunk_size,
-					"road_spatial_hash": _road_spatial_hash,
-					"building_spatial_hash": _building_spatial_hash,
-					"building_poly_hash": _building_poly_hash,
+					"road_spatial_hash": ck_road_hash,
+					"building_spatial_hash": ck_building_hash,
+					"building_poly_hash": ck_building_poly_hash,
 					"water_spatial_hash": _water_spatial_hash,
 					"water_polygons": _water_polygons,
 					"parent": item.parent
@@ -9612,11 +9671,11 @@ func _process_vegetation_queue() -> void:
 				var task_data := {
 					"chunk_key": chunk_key,
 					"chunk_size": chunk_size,
-					"road_spatial_hash": _road_spatial_hash,
-					"building_spatial_hash": _building_spatial_hash,
-					"building_poly_hash": _building_poly_hash,
-					"parking_spatial_hash": _parking_spatial_hash,
-					"parking_polygons": _parking_polygons,
+					"road_spatial_hash": ck_road_hash,
+					"building_spatial_hash": ck_building_hash,
+					"building_poly_hash": ck_building_poly_hash,
+					"parking_spatial_hash": ck_parking_hash,
+					"parking_polygons": ck_parking_polys,
 					"water_spatial_hash": _water_spatial_hash,
 					"water_polygons": _water_polygons,
 					"parent": item.parent
@@ -11735,7 +11794,7 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 
 		if not Geometry2D.is_point_in_polygon(test_point, points):
 			continue
-		if _is_point_near_road_threadsafe(test_point, 3.0, road_hash):
+		if _is_point_near_road_threadsafe(test_point, 5.0, road_hash):
 			continue
 		if _is_point_near_building_threadsafe(test_point, 2.0, building_hash, poly_hash):
 			continue
@@ -11821,7 +11880,7 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 		var test_y := min_z + (hash2 * 0.7 + hash4 * 0.3) * t_chunk_size
 		var test_point := Vector2(test_x, test_y)
 
-		if _is_point_near_road_threadsafe(test_point, 2.0, road_hash):
+		if _is_point_near_road_threadsafe(test_point, 4.0, road_hash):
 			continue
 		if _is_point_near_building_threadsafe(test_point, 2.0, building_hash, poly_hash):
 			continue
@@ -14994,6 +15053,12 @@ func _cleanup_chunk_hash_cells(chunk_key: String) -> void:
 		for cell in cells["intersection"]:
 			_intersection_spatial_hash.erase(cell)
 	_chunk_hash_cells.erase(chunk_key)
+	# Per-chunk hashes
+	_chunk_road_hashes.erase(chunk_key)
+	_chunk_building_hashes.erase(chunk_key)
+	_chunk_building_poly_hashes.erase(chunk_key)
+	_chunk_parking_hashes.erase(chunk_key)
+	_chunk_water_hashes.erase(chunk_key)
 
 
 ## Добавляет перекрёсток в spatial hash
