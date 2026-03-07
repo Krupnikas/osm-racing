@@ -21,6 +21,7 @@ var track_info := {
 	"tuhliy_bez_kontrolya.ogg": ["Тухлый", "Без контроля"],
 	"luka_fiasko_v_tilte.mp3": ["Лука Фиаско", "В тильте"],
 	"rps_delay_delo.mp3": ["Р₽С", "Делай дело (feat. Молодой Дро)"],
+	"lihoy_bugi_klikuha_moya.mp3": ["Лихой Буги", "Кликуха Моя"],
 }
 
 # Audio player
@@ -60,6 +61,7 @@ func _initialize_playlist() -> void:
 		"res://audio/music/tuhliy_bez_kontrolya.ogg",
 		"res://audio/music/luka_fiasko_v_tilte.mp3",
 		"res://audio/music/rps_delay_delo.mp3",
+		"res://audio/music/lihoy_bugi_klikuha_moya.mp3",
 	]
 
 func play_track(index: int) -> void:

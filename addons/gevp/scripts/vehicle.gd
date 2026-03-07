@@ -4,6 +4,8 @@
 class_name Vehicle
 extends RigidBody3D
 
+const BURNOUT_EFFECT_SCENE := preload("res://effects/burnout_effect.tscn")
+
 @export_group("Wheel Nodes")
 ## Assign this to the Wheel [RayCast3D] that is this vehicle's front left wheel.
 @export var front_left_wheel : Wheel
@@ -67,6 +69,20 @@ extends RigidBody3D
 ## Prevents engine power from causing the tires to slip beyond this value.
 ## Values below 0 disable the effect.
 @export var traction_control_max_slip := 8.0
+
+@export_group("Burnout")
+## Allow holding throttle and brake together to spin the rear wheels at low speed.
+@export var burnout_enabled := true
+## Minimum throttle input before burnout logic can engage.
+@export_range(0.0, 1.0, 0.01) var burnout_min_throttle := 0.65
+## Minimum brake input before burnout logic can engage.
+@export_range(0.0, 1.0, 0.01) var burnout_min_brake := 0.65
+## Burnout only engages below this speed in meters per second.
+@export var burnout_max_speed := 6.0
+## Keep most of the service brake on the front axle so the rear can spin.
+@export var burnout_front_brake_factor := 1.35
+## Reduce rear service brake during burnout so the rear wheels can break loose.
+@export_range(0.0, 1.0, 0.01) var burnout_rear_brake_factor := 0.05
 
 @export_subgroup("Front Axle", "front_")
 ## How long the ABS releases the brake, in seconds, when the
@@ -350,6 +366,13 @@ var local_velocity := Vector3.ZERO
 var previous_global_position := Vector3.ZERO
 var speed := 0.0
 var motor_rpm := 0.0
+var wheel_coupled_rpm := 0.0
+var drivetrain_rpm := 0.0
+var clutch_slip_rpm := 0.0
+var engine_load := 0.0
+var throttle_attack_rate := 0.0
+var shift_phase := 0.0
+var shift_direction := 0
 
 var steering_amount := 0.0
 var steering_exponent_amount := 0.0
@@ -373,6 +396,7 @@ var max_brake_force := 0.0
 var handbrake_force := 0.0
 var max_handbrake_force := 0.0
 var is_braking := false
+var burnout_active := false
 var motor_is_redline := false
 var is_shifting := false
 var is_up_shifting := false
@@ -388,6 +412,7 @@ var delta_time := 0.0
 
 var vehicle_inertia : Vector3
 var current_gravity : Vector3
+var previous_throttle_amount := 0.0
 
 class Axle:
 	var wheels : Array[Wheel] = []
@@ -599,6 +624,7 @@ func initialize():
 	previous_global_position = global_position
 	
 	calculate_brake_force()
+	_ensure_burnout_effect()
 	
 	is_ready = true
 
@@ -626,6 +652,7 @@ func _physics_process(delta : float) -> void:
 	process_motor(delta)
 	process_clutch(delta)
 	process_transmission()
+	update_audio_state(delta)
 	process_drive(delta)
 	process_forces(delta)
 	process_stability()
@@ -653,6 +680,7 @@ func process_braking(delta : float) -> void:
 	
 	brake_force = brake_amount * max_brake_force
 	handbrake_force = handbrake_input * max_handbrake_force
+	burnout_active = _should_activate_burnout()
 
 func process_steering(delta : float) -> void:
 	var steer_assist_engaged := false
@@ -738,6 +766,9 @@ func process_throttle(delta : float) -> void:
 	else:
 		clutch_amount = clutch_input
 
+	if burnout_active and current_gear != 0 and not is_shifting:
+		clutch_amount = 0.0
+
 func process_motor(delta : float) -> void:
 	var drag_torque := motor_rpm * motor_drag
 	torque_output = get_torque_at_rpm(motor_rpm) * throttle_amount
@@ -762,6 +793,9 @@ func process_motor(delta : float) -> void:
 		need_clutch = false
 	
 	motor_rpm = maxf(motor_rpm, idle_rpm)
+	if burnout_active:
+		motor_rpm = maxf(motor_rpm, clutch_out_rpm * 0.85)
+		need_clutch = false
 
 func process_clutch(delta : float):
 	if current_gear == 0:
@@ -784,7 +818,7 @@ func process_clutch(delta : float):
 	clutch_torque = clampf(clutch_torque, -max_clutch_torque * clutch_factor, max_clutch_torque * clutch_factor)
 	
 	## Check if traction control is needed and adjust motor speed and clutch torque if needed
-	if traction_control_max_slip > 0.0:
+	if traction_control_max_slip > 0.0 and not burnout_active:
 		var slip_y := 0.0
 		for axle in axles:
 			slip_y = maxf(slip_y, axle.get_max_wheel_slip_y())
@@ -819,6 +853,12 @@ func process_transmission() -> void:
 	## tires without immediately shifting to the next gear.
 	
 	if automatic_transmission:
+		if burnout_active:
+			if current_gear != 1 and delta_time - last_shift_delta_time > shift_time:
+				requested_gear = 1
+				complete_shift()
+			return
+
 		var reversing := false
 		var ideal_wheel_spin := speed / average_drive_wheel_radius
 		var drivetrain_spin := get_drivetrain_spin()
@@ -868,6 +908,12 @@ func process_drive(delta : float) -> void:
 	
 	if current_gear != 0:
 		drive_torque = clutch_torque * current_gear_ratio
+
+	if burnout_active:
+		true_torque_split = 0.0
+		process_axle_drive(front_axle, 0.0, drive_inertia, delta)
+		process_axle_drive(rear_axle, drive_torque, drive_inertia, delta)
+		return
 	
 	## Check for slip and adjust variable torque split
 	if variable_torque_split:
@@ -896,7 +942,8 @@ func process_drive(delta : float) -> void:
 	process_axle_drive(axle_a, transfer_torque_2, drive_inertia, delta)
 
 func process_axle_drive(axle : Axle, torque : float, drive_inertia : float, delta : float) -> void:
-	if not axle.is_drive_axle:
+	var burnout_rear_drive := burnout_active and axle == rear_axle
+	if not axle.is_drive_axle and not burnout_rear_drive:
 		torque = 0.0
 		drive_inertia = 0.0
 	
@@ -909,7 +956,7 @@ func process_axle_drive(axle : Axle, torque : float, drive_inertia : float, delt
 	
 	## If enough torque is applied to the axle, lock to wheel speeds and add
 	## torque vectoring
-	if axle.is_drive_axle and axle.differential_lock_torque >= 0.0:
+	if (axle.is_drive_axle or burnout_rear_drive) and axle.differential_lock_torque >= 0.0:
 		if absf(torque) > axle.differential_lock_torque:
 			axle.rotation_split = 0.5 + (axle.torque_vectoring * -steering_input)
 			var couple_spin := axle.get_average_spin()
@@ -923,11 +970,32 @@ func process_axle_drive(axle : Axle, torque : float, drive_inertia : float, delt
 			axle.rotation_split = minf(axle.rotation_split, right_reaction_torque_ratio)
 	
 	var rotation_sum := 0.0
-	var split := (axle.rotation_split + 1.0) * 0.5
+	var split := 0.5 if burnout_rear_drive else (axle.rotation_split + 1.0) * 0.5
+	var axle_brake_force := _get_axle_brake_force(axle)
 	axle.applied_split = axle.rotation_split
-	rotation_sum += axle.wheels[0].process_torque(torque * split, drive_inertia, brake_force * 0.5 * axle.brake_bias, allow_abs, delta)
-	rotation_sum += axle.wheels[1].process_torque(torque * (1.0 - split), drive_inertia, brake_force * 0.5 * axle.brake_bias, allow_abs, delta)
+	rotation_sum += axle.wheels[0].process_torque(torque * split, drive_inertia, axle_brake_force * 0.5 * axle.brake_bias, allow_abs, delta)
+	rotation_sum += axle.wheels[1].process_torque(torque * (1.0 - split), drive_inertia, axle_brake_force * 0.5 * axle.brake_bias, allow_abs, delta)
 	axle.rotation_split = clampf(rotation_sum, -1.0, 1.0)
+
+func _should_activate_burnout() -> bool:
+	if not burnout_enabled:
+		return false
+	if throttle_input < burnout_min_throttle or brake_input < burnout_min_brake:
+		return false
+	if handbrake_input > 0.1:
+		return false
+	if speed > burnout_max_speed:
+		return false
+	return get_wheel_contact_count() >= 2
+
+func _get_axle_brake_force(axle : Axle) -> float:
+	if not burnout_active:
+		return brake_force
+	if axle == front_axle:
+		return brake_force * burnout_front_brake_factor
+	if axle == rear_axle:
+		return brake_force * burnout_rear_brake_factor
+	return brake_force
 
 func process_forces(delta : float) -> void:
 	## Spring compression values are kept for antiroll bar calculations
@@ -976,6 +1044,7 @@ func shift(count : int) -> void:
 	requested_gear = current_gear + count
 	
 	if requested_gear <= gear_ratios.size() and requested_gear >= -1:
+		shift_direction = signi(count)
 		if current_gear == 0:
 			complete_shift()
 		else:
@@ -997,6 +1066,43 @@ func complete_shift() -> void:
 	last_shift_delta_time = delta_time
 	is_shifting = false
 	is_up_shifting = false
+	shift_direction = 0
+
+
+func update_audio_state(delta: float) -> void:
+	var current_gear_ratio := absf(get_gear_ratio(current_gear))
+	var ideal_wheel_spin := 0.0
+	if average_drive_wheel_radius > 0.0:
+		ideal_wheel_spin = absf(speed) / average_drive_wheel_radius
+	var drivetrain_spin := absf(get_drivetrain_spin())
+
+	if current_gear_ratio > 0.0:
+		wheel_coupled_rpm = clampf(current_gear_ratio * ideal_wheel_spin * ANGULAR_VELOCITY_TO_RPM, idle_rpm, max_rpm)
+		drivetrain_rpm = clampf(current_gear_ratio * drivetrain_spin * ANGULAR_VELOCITY_TO_RPM, idle_rpm, max_rpm)
+	else:
+		wheel_coupled_rpm = idle_rpm
+		drivetrain_rpm = idle_rpm
+
+	clutch_slip_rpm = absf(motor_rpm - drivetrain_rpm)
+	throttle_attack_rate = (throttle_amount - previous_throttle_amount) / maxf(delta, 0.001)
+	previous_throttle_amount = throttle_amount
+
+	var clutch_coupling := 1.0 - clampf(clutch_amount, 0.0, 1.0)
+	var torque_state := clampf(absf(torque_output) / maxf(max_torque, 1.0), 0.0, 1.0)
+	var clutch_state := clampf(absf(clutch_torque) / maxf(max_clutch_torque, 1.0), 0.0, 1.0)
+	engine_load = clampf(
+		maxf(
+			torque_state * lerpf(0.35, 1.0, clutch_coupling),
+			throttle_amount * clutch_state
+		),
+		0.0,
+		1.0
+	)
+
+	if is_shifting and shift_time > 0.0:
+		shift_phase = clampf(1.0 - ((complete_shift_delta_time - delta_time) / shift_time), 0.0, 1.0)
+	else:
+		shift_phase = 0.0
 
 func get_wheel_contact_count() -> int:
 	var contact_count := 0
@@ -1058,6 +1164,15 @@ func calculate_brake_force() -> void:
 	var friction := calculate_average_tire_friction(vehicle_mass * 9.8, "Road")
 	max_brake_force = ((friction * braking_grip_multiplier) * average_drive_wheel_radius) / wheel_array.size()
 	max_handbrake_force = ((friction * braking_grip_multiplier * 0.05) / average_drive_wheel_radius)
+
+func _ensure_burnout_effect() -> void:
+	if get_node_or_null("BurnoutDust") != null:
+		return
+
+	var burnout_effect: Node = BURNOUT_EFFECT_SCENE.instantiate()
+	if burnout_effect.get("vehicle") != null:
+		burnout_effect.set("vehicle", self)
+	add_child(burnout_effect)
 
 func calculate_center_of_gravity(front_distribution : float) -> Vector3:
 	front_axle_position = front_left_wheel.position.lerp(front_right_wheel.position, 0.5)

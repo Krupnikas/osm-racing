@@ -1,0 +1,202 @@
+[
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/Interior/int_high_off.wav",
+    "profile": "loop",
+    "mean_db": -7.1,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -20.9,
+    "result_mean_db": -28.0,
+    "result_peak_db": -20.9
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/Interior/int_high_on.wav",
+    "profile": "loop",
+    "mean_db": -7.5,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -20.5,
+    "result_mean_db": -28.0,
+    "result_peak_db": -20.5
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/Interior/int_idle.wav",
+    "profile": "loop",
+    "mean_db": -12.3,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -15.7,
+    "result_mean_db": -28.0,
+    "result_peak_db": -15.7
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/Interior/int_low_off.wav",
+    "profile": "loop",
+    "mean_db": -6.8,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -21.2,
+    "result_mean_db": -28.0,
+    "result_peak_db": -21.2
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/Interior/int_low_on.wav",
+    "profile": "loop",
+    "mean_db": -8.3,
+    "max_db": -0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -19.7,
+    "result_mean_db": -28.0,
+    "result_peak_db": -19.7
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/Interior/int_maxRPM.wav",
+    "profile": "loop",
+    "mean_db": -11.0,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -17.0,
+    "result_mean_db": -28.0,
+    "result_peak_db": -17.0
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/Interior/int_med_off.wav",
+    "profile": "loop",
+    "mean_db": -6.5,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -21.5,
+    "result_mean_db": -28.0,
+    "result_peak_db": -21.5
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/Interior/int_med_on.wav",
+    "profile": "loop",
+    "mean_db": -7.9,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -20.1,
+    "result_mean_db": -28.0,
+    "result_peak_db": -20.1
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/Interior/int_startup.wav",
+    "profile": "event",
+    "mean_db": -14.3,
+    "max_db": -0.0,
+    "target_mean_db": -23.0,
+    "suggested_gain_db": -8.7,
+    "result_mean_db": -23.0,
+    "result_peak_db": -8.7
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/geardown.wav",
+    "profile": "event",
+    "mean_db": -15.8,
+    "max_db": 0.0,
+    "target_mean_db": -23.0,
+    "suggested_gain_db": -7.2,
+    "result_mean_db": -23.0,
+    "result_peak_db": -7.2
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/gearup.wav",
+    "profile": "event",
+    "mean_db": -25.4,
+    "max_db": -4.1,
+    "target_mean_db": -23.0,
+    "suggested_gain_db": 1.1,
+    "result_mean_db": -24.3,
+    "result_peak_db": -3.0
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/high_off.wav",
+    "profile": "loop",
+    "mean_db": -4.1,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -23.9,
+    "result_mean_db": -28.0,
+    "result_peak_db": -23.9
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/high_on.wav",
+    "profile": "loop",
+    "mean_db": -6.5,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -21.5,
+    "result_mean_db": -28.0,
+    "result_peak_db": -21.5
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/idle.wav",
+    "profile": "loop",
+    "mean_db": -11.3,
+    "max_db": -0.2,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -16.7,
+    "result_mean_db": -28.0,
+    "result_peak_db": -16.9
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/low_off.wav",
+    "profile": "loop",
+    "mean_db": -6.9,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -21.1,
+    "result_mean_db": -28.0,
+    "result_peak_db": -21.1
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/low_on.wav",
+    "profile": "loop",
+    "mean_db": -7.5,
+    "max_db": -0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -20.5,
+    "result_mean_db": -28.0,
+    "result_peak_db": -20.5
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/maxRPM.wav",
+    "profile": "loop",
+    "mean_db": -9.5,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -18.5,
+    "result_mean_db": -28.0,
+    "result_peak_db": -18.5
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/med_off.wav",
+    "profile": "loop",
+    "mean_db": -5.1,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -22.9,
+    "result_mean_db": -28.0,
+    "result_peak_db": -22.9
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/med_on.wav",
+    "profile": "loop",
+    "mean_db": -7.7,
+    "max_db": 0.0,
+    "target_mean_db": -28.0,
+    "suggested_gain_db": -20.3,
+    "result_mean_db": -28.0,
+    "result_peak_db": -20.3
+  },
+  {
+    "file": "/home/nikita/osm-racing/audio/vehicles/i6_german_free/startup.wav",
+    "profile": "event",
+    "mean_db": -15.6,
+    "max_db": -0.4,
+    "target_mean_db": -23.0,
+    "suggested_gain_db": -7.4,
+    "result_mean_db": -23.0,
+    "result_peak_db": -7.8
+  }
+]
