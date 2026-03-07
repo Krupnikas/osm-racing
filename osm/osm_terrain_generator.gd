@@ -93,7 +93,7 @@ var _profiler: PerformanceProfiler  # Для измерения производ
 var _loaded_chunks: Dictionary = {}  # key: "x,z" -> value: Node3D (chunk node)
 var _loading_chunks: Dictionary = {}  # key: "x,z" -> value: timestamp (start time in msec)
 var _loading_placeholders: Dictionary = {}  # key: "x,z" -> MeshInstance3D placeholder
-const CHUNK_LOAD_TIMEOUT := 10.0  # Таймаут загрузки чанка (секунд)
+const CHUNK_LOAD_TIMEOUT := 30.0  # Таймаут загрузки чанка (секунд) — must be > HTTP timeout × retries
 var _last_check_pos := Vector3.ZERO
 var _last_player_pos := Vector3.ZERO
 var _check_interval := 0.5  # Проверка каждые 0.5 сек
@@ -1791,7 +1791,7 @@ func _check_initial_load_complete() -> void:
 			# Убираем зависшие чанки и пытаемся загрузить заново
 			for chunk_key in timed_out_chunks:
 				_loading_chunks.erase(chunk_key)
-				_remove_loading_placeholder(chunk_key)
+				# Keep placeholder — don't remove on retry (prevents blinking)
 				_current_load_count = max(0, _current_load_count - 1)
 				print("OSM: Retrying timed out chunk %s..." % chunk_key)
 				# Перезагружаем чанк
@@ -2384,6 +2384,9 @@ func _load_chunk_at_position(pos: Vector3) -> void:
 func _clean_timed_out_chunks() -> void:
 	if _loading_chunks.is_empty():
 		return
+	# During initial loading, timeouts are handled by _check_initial_load_progress
+	if _initial_loading:
+		return
 	var current_time := Time.get_ticks_msec()
 	var timed_out: Array[String] = []
 	for chunk_key in _loading_chunks.keys():
@@ -2393,9 +2396,13 @@ func _clean_timed_out_chunks() -> void:
 			timed_out.append(chunk_key)
 	for chunk_key in timed_out:
 		_loading_chunks.erase(chunk_key)
-		_remove_loading_placeholder(chunk_key)
+		# Retry instead of just dropping
 		_current_load_count = max(0, _current_load_count - 1)
-		print("OSM: Chunk %s timed out after %.0fs, freed slot" % [chunk_key, CHUNK_LOAD_TIMEOUT])
+		print("OSM: Chunk %s timed out after %.0fs, retrying..." % [chunk_key, CHUNK_LOAD_TIMEOUT])
+		var coords: Array = chunk_key.split(",")
+		var chunk_x := int(coords[0])
+		var chunk_z := int(coords[1])
+		_load_chunk(chunk_x, chunk_z)
 
 
 func _unload_chunk(chunk_key: String) -> void:
@@ -2759,9 +2766,14 @@ func _on_chunk_load_failed(error: String, chunk_key: String, loader: Node, gen: 
 
 	push_error("OSM chunk %s load failed: %s" % [chunk_key, error])
 	_loading_chunks.erase(chunk_key)
-	_remove_loading_placeholder(chunk_key)
-	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
+	_current_load_count = max(0, _current_load_count - 1)
 	loader.queue_free()
+	# Retry the chunk (keep placeholder)
+	var coords: Array = chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+	print("OSM: Retrying failed chunk %s..." % chunk_key)
+	_load_chunk(chunk_x, chunk_z)
 
 func _on_osm_data_loaded(osm_data: Dictionary) -> void:
 	print("OSM: Initial data loaded")

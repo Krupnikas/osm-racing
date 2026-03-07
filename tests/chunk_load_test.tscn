@@ -72,6 +72,8 @@ test_duration = 60.0
 spike_threshold_ms = 25.0
 fly_speed = 27.78
 fly_height = 38.0
+test_location = Vector2(59.150406, 37.955805)
+auto_quit_after_test = true
 
 [node name="FallbackGround" type="StaticBody3D" parent="." groups=["Grass"]]
 collision_layer = 1
@@ -79,13 +81,11 @@ collision_mask = 0
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="FallbackGround"]
 shape = SubResource("WorldBoundaryShape3D_fallback")
-test_location = Vector2(59.150406, 37.948805)
-auto_quit_after_test = true
 
 [node name="OSMTerrain" type="Node3D" parent="." groups=["osm_terrain"]]
 script = ExtResource("osm")
 start_lat = 59.150406
-start_lon = 37.948805
+start_lon = 37.955805
 chunk_size = 200.0
 load_distance = 500.0
 unload_distance = 700.0

@@ -9,7 +9,7 @@ extends Node
 @export var spike_threshold_ms: float = 16.0
 @export var fly_speed: float = 27.78  # 100 km/h in m/s
 @export var fly_height: float = 38.0
-@export var test_location: Vector2 = Vector2(59.150406, 37.948805)  # Cherepovets center
+@export var test_location: Vector2 = Vector2(59.150406, 37.955805)  # Cherepovets east
 @export var auto_quit_after_test: bool = true
 
 var camera: Camera3D
