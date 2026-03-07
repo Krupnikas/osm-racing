@@ -92,6 +92,7 @@ var _camera: Camera3D
 var _profiler: PerformanceProfiler  # Для измерения производительности
 var _loaded_chunks: Dictionary = {}  # key: "x,z" -> value: Node3D (chunk node)
 var _loading_chunks: Dictionary = {}  # key: "x,z" -> value: timestamp (start time in msec)
+var _loading_placeholders: Dictionary = {}  # key: "x,z" -> MeshInstance3D placeholder
 const CHUNK_LOAD_TIMEOUT := 10.0  # Таймаут загрузки чанка (секунд)
 var _last_check_pos := Vector3.ZERO
 var _last_player_pos := Vector3.ZERO
@@ -1790,6 +1791,7 @@ func _check_initial_load_complete() -> void:
 			# Убираем зависшие чанки и пытаемся загрузить заново
 			for chunk_key in timed_out_chunks:
 				_loading_chunks.erase(chunk_key)
+				_remove_loading_placeholder(chunk_key)
 				_current_load_count = max(0, _current_load_count - 1)
 				print("OSM: Retrying timed out chunk %s..." % chunk_key)
 				# Перезагружаем чанк
@@ -2063,6 +2065,7 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 	for chunk_key in cancel_keys:
 		print("OSM: Cancelling loading chunk %s (too far)" % chunk_key)
 		_loading_chunks.erase(chunk_key)
+		_remove_loading_placeholder(chunk_key)
 		_current_load_count = maxi(0, _current_load_count - 1)
 
 
@@ -2298,9 +2301,50 @@ func _get_chunk_distance(chunk_key: String, pos: Vector3) -> float:
 	return pos.distance_to(chunk_center)
 
 
+func _create_loading_placeholder(chunk_key: String, chunk_x: int, chunk_z: int) -> void:
+	if _loading_placeholders.has(chunk_key):
+		return
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.name = "LoadingPlaceholder_" + chunk_key
+	var box := BoxMesh.new()
+	box.size = Vector3(chunk_size - 2.0, 0.3, chunk_size - 2.0)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.35, 0.55, 0.35, 0.6)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	box.material = mat
+	mesh_inst.mesh = box
+	mesh_inst.position = Vector3(
+		chunk_x * chunk_size + chunk_size * 0.5,
+		0.05,
+		chunk_z * chunk_size + chunk_size * 0.5
+	)
+	add_child(mesh_inst)
+	_loading_placeholders[chunk_key] = mesh_inst
+
+
+func _set_placeholder_processing(chunk_key: String) -> void:
+	if _loading_placeholders.has(chunk_key):
+		var ph: MeshInstance3D = _loading_placeholders[chunk_key]
+		if is_instance_valid(ph):
+			var mat: StandardMaterial3D = (ph.mesh as BoxMesh).material
+			mat.albedo_color = Color(0.3, 0.45, 0.7, 0.6)  # Blue = processing
+
+
+func _remove_loading_placeholder(chunk_key: String) -> void:
+	if _loading_placeholders.has(chunk_key):
+		var ph: MeshInstance3D = _loading_placeholders[chunk_key]
+		if is_instance_valid(ph):
+			ph.queue_free()
+		_loading_placeholders.erase(chunk_key)
+
+
 func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 	var chunk_key := "%d,%d" % [chunk_x, chunk_z]
 	_loading_chunks[chunk_key] = Time.get_ticks_msec()  # Сохраняем время начала загрузки
+
+	# Create visible placeholder box while chunk loads
+	_create_loading_placeholder(chunk_key, chunk_x, chunk_z)
 
 	# Вычисляем центр чанка в координатах lat/lon
 	var center_x := chunk_x * chunk_size + chunk_size / 2
@@ -2349,6 +2393,7 @@ func _clean_timed_out_chunks() -> void:
 			timed_out.append(chunk_key)
 	for chunk_key in timed_out:
 		_loading_chunks.erase(chunk_key)
+		_remove_loading_placeholder(chunk_key)
 		_current_load_count = max(0, _current_load_count - 1)
 		print("OSM: Chunk %s timed out after %.0fs, freed slot" % [chunk_key, CHUNK_LOAD_TIMEOUT])
 
@@ -2499,6 +2544,7 @@ func _unload_chunk(chunk_key: String) -> void:
 
 		# Clean up lazy activation
 		_chunk_activation_pending.erase(chunk_key)
+		_remove_loading_placeholder(chunk_key)
 
 		# Free RenderingServer instances for this chunk
 		if _chunk_rs_instances.has(chunk_key):
@@ -2589,6 +2635,8 @@ func reset_terrain() -> void:
 
 	# Сбрасываем состояние
 	_loading_chunks.clear()
+	for ph_key in _loading_placeholders.keys():
+		_remove_loading_placeholder(ph_key)
 	_initial_loading = false
 	_initial_chunks_needed.clear()
 	_initial_chunks_loaded = 0
@@ -2711,6 +2759,7 @@ func _on_chunk_load_failed(error: String, chunk_key: String, loader: Node, gen: 
 
 	push_error("OSM chunk %s load failed: %s" % [chunk_key, error])
 	_loading_chunks.erase(chunk_key)
+	_remove_loading_placeholder(chunk_key)
 	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
 	loader.queue_free()
 
@@ -2736,6 +2785,9 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	# НЕ удаляем из _loading_chunks здесь — удалим в _generate_chunk_async после генерации
 	# Это предотвращает повторную загрузку пока идёт генерация с frame budgeting
 	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
+
+	# Change placeholder color to "processing" (data loaded, finalizing)
+	_set_placeholder_processing(chunk_key)
 
 	# Per-chunk profiling
 	_chunk_profile[chunk_key] = {
@@ -7263,6 +7315,14 @@ func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 	if poly.size() < 3:
 		return
 
+	# Get chunk rect to skip shore on chunk boundary edges
+	var shore_ck := _get_chunk_key_from_node(parent)
+	var chunk_rect := Rect2()
+	var has_chunk_rect := false
+	if not shore_ck.is_empty():
+		chunk_rect = _get_chunk_rect_from_key(shore_ck)
+		has_chunk_rect = true
+
 	var pn := poly.size()
 	var sidewalk_h := 0.22  # Верхний край берега (уровень тротуара/террейна)
 	var water_h := WATER_Y  # Нижний край берега (уровень воды)
@@ -7301,9 +7361,33 @@ func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 	var uvs := PackedVector2Array()
 	var idxs := PackedInt32Array()
 
+	# Chunk boundary tolerance for edge detection
+	var edge_tol := 0.5  # meters
+
 	for ei in range(pn):
 		var i0 := ei
 		var i1 := (ei + 1) % pn
+
+		# Skip edges that lie on chunk boundary (both vertices on same boundary edge)
+		if has_chunk_rect:
+			var p0 := poly[i0]
+			var p1 := poly[i1]
+			var rx := chunk_rect.position.x
+			var rz := chunk_rect.position.y
+			var rx2 := rx + chunk_rect.size.x
+			var rz2 := rz + chunk_rect.size.y
+			# Both on left edge
+			if absf(p0.x - rx) < edge_tol and absf(p1.x - rx) < edge_tol:
+				continue
+			# Both on right edge
+			if absf(p0.x - rx2) < edge_tol and absf(p1.x - rx2) < edge_tol:
+				continue
+			# Both on top edge
+			if absf(p0.y - rz) < edge_tol and absf(p1.y - rz) < edge_tol:
+				continue
+			# Both on bottom edge
+			if absf(p0.y - rz2) < edge_tol and absf(p1.y - rz2) < edge_tol:
+				continue
 		# Inner = water edge, outer = shore top edge
 		var in0 := poly[i0]
 		var in1 := poly[i1]
@@ -15476,6 +15560,7 @@ func _process_chunk_activation() -> void:
 					if is_instance_valid(cn):
 						cn.visible = true
 				_chunk_activation_pending.erase(chunk_key)
+				_remove_loading_placeholder(chunk_key)
 				_chunk_culling_cooldown[chunk_key] = Time.get_ticks_msec() + 3000
 				continue
 
@@ -15492,6 +15577,7 @@ func _process_chunk_activation() -> void:
 					if is_instance_valid(cn):
 						cn.visible = true
 				_chunk_activation_pending.erase(chunk_key)
+				_remove_loading_placeholder(chunk_key)
 				_chunk_culling_cooldown[chunk_key] = Time.get_ticks_msec() + 3000
 			else:
 				_chunk_activation_pending[chunk_key] = end_idx
