@@ -634,7 +634,7 @@
     },
     {
       "osm_way_id": 45975287,
-      "comment": "Лента гипермаркет",
+      "comment": "Лента гипермаркет (Северное шоссе)",
       "wall_texture": "buildings/lenta-texture.png",
       "repeat_y": 1.0,
       "skip_all_pois": true,
@@ -650,6 +650,34 @@
         {
           "lat": 59.147588,
           "lon": 37.930647,
+          "logo": "lenta-logo.png"
+        }
+      ]
+    },
+    {
+      "osm_way_id": 254127396,
+      "comment": "Лента гипермаркет (Краснодонцев)",
+      "wall_texture": "buildings/lenta-texture.png",
+      "repeat_y": 1.0,
+      "skip_all_pois": true,
+      "shop_entrances": [
+        {
+          "lat": 59.092763,
+          "lon": 37.917005,
+          "back_wall_color": [0.9, 0.75, 0.0],
+          "sign_text": "ВХОД"
+        },
+        {
+          "lat": 59.093044,
+          "lon": 37.917691,
+          "sign_logo": "mcdonalds-russia.png",
+          "back_wall_color": [0.486, 0.306, 0.227]
+        }
+      ],
+      "roof_signs": [
+        {
+          "lat": 59.092763,
+          "lon": 37.917005,
           "logo": "lenta-logo.png"
         }
       ]

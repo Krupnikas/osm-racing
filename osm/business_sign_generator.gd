@@ -72,8 +72,9 @@ const BRAND_LOGOS := {
 	# Фастфуд
 	"burger king": "burgerking.png",
 	"бургер кинг": "burgerking.png",
-	"вкусно и точка": "vkusnoitochka.png",
-	"вкусно — и точка": "vkusnoitochka.png",
+	"вкусно и точка": "mcdonalds-russia.png",
+	"вкусно — и точка": "mcdonalds-russia.png",
+	"vkusno i tochka": "mcdonalds-russia.png",
 	"rostic's": "rostics.png",
 	"rostics": "rostics.png",
 	"ростикс": "rostics.png",
@@ -123,6 +124,11 @@ const SIGN_PADDING_V := 0.08  # Вертикальный отступ сверх
 const SIGN_THICKNESS := 0.06  # Толщина вывески (глубина)
 const SIGN_BACKGROUND_COLOR := Color(1.0, 1.0, 1.0)  # Чисто белый фон для текста
 const LOGO_BACKGROUND_COLOR := Color(1.0, 1.0, 0.98)  # Почти белый для логотипов
+
+# Кастомные цвета фона для конкретных логотипов
+const BRAND_BACKGROUND_COLORS := {
+	"mcdonalds-russia.png": Color(0.486, 0.306, 0.227),  # #7C4E3A
+}
 
 # Цвета для диагональных полос Ozon
 const OZON_STRIPE_COLOR_1 := Color(0.22, 0.47, 0.87)  # Синий
@@ -241,10 +247,13 @@ static func _create_logo_sign(sign_root: Node3D, logo_path: String, sign_color: 
 	var sign_width = logo_width + SIGN_PADDING_H * 2
 	var sign_height = logo_height + SIGN_PADDING_V * 2
 
-	# 1. Создаём подложку (для Ozon - с диагональными полосами)
+	# 1. Создаём подложку (для Ozon - с диагональными полосами, для брендов - кастомный цвет)
 	var background: MeshInstance3D
+	var logo_file := logo_path.get_file()
 	if logo_path.contains("ozon"):
 		background = create_ozon_striped_box(sign_width, sign_height, SIGN_THICKNESS)
+	elif BRAND_BACKGROUND_COLORS.has(logo_file):
+		background = create_background_box(sign_width, sign_height, SIGN_THICKNESS, BRAND_BACKGROUND_COLORS[logo_file])
 	else:
 		background = create_background_box(sign_width, sign_height, SIGN_THICKNESS, LOGO_BACKGROUND_COLOR)
 	background.position.z = -SIGN_THICKNESS / 2
