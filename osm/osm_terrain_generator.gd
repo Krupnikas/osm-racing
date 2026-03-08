@@ -5852,6 +5852,10 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	if way_id > 0 and _decoration_layer:
 		_add_custom_entrances_from_override(points, parent, building_height, base_elev, way_id)
 
+	# Вывески на крыше
+	if way_id > 0 and _decoration_layer:
+		_add_roof_signs_from_override(points, parent, building_height, base_elev, way_id)
+
 
 func _create_parking(points: PackedVector2Array, parent: Node3D) -> void:
 	"""Создаёт парковку: асфальтовую поверхность + знак P (знак отложен) + припаркованные машины"""
@@ -13299,6 +13303,8 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 	var skip_override = null
 	if way_id > 0 and _decoration_layer:
 		skip_override = _decoration_layer.get_building_override_for_way(way_id)
+	if skip_override and skip_override.skip_all_pois:
+		return
 	for poi in pois_inside:
 		var poi_id_val = poi.get("id", 0)
 		if skip_override and not skip_override.skip_pois.is_empty():
@@ -13461,7 +13467,8 @@ func _add_shop_entrances_from_override(points: PackedVector2Array, parent: Node3
 			BusinessSignGenerator._create_logo_sign(sign_root, logo_path, Color(0.6, 0.4, 0.2), 4.0)
 		else:
 			# Fallback: текстовая вывеска
-			BusinessSignGenerator._create_text_sign(sign_root, "МАГАЗИН", Color(0.2, 0.5, 0.8), 4.0, "shop")
+			var sign_text: String = shop_data.get("sign_text", "МАГАЗИН")
+			BusinessSignGenerator._create_text_sign(sign_root, sign_text, Color(0.2, 0.5, 0.8), 4.0, "shop")
 		# Подсветка
 		var light := OmniLight3D.new()
 		light.light_energy = 1.5
@@ -13597,6 +13604,76 @@ func _add_mars_sign_label(pos: Vector3, rot_y: float, text: String, subtitle: St
 	label.rotation.y = rot_y
 	label.name = "MarsSignText"
 	parent.add_child(label)
+
+
+func _add_roof_signs_from_override(points: PackedVector2Array, parent: Node3D, building_height: float, base_elev: float, way_id: int) -> void:
+	if not _decoration_layer or way_id <= 0:
+		return
+	var override = _decoration_layer.get_building_override_for_way(way_id)
+	if not override or override.roof_signs.is_empty():
+		return
+
+	var roof_y := base_elev + building_height
+
+	for sign_data in override.roof_signs:
+		var lat: float = sign_data.get("lat", 0.0)
+		var lon: float = sign_data.get("lon", 0.0)
+		var logo_name: String = sign_data.get("logo", "")
+		if lat == 0.0 or lon == 0.0 or logo_name == "":
+			continue
+
+		var logo_path := BusinessSignGenerator.BRAND_LOGOS_PATH + logo_name
+		if not ResourceLoader.exists(logo_path):
+			push_warning("RoofSign: logo not found: " + logo_path)
+			continue
+
+		var texture: Texture2D = load(logo_path)
+		if not texture:
+			continue
+
+		var sign_pos := _latlon_to_local(lat, lon)
+		var wall := _find_closest_wall_to_point(points, sign_pos, 5.0)
+		if wall.is_empty():
+			print("RoofSign: no wall found for sign at (%.6f, %.6f)" % [lat, lon])
+			continue
+
+		var wall_normal: Vector3 = wall.normal
+		var snap_point: Vector2 = wall.closest_point
+
+		# Размер логотипа на крыше (крупный)
+		var tex_size := texture.get_size()
+		var aspect := tex_size.x / tex_size.y
+		var logo_h := 5.0  # Высота логотипа в метрах
+		var logo_w := logo_h * aspect
+
+		# Sprite3D с логотипом
+		var sprite := Sprite3D.new()
+		sprite.texture = texture
+		sprite.pixel_size = logo_h / tex_size.y
+		sprite.billboard = BaseMaterial3D.BILLBOARD_DISABLED
+		sprite.no_depth_test = false
+		sprite.alpha_cut = SpriteBase3D.ALPHA_CUT_DISCARD
+		sprite.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		sprite.name = "RoofSign_%d" % way_id
+
+		# Позиция: на крыше, чуть выше + смещение наружу
+		sprite.position = Vector3(snap_point.x, roof_y + logo_h / 2.0 + 0.3, snap_point.y)
+		sprite.position += wall_normal * 0.1
+		sprite.rotation.y = atan2(wall_normal.x, wall_normal.z)
+
+		parent.add_child(sprite)
+
+		# Подсветка ночью (неоновый эффект)
+		var sign_light := OmniLight3D.new()
+		sign_light.light_energy = 2.0
+		sign_light.light_color = Color(1.0, 0.9, 0.3)  # Тёплый жёлтый
+		sign_light.omni_range = 12.0
+		sign_light.name = "RoofSignLight_%d" % way_id
+		sign_light.position = Vector3(snap_point.x, roof_y + logo_h / 2.0, snap_point.y)
+		sign_light.position += wall_normal * 1.5
+		parent.add_child(sign_light)
+
+		print("RoofSign: added at roof for way %d" % way_id)
 
 
 func _create_shop_back_wall(height: float, width: float, colors: Array) -> MeshInstance3D:

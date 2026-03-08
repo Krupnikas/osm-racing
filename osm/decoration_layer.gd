@@ -182,6 +182,14 @@ func _load_building_overrides_json(path: String) -> void:
 		if od.has("custom_entrances"):
 			override.custom_entrances = od["custom_entrances"]
 
+		# Skip all auto-generated POI signs
+		if od.has("skip_all_pois"):
+			override.skip_all_pois = od["skip_all_pois"]
+
+		# Roof-mounted signs
+		if od.has("roof_signs"):
+			override.roof_signs = od["roof_signs"]
+
 		_building_overrides.append(override)
 
 	# Custom models (гаражи, веранды и т.д. по координатам)

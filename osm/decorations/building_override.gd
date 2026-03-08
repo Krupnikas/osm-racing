@@ -55,6 +55,12 @@ var skip_pois: Array = []
 # Custom entrance groups [{type: String, lat: float, lon: float, ...}]
 var custom_entrances: Array = []
 
+# Skip all auto-generated POI signs for this building
+var skip_all_pois: bool = false
+
+# Roof-mounted signs [{lat: float, lon: float, logo: String}]
+var roof_signs: Array = []
+
 
 func matches_way_id(way_id: int) -> bool:
 	"""Проверяет совпадение по OSM way ID"""
