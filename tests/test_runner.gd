@@ -5,6 +5,7 @@ class_name TestRunner
 # Добавьте этот скрипт в сцену и вызовите run_all() или запустите test_runner.tscn
 
 const TestOSMLoaderScript = preload("res://tests/test_osm_loader.gd")
+const TestRoadTerrainClippingScript = preload("res://tests/test_road_terrain_clipping.gd")
 
 var total_passed := 0
 var total_failed := 0
@@ -26,6 +27,12 @@ func run_all() -> void:
 	osm_tests.run_all_tests()
 	total_passed += osm_tests.tests_passed
 	total_failed += osm_tests.tests_failed
+
+	# Road-Terrain Clipping Tests
+	var road_terrain_tests := TestRoadTerrainClippingScript.new()
+	road_terrain_tests.run_all_tests()
+	total_passed += road_terrain_tests.tests_passed
+	total_failed += road_terrain_tests.tests_failed
 
 	# Итоговый результат
 	print("\n" + "=".repeat(50))

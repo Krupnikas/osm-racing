@@ -4051,44 +4051,29 @@ func _apply_road_result(result: Dictionary) -> void:
 	if not is_bridge and highway_type not in ["footway", "path", "cycleway", "track", "steps"] and unclipped.size() >= 2:
 		var validated: PackedVector2Array = _validate_road_direction(unclipped)
 		if validated.size() >= 2:
-			var half_w: float = width * 0.5
+			var half_w: float = width * 0.5 + 0.3  # +0.3m buffer — corridor must be wider than road mesh
 			var n_pts: int = validated.size()
-			# Вычисляем перпендикуляры с miter join (среднее prev+next направлений)
-			var perps := PackedVector2Array()
-			perps.resize(n_pts)
-			for i in range(n_pts):
-				var perp: Vector2
-				if i == 0:
-					var d: Vector2 = (validated[1] - validated[0]).normalized()
-					perp = Vector2(-d.y, d.x)
-				elif i == n_pts - 1:
-					var d: Vector2 = (validated[i] - validated[i - 1]).normalized()
-					perp = Vector2(-d.y, d.x)
-				else:
-					var d_in: Vector2 = (validated[i] - validated[i - 1]).normalized()
-					var d_out: Vector2 = (validated[i + 1] - validated[i]).normalized()
-					var perp_in := Vector2(-d_in.y, d_in.x)
-					var perp_out := Vector2(-d_out.y, d_out.x)
-					var avg := (perp_in + perp_out)
-					if avg.length_squared() > 0.01:
-						perp = avg.normalized()
-					else:
-						perp = perp_out
-				perps[i] = perp
-			# Коридор: left edge forward, right edge backward
-			var corridor := PackedVector2Array()
-			for i in range(n_pts):
-				corridor.append(validated[i] - perps[i] * half_w)
-			for i in range(n_pts - 1, -1, -1):
-				corridor.append(validated[i] + perps[i] * half_w)
-			# Ensure CCW winding (Geometry2D.clip_polygons requires consistent winding)
-			if _polygon_area(corridor) < 0:
-				corridor.reverse()
-			# Регистрируем в своём чанке
+			# Строим per-segment коридоры (выпуклые четырёхугольники).
+			# Одна полилиния на повороте создаёт невыпуклый полигон, который
+			# Geometry2D.clip_polygons обрабатывает некорректно — оставляет террейн поверх дороги.
+			# Per-segment подход: каждый сегмент — отдельный прямоугольник с forward-only перпендикулярами.
 			var ck := _get_chunk_key_from_node(parent)
 			if not _chunk_terrain_roads.has(ck):
 				_chunk_terrain_roads[ck] = []
-			_chunk_terrain_roads[ck].append(corridor)
+			for seg_i in range(n_pts - 1):
+				var p0: Vector2 = validated[seg_i]
+				var p1: Vector2 = validated[seg_i + 1]
+				var d: Vector2 = (p1 - p0).normalized()
+				var perp := Vector2(-d.y, d.x)
+				var seg_corridor := PackedVector2Array()
+				seg_corridor.append(p0 - perp * half_w)
+				seg_corridor.append(p1 - perp * half_w)
+				seg_corridor.append(p1 + perp * half_w)
+				seg_corridor.append(p0 + perp * half_w)
+				# CCW winding check
+				if _polygon_area(seg_corridor) < 0:
+					seg_corridor.reverse()
+				_chunk_terrain_roads[ck].append(seg_corridor)
 
 	# Curbs
 	if curb_height > 0.0:
@@ -12192,11 +12177,32 @@ func _compute_terrain_clipping_thread(task_data: Dictionary) -> void:
 			if terrain_polys.is_empty():
 				break
 
-	# 5. Финальная фильтрация мелких осколков
-	var filtered_polys: Array[PackedVector2Array] = []
+	# 5. Финальная фильтрация: убираем CW (holes) и мелкие осколки
+	# Geometry2D.clip_polygons может вернуть [outer_CCW, hole_CW] пару.
+	# Нужно вырезать CW-дырки из CCW-полигонов, т.к. триангуляция не учитывает дырки.
+	var ccw_polys: Array[PackedVector2Array] = []
+	var cw_holes: Array[PackedVector2Array] = []
 	for poly in terrain_polys:
-		if poly.size() >= 3 and absf(_polygon_area(poly)) >= 2.0:
-			filtered_polys.append(poly)
+		if poly.size() < 3:
+			continue
+		var area := _polygon_area(poly)
+		if area >= 2.0:
+			ccw_polys.append(poly)
+		elif area <= -2.0:
+			# CW hole — reverse to make CCW for use as clipping polygon
+			var reversed_poly := PackedVector2Array(poly)
+			reversed_poly.reverse()
+			cw_holes.append(reversed_poly)
+	# Clip holes from outer polygons
+	for hole in cw_holes:
+		var new_ccw: Array[PackedVector2Array] = []
+		for poly in ccw_polys:
+			var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, hole)
+			for cp in clipped:
+				if cp.size() >= 3 and _polygon_area(cp) >= 2.0:
+					new_ccw.append(cp)
+		ccw_polys = new_ccw
+	var filtered_polys: Array[PackedVector2Array] = ccw_polys
 
 	# Отправляем результат в main thread через mutex-protected массив
 	var result := {
