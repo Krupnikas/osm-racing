@@ -3492,7 +3492,8 @@ func _process_phase3_queue() -> bool:
 					"residential", "unclassified": ho = 0.006
 					"service": ho = 0.004
 				max_height_offset = maxf(max_height_offset, ho)
-			var intersection_idx := _find_nearest_intersection(pos, 2.0, chunk_key)
+			# Search ALL chunks — intersection may be registered under a different chunk due to overlap
+			var intersection_idx := _find_nearest_intersection(pos, 2.0)
 			var sign_offset := Vector2(5, 5)
 			if intersection_idx >= 0:
 				var angle: float = _intersection_angles[intersection_idx]
