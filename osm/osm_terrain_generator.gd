@@ -193,6 +193,7 @@ var _window_finalize_progress: Dictionary = {}  # chunk_key -> {buf, offset, mm,
 var _building_wall_materials: Dictionary = {}  # texture_type -> ShaderMaterial (shared)
 var _building_recess_materials: Dictionary = {}  # texture_type -> ShaderMaterial (with vertex emission)
 var _building_roof_material: StandardMaterial3D = null  # shared
+var _gabled_roof_material: StandardMaterial3D = null  # shared, для двускатных крыш
 var _building_parapet_material: ShaderMaterial = null  # shared (uses wall shader for FRONT_FACING fix)
 var _building_foundation_materials: Array[StandardMaterial3D] = []  # 4 random colors
 
@@ -647,6 +648,13 @@ func _init_textures() -> void:
 		_building_roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	else:
 		_building_roof_material.albedo_color = Color(0.15, 0.15, 0.15)
+
+	# Двускатная крыша (шифер/металл) для деревянных домов
+	_gabled_roof_material = StandardMaterial3D.new()
+	_gabled_roof_material.albedo_color = Color(0.35, 0.38, 0.36)  # Серо-зелёный шифер
+	_gabled_roof_material.metallic = 0.3
+	_gabled_roof_material.roughness = 0.6
+	_gabled_roof_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	# Парапет использует wall shader для корректной обработки FRONT_FACING
 	_building_parapet_material = ShaderMaterial.new()
@@ -5785,11 +5793,12 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		elif building_material_tag == "wood" or building_material_tag == "timber":
 			is_wooden = true
 
-		if is_wooden and building_height <= 5.0 and _is_russia_location():
+		if is_wooden and building_height <= 7.0 and _is_russia_location():
 			var wood_idx := way_id % WOODEN_TEXTURES.size()
 			var wood_override = BuildingOverride.new()
 			wood_override.wall_texture_path = WOODEN_TEXTURES[wood_idx]
 			wood_override.texture_repeat_y = 1.0
+			wood_override.building_material = "wood"
 			_create_3d_building_with_custom_texture(points, building_height, wood_override, parent, base_elev, debug_name)
 		else:
 			# Проверяем, подходит ли здание для случайной советской текстуры
@@ -9726,43 +9735,194 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 	wall_mesh_instance.material_override = wall_material
 
-	# === КРЫША (плоская поверхность) ===
-	var roof_indices_2d := Geometry2D.triangulate_polygon(points)
-	if roof_indices_2d.size() >= 3:
-		var roof_arrays := []
-		roof_arrays.resize(Mesh.ARRAY_MAX)
+	# === КРЫША ===
+	var is_gabled: bool = building_override.building_material == "wood"
 
-		var roof_vertices := PackedVector3Array()
-		var roof_uvs := PackedVector2Array()
-		var roof_normals := PackedVector3Array()
-
+	if is_gabled:
+		# === ДВУСКАТНАЯ КРЫША (для деревянных домов) ===
+		var bb_min_x := INF
+		var bb_max_x := -INF
+		var bb_min_z := INF
+		var bb_max_z := -INF
 		for p in points:
-			roof_vertices.append(Vector3(p.x, roof_y, p.y))
-			roof_uvs.append(Vector2(p.x * 0.1, p.y * 0.1))
-			roof_normals.append(Vector3.UP)
+			bb_min_x = min(bb_min_x, p.x)
+			bb_max_x = max(bb_max_x, p.x)
+			bb_min_z = min(bb_min_z, p.y)
+			bb_max_z = max(bb_max_z, p.y)
 
-		roof_arrays[Mesh.ARRAY_VERTEX] = roof_vertices
-		roof_arrays[Mesh.ARRAY_TEX_UV] = roof_uvs
-		roof_arrays[Mesh.ARRAY_NORMAL] = roof_normals
-		roof_arrays[Mesh.ARRAY_INDEX] = roof_indices_2d
+		var roof_sx := bb_max_x - bb_min_x
+		var roof_sz := bb_max_z - bb_min_z
+		var ridge_height := 1.8
+		var ridge_y := roof_y + ridge_height
+		var ridge_along_x := roof_sx >= roof_sz
 
+		# Свес крыши за стены
+		var overhang := 0.3
+
+		var slope_verts := PackedVector3Array()
+		var slope_uvs := PackedVector2Array()
+		var slope_normals := PackedVector3Array()
+		var slope_indices := PackedInt32Array()
+
+		var gable_verts := PackedVector3Array()
+		var gable_uvs := PackedVector2Array()
+		var gable_normals := PackedVector3Array()
+		var gable_indices := PackedInt32Array()
+
+		if ridge_along_x:
+			var mid_z := (bb_min_z + bb_max_z) / 2.0
+			var half_w := roof_sz / 2.0
+			var r0 := Vector3(bb_min_x - overhang, ridge_y, mid_z)
+			var r1 := Vector3(bb_max_x + overhang, ridge_y, mid_z)
+			var c0 := Vector3(bb_min_x - overhang, roof_y, bb_min_z - overhang)
+			var c1 := Vector3(bb_max_x + overhang, roof_y, bb_min_z - overhang)
+			var c2 := Vector3(bb_max_x + overhang, roof_y, bb_max_z + overhang)
+			var c3 := Vector3(bb_min_x - overhang, roof_y, bb_max_z + overhang)
+
+			# Нормали скатов
+			var slope_len := sqrt(half_w * half_w + ridge_height * ridge_height)
+			var n_front := Vector3(0, half_w / slope_len, -ridge_height / slope_len)
+			var n_back := Vector3(0, half_w / slope_len, ridge_height / slope_len)
+
+			# Скат 1 (front: min_z side): c0, c1, r1, r0
+			slope_verts.append(c0); slope_verts.append(c1); slope_verts.append(r1); slope_verts.append(r0)
+			var uv_len := roof_sx + 2 * overhang
+			slope_uvs.append(Vector2(0, 1)); slope_uvs.append(Vector2(uv_len * 0.2, 1))
+			slope_uvs.append(Vector2(uv_len * 0.2, 0)); slope_uvs.append(Vector2(0, 0))
+			for _i in 4: slope_normals.append(n_front)
+			slope_indices.append_array([0, 1, 2, 0, 2, 3])
+
+			# Скат 2 (back: max_z side): c3, r0, r1, c2
+			slope_verts.append(c3); slope_verts.append(r0); slope_verts.append(r1); slope_verts.append(c2)
+			slope_uvs.append(Vector2(0, 1)); slope_uvs.append(Vector2(0, 0))
+			slope_uvs.append(Vector2(uv_len * 0.2, 0)); slope_uvs.append(Vector2(uv_len * 0.2, 1))
+			for _i in 4: slope_normals.append(n_back)
+			slope_indices.append_array([4, 5, 6, 4, 6, 7])
+
+			# Фронтон 1 (left/min_x): c0, c3, r0
+			var n_left := Vector3(-1, 0, 0)
+			gable_verts.append(c0); gable_verts.append(c3)
+			gable_verts.append(Vector3(bb_min_x, ridge_y, mid_z))  # r0 без overhang по X
+			gable_uvs.append(Vector2(0, 1)); gable_uvs.append(Vector2(1, 1)); gable_uvs.append(Vector2(0.5, 0))
+			for _i in 3: gable_normals.append(n_left)
+			gable_indices.append_array([0, 1, 2])
+
+			# Фронтон 2 (right/max_x): c1, c2, r1
+			var n_right := Vector3(1, 0, 0)
+			gable_verts.append(c1); gable_verts.append(c2)
+			gable_verts.append(Vector3(bb_max_x, ridge_y, mid_z))  # r1 без overhang по X
+			gable_uvs.append(Vector2(1, 1)); gable_uvs.append(Vector2(0, 1)); gable_uvs.append(Vector2(0.5, 0))
+			for _i in 3: gable_normals.append(n_right)
+			gable_indices.append_array([3, 4, 5])
+		else:
+			var mid_x := (bb_min_x + bb_max_x) / 2.0
+			var half_w := roof_sx / 2.0
+			var r0 := Vector3(mid_x, ridge_y, bb_min_z - overhang)
+			var r1 := Vector3(mid_x, ridge_y, bb_max_z + overhang)
+			var c0 := Vector3(bb_min_x - overhang, roof_y, bb_min_z - overhang)
+			var c1 := Vector3(bb_min_x - overhang, roof_y, bb_max_z + overhang)
+			var c2 := Vector3(bb_max_x + overhang, roof_y, bb_max_z + overhang)
+			var c3 := Vector3(bb_max_x + overhang, roof_y, bb_min_z - overhang)
+
+			var slope_len := sqrt(half_w * half_w + ridge_height * ridge_height)
+			var n_left := Vector3(-ridge_height / slope_len, half_w / slope_len, 0)
+			var n_right := Vector3(ridge_height / slope_len, half_w / slope_len, 0)
+
+			# Скат 1 (left/min_x side): c0, r0, r1, c1
+			slope_verts.append(c0); slope_verts.append(r0); slope_verts.append(r1); slope_verts.append(c1)
+			var uv_len := roof_sz + 2 * overhang
+			slope_uvs.append(Vector2(0, 1)); slope_uvs.append(Vector2(0, 0))
+			slope_uvs.append(Vector2(uv_len * 0.2, 0)); slope_uvs.append(Vector2(uv_len * 0.2, 1))
+			for _i in 4: slope_normals.append(n_left)
+			slope_indices.append_array([0, 1, 2, 0, 2, 3])
+
+			# Скат 2 (right/max_x side): c3, c2, r1, r0
+			slope_verts.append(c3); slope_verts.append(c2); slope_verts.append(r1); slope_verts.append(r0)
+			slope_uvs.append(Vector2(0, 1)); slope_uvs.append(Vector2(uv_len * 0.2, 1))
+			slope_uvs.append(Vector2(uv_len * 0.2, 0)); slope_uvs.append(Vector2(0, 0))
+			for _i in 4: slope_normals.append(n_right)
+			slope_indices.append_array([4, 5, 6, 4, 6, 7])
+
+			# Фронтон 1 (front/min_z): c0, c3, r0
+			var n_front := Vector3(0, 0, -1)
+			gable_verts.append(c0); gable_verts.append(c3)
+			gable_verts.append(Vector3(mid_x, ridge_y, bb_min_z))
+			gable_uvs.append(Vector2(0, 1)); gable_uvs.append(Vector2(1, 1)); gable_uvs.append(Vector2(0.5, 0))
+			for _i in 3: gable_normals.append(n_front)
+			gable_indices.append_array([0, 1, 2])
+
+			# Фронтон 2 (back/max_z): c1, c2, r1
+			var n_back := Vector3(0, 0, 1)
+			gable_verts.append(c1); gable_verts.append(c2)
+			gable_verts.append(Vector3(mid_x, ridge_y, bb_max_z))
+			gable_uvs.append(Vector2(1, 1)); gable_uvs.append(Vector2(0, 1)); gable_uvs.append(Vector2(0.5, 0))
+			for _i in 3: gable_normals.append(n_back)
+			gable_indices.append_array([3, 4, 5])
+
+		# Создаём меш с 2 поверхностями: скаты (металл) + фронтоны (дерево)
 		var roof_mesh := ArrayMesh.new()
-		roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, roof_arrays)
+
+		var slope_arrays := []
+		slope_arrays.resize(Mesh.ARRAY_MAX)
+		slope_arrays[Mesh.ARRAY_VERTEX] = slope_verts
+		slope_arrays[Mesh.ARRAY_TEX_UV] = slope_uvs
+		slope_arrays[Mesh.ARRAY_NORMAL] = slope_normals
+		slope_arrays[Mesh.ARRAY_INDEX] = slope_indices
+		roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, slope_arrays)
+
+		var gable_arrays := []
+		gable_arrays.resize(Mesh.ARRAY_MAX)
+		gable_arrays[Mesh.ARRAY_VERTEX] = gable_verts
+		gable_arrays[Mesh.ARRAY_TEX_UV] = gable_uvs
+		gable_arrays[Mesh.ARRAY_NORMAL] = gable_normals
+		gable_arrays[Mesh.ARRAY_INDEX] = gable_indices
+		roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, gable_arrays)
 
 		var roof_mesh_instance := MeshInstance3D.new()
 		roof_mesh_instance.mesh = roof_mesh
 		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-
-		var roof_material := StandardMaterial3D.new()
-		roof_material.cull_mode = BaseMaterial3D.CULL_BACK
-		if _building_textures.has("roof"):
-			roof_material.albedo_texture = _building_textures["roof"]
-			roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-		else:
-			roof_material.albedo_color = Color(0.15, 0.15, 0.15)
-		roof_mesh_instance.material_override = roof_material
-
+		roof_mesh_instance.set_surface_override_material(0, _gabled_roof_material)
+		roof_mesh_instance.set_surface_override_material(1, wall_material)
 		wall_mesh_instance.add_child(roof_mesh_instance)
+
+	else:
+		# === ПЛОСКАЯ КРЫША ===
+		var roof_indices_2d := Geometry2D.triangulate_polygon(points)
+		if roof_indices_2d.size() >= 3:
+			var roof_arrays := []
+			roof_arrays.resize(Mesh.ARRAY_MAX)
+
+			var roof_vertices := PackedVector3Array()
+			var roof_uvs := PackedVector2Array()
+			var roof_normals := PackedVector3Array()
+
+			for p in points:
+				roof_vertices.append(Vector3(p.x, roof_y, p.y))
+				roof_uvs.append(Vector2(p.x * 0.1, p.y * 0.1))
+				roof_normals.append(Vector3.UP)
+
+			roof_arrays[Mesh.ARRAY_VERTEX] = roof_vertices
+			roof_arrays[Mesh.ARRAY_TEX_UV] = roof_uvs
+			roof_arrays[Mesh.ARRAY_NORMAL] = roof_normals
+			roof_arrays[Mesh.ARRAY_INDEX] = roof_indices_2d
+
+			var roof_mesh := ArrayMesh.new()
+			roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, roof_arrays)
+
+			var roof_mesh_instance := MeshInstance3D.new()
+			roof_mesh_instance.mesh = roof_mesh
+			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+			var roof_material := StandardMaterial3D.new()
+			roof_material.cull_mode = BaseMaterial3D.CULL_BACK
+			if _building_textures.has("roof"):
+				roof_material.albedo_texture = _building_textures["roof"]
+				roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+			else:
+				roof_material.albedo_color = Color(0.15, 0.15, 0.15)
+			roof_mesh_instance.material_override = roof_material
+
+			wall_mesh_instance.add_child(roof_mesh_instance)
 
 		# === ПАРАПЕТ: наружная, нижняя грани + угловые заполнения ===
 		var parapet_arrays := []
