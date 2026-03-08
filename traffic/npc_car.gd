@@ -42,6 +42,10 @@ signal request_despawn
 var _lights: Node3D
 var _lights_enabled := false
 
+# Wheel rotation
+var _wheel_mesh_nodes: Array[MeshInstance3D] = []
+var _wheel_radius := 0.3
+
 # Static cache for merged meshes (по типу NPC сцены)
 static var _merged_mesh_cache: Dictionary = {}  # scene_path → ArrayMesh
 
@@ -104,6 +108,9 @@ func _physics_process(delta: float) -> void:
 
 	# Вызываем базовую физику (скорость, руление, силы, auto-shift)
 	_base_physics_process(delta)
+
+	# Вращаем колёса
+	_update_wheel_rotation(delta)
 
 	# Обновляем стоп-сигналы и задний ход
 	_update_light_states()
@@ -624,6 +631,16 @@ func _debug_wheel_contact() -> void:
 	pass
 
 
+func _update_wheel_rotation(delta: float) -> void:
+	if _wheel_mesh_nodes.is_empty():
+		return
+	var speed_ms: float = current_speed_kmh / 3.6
+	var angular_vel: float = speed_ms / _wheel_radius
+	for mesh in _wheel_mesh_nodes:
+		if is_instance_valid(mesh):
+			mesh.rotate_x(-angular_vel * delta)
+
+
 func _disable_wheel_physics() -> void:
 	"""
 	ОПТИМИЗАЦИЯ: Отключает физику колес у ВСЕХ NPC.
@@ -657,22 +674,35 @@ func _merge_meshes() -> void:
 	if mesh_instances.size() < 2:
 		return  # Нечего объединять (простые box NPC)
 
+	# Разделяем на колёса и кузов — колёса НЕ мержим (они будут вращаться)
+	var body_meshes: Array[MeshInstance3D] = []
+	for mi in mesh_instances:
+		var mname: String = mi.name.to_lower()
+		if "wheel" in mname or "tire" in mname or "rim" in mname or "brakedisk" in mname or "brake_disc" in mname:
+			_wheel_mesh_nodes.append(mi)
+		else:
+			body_meshes.append(mi)
+
+	# Получаем радиус колеса из VehicleWheel3D
+	if wheels_front.size() > 0:
+		_wheel_radius = wheels_front[0].wheel_radius
+
 	var merged_mesh: ArrayMesh
 
 	if _merged_mesh_cache.has(cache_key):
 		# Используем кешированный mesh (мгновенно)
 		merged_mesh = _merged_mesh_cache[cache_key].duplicate() as ArrayMesh
 	else:
-		# Первый NPC этого типа — делаем полный merge
-		merged_mesh = _build_merged_mesh(mesh_instances)
+		# Первый NPC этого типа — делаем полный merge (только кузов)
+		merged_mesh = _build_merged_mesh(body_meshes)
 		if merged_mesh and merged_mesh.get_surface_count() > 0:
 			_merged_mesh_cache[cache_key] = merged_mesh
 
 	if not merged_mesh or merged_mesh.get_surface_count() == 0:
 		return
 
-	# Скрываем оригинальные mesh
-	for mi in mesh_instances:
+	# Скрываем оригинальные mesh кузова (колёса остаются видимыми)
+	for mi in body_meshes:
 		mi.visible = false
 
 	# Создаём один MeshInstance3D с объединённым mesh

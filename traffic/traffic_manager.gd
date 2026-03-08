@@ -18,6 +18,7 @@ var npc_lada_scene: PackedScene
 var npc_taxi_scene: PackedScene
 var npc_vaz2107_scene: PackedScene
 var npc_polo_scene: PackedScene
+var npc_matiz_scene: PackedScene
 var npc_logan_scene: PackedScene
 var road_network: Node  # RoadNetwork
 var terrain_generator: Node  # OSMTerrainGenerator
@@ -52,6 +53,7 @@ func _ready() -> void:
 	npc_taxi_scene = preload("res://traffic/npc_taxi.tscn")
 	npc_vaz2107_scene = preload("res://traffic/npc_vaz_2107.tscn")
 	npc_polo_scene = preload("res://traffic/npc_polo.tscn")
+	npc_matiz_scene = preload("res://traffic/npc_matiz.tscn")
 	npc_logan_scene = preload("res://traffic/npc_logan.tscn")
 
 	# Создаём RoadNetwork
@@ -98,6 +100,7 @@ func _warmup_mesh_cache() -> void:
 	if npc_taxi_scene: scenes.append(npc_taxi_scene)
 	if npc_vaz2107_scene: scenes.append(npc_vaz2107_scene)
 	if npc_polo_scene: scenes.append(npc_polo_scene)
+	if npc_matiz_scene: scenes.append(npc_matiz_scene)
 	if npc_logan_scene: scenes.append(npc_logan_scene)
 	for scene in scenes:
 		var instance := scene.instantiate() as Node3D
@@ -406,10 +409,14 @@ func _get_npc_from_pool():
 			# 25% - ВАЗ-2107
 			scene_to_use = npc_vaz2107_scene
 			car_type = "VAZ-2107"
-		elif rand < 0.70:
-			# 20% - VW Polo
+		elif rand < 0.60:
+			# 10% - VW Polo
 			scene_to_use = npc_polo_scene
 			car_type = "VW Polo"
+		elif rand < 0.70:
+			# 10% - Daewoo Matiz
+			scene_to_use = npc_matiz_scene
+			car_type = "Daewoo Matiz"
 		elif rand < 0.72:
 			# 2% - Renault Logan
 			scene_to_use = npc_logan_scene
