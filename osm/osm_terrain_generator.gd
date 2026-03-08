@@ -3863,8 +3863,9 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 
 	# Smoothing (thread-safe: pure math)
 	var smoothed_points: PackedVector2Array = _smooth_road_corners(local_points)
+	var unclipped_smoothed: PackedVector2Array = smoothed_points  # Сохраняем до клиппинга для коридоров террейна
 
-	# Клипаем smoothed_points к bbox чанка (используется для curbs, corridors, lamps)
+	# Клипаем smoothed_points к bbox чанка (используется для curbs, lamps)
 	if chunk_key != "initial" and chunk_key != "":
 		var ck_parts_sm: PackedStringArray = chunk_key.split(",")
 		var ck_x_sm := int(ck_parts_sm[0])
@@ -3957,6 +3958,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	# Store result via mutex
 	var result := {
 		"smoothed_points": smoothed_points,
+		"unclipped_smoothed": unclipped_smoothed,
 		"vertices": vertices,
 		"uvs": uvs,
 		"normals": normals,
@@ -4040,15 +4042,17 @@ func _apply_road_result(result: Dictionary) -> void:
 			else:
 				batch["indices"].append_array(src_indices)
 
-	# Строим коридор-полигон из НЕОБРЕЗАННЫХ сглаженных точек дороги для выреза террейна
-	# Используем smoothed_points + width → перпендикуляры → left edge + right edge
-	# Это гарантирует что коридор покрывает всю длину дороги и совпадает с мешем
-	if not is_bridge and highway_type not in ["footway", "path", "cycleway", "track", "steps"] and smoothed_points.size() >= 2:
-		var validated: PackedVector2Array = _validate_road_direction(smoothed_points)
+	# Строим коридор-полигон для выреза террейна из ПОЛНЫХ НЕОБРЕЗАННЫХ точек дороги.
+	# Используем unclipped_smoothed (вся дорога из OSM overlap), а не smoothed_points
+	# (обрезанные к bbox чанка). Это гарантирует что дороги из overlap-зоны тоже
+	# вырезают террейн, даже если они лишь краем заходят в chunk rect.
+	var unclipped: PackedVector2Array = result.get("unclipped_smoothed", smoothed_points)
+	if not is_bridge and highway_type not in ["footway", "path", "cycleway", "track", "steps"] and unclipped.size() >= 2:
+		var validated: PackedVector2Array = _validate_road_direction(unclipped)
 		if validated.size() >= 2:
 			var half_w: float = width * 0.5
 			var n_pts: int = validated.size()
-			# Вычисляем перпендикуляры (аналогично _add_road_to_batch_fast)
+			# Вычисляем перпендикуляры с miter join (среднее prev+next направлений)
 			var perps := PackedVector2Array()
 			perps.resize(n_pts)
 			for i in range(n_pts):
@@ -4060,8 +4064,15 @@ func _apply_road_result(result: Dictionary) -> void:
 					var d: Vector2 = (validated[i] - validated[i - 1]).normalized()
 					perp = Vector2(-d.y, d.x)
 				else:
-					var d: Vector2 = (validated[i + 1] - validated[i]).normalized()
-					perp = Vector2(-d.y, d.x)
+					var d_in: Vector2 = (validated[i] - validated[i - 1]).normalized()
+					var d_out: Vector2 = (validated[i + 1] - validated[i]).normalized()
+					var perp_in := Vector2(-d_in.y, d_in.x)
+					var perp_out := Vector2(-d_out.y, d_out.x)
+					var avg := (perp_in + perp_out)
+					if avg.length_squared() > 0.01:
+						perp = avg.normalized()
+					else:
+						perp = perp_out
 				perps[i] = perp
 			# Коридор: left edge forward, right edge backward
 			var corridor := PackedVector2Array()
@@ -4069,7 +4080,10 @@ func _apply_road_result(result: Dictionary) -> void:
 				corridor.append(validated[i] - perps[i] * half_w)
 			for i in range(n_pts - 1, -1, -1):
 				corridor.append(validated[i] + perps[i] * half_w)
-			# Регистрируем только в своём чанке (terrain использует только свои данные)
+			# Ensure CCW winding (Geometry2D.clip_polygons requires consistent winding)
+			if _polygon_area(corridor) < 0:
+				corridor.reverse()
+			# Регистрируем в своём чанке
 			var ck := _get_chunk_key_from_node(parent)
 			if not _chunk_terrain_roads.has(ck):
 				_chunk_terrain_roads[ck] = []
@@ -5263,8 +5277,9 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 	var ck_parts: PackedStringArray = chunk_key.split(",")
 	var ck_x := int(ck_parts[0])
 	var ck_z := int(ck_parts[1])
-	# Собираем коридоры дорог только из своего чанка
-	# Каждый чанк рисует только свои дороги (dominated_by_chunk), terrain тоже свой
+	# Собираем коридоры дорог из своего чанка
+	# Коридоры построены из ПОЛНЫХ необрезанных дорог (вся OSM overlap зона),
+	# поэтому они покрывают все дороги проходящие через chunk rect
 	var terrain_roads: Array = []
 	if _chunk_terrain_roads.has(chunk_key):
 		terrain_roads = _chunk_terrain_roads[chunk_key]
