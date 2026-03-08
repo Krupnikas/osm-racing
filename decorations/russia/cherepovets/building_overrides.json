@@ -265,6 +265,54 @@
         "short": 0.5,
         "long": 1.0
       }
+    },
+    {
+      "osm_way_id": 773775008,
+      "comment": "ул. 6-я Линия 65 — деревянный одноэтажный",
+      "building_material": "wood",
+      "height_override": 3.5
+    },
+    {
+      "osm_way_id": 773774914,
+      "comment": "6-я Линия — деревянный одноэтажный",
+      "building_material": "wood",
+      "height_override": 3.5
+    },
+    {
+      "osm_way_id": 638473955,
+      "comment": "6-я Линия — деревянный одноэтажный",
+      "building_material": "wood",
+      "height_override": 3.5
+    },
+    {
+      "osm_way_id": 773775376,
+      "comment": "6-я Линия — деревянный одноэтажный",
+      "building_material": "wood",
+      "height_override": 3.5
+    },
+    {
+      "osm_way_id": 773775575,
+      "comment": "6-я Линия — деревянный одноэтажный",
+      "building_material": "wood",
+      "height_override": 3.5
+    },
+    {
+      "osm_way_id": 638473954,
+      "comment": "6-я Линия — деревянный одноэтажный",
+      "building_material": "wood",
+      "height_override": 3.5
+    },
+    {
+      "osm_way_id": 638473953,
+      "comment": "6-я Линия — деревянный одноэтажный",
+      "building_material": "wood",
+      "height_override": 3.5
+    },
+    {
+      "osm_way_id": 638473952,
+      "comment": "6-я Линия — деревянный одноэтажный",
+      "building_material": "wood",
+      "height_override": 3.5
     }
   ],
   "custom_models": [
