@@ -3880,6 +3880,8 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 
 	# Smoothing (thread-safe: pure math)
 	var smoothed_points: PackedVector2Array = _smooth_road_corners(local_points)
+	# Save full smoothed points BEFORE clip — needed for corridor polygon
+	var full_smoothed_points: PackedVector2Array = smoothed_points
 	# Клипаем smoothed_points к bbox чанка (используется для curbs, lamps)
 	if chunk_key != "initial" and chunk_key != "":
 		var ck_parts_sm: PackedStringArray = chunk_key.split(",")
@@ -3911,30 +3913,31 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		var validated: PackedVector2Array = _validate_road_direction(smoothed_points)
 		var half_w: float = width * 0.5
 
-		# Corridor: build from FULL validated points (before polyline clip),
+		# Corridor: build from FULL smoothed points (before any polyline clip),
 		# then clip polygon to chunk rect. This ensures roads barely entering
 		# a chunk still produce valid corridors.
-		if validated.size() >= 2 and highway_type not in ["cycleway", "track", "steps"]:
-			var v_count: int = validated.size()
+		var full_validated: PackedVector2Array = _validate_road_direction(full_smoothed_points)
+		if full_validated.size() >= 2 and highway_type not in ["cycleway", "track", "steps"]:
+			var v_count: int = full_validated.size()
 			var v_perps := PackedVector2Array()
 			v_perps.resize(v_count)
 			for i in range(v_count):
 				var perp: Vector2
 				if i == 0:
-					var dir: Vector2 = (validated[1] - validated[0]).normalized()
+					var dir: Vector2 = (full_validated[1] - full_validated[0]).normalized()
 					perp = Vector2(-dir.y, dir.x)
 				elif i == v_count - 1:
-					var dir: Vector2 = (validated[i] - validated[i - 1]).normalized()
+					var dir: Vector2 = (full_validated[i] - full_validated[i - 1]).normalized()
 					perp = Vector2(-dir.y, dir.x)
 				else:
-					var dir_out: Vector2 = (validated[i + 1] - validated[i]).normalized()
+					var dir_out: Vector2 = (full_validated[i + 1] - full_validated[i]).normalized()
 					perp = Vector2(-dir_out.y, dir_out.x)
 				v_perps[i] = perp
 			var raw_corridor := PackedVector2Array()
 			for i in range(v_count):
-				raw_corridor.append(validated[i] - v_perps[i] * half_w)
+				raw_corridor.append(full_validated[i] - v_perps[i] * half_w)
 			for i in range(v_count - 1, -1, -1):
-				raw_corridor.append(validated[i] + v_perps[i] * half_w)
+				raw_corridor.append(full_validated[i] + v_perps[i] * half_w)
 			if _polygon_area(raw_corridor) < 0:
 				raw_corridor.reverse()
 			if chunk_key != "initial" and chunk_key != "":
