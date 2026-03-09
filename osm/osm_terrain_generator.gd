@@ -3929,62 +3929,39 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		var validated: PackedVector2Array = _validate_road_direction(smoothed_points)
 		var half_w: float = width * 0.5
 
-		# Corridor: build from FULL smoothed points with extended endpoints.
-		# Extension ensures corridor always crosses chunk boundary, preventing
-		# Geometry2D.clip_polygons from creating CW holes (which can't be properly
-		# subtracted from terrain). After extension, clip to chunk rect.
+		# Corridor: use offset_polyline for proper non-self-intersecting polygon.
+		# Manual perp-based construction self-intersects at sharp turns, causing
+		# Geometry2D.clip_polygons to produce unpredictable terrain artifacts.
 		var full_validated: PackedVector2Array = _validate_road_direction(full_smoothed_points)
 		if full_validated.size() >= 2 and highway_type not in ["cycleway", "track", "steps"]:
-			# Extend road endpoints just past chunk boundary (half_w + 1m margin)
-			# to ensure corridor always crosses boundary edge after clip
-			var ext_pts := PackedVector2Array()
-			var fv_n: int = full_validated.size()
-			var start_dir: Vector2 = (full_validated[0] - full_validated[1]).normalized()
-			var end_dir: Vector2 = (full_validated[fv_n - 1] - full_validated[fv_n - 2]).normalized()
-			var ext_dist: float = t_chunk_size + half_w + 1.0
-			ext_pts.append(full_validated[0] + start_dir * ext_dist)
-			for i in range(fv_n):
-				ext_pts.append(full_validated[i])
-			ext_pts.append(full_validated[fv_n - 1] + end_dir * ext_dist)
-			# Build corridor from extended points
-			var v_count: int = ext_pts.size()
-			var v_perps := PackedVector2Array()
-			v_perps.resize(v_count)
-			for i in range(v_count):
-				var perp: Vector2
-				if i == 0:
-					var dir: Vector2 = (ext_pts[1] - ext_pts[0]).normalized()
-					perp = Vector2(-dir.y, dir.x)
-				elif i == v_count - 1:
-					var dir: Vector2 = (ext_pts[i] - ext_pts[i - 1]).normalized()
-					perp = Vector2(-dir.y, dir.x)
-				else:
-					var dir_out: Vector2 = (ext_pts[i + 1] - ext_pts[i]).normalized()
-					perp = Vector2(-dir_out.y, dir_out.x)
-				v_perps[i] = perp
-			var raw_corridor := PackedVector2Array()
-			for i in range(v_count):
-				raw_corridor.append(ext_pts[i] - v_perps[i] * half_w)
-			for i in range(v_count - 1, -1, -1):
-				raw_corridor.append(ext_pts[i] + v_perps[i] * half_w)
-			if _polygon_area(raw_corridor) < 0:
-				raw_corridor.reverse()
+			var corridor_delta: float = half_w + 0.1  # 10cm buffer over mesh width
+			var corridor_polys: Array[PackedVector2Array] = Geometry2D.offset_polyline(
+				full_validated, corridor_delta,
+				Geometry2D.JOIN_MITER, Geometry2D.END_SQUARE)
 			if chunk_key != "initial" and chunk_key != "":
 				var ck_parts_c: PackedStringArray = chunk_key.split(",")
 				var c_x := int(ck_parts_c[0])
 				var c_z := int(ck_parts_c[1])
+				var ch_x0 := float(c_x) * t_chunk_size
+				var ch_x1 := float(c_x + 1) * t_chunk_size
+				var ch_z0 := float(c_z) * t_chunk_size
+				var ch_z1 := float(c_z + 1) * t_chunk_size
 				var clip_rect := PackedVector2Array([
-					Vector2(float(c_x) * t_chunk_size, float(c_z) * t_chunk_size),
-					Vector2(float(c_x + 1) * t_chunk_size, float(c_z) * t_chunk_size),
-					Vector2(float(c_x + 1) * t_chunk_size, float(c_z + 1) * t_chunk_size),
-					Vector2(float(c_x) * t_chunk_size, float(c_z + 1) * t_chunk_size),
+					Vector2(ch_x0, ch_z0), Vector2(ch_x1, ch_z0),
+					Vector2(ch_x1, ch_z1), Vector2(ch_x0, ch_z1),
 				])
-				var clipped_corr: Array[PackedVector2Array] = Geometry2D.intersect_polygons(raw_corridor, clip_rect)
-				for cp in clipped_corr:
-					if cp.size() >= 3 and _polygon_area(cp) > 0.001:
-						terrain_corridors.append(cp)
+				for raw_corridor in corridor_polys:
+					if _polygon_area(raw_corridor) < 0:
+						raw_corridor.reverse()
+					var clipped_corr: Array[PackedVector2Array] = Geometry2D.intersect_polygons(raw_corridor, clip_rect)
+					for cp in clipped_corr:
+						if cp.size() >= 3 and _polygon_area(cp) > 0.001:
+							terrain_corridors.append(cp)
 			else:
-				terrain_corridors.append(raw_corridor)
+				for raw_corridor in corridor_polys:
+					if _polygon_area(raw_corridor) < 0:
+						raw_corridor.reverse()
+					terrain_corridors.append(raw_corridor)
 
 		# Clip polyline to chunk with margin (for mesh vertices)
 		var points: PackedVector2Array = validated
@@ -12338,16 +12315,109 @@ func _compute_terrain_clipping_thread(task_data: Dictionary) -> void:
 
 	var terrain_polys: Array[PackedVector2Array] = [chunk_rect]
 
-	# 1. Вырезаем дорожные коридоры (extended to boundary — no CW holes expected)
+	# 1. Вырезаем дорожные коридоры
+	# clip_polygons can't cut holes inside polygons — it returns CW "hole" polygons
+	# that we can't use. When this happens, we pre-split the terrain polygon with
+	# a cutting line through the corridor center, then clip each half.
 	for corridor in roads:
 		if corridor.size() < 4:
 			continue
 		var new_polys: Array[PackedVector2Array] = []
 		for poly in terrain_polys:
 			var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, corridor)
+			# Check for CW holes (area < 0) — means corridor fully inside poly
+			var has_cw_hole := false
 			for cp in clipped:
-				if cp.size() >= 3 and _polygon_area(cp) >= 1.0:
-					new_polys.append(cp)
+				if cp.size() >= 3 and _polygon_area(cp) < -1.0:
+					has_cw_hole = true
+					break
+			if not has_cw_hole:
+				# Normal case: corridor crosses poly boundary
+				for cp in clipped:
+					if cp.size() >= 3 and _polygon_area(cp) >= 1.0:
+						new_polys.append(cp)
+			else:
+				# Corridor fully inside poly — pre-split poly with a cutting line
+				# through corridor center, perpendicular to corridor's main axis
+				var c0: Vector2 = corridor[0]
+				var c_min_x: float = c0.x
+				var c_max_x: float = c0.x
+				var c_min_y: float = c0.y
+				var c_max_y: float = c0.y
+				for ci in range(1, corridor.size()):
+					var cv: Vector2 = corridor[ci]
+					c_min_x = minf(c_min_x, cv.x)
+					c_max_x = maxf(c_max_x, cv.x)
+					c_min_y = minf(c_min_y, cv.y)
+					c_max_y = maxf(c_max_y, cv.y)
+				var c_center_x: float = (c_min_x + c_max_x) * 0.5
+				var c_center_y: float = (c_min_y + c_max_y) * 0.5
+				# Find poly bounding box
+				var pv0: Vector2 = poly[0]
+				var p_min_x: float = pv0.x
+				var p_max_x: float = pv0.x
+				var p_min_y: float = pv0.y
+				var p_max_y: float = pv0.y
+				for pi2 in range(1, poly.size()):
+					var pv: Vector2 = poly[pi2]
+					p_min_x = minf(p_min_x, pv.x)
+					p_max_x = maxf(p_max_x, pv.x)
+					p_min_y = minf(p_min_y, pv.y)
+					p_max_y = maxf(p_max_y, pv.y)
+				# Cut terrain perpendicular to corridor's main axis through its center.
+				# This ensures the corridor crosses the cut line and won't be fully
+				# inside either half → no CW holes from clip_polygons.
+				var halves: Array[PackedVector2Array] = []
+				if (c_max_x - c_min_x) >= (c_max_y - c_min_y):
+					# Corridor runs horizontally — cut VERTICALLY at center_x
+					var left_half := PackedVector2Array([
+						Vector2(p_min_x - 1.0, p_min_y - 1.0),
+						Vector2(c_center_x, p_min_y - 1.0),
+						Vector2(c_center_x, p_max_y + 1.0),
+						Vector2(p_min_x - 1.0, p_max_y + 1.0),
+					])
+					var right_half := PackedVector2Array([
+						Vector2(c_center_x, p_min_y - 1.0),
+						Vector2(p_max_x + 1.0, p_min_y - 1.0),
+						Vector2(p_max_x + 1.0, p_max_y + 1.0),
+						Vector2(c_center_x, p_max_y + 1.0),
+					])
+					var left_parts := Geometry2D.intersect_polygons(poly, left_half)
+					var right_parts := Geometry2D.intersect_polygons(poly, right_half)
+					for lp in left_parts:
+						if lp.size() >= 3 and _polygon_area(lp) >= 1.0:
+							halves.append(lp)
+					for rp in right_parts:
+						if rp.size() >= 3 and _polygon_area(rp) >= 1.0:
+							halves.append(rp)
+				else:
+					# Corridor runs vertically — cut HORIZONTALLY at center_y
+					var top_half := PackedVector2Array([
+						Vector2(p_min_x - 1.0, p_min_y - 1.0),
+						Vector2(p_max_x + 1.0, p_min_y - 1.0),
+						Vector2(p_max_x + 1.0, c_center_y),
+						Vector2(p_min_x - 1.0, c_center_y),
+					])
+					var bot_half := PackedVector2Array([
+						Vector2(p_min_x - 1.0, c_center_y),
+						Vector2(p_max_x + 1.0, c_center_y),
+						Vector2(p_max_x + 1.0, p_max_y + 1.0),
+						Vector2(p_min_x - 1.0, p_max_y + 1.0),
+					])
+					var top_parts := Geometry2D.intersect_polygons(poly, top_half)
+					var bot_parts := Geometry2D.intersect_polygons(poly, bot_half)
+					for tp in top_parts:
+						if tp.size() >= 3 and _polygon_area(tp) >= 1.0:
+							halves.append(tp)
+					for bp in bot_parts:
+						if bp.size() >= 3 and _polygon_area(bp) >= 1.0:
+							halves.append(bp)
+				# Now clip each half with the corridor — corridor crosses the cut edge
+				for half in halves:
+					var half_clipped := Geometry2D.clip_polygons(half, corridor)
+					for hc in half_clipped:
+						if hc.size() >= 3 and _polygon_area(hc) >= 1.0:
+							new_polys.append(hc)
 		terrain_polys = new_polys
 		if terrain_polys.is_empty():
 			break
@@ -15114,6 +15184,63 @@ func _polygon_area(poly: PackedVector2Array) -> float:
 		area += poly[i].x * poly[j].y
 		area -= poly[j].x * poly[i].y
 	return area * 0.5
+
+
+## Add a thin slit (epsilon-width) from corridor to nearest chunk boundary.
+## If corridor already touches any boundary edge, returns it unchanged.
+## This prevents clip_polygons from producing CW holes for interior corridors.
+func _add_boundary_slit(corridor: PackedVector2Array, ch_x0: float, ch_x1: float, ch_z0: float, ch_z1: float) -> PackedVector2Array:
+	# Check if corridor already touches any boundary
+	var eps := 0.1
+	var touches_boundary := false
+	for i in range(corridor.size()):
+		var p := corridor[i]
+		if p.x <= ch_x0 + eps or p.x >= ch_x1 - eps or p.y <= ch_z0 + eps or p.y >= ch_z1 - eps:
+			touches_boundary = true
+			break
+	if touches_boundary:
+		return corridor
+	# Find corridor point closest to any boundary
+	var best_idx := 0
+	var best_dist := INF
+	for i in range(corridor.size()):
+		var p := corridor[i]
+		var d := minf(minf(p.x - ch_x0, ch_x1 - p.x), minf(p.y - ch_z0, ch_z1 - p.y))
+		if d < best_dist:
+			best_dist = d
+			best_idx = i
+	var pt := corridor[best_idx]
+	# Find nearest boundary edge
+	var d_left := pt.x - ch_x0
+	var d_right := ch_x1 - pt.x
+	var d_bottom := pt.y - ch_z0
+	var d_top := ch_z1 - pt.y
+	var min_d := minf(minf(d_left, d_right), minf(d_bottom, d_top))
+	var boundary_pt: Vector2
+	if min_d == d_left:
+		boundary_pt = Vector2(ch_x0, pt.y)
+	elif min_d == d_right:
+		boundary_pt = Vector2(ch_x1, pt.y)
+	elif min_d == d_bottom:
+		boundary_pt = Vector2(pt.x, ch_z0)
+	else:
+		boundary_pt = Vector2(pt.x, ch_z1)
+	# Build slit: thin rectangle (0.02m wide) from corridor point to boundary
+	# Start slit 0.5m INSIDE corridor so merge_polygons gets an overlap (not just touching)
+	var slit_dir := (boundary_pt - pt).normalized()
+	var slit_start := pt - slit_dir * 0.5  # extend 0.5m past corridor vertex into corridor
+	var slit_perp := Vector2(-slit_dir.y, slit_dir.x) * 0.01
+	var slit := PackedVector2Array([
+		slit_start + slit_perp, boundary_pt + slit_perp,
+		boundary_pt - slit_perp, slit_start - slit_perp
+	])
+	# Merge slit with corridor
+	var merged := Geometry2D.merge_polygons(corridor, slit)
+	if merged.size() > 0 and merged[0].size() >= 3:
+		if _polygon_area(merged[0]) < 0:
+			merged[0].reverse()
+		return merged[0]
+	return corridor
 
 
 ## Validates road direction to remove points that create loops/flips
