@@ -3860,8 +3860,6 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 
 	# Smoothing (thread-safe: pure math)
 	var smoothed_points: PackedVector2Array = _smooth_road_corners(local_points)
-	var unclipped_smoothed: PackedVector2Array = smoothed_points  # Сохраняем до клиппинга для коридоров террейна
-
 	# Клипаем smoothed_points к bbox чанка (используется для curbs, lamps)
 	if chunk_key != "initial" and chunk_key != "":
 		var ck_parts_sm: PackedStringArray = chunk_key.split(",")
@@ -3885,6 +3883,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	var uvs := PackedVector2Array()
 	var normals := PackedVector3Array()
 	var indices := PackedInt32Array()
+	var terrain_corridor := PackedVector2Array()
 
 	if not is_bridge and highway_type not in ["footway", "path"]:
 		# Validate + clip (thread-safe: pure math)
@@ -3952,10 +3951,20 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				indices.append(idx + 2)
 				indices.append(idx + 3)
 
+			# Коридор для выреза террейна — из тех же points/perpendiculars + буфер 0.3м.
+			# Единый полигон: left edge forward, right edge reversed.
+			if highway_type not in ["cycleway", "track", "steps"]:
+				var corr_hw: float = half_w + 0.3
+				for i in range(n_points):
+					terrain_corridor.append(points[i] - perpendiculars[i] * corr_hw)
+				for i in range(n_points - 1, -1, -1):
+					terrain_corridor.append(points[i] + perpendiculars[i] * corr_hw)
+				if _polygon_area(terrain_corridor) < 0:
+					terrain_corridor.reverse()
+
 	# Store result via mutex
 	var result := {
 		"smoothed_points": smoothed_points,
-		"unclipped_smoothed": unclipped_smoothed,
 		"vertices": vertices,
 		"uvs": uvs,
 		"normals": normals,
@@ -3971,7 +3980,8 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		"nodes": nodes,
 		"is_bridge": is_bridge,
 		"elevation_info": elevation_info,
-		"way_id": task_data.get("way_id", 0)
+		"way_id": task_data.get("way_id", 0),
+		"terrain_corridor": terrain_corridor
 	}
 	_road_mutex.lock()
 	_road_results.append(result)
@@ -4039,67 +4049,13 @@ func _apply_road_result(result: Dictionary) -> void:
 			else:
 				batch["indices"].append_array(src_indices)
 
-	# Строим коридор-полигон для выреза террейна из ПОЛНЫХ НЕОБРЕЗАННЫХ точек дороги.
-	# Используем unclipped_smoothed (вся дорога из OSM overlap), а не smoothed_points
-	# (обрезанные к bbox чанка). Это гарантирует что дороги из overlap-зоны тоже
-	# вырезают террейн, даже если они лишь краем заходят в chunk rect.
-	var unclipped: PackedVector2Array = result.get("unclipped_smoothed", smoothed_points)
-	if not is_bridge and highway_type not in ["footway", "path", "cycleway", "track", "steps"] and unclipped.size() >= 2:
-		var validated: PackedVector2Array = _validate_road_direction(unclipped)
-		if validated.size() >= 2:
-			var half_w: float = width * 0.5 + 0.3  # +0.3m buffer — corridor must be wider than road mesh
-			var n_pts: int = validated.size()
-			# Строим per-segment коридоры (выпуклые четырёхугольники).
-			# Одна полилиния на повороте создаёт невыпуклый полигон, который
-			# Geometry2D.clip_polygons обрабатывает некорректно — оставляет террейн поверх дороги.
-			# Per-segment подход: каждый сегмент — отдельный прямоугольник с forward-only перпендикулярами.
-			var ck := _get_chunk_key_from_node(parent)
-			if not _chunk_terrain_roads.has(ck):
-				_chunk_terrain_roads[ck] = []
-			# Для каждого сегмента строим прямоугольный коридор.
-			# Между соседними сегментами на поворотах добавляем треугольную заплатку,
-			# чтобы закрыть щель на внутренней стороне поворота.
-			var prev_perp := Vector2.ZERO
-			for seg_i in range(n_pts - 1):
-				var p0: Vector2 = validated[seg_i]
-				var p1: Vector2 = validated[seg_i + 1]
-				if p0.distance_squared_to(p1) < 0.001:
-					continue  # skip degenerate zero-length segments
-				var d: Vector2 = (p1 - p0).normalized()
-				var perp := Vector2(-d.y, d.x)
-				var seg_corridor := PackedVector2Array()
-				seg_corridor.append(p0 - perp * half_w)
-				seg_corridor.append(p1 - perp * half_w)
-				seg_corridor.append(p1 + perp * half_w)
-				seg_corridor.append(p0 + perp * half_w)
-				if _polygon_area(seg_corridor) < 0:
-					seg_corridor.reverse()
-				_chunk_terrain_roads[ck].append(seg_corridor)
-				# Треугольная заплатка на повороте (закрывает щель между сегментами)
-				if seg_i > 0 and prev_perp != Vector2.ZERO:
-					# Четыре угла в точке поворота p0:
-					# prev segment end: p0 ± prev_perp * half_w
-					# curr segment start: p0 ± perp * half_w
-					# Добавляем треугольник с обеих сторон (один будет вырожденным/перекрытым)
-					var join_tri_a := PackedVector2Array([
-						p0,
-						p0 - prev_perp * half_w,
-						p0 - perp * half_w
-					])
-					if absf(_polygon_area(join_tri_a)) > 0.01:
-						if _polygon_area(join_tri_a) < 0:
-							join_tri_a.reverse()
-						_chunk_terrain_roads[ck].append(join_tri_a)
-					var join_tri_b := PackedVector2Array([
-						p0,
-						p0 + prev_perp * half_w,
-						p0 + perp * half_w
-					])
-					if absf(_polygon_area(join_tri_b)) > 0.01:
-						if _polygon_area(join_tri_b) < 0:
-							join_tri_b.reverse()
-						_chunk_terrain_roads[ck].append(join_tri_b)
-				prev_perp = perp
+	# Регистрируем коридор для выреза террейна (посчитан в worker thread)
+	var terrain_corridor: PackedVector2Array = result.get("terrain_corridor", PackedVector2Array())
+	if terrain_corridor.size() >= 6:  # минимум 3 точки на каждую сторону
+		var ck := _get_chunk_key_from_node(parent)
+		if not _chunk_terrain_roads.has(ck):
+			_chunk_terrain_roads[ck] = []
+		_chunk_terrain_roads[ck].append(terrain_corridor)
 
 	# Curbs
 	if curb_height > 0.0:
