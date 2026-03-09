@@ -4056,6 +4056,10 @@ func _apply_road_result(result: Dictionary) -> void:
 			var ck := _get_chunk_key_from_node(parent)
 			if not _chunk_terrain_roads.has(ck):
 				_chunk_terrain_roads[ck] = []
+			# Для каждого сегмента строим прямоугольный коридор.
+			# Между соседними сегментами на поворотах добавляем треугольную заплатку,
+			# чтобы закрыть щель на внутренней стороне поворота.
+			var prev_perp := Vector2.ZERO
 			for seg_i in range(n_pts - 1):
 				var p0: Vector2 = validated[seg_i]
 				var p1: Vector2 = validated[seg_i + 1]
@@ -4068,10 +4072,34 @@ func _apply_road_result(result: Dictionary) -> void:
 				seg_corridor.append(p1 - perp * half_w)
 				seg_corridor.append(p1 + perp * half_w)
 				seg_corridor.append(p0 + perp * half_w)
-				# CCW winding check
 				if _polygon_area(seg_corridor) < 0:
 					seg_corridor.reverse()
 				_chunk_terrain_roads[ck].append(seg_corridor)
+				# Треугольная заплатка на повороте (закрывает щель между сегментами)
+				if seg_i > 0 and prev_perp != Vector2.ZERO:
+					# Четыре угла в точке поворота p0:
+					# prev segment end: p0 ± prev_perp * half_w
+					# curr segment start: p0 ± perp * half_w
+					# Добавляем треугольник с обеих сторон (один будет вырожденным/перекрытым)
+					var join_tri_a := PackedVector2Array([
+						p0,
+						p0 - prev_perp * half_w,
+						p0 - perp * half_w
+					])
+					if absf(_polygon_area(join_tri_a)) > 0.01:
+						if _polygon_area(join_tri_a) < 0:
+							join_tri_a.reverse()
+						_chunk_terrain_roads[ck].append(join_tri_a)
+					var join_tri_b := PackedVector2Array([
+						p0,
+						p0 + prev_perp * half_w,
+						p0 + perp * half_w
+					])
+					if absf(_polygon_area(join_tri_b)) > 0.01:
+						if _polygon_area(join_tri_b) < 0:
+							join_tri_b.reverse()
+						_chunk_terrain_roads[ck].append(join_tri_b)
+				prev_perp = perp
 
 	# Curbs
 	if curb_height > 0.0:
