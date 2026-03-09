@@ -3083,12 +3083,18 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 	# ========== PHASE 2: Intersection detection ==========
 	var node_usage: Dictionary = {}
 	var node_arms: Dictionary = {}
+	var roundabout_nodes: Dictionary = {}
 
 	for way in ways:
 		var tags: Dictionary = way.get("tags", {})
 		var way_nodes: Array = way.get("nodes", [])
 		if not tags.has("highway") or way_nodes.size() < 2:
 			continue
+		var is_roundabout_way: bool = tags.get("junction", "") in ["roundabout", "circular"] or tags.get("highway", "") == "mini_roundabout"
+		if is_roundabout_way:
+			for node in way_nodes:
+				var roundabout_key := "%.6f,%.6f" % [node.lat, node.lon]
+				roundabout_nodes[roundabout_key] = true
 		var highway_type: String = tags.get("highway", "")
 		if highway_type in ["footway", "path", "cycleway", "track", "steps"]:
 			continue
@@ -3153,6 +3159,8 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 	var new_hash_entries: Array = []
 
 	for node_key in node_usage:
+		if roundabout_nodes.has(node_key):
+			continue
 		var info: Dictionary = node_usage[node_key]
 		var types: Array = info["types"]
 		var arms: Array = node_arms.get(node_key, [])
@@ -3235,6 +3243,9 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 			continue
 		for node in way_nodes:
 			var node_key := "%.5f,%.5f" % [node.lat, node.lon]
+			var roundabout_key := "%.6f,%.6f" % [node.lat, node.lon]
+			if roundabout_nodes.has(roundabout_key):
+				continue
 			var local: Vector2 = _ll.call(node.lat, node.lon)
 			if local.x < chunk_min_x - nrc_margin or local.x >= chunk_max_x + nrc_margin or local.y < chunk_min_z - nrc_margin or local.y >= chunk_max_z + nrc_margin:
 				continue
@@ -3262,6 +3273,7 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 		"node_road_count": node_road_count,
 		"node_positions": node_positions,
 		"node_road_types": node_road_types,
+		"roundabout_nodes": roundabout_nodes,
 	}
 	result["thread_time_ms"] = (Time.get_ticks_usec() - _thread_t0) / 1000.0
 	_terrain_thread_mutex.lock()
@@ -3559,6 +3571,7 @@ func _process_phase3_queue() -> bool:
 		var node_road_count: Dictionary = result.node_road_count
 		var node_positions: Dictionary = result.node_positions
 		var node_road_types: Dictionary = result.node_road_types
+		var roundabout_nodes: Dictionary = result.get("roundabout_nodes", {})
 		var ikeys: Array = entry.get("ikeys", [])
 		var idx: int = entry.way_idx
 		while idx < ikeys.size():
@@ -3567,6 +3580,8 @@ func _process_phase3_queue() -> bool:
 				return true
 			var node_key: String = ikeys[idx]
 			idx += 1
+			if roundabout_nodes.has(node_key):
+				continue
 			var pos: Vector2 = node_positions[node_key]
 			# Only create objects for nodes within strict chunk bbox (avoid duplicates from margin)
 			if filter_by_chunk:
@@ -4002,9 +4017,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		var full_validated: PackedVector2Array = _validate_road_direction(full_smoothed_points)
 		if full_validated.size() >= 2 and highway_type not in ["cycleway", "track", "steps"]:
 			var corridor_delta: float = half_w + 0.1  # 10cm buffer over mesh width
-			var corridor_polys: Array[PackedVector2Array] = Geometry2D.offset_polyline(
-				full_validated, corridor_delta,
-				Geometry2D.JOIN_MITER, Geometry2D.END_SQUARE)
+			var clip_rect := PackedVector2Array()
 			if chunk_key != "initial" and chunk_key != "":
 				var ck_parts_c: PackedStringArray = chunk_key.split(",")
 				var c_x := int(ck_parts_c[0])
@@ -4013,22 +4026,11 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				var ch_x1 := float(c_x + 1) * t_chunk_size
 				var ch_z0 := float(c_z) * t_chunk_size
 				var ch_z1 := float(c_z + 1) * t_chunk_size
-				var clip_rect := PackedVector2Array([
+				clip_rect = PackedVector2Array([
 					Vector2(ch_x0, ch_z0), Vector2(ch_x1, ch_z0),
 					Vector2(ch_x1, ch_z1), Vector2(ch_x0, ch_z1),
 				])
-				for raw_corridor in corridor_polys:
-					if _polygon_area(raw_corridor) < 0:
-						raw_corridor.reverse()
-					var clipped_corr: Array[PackedVector2Array] = Geometry2D.intersect_polygons(raw_corridor, clip_rect)
-					for cp in clipped_corr:
-						if cp.size() >= 3 and _polygon_area(cp) > 0.001:
-							terrain_corridors.append(cp)
-			else:
-				for raw_corridor in corridor_polys:
-					if _polygon_area(raw_corridor) < 0:
-						raw_corridor.reverse()
-					terrain_corridors.append(raw_corridor)
+			terrain_corridors.append_array(_build_terrain_corridors_for_polyline(full_validated, corridor_delta, clip_rect))
 
 		# Clip polyline to chunk with margin (for mesh vertices)
 		var points: PackedVector2Array = validated
@@ -4942,10 +4944,9 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 
 	var is_tagged_crossing: bool = item.tags.get("footway", "") == "crossing"
 
-	# Path: целиком через polygon clipping (обрезается road corridors как terrain)
-	# Skip path polygon for tagged crossings — only crossing strips are needed
-	if not is_tagged_crossing:
-		_add_path_clipped_to_batch(smoothed_points, width, 0.23, parent)
+	# Path base is needed even for tagged crossings so curb returns and sidewalk ramps
+	# are filled; the on-road portion is still removed by road-corridor clipping.
+	_add_path_clipped_to_batch(smoothed_points, width, 0.23, parent)
 
 	# Crossing: splitting по on_road для определения on-road portions (зебра)
 	var current_pts := PackedVector2Array()
@@ -4961,6 +4962,9 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 				if current_on:
 					var is_full: bool = is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, smoothed_points[i], ck))
 					if is_full:
+						# Crossing markings are an overlay; keep a plain road base under them
+						# so curb openings do not expose fallback terrain.
+						_add_road_to_batch_fast(current_pts, width, "intersection", 0.012, parent)
 						_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
 						if enable_crossing_signs:
 							_enqueue_crossing_signs(current_pts, parent, ck)
@@ -4979,6 +4983,7 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 		if current_on:
 			var last_pt: Vector2 = smoothed_points[smoothed_points.size() - 1]
 			if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, last_pt, ck)):
+				_add_road_to_batch_fast(current_pts, width, "intersection", 0.012, parent)
 				_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
 				if enable_crossing_signs:
 					_enqueue_crossing_signs(current_pts, parent, ck)
@@ -5099,29 +5104,14 @@ func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, he
 	if validated.size() < 2:
 		return
 	var half_w: float = width * 0.5
-	var n_pts: int = validated.size()
-	var perps := PackedVector2Array()
-	perps.resize(n_pts)
-	for i in range(n_pts):
-		var perp: Vector2
-		if i == 0:
-			var d: Vector2 = (validated[1] - validated[0]).normalized()
-			perp = Vector2(-d.y, d.x)
-		elif i == n_pts - 1:
-			var d: Vector2 = (validated[i] - validated[i - 1]).normalized()
-			perp = Vector2(-d.y, d.x)
-		else:
-			var d: Vector2 = (validated[i + 1] - validated[i]).normalized()
-			perp = Vector2(-d.y, d.x)
-		perps[i] = perp
-	var corridor := PackedVector2Array()
-	for i in range(n_pts):
-		corridor.append(validated[i] - perps[i] * half_w)
-	for i in range(n_pts - 1, -1, -1):
-		corridor.append(validated[i] + perps[i] * half_w)
+	var corridor_polys: Array[PackedVector2Array] = Geometry2D.offset_polyline(
+		validated, half_w,
+		Geometry2D.JOIN_MITER, Geometry2D.END_SQUARE)
+	if corridor_polys.is_empty():
+		return
 
 	# 2. Обрезка по bbox чанка + начальная инициализация polys
-	var polys: Array[PackedVector2Array]
+	var polys: Array[PackedVector2Array] = []
 	var ck_x := 0
 	var ck_z := 0
 	if chunk_key != "initial":
@@ -5135,9 +5125,22 @@ func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, he
 			Vector2(float(ck_x + 1) * chunk_size + margin, float(ck_z + 1) * chunk_size + margin),
 			Vector2(float(ck_x) * chunk_size - margin, float(ck_z + 1) * chunk_size + margin),
 		])
-		polys = Geometry2D.intersect_polygons(corridor, chunk_rect)
+		for raw_corridor in corridor_polys:
+			if raw_corridor.size() < 3:
+				continue
+			if _polygon_area(raw_corridor) < 0:
+				raw_corridor.reverse()
+			var clipped_corridors: Array[PackedVector2Array] = Geometry2D.intersect_polygons(raw_corridor, chunk_rect)
+			for cp in clipped_corridors:
+				if cp.size() >= 3 and absf(_polygon_area(cp)) >= 0.5:
+					polys.append(cp)
 	else:
-		polys = [corridor]
+		for raw_corridor in corridor_polys:
+			if raw_corridor.size() < 3:
+				continue
+			if _polygon_area(raw_corridor) < 0:
+				raw_corridor.reverse()
+			polys.append(raw_corridor)
 	if polys.is_empty():
 		return
 
@@ -15729,6 +15732,71 @@ func _remove_polyline_loops(points: PackedVector2Array) -> PackedVector2Array:
 		if not loop_found:
 			result.append(b)
 		i += 1
+	return result
+
+
+func _is_closed_polyline(points: PackedVector2Array, tolerance: float = 0.5) -> bool:
+	if points.size() < 3:
+		return false
+	return points[0].distance_to(points[points.size() - 1]) <= tolerance
+
+
+func _build_segment_corridor_quad(a: Vector2, b: Vector2, delta: float) -> PackedVector2Array:
+	var dir := b - a
+	var len := dir.length()
+	if len < 0.001:
+		return PackedVector2Array()
+	dir /= len
+	var perp := Vector2(-dir.y, dir.x) * delta
+	var cap := dir * delta
+	return PackedVector2Array([
+		a - perp - cap,
+		a + perp - cap,
+		b + perp + cap,
+		b - perp + cap,
+	])
+
+
+func _build_terrain_corridors_for_polyline(points: PackedVector2Array, delta: float, clip_rect: PackedVector2Array = PackedVector2Array()) -> Array[PackedVector2Array]:
+	var result: Array[PackedVector2Array] = []
+	if points.size() < 2:
+		return result
+
+	var is_closed := _is_closed_polyline(points)
+	if not is_closed:
+		var corridor_polys: Array[PackedVector2Array] = Geometry2D.offset_polyline(
+			points, delta,
+			Geometry2D.JOIN_MITER, Geometry2D.END_SQUARE)
+		for raw_corridor in corridor_polys:
+			if raw_corridor.size() < 3:
+				continue
+			if _polygon_area(raw_corridor) < 0:
+				raw_corridor.reverse()
+			if clip_rect.is_empty():
+				result.append(raw_corridor)
+				continue
+			var clipped_corr: Array[PackedVector2Array] = Geometry2D.intersect_polygons(raw_corridor, clip_rect)
+			for cp in clipped_corr:
+				if cp.size() >= 3 and _polygon_area(cp) > 0.001:
+					result.append(cp)
+		return result
+
+	# Closed-loop roads such as roundabouts produce a filled disk when treated as one
+	# corridor polygon. Split them into overlapping segment quads so terrain clipping
+	# removes only the road ribbon and preserves the center island.
+	for i in range(points.size() - 1):
+		var quad := _build_segment_corridor_quad(points[i], points[i + 1], delta)
+		if quad.size() < 3:
+			continue
+		if _polygon_area(quad) < 0:
+			quad.reverse()
+		if clip_rect.is_empty():
+			result.append(quad)
+			continue
+		var clipped_quads: Array[PackedVector2Array] = Geometry2D.intersect_polygons(quad, clip_rect)
+		for cp in clipped_quads:
+			if cp.size() >= 3 and _polygon_area(cp) > 0.001:
+				result.append(cp)
 	return result
 
 

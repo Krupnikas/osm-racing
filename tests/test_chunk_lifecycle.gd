@@ -24,6 +24,11 @@ func run_all_tests() -> void:
 	await test_pending_batch_chunk_road_queue_gets_priority()
 	await test_road_dispatch_round_robin_reaches_second_pending_batch_chunk()
 	await test_hidden_pending_batch_chunk_still_processes()
+	await test_sharp_turn_sidewalk_path_generates_mesh()
+	await test_tagged_crossing_still_generates_path_base()
+	await test_tagged_crossing_generates_plain_base_under_stripes()
+	await test_roundabout_nodes_skip_intersection_objects()
+	await test_closed_loop_terrain_corridor_preserves_center()
 	await test_chunk_load_queue_deduplicates_and_sorts()
 	await test_chunk_load_queue_respects_max_concurrent_loads()
 	await test_incomplete_chunk_cannot_purge_on_cull()
@@ -330,6 +335,140 @@ func test_hidden_pending_batch_chunk_still_processes() -> void:
 	_assert(gen._should_process_chunk(chunk_key), "hidden_pending_batch_chunk_still_processes", "Hidden pending_batch chunk should still be processable")
 	gen._loaded_chunks.clear()
 	gen._pending_batch_chunks.clear()
+	_cleanup_generator(gen)
+	await get_tree().process_frame
+
+
+func test_sharp_turn_sidewalk_path_generates_mesh() -> void:
+	var gen: OSMTerrainGenerator = _make_generator()
+	await _await_ready(gen)
+	var chunk_key := "0,0"
+	var chunk_node := Node3D.new()
+	chunk_node.name = "Chunk_" + chunk_key
+	gen.add_child(chunk_node)
+	var points := PackedVector2Array([
+		Vector2(0.0, 0.0),
+		Vector2(50.0, 0.0),
+		Vector2(20.0, 10.0),
+	])
+	gen._add_path_clipped_to_batch(points, 4.0, 0.23, chunk_node)
+	var chunk_batch: Dictionary = gen._road_batch_data.get(chunk_key, {})
+	var path_batch: Dictionary = chunk_batch.get("path", {})
+	_assert(path_batch.get("vertices", PackedVector3Array()).size() >= 3, "sharp_turn_sidewalk_path_generates_mesh", "Expected sharp-turn sidewalk path to generate batch vertices")
+	_cleanup_generator(gen)
+	await get_tree().process_frame
+
+
+func test_tagged_crossing_still_generates_path_base() -> void:
+	var gen: OSMTerrainGenerator = _make_generator()
+	await _await_ready(gen)
+	var chunk_key := "0,0"
+	var chunk_node := Node3D.new()
+	chunk_node.name = "Chunk_" + chunk_key
+	gen.add_child(chunk_node)
+	gen._road_batch_data.clear()
+	var item := {
+		"smoothed_points": PackedVector2Array([
+			Vector2(45.0, 70.0),
+			Vector2(50.0, 70.0),
+			Vector2(55.0, 70.0),
+		]),
+		"width": 2.0,
+		"tags": {"footway": "crossing"},
+		"parent": chunk_node,
+		"_pt_idx": 3,
+		"_on_road": [false, true, false],
+		"_in_parking": [false, false, false],
+	}
+	var done: bool = gen._process_footway_incremental(item, Time.get_ticks_usec() + 100000, chunk_key)
+	var chunk_batch: Dictionary = gen._road_batch_data.get(chunk_key, {})
+	var path_batch: Dictionary = chunk_batch.get("path", {})
+	var crossing_batch: Dictionary = chunk_batch.get("crossing", {})
+	_assert(done, "tagged_crossing_process_finishes", "Tagged crossing processing should finish in one call")
+	_assert(path_batch.get("vertices", PackedVector3Array()).size() >= 3, "tagged_crossing_still_generates_path_base", "Tagged crossing should still generate path base geometry")
+	_assert(crossing_batch.get("vertices", PackedVector3Array()).size() >= 4, "tagged_crossing_generates_crossing_strips", "Tagged crossing should still generate crossing stripes")
+	_cleanup_generator(gen)
+	await get_tree().process_frame
+
+
+func test_tagged_crossing_generates_plain_base_under_stripes() -> void:
+	var gen: OSMTerrainGenerator = _make_generator()
+	await _await_ready(gen)
+	var chunk_key := "0,0"
+	var chunk_node := Node3D.new()
+	chunk_node.name = "Chunk_" + chunk_key
+	gen.add_child(chunk_node)
+	gen._road_batch_data.clear()
+	var item := {
+		"smoothed_points": PackedVector2Array([
+			Vector2(45.0, 70.0),
+			Vector2(50.0, 70.0),
+			Vector2(55.0, 70.0),
+		]),
+		"width": 2.0,
+		"tags": {"footway": "crossing"},
+		"parent": chunk_node,
+		"_pt_idx": 3,
+		"_on_road": [false, true, false],
+		"_in_parking": [false, false, false],
+	}
+	gen._process_footway_incremental(item, Time.get_ticks_usec() + 100000, chunk_key)
+	var chunk_batch: Dictionary = gen._road_batch_data.get(chunk_key, {})
+	var base_batch: Dictionary = chunk_batch.get("intersection", {})
+	_assert(base_batch.get("vertices", PackedVector3Array()).size() >= 4, "tagged_crossing_generates_plain_base_under_stripes", "Crossing should add a plain road base under stripes")
+	_cleanup_generator(gen)
+	await get_tree().process_frame
+
+
+func test_roundabout_nodes_skip_intersection_objects() -> void:
+	var gen: OSMTerrainGenerator = _make_generator()
+	await _await_ready(gen)
+	var chunk_key := "0,0"
+	var chunk_node := Node3D.new()
+	chunk_node.name = "Chunk_" + chunk_key
+	gen.add_child(chunk_node)
+	gen._phase3_queue.append({
+		"result": {
+			"osm_data": _empty_osm_data(0.0, 0.0, 0.0),
+			"node_road_count": {"52.00000,37.00000": 3},
+			"node_positions": {"52.00000,37.00000": Vector2(10.0, 10.0)},
+			"node_road_types": {"52.00000,37.00000": ["residential", "residential", "residential"]},
+			"roundabout_nodes": {"52.00000,37.00000": true},
+		},
+		"parent": chunk_node,
+		"chunk_key": chunk_key,
+		"gen": gen._load_generation,
+		"way_idx": 0,
+		"phase": "intersections",
+		"phase3_work_us": 0,
+		"ikeys": ["52.00000,37.00000"],
+	})
+	var did_work: bool = gen._process_phase3_queue()
+	_assert(did_work, "roundabout_nodes_phase3_progresses", "Phase 3 should advance past roundabout node")
+	_assert(chunk_node.get_child_count() == 0, "roundabout_nodes_skip_intersection_objects", "Roundabout node should not create generic intersection patches or signs")
+	_cleanup_generator(gen)
+	await get_tree().process_frame
+
+
+func test_closed_loop_terrain_corridor_preserves_center() -> void:
+	var gen: OSMTerrainGenerator = _make_generator()
+	await _await_ready(gen)
+	var loop := PackedVector2Array([
+		Vector2(0.0, 10.0),
+		Vector2(10.0, 0.0),
+		Vector2(20.0, 10.0),
+		Vector2(10.0, 20.0),
+		Vector2(0.0, 10.0),
+	])
+	var corridors: Array = gen._build_terrain_corridors_for_polyline(loop, 2.0)
+	var center := Vector2(10.0, 10.0)
+	var center_inside := false
+	for corridor in corridors:
+		if corridor.size() >= 3 and Geometry2D.is_point_in_polygon(center, corridor):
+			center_inside = true
+			break
+	_assert(corridors.size() >= 4, "closed_loop_terrain_corridor_split_into_segments", "Closed loop should build per-segment terrain corridors")
+	_assert(not center_inside, "closed_loop_terrain_corridor_preserves_center", "Closed loop terrain corridors should not cover the center island")
 	_cleanup_generator(gen)
 	await get_tree().process_frame
 
