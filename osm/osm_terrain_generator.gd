@@ -188,7 +188,7 @@ var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batc
 var _chunk_terrain_roads: Dictionary = {}  # chunk_key → Array[{points: PackedVector2Array, width: float}] — для отложенного выреза террейна
 var _chunk_water_polygons: Dictionary = {}  # chunk_key → Array[PackedVector2Array] — водоёмы для выреза террейна + берег
 var _deferred_terrain_chunks: Array[String] = []  # Чанки ожидающие terrain clipping (ждут соседей)
-var _chunk_roads_ready: Dictionary = {}  # chunk_key → true — дорожные коридоры готовы для terrain clipping
+
 var _chunk_pending_deferred: Dictionary = {}  # chunk_key → int — счётчик pending deferred items (lamps, footway, manholes, billboard, traffic)
 
 # Window batching system - ONE MultiMesh per chunk instead of per-building
@@ -1696,7 +1696,6 @@ func start_loading() -> void:
 	_chunk_terrain_roads.clear()
 	_chunk_water_polygons.clear()
 	_deferred_terrain_chunks.clear()
-	_chunk_roads_ready.clear()
 	# Clear threaded terrain gen results
 	_terrain_thread_mutex.lock()
 	_terrain_gen_results.clear()
@@ -2753,7 +2752,6 @@ func reset_terrain() -> void:
 	_chunk_terrain_roads.clear()
 	_chunk_water_polygons.clear()
 	_deferred_terrain_chunks.clear()
-	_chunk_roads_ready.clear()
 
 	# Reset draw call stats (prevent stale stats across location changes)
 	for key in _draw_call_stats:
@@ -3445,8 +3443,6 @@ func _process_phase3_queue() -> bool:
 			elif tags.has("waterway"):
 				_create_waterway(nodes, tags, target, null)
 		# Done with ways — move to intersections
-		# Маркируем что дорожные коридоры для этого чанка готовы (для terrain clipping)
-		_chunk_roads_ready[chunk_key] = true
 		entry.phase = "intersections"
 		entry.way_idx = 0
 		# Pre-build intersection keys list for iteration
@@ -4063,6 +4059,8 @@ func _apply_road_result(result: Dictionary) -> void:
 			for seg_i in range(n_pts - 1):
 				var p0: Vector2 = validated[seg_i]
 				var p1: Vector2 = validated[seg_i + 1]
+				if p0.distance_squared_to(p1) < 0.001:
+					continue  # skip degenerate zero-length segments
 				var d: Vector2 = (p1 - p0).normalized()
 				var perp := Vector2(-d.y, d.x)
 				var seg_corridor := PackedVector2Array()
@@ -5268,7 +5266,7 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 	# поэтому они покрывают все дороги проходящие через chunk rect
 	var terrain_roads: Array = []
 	if _chunk_terrain_roads.has(chunk_key):
-		terrain_roads = _chunk_terrain_roads[chunk_key]
+		terrain_roads = _chunk_terrain_roads[chunk_key].duplicate()  # deep copy — worker thread must not share mutable state
 	var ch_min_x := float(ck_x) * chunk_size
 	var ch_max_x := ch_min_x + chunk_size
 	var ch_min_z := float(ck_z) * chunk_size
