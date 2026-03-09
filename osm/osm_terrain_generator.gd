@@ -3020,15 +3020,36 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 			continue
 		var road_width: float = ROAD_WIDTHS.get(highway_type, 5.0)
 
+		# Конвертируем в local и сглаживаем — directions перекрёстков должны
+		# совпадать с фактическими сглаженными дорогами, а не с сырыми OSM-узлами.
+		var raw_pts := PackedVector2Array()
+		raw_pts.resize(way_nodes.size())
+		for wi in range(way_nodes.size()):
+			raw_pts[wi] = _ll.call(way_nodes[wi].lat, way_nodes[wi].lon)
+		var smoothed_pts: PackedVector2Array = _smooth_road_corners(raw_pts)
+
+		# Для каждого исходного OSM-узла находим ближайшую точку на сглаженной полилинии
+		# и берём direction из сглаженных сегментов
 		for i in range(way_nodes.size()):
 			var node = way_nodes[i]
 			var node_key := "%.6f,%.6f" % [node.lat, node.lon]
-			var local: Vector2 = _ll.call(node.lat, node.lon)
+			var local: Vector2 = raw_pts[i]
+
+			# Находим ближайшую точку в smoothed_pts
+			var best_si := 0
+			var best_dist := local.distance_squared_to(smoothed_pts[0])
+			for si in range(1, smoothed_pts.size()):
+				var dd := local.distance_squared_to(smoothed_pts[si])
+				if dd < best_dist:
+					best_dist = dd
+					best_si = si
+
+			# Direction из сглаженной полилинии
 			var direction := Vector2.ZERO
-			if i > 0:
-				direction = (local - _ll.call(way_nodes[i - 1].lat, way_nodes[i - 1].lon)).normalized()
-			elif i < way_nodes.size() - 1:
-				direction = (_ll.call(way_nodes[i + 1].lat, way_nodes[i + 1].lon) - local).normalized()
+			if best_si > 0:
+				direction = (local - smoothed_pts[best_si - 1]).normalized()
+			elif best_si < smoothed_pts.size() - 1:
+				direction = (smoothed_pts[best_si + 1] - local).normalized()
 
 			if not node_usage.has(node_key):
 				node_usage[node_key] = {"pos": local, "types": [], "widths": [], "directions": []}
@@ -3039,13 +3060,12 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 
 			if not node_arms.has(node_key):
 				node_arms[node_key] = []
-			if i > 0:
-				var prev_ll: Vector2 = _ll.call(way_nodes[i - 1].lat, way_nodes[i - 1].lon)
-				var outward_prev := (prev_ll - local).normalized()
+			# Arms: направления от перекрёстка к соседним сглаженным точкам
+			if best_si > 0:
+				var outward_prev := (smoothed_pts[best_si - 1] - local).normalized()
 				node_arms[node_key].append({"direction": outward_prev, "width": road_width})
-			if i < way_nodes.size() - 1:
-				var next_ll: Vector2 = _ll.call(way_nodes[i + 1].lat, way_nodes[i + 1].lon)
-				var outward_next := (next_ll - local).normalized()
+			if best_si < smoothed_pts.size() - 1:
+				var outward_next := (smoothed_pts[best_si + 1] - local).normalized()
 				node_arms[node_key].append({"direction": outward_next, "width": road_width})
 
 	# Detect intersections
