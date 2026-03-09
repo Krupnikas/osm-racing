@@ -3919,12 +3919,13 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		# subtracted from terrain). After extension, clip to chunk rect.
 		var full_validated: PackedVector2Array = _validate_road_direction(full_smoothed_points)
 		if full_validated.size() >= 2 and highway_type not in ["cycleway", "track", "steps"]:
-			# Extend road endpoints beyond chunk boundary
+			# Extend road endpoints just past chunk boundary (half_w + 1m margin)
+			# to ensure corridor always crosses boundary edge after clip
 			var ext_pts := PackedVector2Array()
 			var fv_n: int = full_validated.size()
 			var start_dir: Vector2 = (full_validated[0] - full_validated[1]).normalized()
 			var end_dir: Vector2 = (full_validated[fv_n - 1] - full_validated[fv_n - 2]).normalized()
-			var ext_dist: float = t_chunk_size * 2.0  # extend well beyond chunk
+			var ext_dist: float = t_chunk_size + half_w + 1.0
 			ext_pts.append(full_validated[0] + start_dir * ext_dist)
 			for i in range(fv_n):
 				ext_pts.append(full_validated[i])

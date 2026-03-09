@@ -716,17 +716,14 @@ static func build_extended_corridor(
 ) -> PackedVector2Array:
 	if road_points.size() < 2:
 		return PackedVector2Array()
-	# Chunk diagonal for extension distance
+	# Extension distance: chunk_size + half_w + 1m (just past boundary)
 	var min_x := chunk_rect[0].x
 	var max_x := chunk_rect[0].x
-	var min_y := chunk_rect[0].y
-	var max_y := chunk_rect[0].y
 	for i in range(1, chunk_rect.size()):
 		min_x = minf(min_x, chunk_rect[i].x)
 		max_x = maxf(max_x, chunk_rect[i].x)
-		min_y = minf(min_y, chunk_rect[i].y)
-		max_y = maxf(max_y, chunk_rect[i].y)
-	var ext_dist := Vector2(max_x - min_x, max_y - min_y).length()
+	var chunk_size_est := max_x - min_x
+	var ext_dist := chunk_size_est + half_w + 1.0
 	# Extend road points at both ends
 	var n := road_points.size()
 	var start_dir := (road_points[0] - road_points[1]).normalized()
