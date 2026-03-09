@@ -3971,14 +3971,13 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				indices.append(idx + 2)
 				indices.append(idx + 3)
 
-			# Коридор для выреза террейна — из тех же points/perpendiculars + буфер 0.3м.
+			# Коридор для выреза террейна — из тех же points/perpendiculars.
 			# Единый полигон: left edge forward, right edge reversed.
 			if highway_type not in ["cycleway", "track", "steps"]:
-				var corr_hw: float = half_w + 0.3
 				for i in range(n_points):
-					terrain_corridor.append(points[i] - perpendiculars[i] * corr_hw)
+					terrain_corridor.append(points[i] - perpendiculars[i] * half_w)
 				for i in range(n_points - 1, -1, -1):
-					terrain_corridor.append(points[i] + perpendiculars[i] * corr_hw)
+					terrain_corridor.append(points[i] + perpendiculars[i] * half_w)
 				if _polygon_area(terrain_corridor) < 0:
 					terrain_corridor.reverse()
 
