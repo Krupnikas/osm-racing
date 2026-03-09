@@ -6,8 +6,8 @@ extends RefCounted
 
 
 static func replace_player_car(scene_root: Node3D) -> Node3D:
-	"""Заменяет Car в сцене на выбранную игроком, обновляет все ссылки.
-	Возвращает новую машину (или старую если замена не нужна)."""
+	## Заменяет Car в сцене на выбранную игроком, обновляет все ссылки.
+	## Возвращает новую машину (или старую если замена не нужна).
 	var old_car := scene_root.get_node_or_null("Car")
 	if not old_car:
 		return null
@@ -60,7 +60,7 @@ static func replace_player_car(scene_root: Node3D) -> Node3D:
 
 
 static func _update_car_references(scene_root: Node3D, new_car: Node3D) -> void:
-	"""Обновить все ссылки на машину — универсально для любой сцены."""
+	## Обновить все ссылки на машину — универсально для любой сцены.
 	# Перебираем все ноды с car_path
 	for node_path in [
 		"OSMTerrain", "CameraManager", "UI/HUD", "UI/CoordsLabel",
@@ -89,7 +89,7 @@ static func _update_car_references(scene_root: Node3D, new_car: Node3D) -> void:
 
 
 static func spawn_car_at(parent: Node, position: Vector3, rotation_y: float = 0.0) -> Node3D:
-	"""Создаёт выбранную машину в указанной позиции"""
+	## Создаёт выбранную машину в указанной позиции
 	var car_scene_path := CarSettings.get_car_scene_path()
 	var car_scene := load(car_scene_path) as PackedScene
 	var car := car_scene.instantiate() as Node3D

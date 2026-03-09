@@ -1,0 +1,104 @@
+[gd_scene load_steps=12 format=3 uid="uid://bmw_m3_gtr_gevp_car"]
+
+[ext_resource type="Script" path="res://car/bmw_m3_vehicle.gd" id="1_vehicle"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/wheel.gd" id="2_wheel"]
+[ext_resource type="PackedScene" path="res://car/models/bmw_m3_gtr/scene.glb" id="3_bmw"]
+[ext_resource type="Script" path="res://car/bmw_m3_setup.gd" id="4_bmw_setup"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/vehicle_input.gd" id="6_vehicle_input"]
+[ext_resource type="Script" path="res://car/audio/bmw_layered_engine_sound.gd" id="7_engine_sound"]
+[ext_resource type="Script" path="res://car/audio/bmw_engine_sound_debug.gd" id="8_engine_sound_debug"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/tire_squeal_sound.gd" id="9_tire_squeal"]
+[ext_resource type="AudioStream" path="res://addons/gevp/sounds/tire_squeal.wav" id="10_tire_squeal_wav"]
+[ext_resource type="Script" path="res://night_mode/car_lights.gd" id="11_car_lights"]
+
+[sub_resource type="Curve" id="Curve_torque"]
+_data = [Vector2(0, 0.35), 0.0, 2.0, 0, 0, Vector2(0.72, 1), 0.0, 0.0, 0, 0, Vector2(1, 0.88), -1.5, 0.0, 0, 0]
+point_count = 3
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_collision"]
+size = Vector3(1.78, 0.88, 4.4)
+
+[node name="VehicleRigidBody" type="RigidBody3D" groups=["car"] node_paths=PackedStringArray("front_left_wheel", "front_right_wheel", "rear_left_wheel", "rear_right_wheel")]
+collision_layer = 1
+collision_mask = 7
+script = ExtResource("1_vehicle")
+front_left_wheel = NodePath("WheelFrontLeft")
+front_right_wheel = NodePath("WheelFrontRight")
+rear_left_wheel = NodePath("WheelRearLeft")
+rear_right_wheel = NodePath("WheelRearRight")
+torque_curve = SubResource("Curve_torque")
+reverse_ratio = 3.33
+automatic_transmission = true
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("BoxShape3D_collision")
+
+[node name="BMWModel" parent="." instance=ExtResource("3_bmw")]
+transform = Transform3D(-100, 0, 0, 0, 100, 0, 0, 0, -100, 0, 0.12, 0)
+script = ExtResource("4_bmw_setup")
+
+[node name="WheelFrontLeft" type="RayCast3D" parent="." node_paths=PackedStringArray("wheel_node")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.8169, 0.47, -1.47755)
+script = ExtResource("2_wheel")
+wheel_node = NodePath("FrontLeftWheel")
+tire_radius = 0.33
+spring_length = 0.55
+tire_width = 245.0
+
+[node name="FrontLeftWheel" type="Node3D" parent="WheelFrontLeft"]
+
+[node name="WheelFrontRight" type="RayCast3D" parent="." node_paths=PackedStringArray("wheel_node")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.8169, 0.47, -1.47755)
+script = ExtResource("2_wheel")
+wheel_node = NodePath("FrontRightWheel")
+tire_radius = 0.33
+spring_length = 0.55
+tire_width = 245.0
+
+[node name="FrontRightWheel" type="Node3D" parent="WheelFrontRight"]
+
+[node name="WheelRearLeft" type="RayCast3D" parent="." node_paths=PackedStringArray("wheel_node")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.82715, 0.52, 1.2754)
+script = ExtResource("2_wheel")
+wheel_node = NodePath("RearLeftWheel")
+tire_radius = 0.33
+spring_length = 0.55
+tire_width = 265.0
+
+[node name="RearLeftWheel" type="Node3D" parent="WheelRearLeft"]
+
+[node name="WheelRearRight" type="RayCast3D" parent="." node_paths=PackedStringArray("wheel_node")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.82715, 0.52, 1.2754)
+script = ExtResource("2_wheel")
+wheel_node = NodePath("RearRightWheel")
+tire_radius = 0.33
+spring_length = 0.55
+tire_width = 265.0
+
+[node name="RearRightWheel" type="Node3D" parent="WheelRearRight"]
+
+[node name="EngineSound" type="Node3D" parent="." node_paths=PackedStringArray("vehicle")]
+script = ExtResource("7_engine_sound")
+vehicle = NodePath("..")
+
+[node name="EngineSoundDebug" type="Node" parent="." node_paths=PackedStringArray("vehicle", "engine_sound_path")]
+script = ExtResource("8_engine_sound_debug")
+vehicle = NodePath("..")
+engine_sound_path = NodePath("../EngineSound")
+
+[node name="TireSquealSound" type="AudioStreamPlayer3D" parent="." node_paths=PackedStringArray("vehicle")]
+stream = ExtResource("10_tire_squeal_wav")
+autoplay = false
+max_db = 10.0
+script = ExtResource("9_tire_squeal")
+vehicle = NodePath("..")
+slip_threshold = 0.9
+max_slip = 4.0
+
+[node name="Input" type="Node" parent="." node_paths=PackedStringArray("vehicle")]
+script = ExtResource("6_vehicle_input")
+vehicle = NodePath("..")
+
+[node name="CarLights" type="Node3D" parent="."]
+script = ExtResource("11_car_lights")

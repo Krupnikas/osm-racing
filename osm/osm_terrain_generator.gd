@@ -24,6 +24,14 @@ const PARKING_SIGN_TEXTURE = preload("res://textures/signs/parking.png")
 const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
 const WheelDirtScript = preload("res://effects/wheel_dirt.gd")
 
+# Текстуры для деревянных одноэтажных домов (Россия)
+const WOODEN_TEXTURES := [
+	"res://textures/buildings/wooden-house-1.png",
+	"res://textures/buildings/wooden-house-2.png",
+	"res://textures/buildings/wooden-house-3.png",
+	"res://textures/buildings/wooden-house-4.png",
+]
+
 
 # Decoration Layer для добавления атмосферы поверх OSM данных
 var _decoration_layer: Node = null  # DecorationLayer
@@ -203,6 +211,7 @@ var _window_finalize_progress: Dictionary = {}  # chunk_key -> {buf, offset, mm,
 var _building_wall_materials: Dictionary = {}  # texture_type -> ShaderMaterial (shared)
 var _building_recess_materials: Dictionary = {}  # texture_type -> ShaderMaterial (with vertex emission)
 var _building_roof_material: StandardMaterial3D = null  # shared
+var _gabled_roof_material: StandardMaterial3D = null  # shared, для двускатных крыш
 var _building_parapet_material: ShaderMaterial = null  # shared (uses wall shader for FRONT_FACING fix)
 var _building_foundation_materials: Array[StandardMaterial3D] = []  # 4 random colors
 
@@ -659,6 +668,13 @@ func _init_textures() -> void:
 		_building_roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	else:
 		_building_roof_material.albedo_color = Color(0.15, 0.15, 0.15)
+
+	# Двускатная крыша (шифер/металл) для деревянных домов
+	_gabled_roof_material = StandardMaterial3D.new()
+	_gabled_roof_material.albedo_color = Color(0.35, 0.38, 0.36)  # Серо-зелёный шифер
+	_gabled_roof_material.metallic = 0.3
+	_gabled_roof_material.roughness = 0.6
+	_gabled_roof_material.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	# Парапет использует wall shader для корректной обработки FRONT_FACING
 	_building_parapet_material = ShaderMaterial.new()
@@ -6111,40 +6127,56 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		_create_3d_building(points, override_color, building_height, parent, base_elev, debug_name)
 		print("OSM: Building override applied for way %d with color %s" % [way_id, override_color])
 	else:
-		# Проверяем, подходит ли здание для случайной советской текстуры
-		var use_soviet_texture := false
-		var soviet_texture_path := ""
+		# Деревянные одноэтажные дома (Россия) — из override или OSM тегов
+		var is_wooden := false
+		var building_material_tag := str(tags.get("building:material", ""))
+		if building_override and building_override.building_material == "wood":
+			is_wooden = true
+		elif building_material_tag == "wood" or building_material_tag == "timber":
+			is_wooden = true
 
-		# Критерий 1: Нет override (уже подтверждено, т.к. мы в else)
-		# Критерий 2: Только Череповец
-		# Критерий 3: 5 этажей
-		if _is_cherepovets_location() and _is_5_story_building(building_height, tags):
-			use_soviet_texture = true
-			soviet_texture_path = _get_random_soviet_texture(way_id, tags)
-
-		if use_soviet_texture:
-			# Создаём динамический BuildingOverride со случайной текстурой
-			# ТОЛЬКО текстура + вертикальное повторение (1×). Без масштабов, без адаптивности.
-			var temp_override = BuildingOverride.new()
-			temp_override.wall_texture_path = soviet_texture_path
-			temp_override.texture_repeat_y = 1.0
-
-			_create_3d_building_with_custom_texture(points, building_height, temp_override, parent, base_elev, debug_name)
+		if is_wooden and building_height <= 7.0 and _is_russia_location():
+			var wood_idx := way_id % WOODEN_TEXTURES.size()
+			var wood_override = BuildingOverride.new()
+			wood_override.wall_texture_path = WOODEN_TEXTURES[wood_idx]
+			wood_override.texture_repeat_y = 1.0
+			wood_override.building_material = "wood"
+			_create_3d_building_with_custom_texture(points, building_height, wood_override, parent, base_elev, debug_name)
 		else:
-			# Оригинальная логика текстур по умолчанию
-			var building_type: String = str(tags.get("building", "yes"))
-			var texture_type := "panel"  # По умолчанию панельки
-			if building_height > 15.0:
-				texture_type = "panel"  # Высотки - панельные
-			elif building_type in ["house", "detached", "semidetached_house"]:
-				texture_type = "brick"  # Частные дома - кирпич
-			elif building_type in ["industrial", "warehouse", "garage", "garages"]:
-				texture_type = "wall"  # Промышленные - простая штукатурка
-			else:
-				texture_type = "brick"  # Остальное - кирпич
+			# Проверяем, подходит ли здание для случайной советской текстуры
+			var use_soviet_texture := false
+			var soviet_texture_path := ""
 
-			# Используем многопоточную генерацию зданий
-			_queue_building_for_thread(points, building_height, texture_type, parent, base_elev, distance_to_player)
+			# Критерий 1: Нет override (уже подтверждено, т.к. мы в else)
+			# Критерий 2: Только Череповец
+			# Критерий 3: 5 этажей
+			if _is_cherepovets_location() and _is_5_story_building(building_height, tags):
+				use_soviet_texture = true
+				soviet_texture_path = _get_random_soviet_texture(way_id, tags)
+
+			if use_soviet_texture:
+				# Создаём динамический BuildingOverride со случайной текстурой
+				# ТОЛЬКО текстура + вертикальное повторение (1×). Без масштабов, без адаптивности.
+				var temp_override = BuildingOverride.new()
+				temp_override.wall_texture_path = soviet_texture_path
+				temp_override.texture_repeat_y = 1.0
+
+				_create_3d_building_with_custom_texture(points, building_height, temp_override, parent, base_elev, debug_name)
+			else:
+				# Оригинальная логика текстур по умолчанию
+				var building_type: String = str(tags.get("building", "yes"))
+				var texture_type := "panel"  # По умолчанию панельки
+				if building_height > 15.0:
+					texture_type = "panel"  # Высотки - панельные
+				elif building_type in ["house", "detached", "semidetached_house"]:
+					texture_type = "brick"  # Частные дома - кирпич
+				elif building_type in ["industrial", "warehouse", "garage", "garages"]:
+					texture_type = "wall"  # Промышленные - простая штукатурка
+				else:
+					texture_type = "brick"  # Остальное - кирпич
+
+				# Используем многопоточную генерацию зданий
+				_queue_building_for_thread(points, building_height, texture_type, parent, base_elev, distance_to_player)
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
@@ -6161,6 +6193,10 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	# Добавляем кастомные входные группы (МАРС и т.д.)
 	if way_id > 0 and _decoration_layer:
 		_add_custom_entrances_from_override(points, parent, building_height, base_elev, way_id)
+
+	# Вывески на крыше
+	if way_id > 0 and _decoration_layer:
+		_add_roof_signs_from_override(points, parent, building_height, base_elev, way_id)
 
 
 func _create_parking(points: PackedVector2Array, parent: Node3D) -> void:
@@ -10361,25 +10397,127 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 	wall_mesh_instance.material_override = wall_material
 
-	# === КРЫША (плоская поверхность) ===
-	var roof_indices_2d := Geometry2D.triangulate_polygon(points)
-	if roof_indices_2d.size() >= 3:
+	# === КРЫША ===
+	var is_gabled: bool = building_override.building_material == "wood"
+
+	if is_gabled:
+		# === ВАЛЬМОВАЯ КРЫША — ребро вдоль длинной стороны, скаты со всех сторон ===
+		var bb_min_x := INF
+		var bb_max_x := -INF
+		var bb_min_z := INF
+		var bb_max_z := -INF
+		for p in points:
+			bb_min_x = min(bb_min_x, p.x)
+			bb_max_x = max(bb_max_x, p.x)
+			bb_min_z = min(bb_min_z, p.y)
+			bb_max_z = max(bb_max_z, p.y)
+
+		var roof_sx := bb_max_x - bb_min_x
+		var roof_sz := bb_max_z - bb_min_z
+		var ridge_h := 2.5
+		var ridge_top := roof_y + ridge_h
+		var ridge_along_x := roof_sx >= roof_sz
+
+		# Ребро конька вдоль длинной стороны, отступ от краёв = половина короткой стороны
+		var rv := PackedVector3Array()
+		var ru := PackedVector2Array()
+		var rn := PackedVector3Array()
+		var ri := PackedInt32Array()
+
+		var c0 := Vector3(bb_min_x, roof_y, bb_min_z)
+		var c1 := Vector3(bb_max_x, roof_y, bb_min_z)
+		var c2 := Vector3(bb_max_x, roof_y, bb_max_z)
+		var c3 := Vector3(bb_min_x, roof_y, bb_max_z)
+
+		if ridge_along_x:
+			var mid_z := (bb_min_z + bb_max_z) / 2.0
+			var inset: float = min(roof_sz / 2.0, roof_sx / 4.0)
+			var r0 := Vector3(bb_min_x + inset, ridge_top, mid_z)
+			var r1 := Vector3(bb_max_x - inset, ridge_top, mid_z)
+			var half_w := roof_sz / 2.0
+			var slope_l := sqrt(half_w * half_w + ridge_h * ridge_h)
+			var n_front := Vector3(0, half_w / slope_l, -ridge_h / slope_l)
+			var n_back := Vector3(0, half_w / slope_l, ridge_h / slope_l)
+
+			# Скат front (трапеция): c0, c1, r1, r0
+			var vi: int = 0
+			rv.append(c0); rv.append(c1); rv.append(r1); rv.append(r0)
+			ru.append(Vector2(0, 1)); ru.append(Vector2(roof_sx * 0.2, 1))
+			ru.append(Vector2(roof_sx * 0.2, 0)); ru.append(Vector2(0, 0))
+			for _i in 4: rn.append(n_front)
+			ri.append_array([0, 1, 2, 0, 2, 3])
+
+			# Скат back (трапеция): c3, r0, r1, c2
+			vi = rv.size()
+			rv.append(c3); rv.append(r0); rv.append(r1); rv.append(c2)
+			ru.append(Vector2(0, 1)); ru.append(Vector2(0, 0))
+			ru.append(Vector2(roof_sx * 0.2, 0)); ru.append(Vector2(roof_sx * 0.2, 1))
+			for _i in 4: rn.append(n_back)
+			ri.append_array([vi, vi + 1, vi + 2, vi, vi + 2, vi + 3])
+
+			# Вальма left (треугольник): c0, c3, r0
+			var n_left := Vector3(-1, 0.5, 0).normalized()
+			vi = rv.size()
+			rv.append(c0); rv.append(c3); rv.append(r0)
+			ru.append(Vector2(0, 1)); ru.append(Vector2(1, 1)); ru.append(Vector2(0.5, 0))
+			for _i in 3: rn.append(n_left)
+			ri.append_array([vi, vi + 1, vi + 2])
+
+			# Вальма right (треугольник): c1, c2, r1
+			var n_right := Vector3(1, 0.5, 0).normalized()
+			vi = rv.size()
+			rv.append(c1); rv.append(c2); rv.append(r1)
+			ru.append(Vector2(0, 1)); ru.append(Vector2(1, 1)); ru.append(Vector2(0.5, 0))
+			for _i in 3: rn.append(n_right)
+			ri.append_array([vi, vi + 1, vi + 2])
+		else:
+			var mid_x := (bb_min_x + bb_max_x) / 2.0
+			var inset: float = min(roof_sx / 2.0, roof_sz / 4.0)
+			var r0 := Vector3(mid_x, ridge_top, bb_min_z + inset)
+			var r1 := Vector3(mid_x, ridge_top, bb_max_z - inset)
+			var half_w := roof_sx / 2.0
+			var slope_l := sqrt(half_w * half_w + ridge_h * ridge_h)
+			var n_left := Vector3(-ridge_h / slope_l, half_w / slope_l, 0)
+			var n_right := Vector3(ridge_h / slope_l, half_w / slope_l, 0)
+
+			# Скат left (трапеция): c0, r0, r1, c3
+			var vi: int = 0
+			rv.append(c0); rv.append(r0); rv.append(r1); rv.append(c3)
+			ru.append(Vector2(0, 1)); ru.append(Vector2(0, 0))
+			ru.append(Vector2(roof_sz * 0.2, 0)); ru.append(Vector2(roof_sz * 0.2, 1))
+			for _i in 4: rn.append(n_left)
+			ri.append_array([0, 1, 2, 0, 2, 3])
+
+			# Скат right (трапеция): c1, c2, r1, r0
+			vi = rv.size()
+			rv.append(c1); rv.append(c2); rv.append(r1); rv.append(r0)
+			ru.append(Vector2(0, 1)); ru.append(Vector2(roof_sz * 0.2, 1))
+			ru.append(Vector2(roof_sz * 0.2, 0)); ru.append(Vector2(0, 0))
+			for _i in 4: rn.append(n_right)
+			ri.append_array([vi, vi + 1, vi + 2, vi, vi + 2, vi + 3])
+
+			# Вальма front (треугольник): c0, c1, r0
+			var n_front := Vector3(0, 0.5, -1).normalized()
+			vi = rv.size()
+			rv.append(c0); rv.append(c1); rv.append(r0)
+			ru.append(Vector2(0, 1)); ru.append(Vector2(1, 1)); ru.append(Vector2(0.5, 0))
+			for _i in 3: rn.append(n_front)
+			ri.append_array([vi, vi + 1, vi + 2])
+
+			# Вальма back (треугольник): c3, c2, r1
+			var n_back := Vector3(0, 0.5, 1).normalized()
+			vi = rv.size()
+			rv.append(c3); rv.append(c2); rv.append(r1)
+			ru.append(Vector2(0, 1)); ru.append(Vector2(1, 1)); ru.append(Vector2(0.5, 0))
+			for _i in 3: rn.append(n_back)
+			ri.append_array([vi, vi + 1, vi + 2])
+
 		var roof_arrays := []
 		roof_arrays.resize(Mesh.ARRAY_MAX)
-
-		var roof_vertices := PackedVector3Array()
-		var roof_uvs := PackedVector2Array()
-		var roof_normals := PackedVector3Array()
-
-		for p in points:
-			roof_vertices.append(Vector3(p.x, roof_y, p.y))
-			roof_uvs.append(Vector2(p.x * 0.1, p.y * 0.1))
-			roof_normals.append(Vector3.UP)
-
-		roof_arrays[Mesh.ARRAY_VERTEX] = roof_vertices
-		roof_arrays[Mesh.ARRAY_TEX_UV] = roof_uvs
-		roof_arrays[Mesh.ARRAY_NORMAL] = roof_normals
-		roof_arrays[Mesh.ARRAY_INDEX] = roof_indices_2d
+		roof_arrays[Mesh.ARRAY_VERTEX] = rv
+		roof_arrays[Mesh.ARRAY_TEX_UV] = ru
+		roof_arrays[Mesh.ARRAY_NORMAL] = rn
+		roof_arrays[Mesh.ARRAY_INDEX] = ri
 
 		var roof_mesh := ArrayMesh.new()
 		roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, roof_arrays)
@@ -10387,17 +10525,47 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		var roof_mesh_instance := MeshInstance3D.new()
 		roof_mesh_instance.mesh = roof_mesh
 		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-
-		var roof_material := StandardMaterial3D.new()
-		roof_material.cull_mode = BaseMaterial3D.CULL_BACK
-		if _building_textures.has("roof"):
-			roof_material.albedo_texture = _building_textures["roof"]
-			roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-		else:
-			roof_material.albedo_color = Color(0.15, 0.15, 0.15)
-		roof_mesh_instance.material_override = roof_material
-
+		roof_mesh_instance.material_override = _gabled_roof_material
 		wall_mesh_instance.add_child(roof_mesh_instance)
+
+	else:
+		# === ПЛОСКАЯ КРЫША ===
+		var roof_indices_2d := Geometry2D.triangulate_polygon(points)
+		if roof_indices_2d.size() >= 3:
+			var roof_arrays := []
+			roof_arrays.resize(Mesh.ARRAY_MAX)
+
+			var roof_vertices := PackedVector3Array()
+			var roof_uvs := PackedVector2Array()
+			var roof_normals := PackedVector3Array()
+
+			for p in points:
+				roof_vertices.append(Vector3(p.x, roof_y, p.y))
+				roof_uvs.append(Vector2(p.x * 0.1, p.y * 0.1))
+				roof_normals.append(Vector3.UP)
+
+			roof_arrays[Mesh.ARRAY_VERTEX] = roof_vertices
+			roof_arrays[Mesh.ARRAY_TEX_UV] = roof_uvs
+			roof_arrays[Mesh.ARRAY_NORMAL] = roof_normals
+			roof_arrays[Mesh.ARRAY_INDEX] = roof_indices_2d
+
+			var roof_mesh := ArrayMesh.new()
+			roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, roof_arrays)
+
+			var roof_mesh_instance := MeshInstance3D.new()
+			roof_mesh_instance.mesh = roof_mesh
+			roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+			var roof_material := StandardMaterial3D.new()
+			roof_material.cull_mode = BaseMaterial3D.CULL_BACK
+			if _building_textures.has("roof"):
+				roof_material.albedo_texture = _building_textures["roof"]
+				roof_material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+			else:
+				roof_material.albedo_color = Color(0.15, 0.15, 0.15)
+			roof_mesh_instance.material_override = roof_material
+
+			wall_mesh_instance.add_child(roof_mesh_instance)
 
 		# === ПАРАПЕТ: наружная, нижняя грани + угловые заполнения ===
 		var parapet_arrays := []
@@ -13888,6 +14056,8 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 	var skip_override = null
 	if way_id > 0 and _decoration_layer:
 		skip_override = _decoration_layer.get_building_override_for_way(way_id)
+	if skip_override and skip_override.skip_all_pois:
+		return
 	for poi in pois_inside:
 		var poi_id_val = poi.get("id", 0)
 		if skip_override and not skip_override.skip_pois.is_empty():
@@ -14050,7 +14220,8 @@ func _add_shop_entrances_from_override(points: PackedVector2Array, parent: Node3
 			BusinessSignGenerator._create_logo_sign(sign_root, logo_path, Color(0.6, 0.4, 0.2), 4.0)
 		else:
 			# Fallback: текстовая вывеска
-			BusinessSignGenerator._create_text_sign(sign_root, "МАГАЗИН", Color(0.2, 0.5, 0.8), 4.0, "shop")
+			var sign_text: String = shop_data.get("sign_text", "МАГАЗИН")
+			BusinessSignGenerator._create_text_sign(sign_root, sign_text, Color(0.2, 0.5, 0.8), 4.0, "shop")
 		# Подсветка
 		var light := OmniLight3D.new()
 		light.light_energy = 1.5
@@ -14186,6 +14357,76 @@ func _add_mars_sign_label(pos: Vector3, rot_y: float, text: String, subtitle: St
 	label.rotation.y = rot_y
 	label.name = "MarsSignText"
 	parent.add_child(label)
+
+
+func _add_roof_signs_from_override(points: PackedVector2Array, parent: Node3D, building_height: float, base_elev: float, way_id: int) -> void:
+	if not _decoration_layer or way_id <= 0:
+		return
+	var override = _decoration_layer.get_building_override_for_way(way_id)
+	if not override or override.roof_signs.is_empty():
+		return
+
+	var roof_y := base_elev + building_height
+
+	for sign_data in override.roof_signs:
+		var lat: float = sign_data.get("lat", 0.0)
+		var lon: float = sign_data.get("lon", 0.0)
+		var logo_name: String = sign_data.get("logo", "")
+		if lat == 0.0 or lon == 0.0 or logo_name == "":
+			continue
+
+		var logo_path := BusinessSignGenerator.BRAND_LOGOS_PATH + logo_name
+		if not ResourceLoader.exists(logo_path):
+			push_warning("RoofSign: logo not found: " + logo_path)
+			continue
+
+		var texture: Texture2D = load(logo_path)
+		if not texture:
+			continue
+
+		var sign_pos := _latlon_to_local(lat, lon)
+		var wall := _find_closest_wall_to_point(points, sign_pos, 5.0)
+		if wall.is_empty():
+			print("RoofSign: no wall found for sign at (%.6f, %.6f)" % [lat, lon])
+			continue
+
+		var wall_normal: Vector3 = wall.normal
+		var snap_point: Vector2 = wall.closest_point
+
+		# Размер логотипа на крыше (крупный)
+		var tex_size := texture.get_size()
+		var aspect := tex_size.x / tex_size.y
+		var logo_h := 5.0  # Высота логотипа в метрах
+		var logo_w := logo_h * aspect
+
+		# Sprite3D с логотипом
+		var sprite := Sprite3D.new()
+		sprite.texture = texture
+		sprite.pixel_size = logo_h / tex_size.y
+		sprite.billboard = BaseMaterial3D.BILLBOARD_DISABLED
+		sprite.no_depth_test = false
+		sprite.alpha_cut = SpriteBase3D.ALPHA_CUT_DISCARD
+		sprite.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		sprite.name = "RoofSign_%d" % way_id
+
+		# Позиция: на крыше, чуть выше + смещение наружу
+		sprite.position = Vector3(snap_point.x, roof_y + logo_h / 2.0 + 0.3, snap_point.y)
+		sprite.position += wall_normal * 0.1
+		sprite.rotation.y = atan2(wall_normal.x, wall_normal.z)
+
+		parent.add_child(sprite)
+
+		# Подсветка ночью (неоновый эффект)
+		var sign_light := OmniLight3D.new()
+		sign_light.light_energy = 2.0
+		sign_light.light_color = Color(1.0, 0.9, 0.3)  # Тёплый жёлтый
+		sign_light.omni_range = 12.0
+		sign_light.name = "RoofSignLight_%d" % way_id
+		sign_light.position = Vector3(snap_point.x, roof_y + logo_h / 2.0, snap_point.y)
+		sign_light.position += wall_normal * 1.5
+		parent.add_child(sign_light)
+
+		print("RoofSign: added at roof for way %d" % way_id)
 
 
 func _create_shop_back_wall(height: float, width: float, colors: Array) -> MeshInstance3D:
@@ -16010,6 +16251,11 @@ func _is_cherepovets_location() -> bool:
 	# Простая проверка: если decoration_layer загружен, значит Череповец
 	# (decoration_layer загружается только для активированных городов)
 	return _decoration_layer != null
+
+
+func _is_russia_location() -> bool:
+	# Примерные границы России: lat 41-82, lon 19-180
+	return start_lat >= 41.0 and start_lat <= 82.0 and start_lon >= 19.0 and start_lon <= 180.0
 
 
 ## Проверяет, является ли здание пятиэтажным

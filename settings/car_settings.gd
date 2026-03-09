@@ -26,7 +26,9 @@ const DISPLAY_STATS := {
 	"nexia": {"accel": 0.65, "speed": 0.60, "handling": 0.70},
 	"beetle": {"accel": 0.85, "speed": 0.90, "handling": 0.80},
 	"polo": {"accel": 0.60, "speed": 0.55, "handling": 0.75},
-	"logan": {"accel": 0.55, "speed": 0.50, "handling": 0.65}
+	"logan": {"accel": 0.55, "speed": 0.50, "handling": 0.65},
+	"matiz": {"accel": 0.40, "speed": 0.35, "handling": 0.75},
+	"bmw_m3_gtr": {"accel": 0.90, "speed": 0.95, "handling": 0.85}
 }
 
 var selected_car_id: String = DEFAULT_CAR
@@ -80,6 +82,22 @@ const CARS := {
 		"coefficient_of_drag": 0.33,
 		"frontal_area": 2.0,
 		"gear_ratios": [3.73, 2.05, 1.39, 1.03, 0.82]
+	},
+	"matiz": {
+		"name": "Daewoo Matiz",
+		"scene": "res://addons/gevp/scenes/matiz_car.tscn",
+		"max_torque": 450.0,
+		"max_steering_angle": 42.0,
+		"steering_speed": 4.5,
+		"final_drive": 4.5,
+		"max_rpm": 6000.0,
+		"coefficient_of_drag": 0.35,
+		"frontal_area": 1.5,
+		"gear_ratios": [3.73, 2.05, 1.39, 1.03, 0.82]
+	},
+	"bmw_m3_gtr": {
+		"name": "BMW M3 GTR",
+		"scene": "res://addons/gevp/scenes/bmw_m3_gtr_car.tscn"
 	}
 }
 

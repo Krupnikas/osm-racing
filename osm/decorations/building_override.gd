@@ -32,6 +32,9 @@ extends Resource
 @export var color_tint: Color = Color.WHITE  # Оттенок (WHITE = без изменений)
 @export var use_color_tint: bool = false  # Использовать color_tint
 
+# Материал здания (из override JSON, например "wood", "brick")
+var building_material: String = ""
+
 # Переопределения параметров
 @export var height_override: float = -1.0  # -1 = не менять
 @export var height_multiplier: float = 1.0  # Множитель высоты
@@ -51,6 +54,12 @@ var skip_pois: Array = []
 
 # Custom entrance groups [{type: String, lat: float, lon: float, ...}]
 var custom_entrances: Array = []
+
+# Skip all auto-generated POI signs for this building
+var skip_all_pois: bool = false
+
+# Roof-mounted signs [{lat: float, lon: float, logo: String}]
+var roof_signs: Array = []
 
 
 func matches_way_id(way_id: int) -> bool:

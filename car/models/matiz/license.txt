@@ -1,0 +1,8 @@
+Model Information:
+* title:	Daewoo Matiz
+* source:	https://sketchfab.com/3d-models/daewoo-matiz-4c13f142bf1141a8917f8bcea53068bc
+* author:	nyranarod (https://sketchfab.com/nyranarod)
+
+Model License:
+* license type:	SKETCHFAB Standard (https://sketchfab.com/licenses)
+* requirements:	Under basic restrictions, use worldwide, on all types of media, commercially or not, and in all types of derivative works
