@@ -3913,31 +3913,43 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		var validated: PackedVector2Array = _validate_road_direction(smoothed_points)
 		var half_w: float = width * 0.5
 
-		# Corridor: build from FULL smoothed points (before any polyline clip),
-		# then clip polygon to chunk rect. This ensures roads barely entering
-		# a chunk still produce valid corridors.
+		# Corridor: build from FULL smoothed points with extended endpoints.
+		# Extension ensures corridor always crosses chunk boundary, preventing
+		# Geometry2D.clip_polygons from creating CW holes (which can't be properly
+		# subtracted from terrain). After extension, clip to chunk rect.
 		var full_validated: PackedVector2Array = _validate_road_direction(full_smoothed_points)
 		if full_validated.size() >= 2 and highway_type not in ["cycleway", "track", "steps"]:
-			var v_count: int = full_validated.size()
+			# Extend road endpoints beyond chunk boundary
+			var ext_pts := PackedVector2Array()
+			var fv_n: int = full_validated.size()
+			var start_dir: Vector2 = (full_validated[0] - full_validated[1]).normalized()
+			var end_dir: Vector2 = (full_validated[fv_n - 1] - full_validated[fv_n - 2]).normalized()
+			var ext_dist: float = t_chunk_size * 2.0  # extend well beyond chunk
+			ext_pts.append(full_validated[0] + start_dir * ext_dist)
+			for i in range(fv_n):
+				ext_pts.append(full_validated[i])
+			ext_pts.append(full_validated[fv_n - 1] + end_dir * ext_dist)
+			# Build corridor from extended points
+			var v_count: int = ext_pts.size()
 			var v_perps := PackedVector2Array()
 			v_perps.resize(v_count)
 			for i in range(v_count):
 				var perp: Vector2
 				if i == 0:
-					var dir: Vector2 = (full_validated[1] - full_validated[0]).normalized()
+					var dir: Vector2 = (ext_pts[1] - ext_pts[0]).normalized()
 					perp = Vector2(-dir.y, dir.x)
 				elif i == v_count - 1:
-					var dir: Vector2 = (full_validated[i] - full_validated[i - 1]).normalized()
+					var dir: Vector2 = (ext_pts[i] - ext_pts[i - 1]).normalized()
 					perp = Vector2(-dir.y, dir.x)
 				else:
-					var dir_out: Vector2 = (full_validated[i + 1] - full_validated[i]).normalized()
+					var dir_out: Vector2 = (ext_pts[i + 1] - ext_pts[i]).normalized()
 					perp = Vector2(-dir_out.y, dir_out.x)
 				v_perps[i] = perp
 			var raw_corridor := PackedVector2Array()
 			for i in range(v_count):
-				raw_corridor.append(full_validated[i] - v_perps[i] * half_w)
+				raw_corridor.append(ext_pts[i] - v_perps[i] * half_w)
 			for i in range(v_count - 1, -1, -1):
-				raw_corridor.append(full_validated[i] + v_perps[i] * half_w)
+				raw_corridor.append(ext_pts[i] + v_perps[i] * half_w)
 			if _polygon_area(raw_corridor) < 0:
 				raw_corridor.reverse()
 			if chunk_key != "initial" and chunk_key != "":
@@ -12157,7 +12169,7 @@ func _compute_terrain_clipping_thread(task_data: Dictionary) -> void:
 
 	var terrain_polys: Array[PackedVector2Array] = [chunk_rect]
 
-	# 1. Вырезаем дорожные коридоры
+	# 1. Вырезаем дорожные коридоры (extended to boundary — no CW holes expected)
 	for corridor in roads:
 		if corridor.size() < 4:
 			continue
@@ -12165,7 +12177,7 @@ func _compute_terrain_clipping_thread(task_data: Dictionary) -> void:
 		for poly in terrain_polys:
 			var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, corridor)
 			for cp in clipped:
-				if cp.size() >= 3:
+				if cp.size() >= 3 and _polygon_area(cp) >= 1.0:
 					new_polys.append(cp)
 		terrain_polys = new_polys
 		if terrain_polys.is_empty():

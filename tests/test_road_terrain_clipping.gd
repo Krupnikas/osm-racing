@@ -31,6 +31,13 @@ func run_all_tests() -> void:
 	test_chunk_boundary_diagonal_road()
 	test_chunk_boundary_real_osm_data()
 	test_chunk_boundary_grid_offset_sensitivity()
+	test_full_pipeline_straight_road()
+	test_full_pipeline_crossing_boundary()
+	test_full_pipeline_diagonal_crossing()
+	test_full_pipeline_real_osm_multi_grid()
+	test_full_pipeline_multiple_roads_one_chunk()
+	test_full_pipeline_road_ending_in_chunk()
+	test_full_pipeline_road_starting_in_chunk()
 
 	print("\n=== Results ===")
 	print("Passed: %d" % tests_passed)
@@ -487,12 +494,13 @@ static func simulate_road_in_chunk(
 	var validated := ChunkMath.validate_road_direction(smoothed)
 	if validated.size() < 2:
 		return {"points": PackedVector2Array(), "corridors": []}
-	# 3. Build corridor from FULL validated points (before polyline clip)
-	# This ensures roads barely entering the chunk still produce valid corridors
-	var corridor := build_corridor_polygon(validated, half_w)
-	# 4. Clip corridor to chunk rect (no margin)
+	# 3. Build extended corridor — extend road endpoints beyond chunk boundary
+	# so clip_polygons always splits terrain (never creates CW holes)
 	var chunk_rect := make_chunk_rect(cx, cz, chunk_size)
-	var corridors := clip_corridor_to_chunk(corridor, chunk_rect)
+	var ext_corridor := build_extended_corridor(validated, half_w, chunk_rect)
+	var corridors: Array[PackedVector2Array] = []
+	if ext_corridor.size() >= 3:
+		corridors.append(ext_corridor)
 	# 5. Clip polyline to chunk with margin (for mesh vertices)
 	var margin := half_w + 1.0
 	var min_x := float(cx) * chunk_size - margin
@@ -690,3 +698,294 @@ func test_chunk_boundary_grid_offset_sensitivity() -> void:
 			break
 
 	_assert(all_ok, "chunk_boundary_grid_offset_sensitivity", info)
+
+
+# ==================== Full Terrain Clipping Pipeline Tests ====================
+# These replicate _compute_terrain_clipping_thread: take corridors, clip from
+# chunk_rect terrain polygon, then verify no road mesh points inside terrain.
+# This catches bugs where corridor EXISTS but terrain clipping fails.
+
+## Simulate terrain clipping: clip all corridors from chunk rect, handle CW holes.
+## Returns array of remaining terrain polygons.
+## Build an extended corridor that reaches chunk boundaries on both ends.
+## Takes the road centerline points and half_w, extends endpoints by chunk diagonal,
+## builds corridor from extended points, then clips to chunk rect.
+## Result always crosses chunk boundary → clip_polygons works correctly.
+static func build_extended_corridor(
+	road_points: PackedVector2Array, half_w: float, chunk_rect: PackedVector2Array
+) -> PackedVector2Array:
+	if road_points.size() < 2:
+		return PackedVector2Array()
+	# Chunk diagonal for extension distance
+	var min_x := chunk_rect[0].x
+	var max_x := chunk_rect[0].x
+	var min_y := chunk_rect[0].y
+	var max_y := chunk_rect[0].y
+	for i in range(1, chunk_rect.size()):
+		min_x = minf(min_x, chunk_rect[i].x)
+		max_x = maxf(max_x, chunk_rect[i].x)
+		min_y = minf(min_y, chunk_rect[i].y)
+		max_y = maxf(max_y, chunk_rect[i].y)
+	var ext_dist := Vector2(max_x - min_x, max_y - min_y).length()
+	# Extend road points at both ends
+	var n := road_points.size()
+	var start_dir := (road_points[0] - road_points[1]).normalized()
+	var end_dir := (road_points[n - 1] - road_points[n - 2]).normalized()
+	var ext_pts := PackedVector2Array()
+	ext_pts.append(road_points[0] + start_dir * ext_dist)
+	for i in range(n):
+		ext_pts.append(road_points[i])
+	ext_pts.append(road_points[n - 1] + end_dir * ext_dist)
+	# Build corridor from extended points
+	var corridor := build_corridor_polygon(ext_pts, half_w)
+	# Clip to chunk rect
+	if ChunkMath.polygon_area(corridor) < 0:
+		corridor.reverse()
+	var clipped := Geometry2D.intersect_polygons(corridor, chunk_rect)
+	if clipped.size() > 0 and clipped[0].size() >= 3:
+		return clipped[0]
+	return PackedVector2Array()
+
+
+static func simulate_terrain_clipping(
+	corridors: Array[PackedVector2Array], chunk_rect: PackedVector2Array
+) -> Array[PackedVector2Array]:
+	var terrain_polys: Array[PackedVector2Array] = [chunk_rect]
+	for corridor in corridors:
+		if corridor.size() < 3:
+			continue
+		var new_polys: Array[PackedVector2Array] = []
+		for poly in terrain_polys:
+			var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, corridor)
+			for cp in clipped:
+				if cp.size() >= 3 and ChunkMath.polygon_area(cp) >= 1.0:
+					new_polys.append(cp)
+		terrain_polys = new_polys
+		if terrain_polys.is_empty():
+			break
+	return terrain_polys
+
+
+## Check if any road mesh point inside chunk is still inside terrain after clipping.
+## Returns [ok, fail_info_string]
+static func check_road_not_in_terrain(
+	mesh_points: PackedVector2Array, half_w: float,
+	terrain_polys: Array[PackedVector2Array], chunk_rect: PackedVector2Array
+) -> Array:
+	var edges := build_road_mesh_edges(mesh_points, half_w)
+	var left: PackedVector2Array = edges[0]
+	var right: PackedVector2Array = edges[1]
+	# Also test center points
+	for i in range(mesh_points.size()):
+		var test_pts: Array[Vector2] = [mesh_points[i], left[i], right[i]]
+		var labels: Array[String] = ["center", "left", "right"]
+		for pi in range(3):
+			var pt: Vector2 = test_pts[pi]
+			if not point_in_polygon(pt, chunk_rect):
+				continue
+			for terrain in terrain_polys:
+				if point_in_polygon(pt, terrain):
+					# Nudge inward to handle edge cases
+					var nudge_dir: Vector2
+					if pi == 0:
+						nudge_dir = Vector2.ZERO
+					else:
+						nudge_dir = (mesh_points[i] - pt).normalized() * 0.05
+					if pi == 0 or point_in_polygon(pt + nudge_dir, terrain):
+						return [false, "%s pt %d at %s inside terrain" % [labels[pi], i, pt]]
+	return [true, ""]
+
+
+## Full pipeline test for one road in one chunk: build corridor, clip terrain, check.
+static func full_pipeline_test_road_in_chunk(
+	raw_local_pts: PackedVector2Array, half_w: float,
+	cx: int, cz: int, chunk_size: float
+) -> Dictionary:
+	# Simulate the full pipeline
+	var result := simulate_road_in_chunk(raw_local_pts, half_w, cx, cz, chunk_size)
+	if result.points.size() < 2:
+		return {"ok": true, "info": "no mesh in chunk", "has_mesh": false}
+	var corridors: Array[PackedVector2Array] = result.corridors
+	var chunk_rect: PackedVector2Array = result.chunk_rect
+	# Clip terrain
+	var terrain_polys := simulate_terrain_clipping(corridors, chunk_rect)
+	# Check no road mesh inside terrain
+	var check := check_road_not_in_terrain(result.points, half_w, terrain_polys, chunk_rect)
+	return {
+		"ok": check[0],
+		"info": check[1],
+		"has_mesh": true,
+		"n_corridors": corridors.size(),
+		"n_terrain_polys": terrain_polys.size()
+	}
+
+
+func test_full_pipeline_straight_road() -> void:
+	var chunk_size := 200.0
+	var half_w := 3.0
+	# Road through middle of chunk
+	var road := PackedVector2Array([Vector2(50, 100), Vector2(150, 100)])
+	var r := full_pipeline_test_road_in_chunk(road, half_w, 0, 0, chunk_size)
+	_assert(r.ok, "full_pipeline_straight_road", r.info)
+
+
+func test_full_pipeline_crossing_boundary() -> void:
+	var chunk_size := 200.0
+	var half_w := 3.0
+	var road := PackedVector2Array([Vector2(150, 100), Vector2(250, 100)])
+	var all_ok := true
+	var info := ""
+	for cx in [0, 1]:
+		var r := full_pipeline_test_road_in_chunk(road, half_w, cx, 0, chunk_size)
+		if not r.ok:
+			all_ok = false
+			info = "chunk(%d,0): %s" % [cx, r.info]
+			break
+	_assert(all_ok, "full_pipeline_crossing_boundary", info)
+
+
+func test_full_pipeline_diagonal_crossing() -> void:
+	var chunk_size := 200.0
+	var half_w := 3.5
+	var road := PackedVector2Array([Vector2(150, 150), Vector2(250, 250)])
+	var all_ok := true
+	var info := ""
+	for cx in [0, 1]:
+		for cz in [0, 1]:
+			var r := full_pipeline_test_road_in_chunk(road, half_w, cx, cz, chunk_size)
+			if not r.ok:
+				all_ok = false
+				info = "chunk(%d,%d): %s" % [cx, cz, r.info]
+				break
+		if not all_ok:
+			break
+	_assert(all_ok, "full_pipeline_diagonal_crossing", info)
+
+
+func test_full_pipeline_real_osm_multi_grid() -> void:
+	# Multiple real roads near 59.146519, 37.965935 with different grid offsets
+	# This is THE test that must catch the "curbs visible but terrain on road" bug
+	var roads_latlons := [
+		# Way 58762459 (tertiary)
+		[[59.1460608, 37.9655808], [59.1457399, 37.9641653], [59.1457077, 37.9640221],
+		 [59.1456803, 37.9639000], [59.1453984, 37.9626453], [59.1449675, 37.9607274]],
+		# Shorter residential road
+		[[59.1458, 37.9645], [59.1456, 37.9635], [59.1454, 37.9625]],
+		# Service road perpendicular
+		[[59.1457, 37.9640], [59.1457, 37.9650]],
+	]
+	var road_widths := [3.0, 2.75, 2.0]  # tertiary, residential, service
+
+	var chunk_size := 200.0
+	var start_positions := [
+		[59.1504, 37.9488],   # default Cherepovets
+		[59.1470, 37.9650],   # near road
+		[59.1450, 37.9600],   # shifted
+		[59.1460, 37.9656],   # very close to road start
+		[59.1455, 37.9640],   # on the road
+		[59.1445, 37.9585],   # south of road
+		[59.1480, 37.9620],   # north
+		[59.1500, 37.9500],   # far north
+	]
+
+	var all_ok := true
+	var info := ""
+	for si in range(start_positions.size()):
+		var slat: float = start_positions[si][0]
+		var slon: float = start_positions[si][1]
+		var lon_scale := cos(deg_to_rad(slat)) * 111000.0
+
+		for ri in range(roads_latlons.size()):
+			var half_w: float = road_widths[ri]
+			var local_pts := PackedVector2Array()
+			for ll in roads_latlons[ri]:
+				var dx: float = (ll[1] - slon) * lon_scale
+				var dz: float = (ll[0] - slat) * 111000.0
+				local_pts.append(Vector2(dx, -dz))
+
+			# Find chunks
+			var min_x := INF
+			var max_x := -INF
+			var min_z := INF
+			var max_z := -INF
+			for p in local_pts:
+				min_x = minf(min_x, p.x)
+				max_x = maxf(max_x, p.x)
+				min_z = minf(min_z, p.y)
+				max_z = maxf(max_z, p.y)
+
+			for cx in range(int(floor(min_x / chunk_size)) - 1, int(floor(max_x / chunk_size)) + 2):
+				for cz in range(int(floor(min_z / chunk_size)) - 1, int(floor(max_z / chunk_size)) + 2):
+					var r := full_pipeline_test_road_in_chunk(local_pts, half_w, cx, cz, chunk_size)
+					if not r.ok:
+						all_ok = false
+						info = "start[%d] road[%d] chunk(%d,%d): %s (corrs=%d terr=%d)" % [
+							si, ri, cx, cz, r.info, r.n_corridors, r.n_terrain_polys]
+						break
+				if not all_ok:
+					break
+			if not all_ok:
+				break
+		if not all_ok:
+			break
+
+	_assert(all_ok, "full_pipeline_real_osm_multi_grid", info)
+
+
+func test_full_pipeline_multiple_roads_one_chunk() -> void:
+	# Multiple roads in one chunk — test that clipping multiple corridors works
+	var chunk_size := 200.0
+	var roads := [
+		{"pts": PackedVector2Array([Vector2(20, 50), Vector2(180, 50)]), "hw": 3.0},
+		{"pts": PackedVector2Array([Vector2(20, 100), Vector2(180, 100)]), "hw": 3.5},
+		{"pts": PackedVector2Array([Vector2(100, 20), Vector2(100, 180)]), "hw": 2.75},
+	]
+	var chunk_rect := make_chunk_rect(0, 0, chunk_size)
+	var all_corridors: Array[PackedVector2Array] = []
+	var all_mesh: Array[Dictionary] = []  # {points, half_w}
+
+	for road in roads:
+		var result := simulate_road_in_chunk(road.pts, road.hw, 0, 0, chunk_size)
+		if result.points.size() >= 2:
+			for c in result.corridors:
+				all_corridors.append(c)
+			all_mesh.append({"points": result.points, "half_w": road.hw})
+
+	# Clip terrain with all corridors
+	var terrain_polys := simulate_terrain_clipping(all_corridors, chunk_rect)
+
+	# Check ALL roads
+	var all_ok := true
+	var info := ""
+	for mi in range(all_mesh.size()):
+		var m: Dictionary = all_mesh[mi]
+		var check := check_road_not_in_terrain(m.points, m.half_w, terrain_polys, chunk_rect)
+		if not check[0]:
+			all_ok = false
+			info = "road[%d]: %s" % [mi, check[1]]
+			break
+
+	_assert(all_ok, "full_pipeline_multiple_roads_one_chunk", info)
+
+
+func test_full_pipeline_road_ending_in_chunk() -> void:
+	# Road that starts outside and ends inside chunk — the user's key scenario
+	var chunk_size := 200.0
+	var half_w := 3.0
+	# Road starts at x=-50 (outside chunk 0,0) and ends at x=80 (inside)
+	var road := PackedVector2Array([
+		Vector2(-50, 100), Vector2(0, 100), Vector2(40, 95), Vector2(80, 100)
+	])
+	var r := full_pipeline_test_road_in_chunk(road, half_w, 0, 0, chunk_size)
+	_assert(r.ok, "full_pipeline_road_ending_in_chunk", r.info)
+
+
+func test_full_pipeline_road_starting_in_chunk() -> void:
+	# Road starts inside chunk and exits
+	var chunk_size := 200.0
+	var half_w := 3.0
+	var road := PackedVector2Array([
+		Vector2(120, 100), Vector2(160, 105), Vector2(200, 100), Vector2(250, 100)
+	])
+	var r := full_pipeline_test_road_in_chunk(road, half_w, 0, 0, chunk_size)
+	_assert(r.ok, "full_pipeline_road_starting_in_chunk", r.info)
