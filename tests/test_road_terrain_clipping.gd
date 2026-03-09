@@ -1,6 +1,8 @@
 extends Node
 class_name TestRoadTerrainClipping
 
+const ChunkTerrainScript = preload("res://osm/chunk_terrain.gd")
+
 ## Synthetic tests for the road mesh → terrain corridor → terrain clipping pipeline.
 ## Verifies that the terrain corridor fully covers the road mesh, so no terrain
 ## renders on top of roads.
@@ -10,6 +12,211 @@ class_name TestRoadTerrainClipping
 var tests_passed := 0
 var tests_failed := 0
 var test_results := []
+
+class ChunkMath:
+	static func polygon_area(poly: PackedVector2Array) -> float:
+		var area := 0.0
+		var n := poly.size()
+		for i in range(n):
+			var j := (i + 1) % n
+			area += poly[i].x * poly[j].y
+			area -= poly[j].x * poly[i].y
+		return area * 0.5
+
+	static func validate_road_direction(points: PackedVector2Array) -> PackedVector2Array:
+		if points.size() < 3:
+			return points
+		var result := PackedVector2Array()
+		result.append(points[0])
+		var prev_dir: Vector2 = (points[1] - points[0]).normalized()
+		for i in range(1, points.size() - 1):
+			var current_dir: Vector2 = (points[i + 1] - points[i]).normalized()
+			if prev_dir.dot(current_dir) < 0.26:
+				continue
+			result.append(points[i])
+			prev_dir = current_dir
+		result.append(points[points.size() - 1])
+		return result
+
+	static func smooth_road_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
+		return _remove_polyline_loops(_smooth_points_adaptive(raw_points, 1.0))
+
+	static func clip_polyline_to_rect(points: PackedVector2Array, min_x: float, max_x: float, min_z: float, max_z: float) -> PackedVector2Array:
+		if points.size() < 2:
+			return points
+		var result := PackedVector2Array()
+		for i in range(points.size() - 1):
+			var segment := _clip_segment_to_rect_segment(points[i], points[i + 1], min_x, max_x, min_z, max_z)
+			if segment.size() < 2:
+				continue
+			for pt in segment:
+				if result.is_empty() or result[result.size() - 1].distance_to(pt) > 0.01:
+					result.append(pt)
+		return result
+
+	static func _clip_segment_to_rect_segment(a: Vector2, b: Vector2, min_x: float, max_x: float, min_z: float, max_z: float) -> PackedVector2Array:
+		var dx := b.x - a.x
+		var dy := b.y - a.y
+		var t0 := 0.0
+		var t1 := 1.0
+
+		var clip_test := func(p: float, q: float) -> bool:
+			if absf(p) < 0.000001:
+				return q >= 0.0
+			var r := q / p
+			if p < 0.0:
+				if r > t1:
+					return false
+				if r > t0:
+					t0 = r
+			else:
+				if r < t0:
+					return false
+				if r < t1:
+					t1 = r
+			return true
+
+		if not clip_test.call(-dx, a.x - min_x):
+			return PackedVector2Array()
+		if not clip_test.call(dx, max_x - a.x):
+			return PackedVector2Array()
+		if not clip_test.call(-dy, a.y - min_z):
+			return PackedVector2Array()
+		if not clip_test.call(dy, max_z - a.y):
+			return PackedVector2Array()
+		if t1 < t0:
+			return PackedVector2Array()
+
+		return PackedVector2Array([
+			Vector2(a.x + dx * t0, a.y + dy * t0),
+			Vector2(a.x + dx * t1, a.y + dy * t1),
+		])
+
+	static func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) -> Vector2:
+		var t2 := t * t
+		var t3 := t2 * t
+		return (p1 * 2.0 + (-p0 + p2) * t + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 + (-p0 + p1 * 3.0 - p2 * 3.0 + p3) * t3) * 0.5
+
+	static func _smooth_points_adaptive(raw_points: PackedVector2Array, min_dist: float) -> PackedVector2Array:
+		if raw_points.size() < 3:
+			return raw_points
+		var result := PackedVector2Array()
+		result.append(raw_points[0])
+		for i in range(raw_points.size() - 1):
+			var p0: Vector2 = raw_points[maxi(0, i - 1)]
+			var p1: Vector2 = raw_points[i]
+			var p2: Vector2 = raw_points[mini(raw_points.size() - 1, i + 1)]
+			var p3: Vector2 = raw_points[mini(raw_points.size() - 1, i + 2)]
+			var seg_length: float = p1.distance_to(p2)
+			if seg_length < 0.01:
+				continue
+			var sharpness_at_p1 := 0.0
+			if i > 0:
+				var d1: Vector2 = (p1 - p0).normalized()
+				var d2: Vector2 = (p2 - p1).normalized()
+				sharpness_at_p1 = (1.0 - d1.dot(d2)) * 0.5
+			var sharpness_at_p2 := 0.0
+			if i + 2 < raw_points.size():
+				var d1: Vector2 = (p2 - p1).normalized()
+				var d2: Vector2 = (p3 - p2).normalized()
+				sharpness_at_p2 = (1.0 - d1.dot(d2)) * 0.5
+			var sharpness := maxf(sharpness_at_p1, sharpness_at_p2)
+			var mid_interp: Vector2 = _catmull_rom(p0, p1, p2, p3, 0.5)
+			var mid_straight: Vector2 = (p1 + p2) * 0.5
+			var rel_curvature := mid_interp.distance_to(mid_straight) / maxf(seg_length, 0.1)
+			if rel_curvature > 0.005:
+				sharpness = maxf(sharpness, rel_curvature * 8.0)
+			var subdivisions: int
+			if sharpness < 0.05:
+				subdivisions = 1
+			elif sharpness < 0.15:
+				subdivisions = 2
+			elif sharpness < 0.3:
+				subdivisions = maxi(3, mini(4, int(seg_length / 8.0)))
+			elif sharpness < 0.5:
+				subdivisions = maxi(4, mini(6, int(seg_length / 5.0)))
+			else:
+				subdivisions = maxi(6, mini(8, int(seg_length / 3.0)))
+			for j in range(1, subdivisions):
+				var t := float(j) / float(subdivisions)
+				var interp: Vector2 = _catmull_rom(p0, p1, p2, p3, t)
+				if result[result.size() - 1].distance_to(interp) > min_dist:
+					result.append(interp)
+			if i < raw_points.size() - 2 and result[result.size() - 1].distance_to(p2) > min_dist:
+				result.append(p2)
+		var last_point: Vector2 = raw_points[raw_points.size() - 1]
+		if result[result.size() - 1].distance_to(last_point) > 0.1:
+			result.append(last_point)
+		return result
+
+	static func _remove_polyline_loops(points: PackedVector2Array) -> PackedVector2Array:
+		if points.size() < 4:
+			return points
+		var result := PackedVector2Array()
+		result.append(points[0])
+		var i := 1
+		while i < points.size():
+			var a: Vector2 = result[result.size() - 1]
+			var b: Vector2 = points[i]
+			var loop_found := false
+			if result.size() >= 3:
+				var j := 0
+				while j < result.size() - 2:
+					var ix := _segment_intersect(a, b, result[j], result[j + 1])
+					if ix != Vector2.INF:
+						var new_result := PackedVector2Array()
+						for k in range(j + 1):
+							new_result.append(result[k])
+						new_result.append(ix)
+						result = new_result
+						loop_found = true
+						break
+					j += 1
+			if not loop_found:
+				result.append(b)
+			i += 1
+		return result
+
+	static func _segment_intersect(a: Vector2, b: Vector2, c: Vector2, d: Vector2) -> Vector2:
+		var ab: Vector2 = b - a
+		var cd: Vector2 = d - c
+		var denom: float = ab.x * cd.y - ab.y * cd.x
+		if absf(denom) < 1e-10:
+			return Vector2.INF
+		var ac: Vector2 = c - a
+		var t: float = (ac.x * cd.y - ac.y * cd.x) / denom
+		var u: float = (ac.x * ab.y - ac.y * ab.x) / denom
+		if t > 0.01 and t < 0.99 and u > 0.01 and u < 0.99:
+			return a + ab * t
+		return Vector2.INF
+
+	static func _clip_segment_to_rect(a: Vector2, b: Vector2, min_x: float, max_x: float, min_z: float, max_z: float) -> Vector2:
+		var best_t := 1.0
+		var dx := b.x - a.x
+		var dy := b.y - a.y
+		if absf(dx) > 0.001:
+			var t1: float = (min_x - a.x) / dx
+			if t1 > 0.0 and t1 < best_t:
+				var hz1: float = a.y + dy * t1
+				if hz1 >= min_z and hz1 <= max_z:
+					best_t = t1
+			var t2: float = (max_x - a.x) / dx
+			if t2 > 0.0 and t2 < best_t:
+				var hz2: float = a.y + dy * t2
+				if hz2 >= min_z and hz2 <= max_z:
+					best_t = t2
+		if absf(dy) > 0.001:
+			var t3: float = (min_z - a.y) / dy
+			if t3 > 0.0 and t3 < best_t:
+				var hx3: float = a.x + dx * t3
+				if hx3 >= min_x and hx3 <= max_x:
+					best_t = t3
+			var t4: float = (max_z - a.y) / dy
+			if t4 > 0.0 and t4 < best_t:
+				var hx4: float = a.x + dx * t4
+				if hx4 >= min_x and hx4 <= max_x:
+					best_t = t4
+		return Vector2(a.x + dx * best_t, a.y + dy * best_t)
 
 func run_all_tests() -> void:
 	print("\n=== Road-Terrain Clipping Tests ===\n")
@@ -29,6 +236,7 @@ func run_all_tests() -> void:
 	test_terrain_clipping_sharp_turn()
 	test_validate_road_direction_consistency()
 	test_chunk_boundary_horizontal_road()
+	test_chunk_boundary_crossing_with_both_endpoints_outside()
 	test_chunk_boundary_diagonal_road()
 	test_chunk_boundary_real_osm_data()
 	test_chunk_boundary_grid_offset_sensitivity()
@@ -375,7 +583,7 @@ func test_terrain_clipping_sharp_turn() -> void:
 
 	# Use production terrain clipping
 	var corridors: Array = [corridor]
-	var terrain_polys := ChunkTerrain.compute_terrain_clipping(chunk_rect, corridors, [], [], [])
+	var terrain_polys := ChunkTerrainScript.compute_terrain_clipping(chunk_rect, corridors, [], [], [])
 
 	var any_overlap := false
 	var overlap_info := ""
@@ -563,6 +771,15 @@ func test_chunk_boundary_horizontal_road() -> void:
 	_assert(all_ok, "chunk_boundary_horizontal_road", info)
 
 
+func test_chunk_boundary_crossing_with_both_endpoints_outside() -> void:
+	var points := PackedVector2Array([
+		Vector2(-70, 0),
+		Vector2(130, 0),
+	])
+	var clipped := ChunkMath.clip_polyline_to_rect(points, -4.0, 104.0, -4.0, 104.0)
+	_assert(clipped.size() >= 2, "chunk_boundary_crossing_with_both_endpoints_outside", "Expected clipped crossing segment, got %d points" % clipped.size())
+
+
 func test_chunk_boundary_diagonal_road() -> void:
 	# Diagonal road crossing chunk boundary at x=200, z=200 (corner of 4 chunks)
 	var chunk_size := 200.0
@@ -737,7 +954,7 @@ static func simulate_terrain_clipping(
 	var corridor_array: Array = []
 	for c in corridors:
 		corridor_array.append(c)
-	return ChunkTerrain.compute_terrain_clipping(chunk_rect, corridor_array, [], [], [])
+	return ChunkTerrainScript.compute_terrain_clipping(chunk_rect, corridor_array, [], [], [])
 
 
 ## Check if any road mesh point inside chunk is still inside terrain after clipping.

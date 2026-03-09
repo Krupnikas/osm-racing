@@ -63,6 +63,10 @@ var _lon_scale := 0.0  # Cached cos(deg_to_rad(start_lat)) * 111000.0
 @export var car_path: NodePath
 @export var camera_path: NodePath
 @export var debug_print := false  # Выключить debug output для производительности
+@export var debug_chunk_lifecycle := false  # Лёгкая диагностика стадий чанков
+@export var debug_log_to_file := true  # Пишет runtime-диагностику в user://osm_runtime_debug.log
+@export var debug_log_roads := true  # Добавляет road/culling события в runtime-лог
+@export var debug_log_path := "user://osm_runtime_debug.log"
 
 ## Feature Flags для A/B тестирования производительности
 @export_group("Features", "enable_")
@@ -97,11 +101,16 @@ var test_data_provider: Callable = Callable()
 var osm_loader: Node
 var _car: Node3D
 var _camera: Camera3D
+var _debug_log_file: FileAccess = null
+var _debug_log_absolute_path := ""
 var _profiler: PerformanceProfiler  # Для измерения производительности
 var _loaded_chunks: Dictionary = {}  # key: "x,z" -> value: Node3D (chunk node)
 var _loading_chunks: Dictionary = {}  # key: "x,z" -> value: timestamp (start time in msec)
+var _chunk_state: Dictionary = {}  # key: "x,z" -> lifecycle/debug state
 var _loading_placeholders: Dictionary = {}  # key: "x,z" -> MeshInstance3D placeholder
 const CHUNK_LOAD_TIMEOUT := 30.0  # Таймаут загрузки чанка (секунд) — must be > HTTP timeout × retries
+const CHUNK_STALL_WARN_MS := 10000
+const CHUNK_STALL_FAIL_MS := 30000
 var _last_check_pos := Vector3.ZERO
 var _last_player_pos := Vector3.ZERO
 var _check_interval := 0.5  # Проверка каждые 0.5 сек
@@ -189,6 +198,7 @@ var _curb_queue: Array = []  # Очередь бордюров (создаютс
 var _road_mutex: Mutex
 var _road_results: Array = []  # Готовые результаты из worker threads
 var _pending_road_tasks: int = 0  # Счётчик активных задач
+var _pending_road_tasks_by_chunk: Dictionary = {}  # chunk_key -> int active worker tasks
 
 # Road batching system - накопление geometry данных для mesh merging
 var _road_batch_data: Dictionary = {}  # key: chunk_key -> { "highway": {vertices, uvs, normals, indices}, "primary": {...}, ...}
@@ -460,6 +470,7 @@ const BRIDGE_PILLAR_COLOR := Color(0.55, 0.53, 0.5)  # Цвет бетонных
 func _ready() -> void:
 	# Cache cosine for _latlon_to_local (avoids cos() every call)
 	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
+	_open_runtime_debug_log()
 
 	# Добавляем в группу для поиска из MiniMap
 	add_to_group("terrain_generator")
@@ -568,6 +579,10 @@ func _ready() -> void:
 	_setup_render_distance()
 
 	print("OSM: Ready for loading (waiting for start_loading call)...")
+
+
+func _exit_tree() -> void:
+	_close_runtime_debug_log()
 
 func _init_textures() -> void:
 	if _textures_initialized:
@@ -1660,6 +1675,7 @@ func start_loading() -> void:
 	if _loading_chunks.size() > 0:
 		print("OSM: WARNING - _loading_chunks not empty, clearing...")
 		_loading_chunks.clear()
+	_chunk_state.clear()
 
 	_loading_paused = false
 	_initial_loading = true
@@ -1982,10 +1998,8 @@ func _update_chunks(player_pos: Vector3) -> void:
 	if chunks_to_load.size() > 1:
 		chunks_to_load.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
 	for chunk_key in chunks_to_load:
-		var coords: Array = chunk_key.split(",")
-		var chunk_x := int(coords[0])
-		var chunk_z := int(coords[1])
-		_load_chunk(chunk_x, chunk_z)
+		_enqueue_chunk_load_request(chunk_key, -_chunk_priority_score(chunk_key))
+	_process_chunk_load_queue()
 
 	# Выгружаем далёкие чанки
 	for chunk_key in _loaded_chunks:
@@ -2052,10 +2066,8 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 	if chunks_to_load.size() > 1:
 		chunks_to_load.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
 	for chunk_key in chunks_to_load:
-		var coords: Array = chunk_key.split(",")
-		var chunk_x := int(coords[0])
-		var chunk_z := int(coords[1])
-		_load_chunk(chunk_x, chunk_z)
+		_enqueue_chunk_load_request(chunk_key, -_chunk_priority_score(chunk_key))
+	_process_chunk_load_queue()
 
 	# Выгружаем далёкие чанки — сзади быстрее (300м), спереди дальше (unload_distance)
 	var move_dir := velocity.normalized() if speed > min_speed_for_prediction else Vector3.ZERO
@@ -2093,6 +2105,7 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 	for chunk_key in cancel_keys:
 		print("OSM: Cancelling loading chunk %s (too far)" % chunk_key)
 		_loading_chunks.erase(chunk_key)
+		_chunk_load_queue = _chunk_load_queue.filter(func(c): return c["key"] != chunk_key)
 		_remove_loading_placeholder(chunk_key)
 		_current_load_count = maxi(0, _current_load_count - 1)
 
@@ -2104,41 +2117,8 @@ func _update_chunks_predictive(player_pos: Vector3, velocity: Vector3) -> void:
 
 	# Добавляем новые чанки в очередь
 	for chunk_data in predicted_chunks:
-		var chunk_key: String = chunk_data["key"]
-
-		# Пропускаем уже загруженные/загружающиеся
-		if _loaded_chunks.has(chunk_key) or _loading_chunks.has(chunk_key):
-			continue
-
-		# Проверяем, есть ли уже в очереди
-		var in_queue := false
-		for queued in _chunk_load_queue:
-			if queued["key"] == chunk_key:
-				# Обновляем приоритет если выше
-				if chunk_data["priority"] > queued["priority"]:
-					queued["priority"] = chunk_data["priority"]
-				in_queue = true
-				break
-
-		if not in_queue:
-			_chunk_load_queue.append(chunk_data)
-
-	# Сортируем очередь по приоритету (убывание)
-	_chunk_load_queue.sort_custom(func(a, b): return a["priority"] > b["priority"])
-
-	# Обрабатываем очередь (ограничиваем параллельные загрузки)
-	while _current_load_count < MAX_CONCURRENT_LOADS and _chunk_load_queue.size() > 0:
-		var next_chunk: Dictionary = _chunk_load_queue.pop_front()
-		var chunk_key: String = next_chunk["key"]
-
-		# Повторная проверка (могло загрузиться пока ждало в очереди)
-		if _loaded_chunks.has(chunk_key) or _loading_chunks.has(chunk_key):
-			continue
-
-		var coords: Array = chunk_key.split(",")
-		var chunk_x := int(coords[0])
-		var chunk_z := int(coords[1])
-		_load_chunk_tracked(chunk_x, chunk_z)
+		_enqueue_chunk_load_request(chunk_data["key"], chunk_data["priority"])
+	_process_chunk_load_queue()
 
 	# Направленная выгрузка
 	_unload_distant_chunks(player_pos, velocity)
@@ -2148,6 +2128,38 @@ func _update_chunks_predictive(player_pos: Vector3, velocity: Vector3) -> void:
 func _load_chunk_tracked(chunk_x: int, chunk_z: int) -> void:
 	_current_load_count += 1
 	_load_chunk(chunk_x, chunk_z)
+
+
+func _enqueue_chunk_load_request(chunk_key: String, priority: float) -> void:
+	if chunk_key == "":
+		return
+	if _loaded_chunks.has(chunk_key) or _loading_chunks.has(chunk_key):
+		return
+	for idx in range(_chunk_load_queue.size()):
+		var queued: Dictionary = _chunk_load_queue[idx]
+		if queued["key"] == chunk_key:
+			if priority > queued["priority"]:
+				queued["priority"] = priority
+				_chunk_load_queue[idx] = queued
+				_chunk_load_queue.sort_custom(func(a, b): return a["priority"] > b["priority"])
+			return
+	_chunk_load_queue.append({
+		"key": chunk_key,
+		"priority": priority,
+	})
+	_chunk_load_queue.sort_custom(func(a, b): return a["priority"] > b["priority"])
+
+
+func _process_chunk_load_queue() -> void:
+	while _current_load_count < MAX_CONCURRENT_LOADS and _chunk_load_queue.size() > 0:
+		var next_chunk: Dictionary = _chunk_load_queue.pop_front()
+		var chunk_key: String = next_chunk["key"]
+		if _loaded_chunks.has(chunk_key) or _loading_chunks.has(chunk_key):
+			continue
+		var coords: Array = chunk_key.split(",")
+		var chunk_x := int(coords[0])
+		var chunk_z := int(coords[1])
+		_load_chunk_tracked(chunk_x, chunk_z)
 
 
 ## Получает приоритизированный список чанков на основе предсказания
@@ -2369,7 +2381,28 @@ func _remove_loading_placeholder(chunk_key: String) -> void:
 
 func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 	var chunk_key := "%d,%d" % [chunk_x, chunk_z]
-	_loading_chunks[chunk_key] = Time.get_ticks_msec()  # Сохраняем время начала загрузки
+	var request_started_ms := Time.get_ticks_msec()
+	_loading_chunks[chunk_key] = request_started_ms  # Сохраняем время начала загрузки
+	var state: Dictionary = _ensure_chunk_state(chunk_key)
+	var existing_node: Node3D = state.get("node", null)
+	if existing_node and not is_instance_valid(existing_node):
+		state["node"] = null
+	state["generation"] = _load_generation
+	state["request_started_ms"] = request_started_ms
+	state["data_loaded_ms"] = 0
+	state["tgen_applied_ms"] = 0
+	state["phase3_done_ms"] = 0
+	state["finalize_done_ms"] = 0
+	state["activated_ms"] = 0
+	state["last_error"] = ""
+	state["cancelled"] = false
+	_chunk_state[chunk_key] = state
+	_set_chunk_stage(chunk_key, "requested")
+	_emit_chunk_debug("CHUNK_REQUEST key=%s gen=%d request_started_ms=%d" % [
+		chunk_key,
+		_load_generation,
+		request_started_ms
+	])
 
 	# Create visible placeholder box while chunk loads
 	_create_loading_placeholder(chunk_key, chunk_x, chunk_z)
@@ -2423,18 +2456,23 @@ func _clean_timed_out_chunks() -> void:
 		if elapsed_sec > CHUNK_LOAD_TIMEOUT:
 			timed_out.append(chunk_key)
 	for chunk_key in timed_out:
-		_loading_chunks.erase(chunk_key)
-		# Retry instead of just dropping
 		_current_load_count = max(0, _current_load_count - 1)
 		print("OSM: Chunk %s timed out after %.0fs, retrying..." % [chunk_key, CHUNK_LOAD_TIMEOUT])
-		var coords: Array = chunk_key.split(",")
-		var chunk_x := int(coords[0])
-		var chunk_z := int(coords[1])
-		_load_chunk(chunk_x, chunk_z)
+		_emit_chunk_debug("CHUNK_TIMEOUT key=%s timeout_s=%.0f" % [chunk_key, CHUNK_LOAD_TIMEOUT])
+		_retry_chunk_load(chunk_key, "timeout")
 
 
 func _unload_chunk(chunk_key: String) -> void:
+	if not _loaded_chunks.has(chunk_key):
+		var state_node := _get_chunk_node(chunk_key)
+		if state_node and is_instance_valid(state_node):
+			_set_chunk_stage(chunk_key, "unloaded", {"last_error": "manual_unload"})
+			_emit_chunk_debug("CHUNK_UNLOAD key=%s had_loaded_entry=false" % chunk_key)
+			_drop_chunk_runtime_state(chunk_key)
+		return
 	if _loaded_chunks.has(chunk_key):
+		_set_chunk_stage(chunk_key, "unloaded", {"last_error": "manual_unload"})
+		_emit_chunk_debug("CHUNK_UNLOAD key=%s had_loaded_entry=true" % chunk_key)
 		_chunk_culling_cooldown.erase(chunk_key)
 		# NEW: Clean up lamp batch data if not yet finalized
 		if _lamp_batch_data.has(chunk_key):
@@ -2526,6 +2564,7 @@ func _unload_chunk(chunk_key: String) -> void:
 			if rr.get("chunk_key", "") != chunk_key:
 				_filtered_rr.append(rr)
 		_road_results = _filtered_rr
+		_pending_road_tasks_by_chunk.erase(chunk_key)
 		_road_mutex.unlock()
 
 		# Clean up terrain roads data for this chunk
@@ -2594,6 +2633,10 @@ func _unload_chunk(chunk_key: String) -> void:
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
 		chunk_node.queue_free()
 		_loaded_chunks.erase(chunk_key)
+		if _chunk_state.has(chunk_key):
+			var state: Dictionary = _chunk_state[chunk_key]
+			state["node"] = null
+			_chunk_state[chunk_key] = state
 
 		# Очищаем позиции фонарей и знаков в выгруженном чанке
 		_clear_chunk_objects_positions(chunk_key)
@@ -2656,6 +2699,11 @@ func _clear_chunk_objects_positions(chunk_key: String) -> void:
 # Сбрасывает все загруженные чанки (для смены локации)
 func reset_terrain() -> void:
 	print("OSM: Resetting terrain...")
+	_emit_chunk_debug("TERRAIN_RESET begin generation=%d loaded=%d loading=%d" % [
+		_load_generation,
+		_loaded_chunks.size(),
+		_loading_chunks.size()
+	])
 	# Recalculate cached cosine (start_lat may have changed)
 	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
 	# Инкрементируем generation чтобы игнорировать callback'и от старых загрузок
@@ -2670,6 +2718,7 @@ func reset_terrain() -> void:
 
 	# Сбрасываем состояние
 	_loading_chunks.clear()
+	_chunk_state.clear()
 	for ph_key in _loading_placeholders.keys():
 		_remove_loading_placeholder(ph_key)
 	_initial_loading = false
@@ -2699,6 +2748,7 @@ func reset_terrain() -> void:
 	_road_mutex.lock()
 	_road_results.clear()
 	_pending_road_tasks = 0
+	_pending_road_tasks_by_chunk.clear()
 	_road_mutex.unlock()
 	_veg_mutex.lock()
 	_veg_thread_results.clear()
@@ -2780,6 +2830,7 @@ func reset_terrain() -> void:
 		_night_mode_connected = false
 
 	print("OSM: Terrain reset complete (all batch data cleared)")
+	_emit_chunk_debug("TERRAIN_RESET complete generation=%d" % _load_generation)
 
 func _on_osm_load_failed(error: String) -> void:
 	push_error("OSM load failed: " + error)
@@ -2798,15 +2849,11 @@ func _on_chunk_load_failed(error: String, chunk_key: String, loader: Node, gen: 
 		return
 
 	push_error("OSM chunk %s load failed: %s" % [chunk_key, error])
-	_loading_chunks.erase(chunk_key)
+	_emit_chunk_debug("CHUNK_HTTP_FAIL key=%s gen=%d error=%s" % [chunk_key, gen, error])
 	_current_load_count = max(0, _current_load_count - 1)
 	loader.queue_free()
-	# Retry the chunk (keep placeholder)
-	var coords: Array = chunk_key.split(",")
-	var chunk_x := int(coords[0])
-	var chunk_z := int(coords[1])
 	print("OSM: Retrying failed chunk %s..." % chunk_key)
-	_load_chunk(chunk_x, chunk_z)
+	_retry_chunk_load(chunk_key, error)
 
 func _on_osm_data_loaded(osm_data: Dictionary) -> void:
 	print("OSM: Initial data loaded")
@@ -2827,6 +2874,12 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 		return
 
 	print("OSM: Chunk %s data loaded" % chunk_key)
+	_emit_chunk_debug("CHUNK_HTTP_OK key=%s gen=%d ways=%d nodes=%d" % [
+		chunk_key,
+		gen,
+		int(osm_data.get("ways", []).size()),
+		int(osm_data.get("nodes", {}).size())
+	])
 	# НЕ удаляем из _loading_chunks здесь — удалим в _generate_chunk_async после генерации
 	# Это предотвращает повторную загрузку пока идёт генерация с frame budgeting
 	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
@@ -2850,6 +2903,11 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 	chunk_node.name = "Chunk_" + chunk_key
 	chunk_node.visible = false
 	add_child(chunk_node)
+	_ensure_chunk_state(chunk_key, chunk_node)
+	_set_chunk_stage(chunk_key, "http_loaded", {
+		"generation": gen,
+		"node": chunk_node,
+	})
 	_chunk_activation_pending[chunk_key] = -1  # -1 = ждём финализации
 
 	# Генерируем объекты асинхронно (с frame budgeting)
@@ -3303,14 +3361,12 @@ func _apply_single_terrain_gen_result(result: Dictionary) -> void:
 		print("OSM: Ignoring stale terrain gen %s (gen %d != %d)" % [chunk_key, gen, _load_generation])
 		return
 
-	# Find chunk node
-	var parent: Node3D = null
-	for child in get_children():
-		if child.name == "Chunk_" + chunk_key:
-			parent = child
-			break
-	if not parent:
-		print("OSM: Terrain gen result for %s but chunk node not found" % chunk_key)
+	var parent: Node3D = _get_chunk_node(chunk_key)
+	if not parent or not is_instance_valid(parent):
+		_set_chunk_stage(chunk_key, "cancelled", {"last_error": "missing_chunk_node"})
+		_emit_chunk_debug("CHUNK_DROP key=%s reason=missing_node stage=terrain_gen_ready" % chunk_key)
+		if _chunk_debug_enabled():
+			dump_chunk_pipeline(chunk_key)
 		return
 
 	# Apply Phase 1: per-chunk spatial hashes
@@ -3371,6 +3427,10 @@ func _apply_single_terrain_gen_result(result: Dictionary) -> void:
 	# Record profiling: thread time and apply time
 	if _chunk_profile.has(chunk_key):
 		_chunk_profile[chunk_key]["phase12_thread_ms"] = result.get("thread_time_ms", 0.0)
+	_set_chunk_stage(chunk_key, "terrain_gen_ready", {
+		"generation": gen,
+		"node": parent,
+	})
 
 	# Queue Phase 3 for incremental processing across frames
 	_phase3_queue.append({
@@ -3417,8 +3477,13 @@ func _process_phase3_queue() -> bool:
 
 	# Check parent still valid
 	if not is_instance_valid(parent):
+		_set_chunk_stage(chunk_key, "cancelled", {"last_error": "invalid_phase3_parent"})
 		_phase3_queue.pop_front()
 		return true
+	if chunk_key != "" and _chunk_state.has(chunk_key):
+		var state: Dictionary = _chunk_state[chunk_key]
+		if state.get("stage", "") != "phase3":
+			_set_chunk_stage(chunk_key, "phase3", {"node": parent})
 
 	var osm_data: Dictionary = result.osm_data
 	var target: Node3D = parent if parent else self
@@ -3602,6 +3667,7 @@ func _process_phase3_queue() -> bool:
 		if not _pending_batch_chunks.has(batch_chunk_key):
 			_pending_batch_chunks.append(batch_chunk_key)
 		# Finalize chunk state
+		_set_chunk_stage(chunk_key, "finalizing", {"node": parent})
 		_loading_chunks.erase(chunk_key)
 		_loaded_chunks[chunk_key] = parent
 		_initial_chunks_completed[chunk_key] = true
@@ -3913,6 +3979,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			# Дорога полностью вне чанка — уменьшаем счётчик и выходим
 			_road_mutex.lock()
 			_pending_road_tasks -= 1
+			_decrement_pending_road_task(chunk_key)
 			_road_mutex.unlock()
 			return
 
@@ -4050,16 +4117,22 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	_road_mutex.lock()
 	_road_results.append(result)
 	_pending_road_tasks -= 1
+	_decrement_pending_road_task(chunk_key)
 	_road_mutex.unlock()
 
 
 ## Применяет результат road geometry из worker thread (main thread only)
 func _apply_road_result(result: Dictionary) -> void:
 	var parent: Node3D = result.parent
+	var chunk_key: String = result.chunk_key
 	if not is_instance_valid(parent):
+		_emit_road_debug("ROAD_DROP key=%s reason=invalid_parent highway=%s way_id=%s" % [
+			chunk_key,
+			str(result.get("highway_type", "")),
+			str(result.get("way_id", 0))
+		])
 		return
 
-	var chunk_key: String = result.chunk_key
 	var texture_key: String = result.texture_key
 	var smoothed_points: PackedVector2Array = result.smoothed_points
 	var width: float = result.width
@@ -5184,6 +5257,7 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 
 	if not _road_batch_data.has(chunk_key):
 		# Нет дорог — но террейн всё равно создаём
+		_emit_road_debug("ROAD_FINALIZE key=%s status=no_batches" % chunk_key)
 		_create_deferred_terrain(chunk_key)
 		if _profiler:
 			_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
@@ -5256,6 +5330,12 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	# SAFETY: Проверяем что parent ещё существует (чанк не был выгружен)
 	if not is_instance_valid(parent):
 		print("OSM: ⚠️ Skipped road batch %s/%s - chunk was unloaded" % [chunk_key, texture_key])
+		_emit_road_debug("ROAD_DROP key=%s reason=finalize_invalid_parent texture=%s verts=%d indices=%d" % [
+			chunk_key,
+			texture_key,
+			int(batch["vertices"].size()),
+			int(batch["indices"].size())
+		])
 		if _profiler:
 			_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
 		return
@@ -5268,6 +5348,15 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		if not _chunk_road_materials.has(chunk_key):
 			_chunk_road_materials[chunk_key] = []
 		_chunk_road_materials[chunk_key].append(material)
+
+	_emit_road_debug("ROAD_FINALIZE key=%s texture=%s verts=%d tris=%d rs_instances=%d remaining_batches=%d" % [
+		chunk_key,
+		texture_key,
+		int(batch["vertices"].size()),
+		int(batch["indices"].size() / 3),
+		int(_chunk_rs_instances.get(chunk_key, []).size()),
+		int(_road_batch_data.get(chunk_key, {}).size())
+	])
 
 	# Road collision — StaticBody3D (deferred shape creation)
 	var road_body := StaticBody3D.new()
@@ -8892,42 +8981,46 @@ func _process_road_queue() -> void:
 	if _lon_scale == 0.0:
 		_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
 
-	# Pick processable chunk with best priority score (once per frame)
+	# Dispatch in fair round-robin order so finalizing chunks do not starve behind new road work.
 	if not _road_queue.is_empty() and _pending_road_tasks < MAX_CONCURRENT_ROAD_TASKS:
-		var best_ck := ""
-		var best_score := INF
-		for rq_ck in _road_queue:
-			if not _should_process_chunk(rq_ck):
+		var dispatch_capacity := MAX_CONCURRENT_ROAD_TASKS - _pending_road_tasks
+		for chunk_key in _get_road_dispatch_order(dispatch_capacity):
+			if _pending_road_tasks >= MAX_CONCURRENT_ROAD_TASKS:
+				break
+			if not _road_queue.has(chunk_key):
 				continue
-			var rq_s := _chunk_priority_score(rq_ck)
-			if rq_s < best_score:
-				best_score = rq_s
-				best_ck = rq_ck
-		# Dispatch multiple roads from best chunk until worker limit
-		if best_ck != "":
-			var rq_arr: Array = _road_queue[best_ck]
-			while not rq_arr.is_empty() and _pending_road_tasks < MAX_CONCURRENT_ROAD_TASKS:
-				var item: Dictionary = rq_arr.pop_front()
-				if not is_instance_valid(item.get("parent")):
-					continue
-				var parent: Node3D = item.parent
-				var task_data := {
-					"nodes": item.nodes,
-					"tags": item.tags,
-					"parent": parent,
-					"chunk_key": best_ck,
-					"chunk_size": chunk_size,
-					"start_lat": start_lat,
-					"start_lon": start_lon,
-					"lon_scale": _lon_scale,
-					"way_id": item.get("way_id", 0)
-				}
-				_road_mutex.lock()
-				_pending_road_tasks += 1
-				_road_mutex.unlock()
-				WorkerThreadPool.add_task(_compute_road_geometry_thread.bind(task_data))
+			var rq_arr: Array = _road_queue[chunk_key]
 			if rq_arr.is_empty():
-				_road_queue.erase(best_ck)
+				_road_queue.erase(chunk_key)
+				continue
+			var item: Dictionary = rq_arr.pop_front()
+			if rq_arr.is_empty():
+				_road_queue.erase(chunk_key)
+			if not is_instance_valid(item.get("parent")):
+				continue
+			_emit_road_debug("ROAD_DISPATCH key=%s queued=%d pending_tasks=%d activation_state=%s" % [
+				chunk_key,
+				rq_arr.size(),
+				_pending_road_task_count_for_chunk(chunk_key),
+				str(_chunk_activation_pending.get(chunk_key, null))
+			])
+			var parent: Node3D = item.parent
+			var task_data := {
+				"nodes": item.nodes,
+				"tags": item.tags,
+				"parent": parent,
+				"chunk_key": chunk_key,
+				"chunk_size": chunk_size,
+				"start_lat": start_lat,
+				"start_lon": start_lon,
+				"lon_scale": _lon_scale,
+				"way_id": item.get("way_id", 0)
+			}
+			_road_mutex.lock()
+			_pending_road_tasks += 1
+			_increment_pending_road_task(chunk_key)
+			_road_mutex.unlock()
+			WorkerThreadPool.add_task(_compute_road_geometry_thread.bind(task_data))
 
 	# Check if roads pipeline has active work before finalization
 	_road_mutex.lock()
@@ -8951,8 +9044,24 @@ func _process_road_queue() -> void:
 			0:  # Roads (1 chunk — visible first)
 				_finalize_phase = 1
 				if not _pending_batch_chunks.is_empty():
-					var _pbc_idx := _pick_closest_chunk_idx(_pending_batch_chunks)
-					if _pbc_idx >= 0:
+					var _pbc_idx := -1
+					for candidate_idx in range(_pending_batch_chunks.size()):
+						var candidate_key: String = _pending_batch_chunks[candidate_idx]
+						if _chunk_has_pending_road_inputs(candidate_key):
+							continue
+						_pbc_idx = candidate_idx
+						break
+					if _pbc_idx < 0:
+						var fallback_idx := _pick_closest_chunk_idx(_pending_batch_chunks)
+						if fallback_idx >= 0:
+							var blocked_chunk: String = _pending_batch_chunks[fallback_idx]
+							_emit_road_debug("ROAD_FINALIZE_WAIT key=%s queue=%s pending_tasks=%d ready_results=%s" % [
+								blocked_chunk,
+								str(_road_queue.get(blocked_chunk, []).size()),
+								_pending_road_task_count_for_chunk(blocked_chunk),
+								str(_chunk_has_key_in_array(_road_results, blocked_chunk))
+							])
+					else:
 						var t_batch := Time.get_ticks_usec()
 						var chunk_key2: String = _pending_batch_chunks[_pbc_idx]
 						_pending_batch_chunks.remove_at(_pbc_idx)
@@ -9652,8 +9761,6 @@ func _process_vegetation_queue() -> void:
 	if _vegetation_queue.is_empty():
 		return
 
-		return
-
 	const MAX_CONCURRENT_VEG_TASKS := 4
 
 	while not _vegetation_queue.is_empty() and _pending_veg_tasks < MAX_CONCURRENT_VEG_TASKS:
@@ -9737,6 +9844,12 @@ func _process_vegetation_queue() -> void:
 				WorkerThreadPool.add_task(_compute_chunk_trees_thread.bind(task_data))
 
 
+func _is_chunk_alive_for_async_work(chunk_key: String) -> bool:
+	if chunk_key.is_empty():
+		return true
+	return _is_chunk_alive(chunk_key)
+
+
 ## Применяет результаты из воркер-тредов деревьев (с бюджетом)
 func _apply_veg_thread_results() -> void:
 	_veg_mutex.lock()
@@ -9755,8 +9868,8 @@ func _apply_veg_thread_results() -> void:
 		var chunk_key: String = result.chunk_key
 		var parent: Node3D = result.parent
 
-		# Проверяем что чанк ещё загружен
-		if not is_instance_valid(parent) or not _loaded_chunks.has(chunk_key):
+		# Не дропаем результаты, если чанк ещё в стадии loading/finalization.
+		if not is_instance_valid(parent) or not _is_chunk_alive_for_async_work(chunk_key):
 			applied += 1
 			continue
 
@@ -11021,10 +11134,8 @@ func preload_route_chunks(waypoints: Array) -> void:
 
 	# Запускаем загрузку чанков
 	for key in chunks_to_load:
-		var parts := key.split(",")
-		var cx := int(parts[0])
-		var cz := int(parts[1])
-		_load_chunk(cx, cz)
+		_enqueue_chunk_load_request(key, 0.5)
+	_process_chunk_load_queue()
 
 
 # Расчёт площади полигона (формула Шолейса)
@@ -11126,6 +11237,455 @@ func _deferred_total_size(dict: Dictionary) -> int:
 	for arr in dict.values():
 		total += arr.size()
 	return total
+
+
+func get_runtime_debug_log_path() -> String:
+	if _debug_log_absolute_path == "":
+		_debug_log_absolute_path = ProjectSettings.globalize_path(debug_log_path)
+	return _debug_log_absolute_path
+
+
+func _open_runtime_debug_log() -> void:
+	if not debug_log_to_file:
+		return
+	_debug_log_absolute_path = ProjectSettings.globalize_path(debug_log_path)
+	var log_dir := _debug_log_absolute_path.get_base_dir()
+	var dir_err := DirAccess.make_dir_recursive_absolute(log_dir)
+	if dir_err != OK and not DirAccess.dir_exists_absolute(log_dir):
+		push_warning("OSM runtime debug log directory could not be created: %s" % _debug_log_absolute_path)
+		return
+	_debug_log_file = FileAccess.open(debug_log_path, FileAccess.WRITE)
+	if _debug_log_file == null:
+		push_warning("OSM runtime debug log could not be opened: %s" % _debug_log_absolute_path)
+		return
+	print("OSM: Runtime debug log -> %s" % _debug_log_absolute_path)
+	_write_runtime_debug_log("SESSION_START")
+	_write_runtime_debug_log("SESSION_CONFIG chunk_debug=%s road_debug=%s start_lat=%.6f start_lon=%.6f chunk_size=%.1f load_distance=%.1f unload_distance=%.1f" % [
+		str(debug_chunk_lifecycle),
+		str(debug_log_roads),
+		start_lat,
+		start_lon,
+		chunk_size,
+		load_distance,
+		unload_distance,
+	])
+
+
+func _close_runtime_debug_log() -> void:
+	if _debug_log_file:
+		_write_runtime_debug_log("SESSION_END")
+		_debug_log_file.flush()
+		_debug_log_file.close()
+		_debug_log_file = null
+
+
+func _write_runtime_debug_log(message: String) -> void:
+	if _debug_log_file == null:
+		return
+	var timestamp := Time.get_datetime_string_from_system()
+	_debug_log_file.store_line("%s uptime_ms=%d %s" % [timestamp, Time.get_ticks_msec(), message])
+	_debug_log_file.flush()
+
+
+func _emit_chunk_debug(message: String) -> void:
+	if _chunk_debug_enabled():
+		print(message)
+	if debug_log_to_file:
+		_write_runtime_debug_log(message)
+
+
+func _emit_road_debug(message: String) -> void:
+	if debug_print:
+		print(message)
+	if debug_log_to_file and debug_log_roads:
+		_write_runtime_debug_log(message)
+
+
+func _chunk_debug_enabled() -> bool:
+	return debug_print or debug_chunk_lifecycle
+
+
+func _ensure_chunk_state(chunk_key: String, node: Node3D = null) -> Dictionary:
+	var state: Dictionary = _chunk_state.get(chunk_key, {})
+	if state.is_empty():
+		state = {
+			"node": null,
+			"stage": "requested",
+			"generation": _load_generation,
+			"request_started_ms": 0,
+			"data_loaded_ms": 0,
+			"tgen_applied_ms": 0,
+			"phase3_done_ms": 0,
+			"finalize_done_ms": 0,
+			"activated_ms": 0,
+			"last_error": "",
+			"retry_count": 0,
+			"cancelled": false,
+			"last_stage_change_ms": 0,
+			"last_stall_report_ms": 0,
+		}
+	if node != null:
+		state["node"] = node
+	_chunk_state[chunk_key] = state
+	return state
+
+
+func _set_chunk_stage(chunk_key: String, stage: String, extra: Dictionary = {}) -> void:
+	var now := Time.get_ticks_msec()
+	var state: Dictionary = _ensure_chunk_state(chunk_key)
+	state["stage"] = stage
+	state["last_stage_change_ms"] = now
+	match stage:
+		"http_loaded":
+			state["data_loaded_ms"] = now
+		"terrain_gen_ready":
+			state["tgen_applied_ms"] = now
+		"finalizing":
+			state["phase3_done_ms"] = now
+			state["finalize_done_ms"] = now
+		"ready":
+			state["activated_ms"] = now
+		"cancelled":
+			state["cancelled"] = true
+		"failed", "unloaded":
+			state["cancelled"] = false
+	if stage not in ["cancelled", "failed", "unloaded"] and not extra.has("cancelled"):
+		state["cancelled"] = false
+	for key in extra:
+		state[key] = extra[key]
+	_chunk_state[chunk_key] = state
+	_emit_chunk_debug("CHUNK_STAGE key=%s stage=%s gen=%s retry=%s" % [
+		chunk_key,
+		stage,
+		str(state.get("generation", -1)),
+		str(state.get("retry_count", 0))
+	])
+
+
+func _get_chunk_node(chunk_key: String) -> Node3D:
+	if not _chunk_state.has(chunk_key):
+		return null
+	var node: Node3D = _chunk_state[chunk_key].get("node", null)
+	if node and is_instance_valid(node):
+		return node
+	return null
+
+
+func _is_chunk_alive(chunk_key: String) -> bool:
+	if not _chunk_state.has(chunk_key):
+		return false
+	var state: Dictionary = _chunk_state[chunk_key]
+	var stage: String = state.get("stage", "")
+	if stage in ["cancelled", "failed", "unloaded"]:
+		return false
+	var node: Node3D = state.get("node", null)
+	return node != null and is_instance_valid(node)
+
+
+func _chunk_has_key_in_array(queue: Array, chunk_key: String) -> bool:
+	for item in queue:
+		if item is Dictionary and item.get("chunk_key", "") == chunk_key:
+			return true
+	return false
+
+
+func _pending_road_task_count_for_chunk(chunk_key: String) -> int:
+	return int(_pending_road_tasks_by_chunk.get(chunk_key, 0))
+
+
+func _increment_pending_road_task(chunk_key: String) -> void:
+	if chunk_key == "":
+		return
+	_pending_road_tasks_by_chunk[chunk_key] = _pending_road_task_count_for_chunk(chunk_key) + 1
+
+
+func _decrement_pending_road_task(chunk_key: String) -> void:
+	if chunk_key == "":
+		return
+	var remaining: int = maxi(0, _pending_road_task_count_for_chunk(chunk_key) - 1)
+	if remaining == 0:
+		_pending_road_tasks_by_chunk.erase(chunk_key)
+	else:
+		_pending_road_tasks_by_chunk[chunk_key] = remaining
+
+
+func _chunk_has_pending_road_inputs(chunk_key: String) -> bool:
+	if chunk_key == "":
+		return false
+	if _road_queue.has(chunk_key):
+		return true
+	if _chunk_has_key_in_array(_road_results, chunk_key):
+		return true
+	return _pending_road_task_count_for_chunk(chunk_key) > 0
+
+
+func _get_prioritized_road_queue_keys() -> Array:
+	var finalizing: Array = []
+	var activating: Array = []
+	var normal: Array = []
+	for chunk_key in _road_queue.keys():
+		if not _should_process_chunk(chunk_key):
+			continue
+		if _pending_batch_chunks.has(chunk_key):
+			finalizing.append(chunk_key)
+		elif _chunk_activation_pending.has(chunk_key):
+			activating.append(chunk_key)
+		else:
+			normal.append(chunk_key)
+	if finalizing.size() > 1:
+		finalizing.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
+	if activating.size() > 1:
+		activating.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
+	if normal.size() > 1:
+		normal.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
+	finalizing.append_array(activating)
+	finalizing.append_array(normal)
+	return finalizing
+
+
+func _get_road_dispatch_order(max_tasks: int) -> Array[String]:
+	var dispatch_order: Array[String] = []
+	if max_tasks <= 0:
+		return dispatch_order
+	var prioritized_keys: Array = _get_prioritized_road_queue_keys()
+	if prioritized_keys.is_empty():
+		return dispatch_order
+	var remaining_per_chunk: Dictionary = {}
+	for chunk_key in prioritized_keys:
+		var queued_items: Array = _road_queue.get(chunk_key, [])
+		if not queued_items.is_empty():
+			remaining_per_chunk[chunk_key] = queued_items.size()
+	while dispatch_order.size() < max_tasks and not remaining_per_chunk.is_empty():
+		var dispatched_in_round := false
+		for chunk_key in prioritized_keys:
+			if dispatch_order.size() >= max_tasks:
+				break
+			var remaining: int = int(remaining_per_chunk.get(chunk_key, 0))
+			if remaining <= 0:
+				continue
+			dispatch_order.append(chunk_key)
+			dispatched_in_round = true
+			remaining -= 1
+			if remaining <= 0:
+				remaining_per_chunk.erase(chunk_key)
+			else:
+				remaining_per_chunk[chunk_key] = remaining
+		if not dispatched_in_round:
+			break
+	return dispatch_order
+
+
+func _collect_chunk_blockers(chunk_key: String) -> Array[String]:
+	var blockers: Array[String] = []
+	var state: Dictionary = _chunk_state.get(chunk_key, {})
+	var stage: String = state.get("stage", "")
+	if stage in ["requested", "http_loaded", "terrain_gen_ready", "phase3"]:
+		blockers.append("stage:" + stage)
+	if _road_queue.has(chunk_key):
+		blockers.append("road_queue")
+	if _pending_road_task_count_for_chunk(chunk_key) > 0:
+		blockers.append("road_tasks_pending")
+	if _chunk_has_key_in_array(_road_results, chunk_key):
+		blockers.append("road_results_pending")
+	if _pending_batch_chunks.has(chunk_key):
+		blockers.append("pending_batch")
+	if _road_batch_data.has(chunk_key):
+		blockers.append("road_batch_data")
+	if _building_geo_finalize_queue.has(chunk_key):
+		blockers.append("building_geo_finalize")
+	if _building_geo_batch.has(chunk_key):
+		blockers.append("building_geo_batch")
+	if _window_finalize_queue.has(chunk_key):
+		blockers.append("window_finalize")
+	if _window_finalize_progress.has(chunk_key):
+		blockers.append("window_finalize_progress")
+	if _curb_geo_batch.has(chunk_key):
+		blockers.append("curb_geo_batch")
+	if _lamp_batches_to_finalize.has(chunk_key):
+		blockers.append("lamp_finalize")
+	if _tree_batches_to_finalize.has(chunk_key):
+		blockers.append("tree_finalize")
+	if _tree_batch_data.has(chunk_key):
+		blockers.append("tree_batch_data")
+	if _billboard_batches_to_finalize.has(chunk_key):
+		blockers.append("billboard_finalize")
+	if _fence_batches_to_finalize.has(chunk_key):
+		blockers.append("fence_finalize")
+	if _deferred_footway_queue.has(chunk_key):
+		blockers.append("deferred_footway")
+	if _deferred_lamp_queue.has(chunk_key):
+		blockers.append("deferred_lamps")
+	if _deferred_manhole_queue.has(chunk_key):
+		blockers.append("deferred_manholes")
+	if _deferred_billboard_queue.has(chunk_key):
+		blockers.append("deferred_billboards")
+	if _deferred_building_collisions.has(chunk_key):
+		blockers.append("deferred_building_collisions")
+	if _deferred_tree_collisions.has(chunk_key):
+		blockers.append("deferred_tree_collisions")
+	if _deferred_road_collisions.has(chunk_key):
+		blockers.append("deferred_road_collisions")
+	if _deferred_terrain_collisions.has(chunk_key):
+		blockers.append("deferred_terrain_collisions")
+	if _deferred_lamp_lights.has(chunk_key):
+		blockers.append("deferred_lamp_lights")
+	if _deferred_fence_edges.has(chunk_key):
+		blockers.append("deferred_fence_edges")
+	if _chunk_has_key_in_array(_phase3_queue, chunk_key):
+		blockers.append("phase3_queue")
+	if _chunk_has_key_in_array(_terrain_gen_results, chunk_key):
+		blockers.append("terrain_gen_results")
+	if _chunk_has_key_in_array(_terrain_thread_results, chunk_key):
+		blockers.append("terrain_thread_results")
+	return blockers
+
+
+func _collect_chunk_activation_blockers(chunk_key: String) -> Array[String]:
+	var blockers: Array[String] = []
+	var state: Dictionary = _chunk_state.get(chunk_key, {})
+	var stage: String = state.get("stage", "")
+	if stage in ["requested", "http_loaded", "terrain_gen_ready", "phase3"]:
+		blockers.append("stage:" + stage)
+	if _chunk_has_key_in_array(_phase3_queue, chunk_key):
+		blockers.append("phase3_queue")
+	if _pending_batch_chunks.has(chunk_key):
+		blockers.append("pending_batch")
+	if _building_geo_finalize_queue.has(chunk_key):
+		blockers.append("building_geo_finalize")
+	if _lamp_batches_to_finalize.has(chunk_key):
+		blockers.append("lamp_finalize")
+	if _tree_batches_to_finalize.has(chunk_key):
+		blockers.append("tree_finalize")
+	if _billboard_batches_to_finalize.has(chunk_key):
+		blockers.append("billboard_finalize")
+	if _fence_batches_to_finalize.has(chunk_key):
+		blockers.append("fence_finalize")
+	if _deferred_footway_queue.has(chunk_key):
+		blockers.append("deferred_footway")
+	if _deferred_lamp_queue.has(chunk_key):
+		blockers.append("deferred_lamps")
+	if _deferred_manhole_queue.has(chunk_key):
+		blockers.append("deferred_manholes")
+	if _deferred_billboard_queue.has(chunk_key):
+		blockers.append("deferred_billboards")
+	if _deferred_building_collisions.has(chunk_key):
+		blockers.append("deferred_building_collisions")
+	if _deferred_tree_collisions.has(chunk_key):
+		blockers.append("deferred_tree_collisions")
+	if _deferred_road_collisions.has(chunk_key):
+		blockers.append("deferred_road_collisions")
+	if _deferred_terrain_collisions.has(chunk_key):
+		blockers.append("deferred_terrain_collisions")
+	if _deferred_lamp_lights.has(chunk_key):
+		blockers.append("deferred_lamp_lights")
+	if _deferred_fence_edges.has(chunk_key):
+		blockers.append("deferred_fence_edges")
+	return blockers
+
+
+func _chunk_has_pending_work(chunk_key: String) -> bool:
+	return not _collect_chunk_activation_blockers(chunk_key).is_empty()
+
+
+func _can_purge_chunk_on_cull(chunk_key: String) -> bool:
+	if _initial_loading and not _initial_chunks_completed.has(chunk_key):
+		return false
+	if _chunk_activation_pending.has(chunk_key):
+		return false
+	if not _chunk_state.has(chunk_key):
+		return true
+	var state: Dictionary = _chunk_state[chunk_key]
+	if state.get("stage", "") != "ready":
+		return false
+	return _collect_chunk_blockers(chunk_key).is_empty()
+
+
+func get_chunk_debug_state(chunk_key: String) -> Dictionary:
+	if not _chunk_state.has(chunk_key):
+		return {}
+	var state: Dictionary = _chunk_state[chunk_key].duplicate(true)
+	state["has_loaded_entry"] = _loaded_chunks.has(chunk_key)
+	state["has_loading_entry"] = _loading_chunks.has(chunk_key)
+	state["activation_state"] = _chunk_activation_pending.get(chunk_key, null)
+	state["blockers"] = _collect_chunk_blockers(chunk_key)
+	state["activation_blockers"] = _collect_chunk_activation_blockers(chunk_key)
+	state["can_purge_on_cull"] = _can_purge_chunk_on_cull(chunk_key)
+	return state
+
+
+func get_all_chunk_debug_states() -> Dictionary:
+	var result: Dictionary = {}
+	for chunk_key in _chunk_state.keys():
+		result[chunk_key] = get_chunk_debug_state(chunk_key)
+	return result
+
+
+func dump_chunk_pipeline(chunk_key: String = "") -> void:
+	if chunk_key == "":
+		var keys: Array = _chunk_state.keys()
+		keys.sort()
+		for key in keys:
+			_emit_chunk_debug("CHUNK_PIPELINE %s %s" % [key, str(get_chunk_debug_state(key))])
+		return
+	_emit_chunk_debug("CHUNK_PIPELINE %s %s" % [chunk_key, str(get_chunk_debug_state(chunk_key))])
+
+
+func _drop_chunk_runtime_state(chunk_key: String, free_node: bool = true) -> void:
+	var parent: Node3D = _get_chunk_node(chunk_key)
+	_loading_chunks.erase(chunk_key)
+	_chunk_activation_pending.erase(chunk_key)
+	_chunk_culling_cooldown.erase(chunk_key)
+	_purge_chunk_queues(chunk_key)
+	_chunk_terrain_roads.erase(chunk_key)
+	_chunk_water_polygons.erase(chunk_key)
+	_remove_loading_placeholder(chunk_key)
+	if parent and is_instance_valid(parent):
+		_terrain_objects_queue = _terrain_objects_queue.filter(func(item): return item.get("parent") != parent)
+		_infrastructure_queue = _infrastructure_queue.filter(func(item): return item.get("parent") != parent)
+		_curb_queue = _curb_queue.filter(func(item): return item.get("parent") != parent)
+		_curb_smoothed_queue = _curb_smoothed_queue.filter(func(item): return item.get("parent") != parent)
+	_deferred_add_child_queue = _deferred_add_child_queue.filter(
+		func(item): return item.get("chunk_key", "") != chunk_key and is_instance_valid(item.get("parent")) and is_instance_valid(item.get("child")))
+	_road_mutex.lock()
+	_road_results = _road_results.filter(func(item): return item.get("chunk_key", "") != chunk_key)
+	_pending_road_tasks_by_chunk.erase(chunk_key)
+	_road_mutex.unlock()
+	_veg_mutex.lock()
+	_veg_thread_results = _veg_thread_results.filter(func(item): return item.get("chunk_key", "") != chunk_key)
+	_veg_mutex.unlock()
+	_terrain_thread_mutex.lock()
+	var old_tgen_size := _terrain_gen_results.size()
+	_terrain_gen_results = _terrain_gen_results.filter(func(item): return item.get("chunk_key", "") != chunk_key)
+	_pending_terrain_gen_tasks = maxi(0, _pending_terrain_gen_tasks - (old_tgen_size - _terrain_gen_results.size()))
+	var old_terrain_size := _terrain_thread_results.size()
+	_terrain_thread_results = _terrain_thread_results.filter(func(item): return item.get("chunk_key", "") != chunk_key)
+	_pending_terrain_tasks = maxi(0, _pending_terrain_tasks - (old_terrain_size - _terrain_thread_results.size()))
+	_terrain_thread_mutex.unlock()
+	if _loaded_chunks.has(chunk_key):
+		_loaded_chunks.erase(chunk_key)
+	if free_node and parent and is_instance_valid(parent):
+		parent.queue_free()
+	_cleanup_chunk_hash_cells(chunk_key)
+	if _chunk_state.has(chunk_key):
+		var state: Dictionary = _chunk_state[chunk_key]
+		state["node"] = null
+		_chunk_state[chunk_key] = state
+
+
+func _retry_chunk_load(chunk_key: String, reason: String) -> void:
+	var state: Dictionary = _ensure_chunk_state(chunk_key)
+	var retries := int(state.get("retry_count", 0)) + 1
+	_set_chunk_stage(chunk_key, "failed", {
+		"last_error": reason,
+		"retry_count": retries,
+	})
+	_emit_chunk_debug("CHUNK_DROP key=%s reason=%s stage=%s" % [chunk_key, reason, str(_chunk_state.get(chunk_key, {}).get("stage", ""))])
+	if _chunk_debug_enabled():
+		dump_chunk_pipeline(chunk_key)
+	_drop_chunk_runtime_state(chunk_key)
+	var coords: PackedStringArray = chunk_key.split(",")
+	if coords.size() == 2:
+		_load_chunk(int(coords[0]), int(coords[1]))
 
 ## Create a StaticBody3D collision for a lamp pole at given transform
 func _create_lamp_collision(xform: Transform3D) -> StaticBody3D:
@@ -12525,8 +13085,8 @@ func _apply_terrain_thread_results() -> void:
 		var chunk_key: String = result.chunk_key
 		var terrain_polys: Array[PackedVector2Array] = result.terrain_polys
 
-		var parent: Node3D = _loaded_chunks.get(chunk_key, null)
-		if not parent or not is_instance_valid(parent):
+		var parent: Node3D = _get_chunk_node(chunk_key)
+		if not parent or not _is_chunk_alive(chunk_key):
 			applied += 1
 			continue
 
@@ -14869,6 +15429,9 @@ func _should_process_chunk(chunk_key: String) -> bool:
 	var node: Node3D = _loaded_chunks[chunk_key]
 	if not is_instance_valid(node):
 		return true
+	# Нефинализированные road batches должны дренироваться даже если чанк временно скрыт.
+	if _pending_batch_chunks.has(chunk_key):
+		return true
 	# Activation pending — обрабатываем (ещё не visible, но нужно)
 	if _chunk_activation_pending.has(chunk_key):
 		return true
@@ -14954,24 +15517,54 @@ func _clip_polyline_to_rect(points: PackedVector2Array, min_x: float, max_x: flo
 		return points
 
 	var result := PackedVector2Array()
-	for i in range(points.size()):
-		var p := points[i]
-		var inside := p.x >= min_x and p.x <= max_x and p.y >= min_z and p.y <= max_z
-
-		if i > 0:
-			var prev := points[i - 1]
-			var prev_inside := prev.x >= min_x and prev.x <= max_x and prev.y >= min_z and prev.y <= max_z
-
-			if inside != prev_inside:
-				# Одна точка внутри, другая снаружи — добавляем пересечение
-				var clipped := _clip_segment_to_rect(prev, p, min_x, max_x, min_z, max_z)
-				if clipped != prev and clipped != p:
-					result.append(clipped)
-
-		if inside:
-			result.append(p)
+	for i in range(points.size() - 1):
+		var segment: PackedVector2Array = _clip_segment_to_rect_segment(points[i], points[i + 1], min_x, max_x, min_z, max_z)
+		if segment.size() < 2:
+			continue
+		for pt in segment:
+			if result.is_empty() or result[result.size() - 1].distance_to(pt) > 0.01:
+				result.append(pt)
 
 	return result
+
+
+func _clip_segment_to_rect_segment(a: Vector2, b: Vector2, min_x: float, max_x: float, min_z: float, max_z: float) -> PackedVector2Array:
+	var dx := b.x - a.x
+	var dy := b.y - a.y
+	var t0 := 0.0
+	var t1 := 1.0
+
+	var clip_test := func(p: float, q: float) -> bool:
+		if absf(p) < 0.000001:
+			return q >= 0.0
+		var r := q / p
+		if p < 0.0:
+			if r > t1:
+				return false
+			if r > t0:
+				t0 = r
+		else:
+			if r < t0:
+				return false
+			if r < t1:
+				t1 = r
+		return true
+
+	if not clip_test.call(-dx, a.x - min_x):
+		return PackedVector2Array()
+	if not clip_test.call(dx, max_x - a.x):
+		return PackedVector2Array()
+	if not clip_test.call(-dy, a.y - min_z):
+		return PackedVector2Array()
+	if not clip_test.call(dy, max_z - a.y):
+		return PackedVector2Array()
+	if t1 < t0:
+		return PackedVector2Array()
+
+	return PackedVector2Array([
+		Vector2(a.x + dx * t0, a.y + dy * t0),
+		Vector2(a.x + dx * t1, a.y + dy * t1),
+	])
 
 
 ## Находит точку пересечения отрезка (a→b) с границей прямоугольника (ближайшую к a).
@@ -16042,6 +16635,8 @@ func _rs_add_mesh(chunk_key: String, mesh: Mesh, material: Material = null,
 
 ## Чанк полностью финализирован: загружен, все очереди обработаны, RS instances активированы
 func is_chunk_fully_ready(chunk_key: String) -> bool:
+	if _chunk_state.has(chunk_key):
+		return _chunk_state[chunk_key].get("stage", "") == "ready"
 	return _loaded_chunks.has(chunk_key) and not _chunk_activation_pending.has(chunk_key)
 
 
@@ -16064,23 +16659,37 @@ func _process_chunk_activation() -> void:
 
 	for chunk_key in activation_keys:
 		var state: int = _chunk_activation_pending[chunk_key]
+		var chunk_debug_state: Dictionary = _chunk_state.get(chunk_key, {})
+		var data_loaded_ms: int = int(chunk_debug_state.get("data_loaded_ms", 0))
+		var elapsed_since_data: int = Time.get_ticks_msec() - data_loaded_ms if data_loaded_ms > 0 else 0
 
 		if state == -1:
-			# Проверяем есть ли ещё finalize очереди для этого чанка
-			var still_pending := _pending_batch_chunks.has(chunk_key) or _lamp_batches_to_finalize.has(chunk_key) or _tree_batches_to_finalize.has(chunk_key) or _billboard_batches_to_finalize.has(chunk_key) or _building_geo_finalize_queue.has(chunk_key) or _fence_batches_to_finalize.has(chunk_key) or _deferred_footway_queue.has(chunk_key) or _deferred_lamp_queue.has(chunk_key) or _deferred_manhole_queue.has(chunk_key) or _deferred_billboard_queue.has(chunk_key) or _deferred_building_collisions.has(chunk_key) or _deferred_tree_collisions.has(chunk_key) or _deferred_road_collisions.has(chunk_key) or _deferred_terrain_collisions.has(chunk_key) or _deferred_lamp_lights.has(chunk_key) or _deferred_fence_edges.has(chunk_key)
-			if not still_pending:
+			if elapsed_since_data > CHUNK_STALL_FAIL_MS:
+				_emit_chunk_debug("CHUNK_DROP key=%s reason=activation_timeout stage=%s" % [chunk_key, str(chunk_debug_state.get("stage", ""))])
+				if _chunk_debug_enabled():
+					dump_chunk_pipeline(chunk_key)
+				_retry_chunk_load(chunk_key, "activation_timeout")
+				continue
+			if elapsed_since_data > CHUNK_STALL_WARN_MS:
+				var last_report_ms: int = int(chunk_debug_state.get("last_stall_report_ms", 0))
+				if Time.get_ticks_msec() - last_report_ms > 1000:
+					chunk_debug_state["last_stall_report_ms"] = Time.get_ticks_msec()
+					_chunk_state[chunk_key] = chunk_debug_state
+					dump_chunk_pipeline(chunk_key)
+			if not _chunk_has_pending_work(chunk_key):
 				_chunk_activation_pending[chunk_key] = 0  # начинаем пакетную активацию
+				_set_chunk_stage(chunk_key, "activating")
 		else:
 			# Пакетная активация RS instances по N за кадр
 			if not _chunk_rs_instances.has(chunk_key):
 				# Нет RS instances — сразу включаем scene tree node
-				if _loaded_chunks.has(chunk_key):
-					var cn: Node3D = _loaded_chunks[chunk_key]
-					if is_instance_valid(cn):
-						cn.visible = true
+				var cn: Node3D = _get_chunk_node(chunk_key)
+				if is_instance_valid(cn):
+					cn.visible = true
 				_chunk_activation_pending.erase(chunk_key)
 				_remove_loading_placeholder(chunk_key)
 				_chunk_culling_cooldown[chunk_key] = Time.get_ticks_msec() + 3000
+				_set_chunk_stage(chunk_key, "ready", {"node": cn})
 				continue
 
 			var instances: Array = _chunk_rs_instances[chunk_key]
@@ -16091,13 +16700,13 @@ func _process_chunk_activation() -> void:
 				i += 1
 			if end_idx >= instances.size():
 				# Все RS instances активированы — включаем scene tree node
-				if _loaded_chunks.has(chunk_key):
-					var cn: Node3D = _loaded_chunks[chunk_key]
-					if is_instance_valid(cn):
-						cn.visible = true
+				var cn: Node3D = _get_chunk_node(chunk_key)
+				if is_instance_valid(cn):
+					cn.visible = true
 				_chunk_activation_pending.erase(chunk_key)
 				_remove_loading_placeholder(chunk_key)
 				_chunk_culling_cooldown[chunk_key] = Time.get_ticks_msec() + 3000
+				_set_chunk_stage(chunk_key, "ready", {"node": cn})
 			else:
 				_chunk_activation_pending[chunk_key] = end_idx
 
@@ -16371,7 +16980,16 @@ func _update_chunk_culling() -> void:
 					RenderingServer.instance_set_visible(rid, want_visible)
 			# Clean queues when chunk becomes culled — free resources for visible chunks
 			if not want_visible:
-				_purge_chunk_queues(chunk_key)
+				var can_purge := _can_purge_chunk_on_cull(chunk_key)
+				_emit_road_debug("CHUNK_CULL key=%s visible=%s purge=%s stage=%s blockers=%s" % [
+					chunk_key,
+					str(want_visible),
+					str(can_purge),
+					str(_chunk_state.get(chunk_key, {}).get("stage", "")),
+					"|".join(_collect_chunk_blockers(chunk_key))
+				])
+				if can_purge:
+					_purge_chunk_queues(chunk_key)
 
 	# Сохраняем для HUD
 	_culling_visible_count = visible_count
