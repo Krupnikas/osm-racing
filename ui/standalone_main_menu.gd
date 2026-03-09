@@ -63,14 +63,14 @@ func _ready() -> void:
 		if args[i] == "--autostart":
 			if has_custom_coords:
 				print("StandaloneMenu: Autostart at --lat %.6f --lon %.6f" % [cmd_lat, cmd_lon])
-				_start_free_roam_at_coords(cmd_lat, cmd_lon)
+				_start_free_roam_at_coords.call_deferred(cmd_lat, cmd_lon)
 				return
 			elif i + 1 < args.size():
 				var idx := int(args[i + 1])
 				var locations := LOCATIONS.keys()
 				if idx >= 0 and idx < locations.size():
 					print("StandaloneMenu: Autostart location %d: %s" % [idx, locations[idx]])
-					_start_free_roam(locations[idx])
+					_start_free_roam.call_deferred(locations[idx])
 					return
 
 

@@ -27,6 +27,10 @@ func run_all_tests() -> void:
 	test_terrain_clipping_removes_road_area()
 	test_terrain_clipping_sharp_turn()
 	test_validate_road_direction_consistency()
+	test_chunk_boundary_horizontal_road()
+	test_chunk_boundary_diagonal_road()
+	test_chunk_boundary_real_osm_data()
+	test_chunk_boundary_grid_offset_sensitivity()
 
 	print("\n=== Results ===")
 	print("Passed: %d" % tests_passed)
@@ -91,44 +95,38 @@ static func build_road_mesh_edges(points: PackedVector2Array, half_w: float) -> 
 	return [left, right]
 
 
-## Build per-segment corridor rectangles (same as _apply_road_result after fix).
-## Returns array of convex quadrilaterals, one per segment.
-## The real code uses half_w + 0.3m buffer for guaranteed coverage.
-static func build_corridor_segments(points: PackedVector2Array, half_w: float) -> Array[PackedVector2Array]:
-	var hw := half_w + 0.3
-	var segments: Array[PackedVector2Array] = []
-	for i in range(points.size() - 1):
-		var p0 := points[i]
-		var p1 := points[i + 1]
-		var d := (p1 - p0).normalized()
-		var perp := Vector2(-d.y, d.x)
-		var seg := PackedVector2Array()
-		seg.append(p0 - perp * hw)
-		seg.append(p1 - perp * hw)
-		seg.append(p1 + perp * hw)
-		seg.append(p0 + perp * hw)
-		if ChunkMath.polygon_area(seg) < 0:
-			seg.reverse()
-		segments.append(seg)
-	return segments
-
-
-## Build single merged corridor polygon for simple containment tests.
-## Uses Geometry2D.merge_polygons to union per-segment rectangles.
+## Build single corridor polygon (same as production code).
+## Left edge forward + right edge reversed. No buffer.
 static func build_corridor_polygon(points: PackedVector2Array, half_w: float) -> PackedVector2Array:
-	var segments := build_corridor_segments(points, half_w)
-	if segments.is_empty():
-		return PackedVector2Array()
-	var merged: Array[PackedVector2Array] = [segments[0]]
-	for i in range(1, segments.size()):
-		var new_merged: Array[PackedVector2Array] = []
-		for existing in merged:
-			var union := Geometry2D.merge_polygons(existing, segments[i])
-			for u in union:
-				if u.size() >= 3:
-					new_merged.append(u)
-		merged = new_merged
-	return merged[0] if not merged.is_empty() else PackedVector2Array()
+	var perps := build_road_mesh_perps(points)
+	var corridor := PackedVector2Array()
+	for i in range(points.size()):
+		corridor.append(points[i] - perps[i] * half_w)
+	for i in range(points.size() - 1, -1, -1):
+		corridor.append(points[i] + perps[i] * half_w)
+	if ChunkMath.polygon_area(corridor) < 0:
+		corridor.reverse()
+	return corridor
+
+
+## Clip corridor polygon to chunk rect, returns array of clipped polygons
+static func clip_corridor_to_chunk(corridor: PackedVector2Array, chunk_rect: PackedVector2Array) -> Array[PackedVector2Array]:
+	var result: Array[PackedVector2Array] = []
+	var clipped: Array[PackedVector2Array] = Geometry2D.intersect_polygons(corridor, chunk_rect)
+	for cp in clipped:
+		if cp.size() >= 3 and ChunkMath.polygon_area(cp) > 0.001:
+			result.append(cp)
+	return result
+
+
+## Build chunk rect polygon from chunk coords and size
+static func make_chunk_rect(cx: int, cz: int, chunk_size: float) -> PackedVector2Array:
+	return PackedVector2Array([
+		Vector2(float(cx) * chunk_size, float(cz) * chunk_size),
+		Vector2(float(cx + 1) * chunk_size, float(cz) * chunk_size),
+		Vector2(float(cx + 1) * chunk_size, float(cz + 1) * chunk_size),
+		Vector2(float(cx) * chunk_size, float(cz + 1) * chunk_size),
+	])
 
 
 ## Check if a 2D point is inside a polygon (uses Godot's built-in)
@@ -144,10 +142,8 @@ static func check_mesh_inside_corridor(points: PackedVector2Array, half_w: float
 	var right: PackedVector2Array = edges[1]
 	var corridor := build_corridor_polygon(points, half_w)
 
-	# Inflate corridor slightly for floating-point tolerance
 	for i in range(left.size()):
 		if not point_in_polygon(left[i], corridor):
-			# Check with small tolerance (0.01m)
 			var to_center := (points[i] - left[i]).normalized() * 0.01
 			if not point_in_polygon(left[i] + to_center, corridor):
 				return [false, left[i], i, "left"]
@@ -155,6 +151,39 @@ static func check_mesh_inside_corridor(points: PackedVector2Array, half_w: float
 			var to_center := (points[i] - right[i]).normalized() * 0.01
 			if not point_in_polygon(right[i] + to_center, corridor):
 				return [false, right[i], i, "right"]
+	return [true, Vector2.ZERO, -1, ""]
+
+
+## Check if a mesh point inside chunk_rect is covered by ANY corridor in the list.
+## This simulates terrain clipping: point must be inside a corridor OR outside chunk_rect.
+static func check_mesh_covered_in_chunk(
+	points: PackedVector2Array, half_w: float,
+	corridors: Array[PackedVector2Array], chunk_rect: PackedVector2Array
+) -> Array:
+	var edges := build_road_mesh_edges(points, half_w)
+	var left: PackedVector2Array = edges[0]
+	var right: PackedVector2Array = edges[1]
+	for i in range(left.size()):
+		var pts_to_check: PackedVector2Array = PackedVector2Array([left[i], right[i]])
+		for pi in range(2):
+			var pt: Vector2 = pts_to_check[pi]
+			if not point_in_polygon(pt, chunk_rect):
+				continue  # outside chunk — not our problem
+			var covered := false
+			for corridor in corridors:
+				if point_in_polygon(pt, corridor):
+					covered = true
+					break
+			if not covered:
+				# Try with tiny inward nudge for fp tolerance
+				var nudge: Vector2 = (points[i] - pt).normalized() * 0.02
+				for corridor in corridors:
+					if point_in_polygon(pt + nudge, corridor):
+						covered = true
+						break
+			if not covered:
+				var side: String = "left" if pi == 0 else "right"
+				return [false, pt, i, side]
 	return [true, Vector2.ZERO, -1, ""]
 
 
@@ -282,30 +311,24 @@ func test_smoothed_road_corridor_covers_mesh() -> void:
 
 
 func test_terrain_clipping_removes_road_area() -> void:
-	# Build a straight road corridor and verify terrain clipping removes the road area
 	var chunk_rect := PackedVector2Array([
 		Vector2(0, 0), Vector2(200, 0), Vector2(200, 200), Vector2(0, 200)
 	])
-
-	# Road going through the middle of the chunk
 	var road_points := PackedVector2Array([
 		Vector2(0, 100), Vector2(200, 100)
 	])
 	var half_w := 5.0
-	var corridors := build_corridor_segments(road_points, half_w)
+	var corridor := build_corridor_polygon(road_points, half_w)
 
-	# Clip terrain by road corridor segments (same as _compute_terrain_clipping_thread)
 	var terrain_polys: Array[PackedVector2Array] = [chunk_rect]
-	for corridor in corridors:
-		var new_polys: Array[PackedVector2Array] = []
-		for poly in terrain_polys:
-			var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, corridor)
-			for cp in clipped:
-				if cp.size() >= 3:
-					new_polys.append(cp)
-		terrain_polys = new_polys
+	var new_polys: Array[PackedVector2Array] = []
+	for poly in terrain_polys:
+		var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, corridor)
+		for cp in clipped:
+			if cp.size() >= 3:
+				new_polys.append(cp)
+	terrain_polys = new_polys
 
-	# Check that road center points are NOT inside any terrain polygon
 	var road_center := Vector2(100, 100)
 	var center_in_terrain := false
 	for poly in terrain_polys:
@@ -315,8 +338,7 @@ func test_terrain_clipping_removes_road_area() -> void:
 	_assert(not center_in_terrain, "terrain_clipping_removes_road_center",
 		"Road center (100,100) still inside terrain after clipping!")
 
-	# Check that terrain exists outside the road
-	var terrain_point := Vector2(100, 50)  # Above the road
+	var terrain_point := Vector2(100, 50)
 	var found_terrain := false
 	for poly in terrain_polys:
 		if point_in_polygon(terrain_point, poly):
@@ -325,54 +347,37 @@ func test_terrain_clipping_removes_road_area() -> void:
 	_assert(found_terrain, "terrain_clipping_preserves_non_road_area",
 		"Terrain at (100,50) — outside road — should exist after clipping")
 
-	# Check total terrain area is approximately correct
-	# Chunk = 200x200 = 40000, road corridor = 200 * (10 + 0.6) = 2120 (with +0.3m buffer each side)
-	# Remaining should be ~37880
 	var total_area := 0.0
 	for poly in terrain_polys:
 		total_area += absf(ChunkMath.polygon_area(poly))
-	var expected_area := 200.0 * 200.0 - 200.0 * (10.0 + 0.6)  # 37880
+	var expected_area := 200.0 * 200.0 - 200.0 * 10.0  # 38000
 	_assert(absf(total_area - expected_area) < 200.0, "terrain_clipping_area_correct",
 		"Expected terrain area ~%.0f, got %.0f" % [expected_area, total_area])
 
 
 func test_terrain_clipping_sharp_turn() -> void:
-	# Road with a sharp turn through the chunk.
-	# Per-segment corridors must cover ALL road mesh vertices.
-	# After clipping, NO road mesh vertex should be inside any terrain polygon.
 	var chunk_rect := PackedVector2Array([
 		Vector2(-100, -100), Vector2(100, -100), Vector2(100, 100), Vector2(-100, 100)
 	])
-
-	# 90° turn road crossing chunk boundaries (realistic scenario)
 	var road_points := PackedVector2Array([
 		Vector2(-120, 0), Vector2(0, 0), Vector2(0, -120)
 	])
 	var half_w := 5.0
+	var corridor := build_corridor_polygon(road_points, half_w)
 
-	# Build per-segment corridor rectangles (same as real code)
-	var corridors := build_corridor_segments(road_points, half_w)
-
-	# Build road mesh edges (forward-only perps, no buffer)
-	var edges := build_road_mesh_edges(road_points, half_w)
-	var mesh_left: PackedVector2Array = edges[0]
-	var mesh_right: PackedVector2Array = edges[1]
-
-	# Ensure chunk_rect is CCW (Geometry2D requires consistent winding)
 	if ChunkMath.polygon_area(chunk_rect) < 0:
 		chunk_rect.reverse()
 
-	# Clip terrain by each corridor segment (same as _compute_terrain_clipping_thread)
 	var terrain_polys: Array[PackedVector2Array] = [chunk_rect]
-	for corridor in corridors:
-		var new_polys: Array[PackedVector2Array] = []
-		for poly in terrain_polys:
-			var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, corridor)
-			for cp in clipped:
-				if cp.size() >= 3:
-					new_polys.append(cp)
-		terrain_polys = new_polys
-	# Final filter: clip CW holes from CCW polys (same as production code)
+	var new_polys: Array[PackedVector2Array] = []
+	for poly in terrain_polys:
+		var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, corridor)
+		for cp in clipped:
+			if cp.size() >= 3:
+				new_polys.append(cp)
+	terrain_polys = new_polys
+
+	# CW hole filter
 	var ccw_polys: Array[PackedVector2Array] = []
 	var cw_holes: Array[PackedVector2Array] = []
 	for poly in terrain_polys:
@@ -388,29 +393,22 @@ func test_terrain_clipping_sharp_turn() -> void:
 	for hole in cw_holes:
 		var new_ccw: Array[PackedVector2Array] = []
 		for poly in ccw_polys:
-			var clipped := Geometry2D.clip_polygons(poly, hole)
-			for cp in clipped:
+			var clipped_h: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, hole)
+			for cp in clipped_h:
 				if cp.size() >= 3 and ChunkMath.polygon_area(cp) >= 2.0:
 					new_ccw.append(cp)
 		ccw_polys = new_ccw
 	terrain_polys = ccw_polys
 
-	# Check road CENTER points are NOT inside any terrain polygon.
-	# Edge vertices at turn inner corners may have tiny gaps between corridor segments —
-	# these are covered by intersection contours in the real pipeline (step 2 of clipping).
-	# So we test points along the road centerline + half-width inward on each side.
 	var any_overlap := false
 	var overlap_info := ""
-	# Test points along each road segment centerline
 	for seg_i in range(road_points.size() - 1):
 		var p0 := road_points[seg_i]
 		var p1 := road_points[seg_i + 1]
 		var d := (p1 - p0).normalized()
 		var perp := Vector2(-d.y, d.x)
-		# Test 5 points along the segment, at center and ±(half_w - 0.5) from center
 		for t in [0.2, 0.4, 0.6, 0.8]:
 			var center := p0.lerp(p1, t)
-			# Test only within chunk bounds
 			if center.x < -99 or center.x > 99 or center.y < -99 or center.y > 99:
 				continue
 			var offsets: PackedFloat64Array = [0.0, half_w - 0.5, -(half_w - 0.5)]
@@ -469,3 +467,226 @@ func test_validate_road_direction_consistency() -> void:
 		info = "Too few points after validation: full=%d, clipped=%d" % [validated_full.size(), validated_clipped.size()]
 
 	_assert(shared_ok, "validate_road_direction_consistency", info)
+
+
+# ==================== Chunk Boundary Tests ====================
+# These test that corridors correctly cover road mesh at chunk boundaries.
+# The key scenario: a road crosses a chunk boundary. Each chunk builds
+# its own corridor clipped to its rect. The mesh extends with margin.
+# Every mesh point INSIDE the chunk rect must be covered by a corridor.
+
+## Simulate the full pipeline for one road in one chunk:
+## smooth → validate → clip polyline → build mesh → build corridor → clip corridor
+static func simulate_road_in_chunk(
+	raw_local_pts: PackedVector2Array, half_w: float,
+	cx: int, cz: int, chunk_size: float
+) -> Dictionary:
+	# 1. Smooth
+	var smoothed := ChunkMath.smooth_road_corners(raw_local_pts)
+	# 2. Validate
+	var validated := ChunkMath.validate_road_direction(smoothed)
+	if validated.size() < 2:
+		return {"points": PackedVector2Array(), "corridors": []}
+	# 3. Build corridor from FULL validated points (before polyline clip)
+	# This ensures roads barely entering the chunk still produce valid corridors
+	var corridor := build_corridor_polygon(validated, half_w)
+	# 4. Clip corridor to chunk rect (no margin)
+	var chunk_rect := make_chunk_rect(cx, cz, chunk_size)
+	var corridors := clip_corridor_to_chunk(corridor, chunk_rect)
+	# 5. Clip polyline to chunk with margin (for mesh vertices)
+	var margin := half_w + 1.0
+	var min_x := float(cx) * chunk_size - margin
+	var max_x := float(cx + 1) * chunk_size + margin
+	var min_z := float(cz) * chunk_size - margin
+	var max_z := float(cz + 1) * chunk_size + margin
+	var clipped := ChunkMath.clip_polyline_to_rect(validated, min_x, max_x, min_z, max_z)
+	if clipped.size() < 2:
+		return {"points": PackedVector2Array(), "corridors": corridors, "chunk_rect": chunk_rect}
+	return {"points": clipped, "corridors": corridors, "chunk_rect": chunk_rect}
+
+
+func test_chunk_boundary_horizontal_road() -> void:
+	# Horizontal road crossing chunk boundary at x=200 (chunks 0,0 and 1,0)
+	var chunk_size := 200.0
+	var half_w := 3.0  # 6m road
+	var road_pts := PackedVector2Array([
+		Vector2(150, 100), Vector2(250, 100)
+	])
+
+	# Check both chunks
+	var all_ok := true
+	var info := ""
+	for cx in [0, 1]:
+		var result := simulate_road_in_chunk(road_pts, half_w, cx, 0, chunk_size)
+		if result.points.size() < 2:
+			continue
+		var check := check_mesh_covered_in_chunk(
+			result.points, half_w, result.corridors, result.chunk_rect)
+		if not check[0]:
+			all_ok = false
+			info = "chunk(%d,0) %s pt %d at %s uncovered" % [cx, check[3], check[2], check[1]]
+			break
+
+	_assert(all_ok, "chunk_boundary_horizontal_road", info)
+
+
+func test_chunk_boundary_diagonal_road() -> void:
+	# Diagonal road crossing chunk boundary at x=200, z=200 (corner of 4 chunks)
+	var chunk_size := 200.0
+	var half_w := 3.5  # 7m road
+	var road_pts := PackedVector2Array([
+		Vector2(150, 150), Vector2(250, 250)
+	])
+
+	var all_ok := true
+	var info := ""
+	for cx in [0, 1]:
+		for cz in [0, 1]:
+			var result := simulate_road_in_chunk(road_pts, half_w, cx, cz, chunk_size)
+			if result.points.size() < 2:
+				continue
+			var check := check_mesh_covered_in_chunk(
+				result.points, half_w, result.corridors, result.chunk_rect)
+			if not check[0]:
+				all_ok = false
+				info = "chunk(%d,%d) %s pt %d at %s uncovered" % [cx, cz, check[3], check[2], check[1]]
+				break
+		if not all_ok:
+			break
+
+	_assert(all_ok, "chunk_boundary_diagonal_road", info)
+
+
+func test_chunk_boundary_real_osm_data() -> void:
+	# Real OSM data near 59.146519, 37.965935 (Cherepovets)
+	# Way 58762459 (tertiary) — long road with many points
+	var start_lat := 59.1504
+	var start_lon := 37.9488
+	var lon_scale := cos(deg_to_rad(start_lat)) * 111000.0
+
+	# Convert real lat/lon to local coords
+	var raw_latlons := [
+		[59.1460608, 37.9655808],
+		[59.1457399, 37.9641653],
+		[59.1457077, 37.9640221],
+		[59.1456803, 37.9639000],
+		[59.1453984, 37.9626453],
+		[59.1449675, 37.9607274],
+		[59.1444785, 37.9584874],
+		[59.1443458, 37.9578795],
+	]
+	var local_pts := PackedVector2Array()
+	for ll in raw_latlons:
+		var dx: float = (ll[1] - start_lon) * lon_scale
+		var dz: float = (ll[0] - start_lat) * 111000.0
+		local_pts.append(Vector2(dx, -dz))
+
+	var chunk_size := 200.0
+	var half_w := 3.0  # tertiary = 6m
+
+	# Find which chunks this road passes through
+	var min_x := INF
+	var max_x := -INF
+	var min_z := INF
+	var max_z := -INF
+	for p in local_pts:
+		min_x = minf(min_x, p.x)
+		max_x = maxf(max_x, p.x)
+		min_z = minf(min_z, p.y)
+		max_z = maxf(max_z, p.y)
+
+	var all_ok := true
+	var info := ""
+	var chunks_tested := 0
+	for cx in range(int(floor(min_x / chunk_size)) - 1, int(floor(max_x / chunk_size)) + 2):
+		for cz in range(int(floor(min_z / chunk_size)) - 1, int(floor(max_z / chunk_size)) + 2):
+			var result := simulate_road_in_chunk(local_pts, half_w, cx, cz, chunk_size)
+			if result.points.size() < 2:
+				continue
+			chunks_tested += 1
+			var check := check_mesh_covered_in_chunk(
+				result.points, half_w, result.corridors, result.chunk_rect)
+			if not check[0]:
+				all_ok = false
+				info = "chunk(%d,%d) %s pt %d at %s uncovered" % [cx, cz, check[3], check[2], check[1]]
+				break
+		if not all_ok:
+			break
+
+	if chunks_tested == 0:
+		all_ok = false
+		info = "No chunks tested — road outside all chunks?"
+
+	_assert(all_ok, "chunk_boundary_real_osm_data", info)
+
+
+func test_chunk_boundary_grid_offset_sensitivity() -> void:
+	# Same road, different start positions → different grid alignment
+	# This tests the user's exact bug: "depends on chunk grid"
+	var road_latlons := [
+		[59.1460608, 37.9655808],
+		[59.1457399, 37.9641653],
+		[59.1456803, 37.9639000],
+		[59.1453984, 37.9626453],
+		[59.1449675, 37.9607274],
+	]
+
+	var chunk_size := 200.0
+	var half_w := 3.0
+
+	# Try 10 different start positions (shifts the grid)
+	var all_ok := true
+	var info := ""
+	var start_positions := [
+		[59.1504, 37.9488],   # default
+		[59.1470, 37.9650],   # near the road
+		[59.1450, 37.9600],   # shifted
+		[59.1500, 37.9500],   # shifted more
+		[59.1465, 37.9660],   # from screenshot coords
+		[59.1440, 37.9580],   # south
+		[59.1480, 37.9620],   # north
+		[59.1455, 37.9640],   # on the road
+		[59.1460, 37.9656],   # very close to road start
+		[59.1445, 37.9585],   # another offset
+	]
+
+	for si in range(start_positions.size()):
+		var slat: float = start_positions[si][0]
+		var slon: float = start_positions[si][1]
+		var lon_scale := cos(deg_to_rad(slat)) * 111000.0
+
+		var local_pts := PackedVector2Array()
+		for ll in road_latlons:
+			var dx: float = (ll[1] - slon) * lon_scale
+			var dz: float = (ll[0] - slat) * 111000.0
+			local_pts.append(Vector2(dx, -dz))
+
+		# Find chunks
+		var min_x := INF
+		var max_x := -INF
+		var min_z := INF
+		var max_z := -INF
+		for p in local_pts:
+			min_x = minf(min_x, p.x)
+			max_x = maxf(max_x, p.x)
+			min_z = minf(min_z, p.y)
+			max_z = maxf(max_z, p.y)
+
+		for cx in range(int(floor(min_x / chunk_size)) - 1, int(floor(max_x / chunk_size)) + 2):
+			for cz in range(int(floor(min_z / chunk_size)) - 1, int(floor(max_z / chunk_size)) + 2):
+				var result := simulate_road_in_chunk(local_pts, half_w, cx, cz, chunk_size)
+				if result.points.size() < 2:
+					continue
+				var check := check_mesh_covered_in_chunk(
+					result.points, half_w, result.corridors, result.chunk_rect)
+				if not check[0]:
+					all_ok = false
+					info = "start[%d] (%.4f,%.4f) chunk(%d,%d) %s pt %d at %s uncovered" % [
+						si, slat, slon, cx, cz, check[3], check[2], check[1]]
+					break
+			if not all_ok:
+				break
+		if not all_ok:
+			break
+
+	_assert(all_ok, "chunk_boundary_grid_offset_sensitivity", info)

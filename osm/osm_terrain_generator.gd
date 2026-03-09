@@ -3908,12 +3908,59 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	if not is_bridge and highway_type not in ["footway", "path"]:
 		# Validate + clip (thread-safe: pure math)
 		# Skip vertex gen for footway/path — they get re-split on main thread anyway
-		var points: PackedVector2Array = _validate_road_direction(smoothed_points)
+		var validated: PackedVector2Array = _validate_road_direction(smoothed_points)
+		var half_w: float = width * 0.5
+
+		# Corridor: build from FULL validated points (before polyline clip),
+		# then clip polygon to chunk rect. This ensures roads barely entering
+		# a chunk still produce valid corridors.
+		if validated.size() >= 2 and highway_type not in ["cycleway", "track", "steps"]:
+			var v_count: int = validated.size()
+			var v_perps := PackedVector2Array()
+			v_perps.resize(v_count)
+			for i in range(v_count):
+				var perp: Vector2
+				if i == 0:
+					var dir: Vector2 = (validated[1] - validated[0]).normalized()
+					perp = Vector2(-dir.y, dir.x)
+				elif i == v_count - 1:
+					var dir: Vector2 = (validated[i] - validated[i - 1]).normalized()
+					perp = Vector2(-dir.y, dir.x)
+				else:
+					var dir_out: Vector2 = (validated[i + 1] - validated[i]).normalized()
+					perp = Vector2(-dir_out.y, dir_out.x)
+				v_perps[i] = perp
+			var raw_corridor := PackedVector2Array()
+			for i in range(v_count):
+				raw_corridor.append(validated[i] - v_perps[i] * half_w)
+			for i in range(v_count - 1, -1, -1):
+				raw_corridor.append(validated[i] + v_perps[i] * half_w)
+			if _polygon_area(raw_corridor) < 0:
+				raw_corridor.reverse()
+			if chunk_key != "initial" and chunk_key != "":
+				var ck_parts_c: PackedStringArray = chunk_key.split(",")
+				var c_x := int(ck_parts_c[0])
+				var c_z := int(ck_parts_c[1])
+				var clip_rect := PackedVector2Array([
+					Vector2(float(c_x) * t_chunk_size, float(c_z) * t_chunk_size),
+					Vector2(float(c_x + 1) * t_chunk_size, float(c_z) * t_chunk_size),
+					Vector2(float(c_x + 1) * t_chunk_size, float(c_z + 1) * t_chunk_size),
+					Vector2(float(c_x) * t_chunk_size, float(c_z + 1) * t_chunk_size),
+				])
+				var clipped_corr: Array[PackedVector2Array] = Geometry2D.intersect_polygons(raw_corridor, clip_rect)
+				for cp in clipped_corr:
+					if cp.size() >= 3 and _polygon_area(cp) > 0.001:
+						terrain_corridors.append(cp)
+			else:
+				terrain_corridors.append(raw_corridor)
+
+		# Clip polyline to chunk with margin (for mesh vertices)
+		var points: PackedVector2Array = validated
 		if chunk_key != "initial" and chunk_key != "":
 			var ck_parts: PackedStringArray = chunk_key.split(",")
 			var ck_x := int(ck_parts[0])
 			var ck_z := int(ck_parts[1])
-			var margin := width * 0.5 + 1.0
+			var margin := half_w + 1.0
 			points = _clip_polyline_to_rect(points,
 				float(ck_x) * t_chunk_size - margin,
 				float(ck_x + 1) * t_chunk_size + margin,
@@ -3923,7 +3970,6 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		if points.size() >= 2:
 			var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
 			var z_offset: float = hash_val * 0.00003
-			var half_w: float = width * 0.5
 			var h: float = height_offset + z_offset
 			var n_points: int = points.size()
 
@@ -3970,35 +4016,6 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				indices.append(idx)
 				indices.append(idx + 2)
 				indices.append(idx + 3)
-
-			# Коридор для выреза террейна — из тех же points/perpendiculars.
-			# Единый полигон: left edge forward, right edge reversed.
-			# Клипится строго к rect чанка — каждый чанк вырезает только свою часть.
-			if highway_type not in ["cycleway", "track", "steps"]:
-				var raw_corridor := PackedVector2Array()
-				for i in range(n_points):
-					raw_corridor.append(points[i] - perpendiculars[i] * half_w)
-				for i in range(n_points - 1, -1, -1):
-					raw_corridor.append(points[i] + perpendiculars[i] * half_w)
-				if _polygon_area(raw_corridor) < 0:
-					raw_corridor.reverse()
-				# Клипим к rect чанка (строго по границе, без margin)
-				if chunk_key != "initial" and chunk_key != "":
-					var ck_parts_c: PackedStringArray = chunk_key.split(",")
-					var c_x := int(ck_parts_c[0])
-					var c_z := int(ck_parts_c[1])
-					var clip_rect := PackedVector2Array([
-						Vector2(float(c_x) * t_chunk_size, float(c_z) * t_chunk_size),
-						Vector2(float(c_x + 1) * t_chunk_size, float(c_z) * t_chunk_size),
-						Vector2(float(c_x + 1) * t_chunk_size, float(c_z + 1) * t_chunk_size),
-						Vector2(float(c_x) * t_chunk_size, float(c_z + 1) * t_chunk_size),
-					])
-					var clipped: Array[PackedVector2Array] = Geometry2D.intersect_polygons(raw_corridor, clip_rect)
-					for cp in clipped:
-						if cp.size() >= 3 and _polygon_area(cp) > 0.1:
-							terrain_corridors.append(cp)
-				else:
-					terrain_corridors.append(raw_corridor)
 
 	# Store result via mutex
 	var result := {
@@ -4089,8 +4106,8 @@ func _apply_road_result(result: Dictionary) -> void:
 
 	# Регистрируем коридоры для выреза террейна (посчитаны и клипнуты к чанку в worker thread)
 	var corridors: Array = result.get("terrain_corridors", [])
+	var ck := _get_chunk_key_from_node(parent)
 	if not corridors.is_empty():
-		var ck := _get_chunk_key_from_node(parent)
 		if not _chunk_terrain_roads.has(ck):
 			_chunk_terrain_roads[ck] = []
 		for corridor in corridors:

@@ -45,7 +45,6 @@ func run_all() -> void:
 		print("\n*** ALL TESTS PASSED ***")
 	else:
 		print("\n*** SOME TESTS FAILED ***")
-		# Выход с кодом ошибки для CI
-		# get_tree().quit(1)
 
 	print("=".repeat(50) + "\n")
+	get_tree().quit(total_failed)
