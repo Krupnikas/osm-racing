@@ -13,7 +13,7 @@ func _ready() -> void:
 		_car = get_node(car_path)
 	# Находим terrain generator для синхронизации координат
 	_terrain_gen = get_tree().current_scene.find_child("OSMTerrain", true, false)
-	if _terrain_gen:
+	if _terrain_gen and _terrain_gen.get_script():
 		start_lat = _terrain_gen.start_lat
 		start_lon = _terrain_gen.start_lon
 		_chunk_size = _terrain_gen.chunk_size
@@ -23,7 +23,7 @@ func _process(_delta: float) -> void:
 		return
 
 	# Синхронизируем координаты с terrain generator (могут обновиться после загрузки)
-	if _terrain_gen:
+	if _terrain_gen and _terrain_gen.get_script():
 		start_lat = _terrain_gen.start_lat
 		start_lon = _terrain_gen.start_lon
 

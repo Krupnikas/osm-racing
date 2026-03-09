@@ -67,7 +67,7 @@ func _ready() -> void:
 	_graphics_settings = get_tree().current_scene.find_child("GraphicsSettings", true, false)
 
 	# Подключаем сигналы от генератора террейна
-	if _terrain_generator:
+	if _terrain_generator and _terrain_generator.get_script():
 		_terrain_generator.initial_load_started.connect(_on_load_started)
 		_terrain_generator.initial_load_progress.connect(_on_load_progress)
 		_terrain_generator.initial_load_complete.connect(_on_load_complete)
