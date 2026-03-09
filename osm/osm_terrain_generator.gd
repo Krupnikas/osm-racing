@@ -3903,7 +3903,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	var uvs := PackedVector2Array()
 	var normals := PackedVector3Array()
 	var indices := PackedInt32Array()
-	var terrain_corridor := PackedVector2Array()
+	var terrain_corridors: Array[PackedVector2Array] = []
 
 	if not is_bridge and highway_type not in ["footway", "path"]:
 		# Validate + clip (thread-safe: pure math)
@@ -3973,13 +3973,32 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 
 			# Коридор для выреза террейна — из тех же points/perpendiculars.
 			# Единый полигон: left edge forward, right edge reversed.
+			# Клипится строго к rect чанка — каждый чанк вырезает только свою часть.
 			if highway_type not in ["cycleway", "track", "steps"]:
+				var raw_corridor := PackedVector2Array()
 				for i in range(n_points):
-					terrain_corridor.append(points[i] - perpendiculars[i] * half_w)
+					raw_corridor.append(points[i] - perpendiculars[i] * half_w)
 				for i in range(n_points - 1, -1, -1):
-					terrain_corridor.append(points[i] + perpendiculars[i] * half_w)
-				if _polygon_area(terrain_corridor) < 0:
-					terrain_corridor.reverse()
+					raw_corridor.append(points[i] + perpendiculars[i] * half_w)
+				if _polygon_area(raw_corridor) < 0:
+					raw_corridor.reverse()
+				# Клипим к rect чанка (строго по границе, без margin)
+				if chunk_key != "initial" and chunk_key != "":
+					var ck_parts_c: PackedStringArray = chunk_key.split(",")
+					var c_x := int(ck_parts_c[0])
+					var c_z := int(ck_parts_c[1])
+					var clip_rect := PackedVector2Array([
+						Vector2(float(c_x) * t_chunk_size, float(c_z) * t_chunk_size),
+						Vector2(float(c_x + 1) * t_chunk_size, float(c_z) * t_chunk_size),
+						Vector2(float(c_x + 1) * t_chunk_size, float(c_z + 1) * t_chunk_size),
+						Vector2(float(c_x) * t_chunk_size, float(c_z + 1) * t_chunk_size),
+					])
+					var clipped: Array[PackedVector2Array] = Geometry2D.intersect_polygons(raw_corridor, clip_rect)
+					for cp in clipped:
+						if cp.size() >= 3 and _polygon_area(cp) > 0.1:
+							terrain_corridors.append(cp)
+				else:
+					terrain_corridors.append(raw_corridor)
 
 	# Store result via mutex
 	var result := {
@@ -4000,7 +4019,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		"is_bridge": is_bridge,
 		"elevation_info": elevation_info,
 		"way_id": task_data.get("way_id", 0),
-		"terrain_corridor": terrain_corridor
+		"terrain_corridors": terrain_corridors
 	}
 	_road_mutex.lock()
 	_road_results.append(result)
@@ -4068,13 +4087,15 @@ func _apply_road_result(result: Dictionary) -> void:
 			else:
 				batch["indices"].append_array(src_indices)
 
-	# Регистрируем коридор для выреза террейна (посчитан в worker thread)
-	var terrain_corridor: PackedVector2Array = result.get("terrain_corridor", PackedVector2Array())
-	if terrain_corridor.size() >= 6:  # минимум 3 точки на каждую сторону
+	# Регистрируем коридоры для выреза террейна (посчитаны и клипнуты к чанку в worker thread)
+	var corridors: Array = result.get("terrain_corridors", [])
+	if not corridors.is_empty():
 		var ck := _get_chunk_key_from_node(parent)
 		if not _chunk_terrain_roads.has(ck):
 			_chunk_terrain_roads[ck] = []
-		_chunk_terrain_roads[ck].append(terrain_corridor)
+		for corridor in corridors:
+			if corridor.size() >= 3:
+				_chunk_terrain_roads[ck].append(corridor)
 
 	# Curbs
 	if curb_height > 0.0:
@@ -5264,12 +5285,10 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 	var ck_parts: PackedStringArray = chunk_key.split(",")
 	var ck_x := int(ck_parts[0])
 	var ck_z := int(ck_parts[1])
-	# Собираем коридоры дорог из своего чанка
-	# Коридоры построены из ПОЛНЫХ необрезанных дорог (вся OSM overlap зона),
-	# поэтому они покрывают все дороги проходящие через chunk rect
+	# Собираем коридоры дорог — уже клипнуты к rect чанка в worker thread
 	var terrain_roads: Array = []
 	if _chunk_terrain_roads.has(chunk_key):
-		terrain_roads = _chunk_terrain_roads[chunk_key].duplicate()  # deep copy — worker thread must not share mutable state
+		terrain_roads = _chunk_terrain_roads[chunk_key].duplicate()
 	var ch_min_x := float(ck_x) * chunk_size
 	var ch_max_x := ch_min_x + chunk_size
 	var ch_min_z := float(ck_z) * chunk_size
