@@ -681,6 +681,27 @@
           "logo": "lenta-logo.png"
         }
       ]
+    },
+    {
+      "osm_way_id": 45376211,
+      "comment": "ТЦ Новый Век",
+      "wall_texture": "buildings/novy-vek-texture.png",
+      "repeat_y": 1.0,
+      "roof_type": "flat",
+      "skip_all_pois": true,
+      "pediments": [
+        {
+          "p1": [59.1236276, 37.9833281],
+          "p2": [59.1235933, 37.9835669],
+          "rect_height": 3.0,
+          "tri_height": 3.5,
+          "depth": 7.0,
+          "color": [0.92, 0.92, 0.94],
+          "texture": "buildings/novy-vek-pediment.png",
+          "logo": "buildings/novy-vek-logo.png",
+          "entrance_text": "ТОРГОВЫЙ  ЦЕНТР"
+        }
+      ]
     }
   ],
   "custom_models": [

@@ -11,6 +11,7 @@ const TestTracksScript = preload("res://race/test_tracks.gd")
 # Доступные локации для свободной езды: название -> [широта, долгота]
 const LOCATIONS := {
 	"Череповец": [59.150406, 37.948805],
+	"Новый Век": [59.123567, 37.982864],
 	"Москва (Отрадное)": [55.860580, 37.599646],
 	"Тбилиси (Важа-Пшавела)": [41.723972, 44.730502],
 	"Дубай (Крик)": [25.208591, 55.344100],
@@ -214,6 +215,10 @@ func _on_location_back_pressed() -> void:
 
 func _on_cherepovets_pressed() -> void:
 	_start_free_roam("Череповец")
+
+
+func _on_novy_vek_pressed() -> void:
+	_start_free_roam("Новый Век")
 
 
 func _on_moscow_pressed() -> void:

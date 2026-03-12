@@ -159,6 +159,12 @@ layout_mode = 2
 theme_override_font_sizes/font_size = 28
 text = "Череповец"
 
+[node name="NovyVekButton" type="Button" parent="LocationPanel/VBox"]
+custom_minimum_size = Vector2(0, 60)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Новый Век"
+
 [node name="MoscowButton" type="Button" parent="LocationPanel/VBox"]
 custom_minimum_size = Vector2(0, 60)
 layout_mode = 2
@@ -535,6 +541,7 @@ text = "v0.1 alpha"
 [connection signal="pressed" from="VBox/SettingsButton" to="." method="_on_settings_pressed"]
 [connection signal="pressed" from="VBox/QuitButton" to="." method="_on_quit_pressed"]
 [connection signal="pressed" from="LocationPanel/VBox/CherepovetsButton" to="." method="_on_cherepovets_pressed"]
+[connection signal="pressed" from="LocationPanel/VBox/NovyVekButton" to="." method="_on_novy_vek_pressed"]
 [connection signal="pressed" from="LocationPanel/VBox/MoscowButton" to="." method="_on_moscow_pressed"]
 [connection signal="pressed" from="LocationPanel/VBox/TbilisiButton" to="." method="_on_tbilisi_pressed"]
 [connection signal="pressed" from="LocationPanel/VBox/DubaiButton" to="." method="_on_dubai_pressed"]

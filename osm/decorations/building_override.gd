@@ -35,6 +35,11 @@ extends Resource
 # Материал здания (из override JSON, например "wood", "brick")
 var building_material: String = ""
 
+# Тип крыши: "" = flat (default), "hip" = вальмовая, "gable" = двускатная
+var roof_type: String = ""
+var ridge_height: float = 0.0  # Высота конька (0 = авто: 2.5 hip, 3.5 gable)
+var gable_color: Color = Color(0.9, 0.9, 0.92)  # Цвет фронтонов (для gable)
+
 # Переопределения параметров
 @export var height_override: float = -1.0  # -1 = не менять
 @export var height_multiplier: float = 1.0  # Множитель высоты
@@ -60,6 +65,9 @@ var skip_all_pois: bool = false
 
 # Roof-mounted signs [{lat: float, lon: float, logo: String}]
 var roof_signs: Array = []
+
+# Pediments — надстройки-фронтоны на стене [{lat, lon, rect_height, tri_height, color: [R,G,B]}]
+var pediments: Array = []
 
 
 func matches_way_id(way_id: int) -> bool:

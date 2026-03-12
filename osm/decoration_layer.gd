@@ -166,6 +166,16 @@ func _load_building_overrides_json(path: String) -> void:
 		if od.has("building_material"):
 			override.building_material = od["building_material"]
 
+		# Тип крыши (hip, gable)
+		if od.has("roof_type"):
+			override.roof_type = od["roof_type"]
+		if od.has("ridge_height"):
+			override.ridge_height = od["ridge_height"]
+		if od.has("gable_color"):
+			var gc: Array = od["gable_color"]
+			if gc.size() >= 3:
+				override.gable_color = Color(gc[0], gc[1], gc[2])
+
 		# Входные группы подъездов
 		if od.has("entrances"):
 			override.entrances = od["entrances"]
@@ -189,6 +199,10 @@ func _load_building_overrides_json(path: String) -> void:
 		# Roof-mounted signs
 		if od.has("roof_signs"):
 			override.roof_signs = od["roof_signs"]
+
+		# Pediments (надстройки-фронтоны)
+		if od.has("pediments"):
+			override.pediments = od["pediments"]
 
 		_building_overrides.append(override)
 

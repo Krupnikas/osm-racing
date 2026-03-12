@@ -6304,6 +6304,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	# Вывески на крыше
 	if way_id > 0 and _decoration_layer:
 		_add_roof_signs_from_override(points, parent, building_height, base_elev, way_id)
+		_add_pediments_from_override(points, parent, building_height, base_elev, way_id)
 
 
 func _create_parking(points: PackedVector2Array, parent: Node3D) -> void:
@@ -10431,6 +10432,90 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	var is_ccw := _is_polygon_ccw(points)
 	var normal_sign := -1.0 if is_ccw else 1.0
 
+	# === Per-vertex extra heights from pediments ===
+	var extra_height: Array[float] = []
+	extra_height.resize(points.size())
+	for _ei in points.size():
+		extra_height[_ei] = 0.0
+
+	# Extension walls (above roof_y) — separate mesh with light color
+	var ext_vertices := PackedVector3Array()
+	var ext_uvs := PackedVector2Array()
+	var ext_normals := PackedVector3Array()
+	var ext_indices := PackedInt32Array()
+	var has_extensions := false
+	var ext_color := Color(0.92, 0.92, 0.94)
+	var ext_texture: Texture2D = null
+
+	if building_override and not building_override.pediments.is_empty():
+		for ped_data in building_override.pediments:
+			if not ped_data.has("p1") or not ped_data.has("p2"):
+				continue
+			var ped_p1_ll: Array = ped_data["p1"]
+			var ped_p2_ll: Array = ped_data["p2"]
+			if ped_p1_ll.size() < 2 or ped_p2_ll.size() < 2:
+				continue
+
+			var ped_p1_local := _latlon_to_local(ped_p1_ll[0], ped_p1_ll[1])
+			var ped_p2_local := _latlon_to_local(ped_p2_ll[0], ped_p2_ll[1])
+			var rect_h: float = ped_data.get("rect_height", 2.0)
+			var tri_h: float = ped_data.get("tri_height", 2.0)
+
+			if ped_data.has("color"):
+				var ca: Array = ped_data["color"]
+				if ca.size() >= 3:
+					ext_color = Color(ca[0], ca[1], ca[2])
+
+			if ped_data.has("texture"):
+				var tex_path: String = "res://textures/" + ped_data["texture"]
+				ext_texture = load(tex_path) as Texture2D
+
+			# Find closest polygon vertices to p1 and p2
+			var idx1 := -1
+			var idx2 := -1
+			var best_d1 := 999999.0
+			var best_d2 := 999999.0
+			for vi in points.size():
+				var d1 := points[vi].distance_squared_to(ped_p1_local)
+				var d2 := points[vi].distance_squared_to(ped_p2_local)
+				if d1 < best_d1:
+					best_d1 = d1
+					idx1 = vi
+				if d2 < best_d2:
+					best_d2 = d2
+					idx2 = vi
+
+			if idx1 < 0 or idx2 < 0 or idx1 == idx2:
+				continue
+
+			# Walk from idx1 to idx2 (both directions), use shorter path
+			var walk := []
+			var vi_cur := idx1
+			while vi_cur != idx2:
+				walk.append(vi_cur)
+				vi_cur = (vi_cur + 1) % points.size()
+			walk.append(idx2)
+
+			var walk_rev := []
+			vi_cur = idx1
+			while vi_cur != idx2:
+				walk_rev.append(vi_cur)
+				vi_cur = (vi_cur - 1 + points.size()) % points.size()
+			walk_rev.append(idx2)
+
+			if walk_rev.size() < walk.size():
+				walk = walk_rev
+
+			# Assign heights: corners = rect_h, middle = rect_h + tri_h
+			for wi in walk.size():
+				var vidx: int = walk[wi]
+				if wi == 0 or wi == walk.size() - 1:
+					extra_height[vidx] = maxf(extra_height[vidx], rect_h)
+				else:
+					var t: float = float(wi) / float(walk.size() - 1)
+					var tri_contrib: float = tri_h * (1.0 - abs(t - 0.5) / 0.5)
+					extra_height[vidx] = maxf(extra_height[vidx], rect_h + tri_contrib)
+
 	var accumulated_width := 0.0
 	for i in range(points.size()):
 		var p1 := points[i]
@@ -10493,6 +10578,35 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		wall_indices.append(idx + 2)
 		wall_indices.append(idx + 3)
 
+		# Extension walls above roof_y for pediment vertices
+		var i_next := (i + 1) % points.size()
+		var ext_left: float = extra_height[i]
+		var ext_right: float = extra_height[i_next]
+		if ext_left > 0.0 or ext_right > 0.0:
+			has_extensions = true
+			var eidx := ext_vertices.size()
+			ext_vertices.append(Vector3(p1.x, roof_y, p1.y))
+			ext_vertices.append(Vector3(p2.x, roof_y, p2.y))
+			ext_vertices.append(Vector3(p2.x, roof_y + ext_right, p2.y))
+			ext_vertices.append(Vector3(p1.x, roof_y + ext_left, p1.y))
+			var ext_u_right := wall_width / 3.0  # тайлинг ~3м на повтор
+			var ext_v_left := ext_left / 3.0
+			var ext_v_right := ext_right / 3.0
+			ext_uvs.append(Vector2(0, ext_v_left))           # bottom-left
+			ext_uvs.append(Vector2(ext_u_right, ext_v_right)) # bottom-right
+			ext_uvs.append(Vector2(ext_u_right, 0))           # top-right
+			ext_uvs.append(Vector2(0, 0))                     # top-left
+			ext_normals.append(normal)
+			ext_normals.append(normal)
+			ext_normals.append(normal)
+			ext_normals.append(normal)
+			ext_indices.append(eidx + 0)
+			ext_indices.append(eidx + 1)
+			ext_indices.append(eidx + 2)
+			ext_indices.append(eidx + 0)
+			ext_indices.append(eidx + 2)
+			ext_indices.append(eidx + 3)
+
 		accumulated_width += wall_width
 
 	wall_arrays[Mesh.ARRAY_VERTEX] = wall_vertices
@@ -10508,6 +10622,34 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	wall_mesh_instance.visibility_range_end = render_distance
+
+	# === Extension walls (pediment upper section, light color) ===
+	if has_extensions and ext_vertices.size() >= 3:
+		var ext_arrays := []
+		ext_arrays.resize(Mesh.ARRAY_MAX)
+		ext_arrays[Mesh.ARRAY_VERTEX] = ext_vertices
+		ext_arrays[Mesh.ARRAY_TEX_UV] = ext_uvs
+		ext_arrays[Mesh.ARRAY_NORMAL] = ext_normals
+		ext_arrays[Mesh.ARRAY_INDEX] = ext_indices
+
+		var ext_mesh := ArrayMesh.new()
+		ext_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, ext_arrays)
+
+		var ext_mat := ShaderMaterial.new()
+		ext_mat.shader = BuildingWallShader
+		if ext_texture:
+			ext_mat.set_shader_parameter("use_texture", true)
+			ext_mat.set_shader_parameter("albedo_texture", ext_texture)
+		else:
+			ext_mat.set_shader_parameter("use_texture", false)
+		ext_mat.set_shader_parameter("albedo_color", ext_color)
+		ext_mat.set_shader_parameter("roughness_base", 0.6)
+
+		var ext_inst := MeshInstance3D.new()
+		ext_inst.mesh = ext_mesh
+		ext_inst.material_override = ext_mat
+		ext_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		wall_mesh_instance.add_child(ext_inst)
 	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 
 	# Материал стен с кастомной текстурой - используем ShaderMaterial для правильной работы emission
@@ -10529,9 +10671,12 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	wall_mesh_instance.material_override = wall_material
 
 	# === КРЫША ===
-	var is_gabled: bool = building_override.building_material == "wood"
+	# Определяем тип крыши: explicit roof_type > building_material fallback
+	var effective_roof_type: String = building_override.roof_type
+	if effective_roof_type == "" and building_override.building_material == "wood":
+		effective_roof_type = "hip"
 
-	if is_gabled:
+	if effective_roof_type == "hip":
 		# === ВАЛЬМОВАЯ КРЫША — ребро вдоль длинной стороны, скаты со всех сторон ===
 		var bb_min_x := INF
 		var bb_max_x := -INF
@@ -10545,7 +10690,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 		var roof_sx := bb_max_x - bb_min_x
 		var roof_sz := bb_max_z - bb_min_z
-		var ridge_h := 2.5
+		var ridge_h: float = building_override.ridge_height if building_override.ridge_height > 0 else 2.5
 		var ridge_top := roof_y + ridge_h
 		var ridge_along_x := roof_sx >= roof_sz
 
@@ -10659,8 +10804,163 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		roof_mesh_instance.material_override = _gabled_roof_material
 		wall_mesh_instance.add_child(roof_mesh_instance)
 
+	elif effective_roof_type == "gable":
+		# === ДВУСКАТНАЯ КРЫША (gable) — конёк на полную длину, вертикальные фронтоны ===
+		var bb_min_x := INF
+		var bb_max_x := -INF
+		var bb_min_z := INF
+		var bb_max_z := -INF
+		for p in points:
+			bb_min_x = min(bb_min_x, p.x)
+			bb_max_x = max(bb_max_x, p.x)
+			bb_min_z = min(bb_min_z, p.y)
+			bb_max_z = max(bb_max_z, p.y)
+
+		var roof_sx := bb_max_x - bb_min_x
+		var roof_sz := bb_max_z - bb_min_z
+		var ridge_h: float = building_override.ridge_height if building_override.ridge_height > 0 else 3.5
+		var ridge_top := roof_y + ridge_h
+		var ridge_along_x := roof_sx >= roof_sz
+
+		var rv := PackedVector3Array()
+		var ru := PackedVector2Array()
+		var rn := PackedVector3Array()
+		var ri := PackedInt32Array()
+
+		var c0 := Vector3(bb_min_x, roof_y, bb_min_z)
+		var c1 := Vector3(bb_max_x, roof_y, bb_min_z)
+		var c2 := Vector3(bb_max_x, roof_y, bb_max_z)
+		var c3 := Vector3(bb_min_x, roof_y, bb_max_z)
+
+		# Фронтоны (вертикальные треугольники) — отдельный меш
+		var fv := PackedVector3Array()
+		var fu := PackedVector2Array()
+		var fn := PackedVector3Array()
+		var fi := PackedInt32Array()
+
+		if ridge_along_x:
+			var mid_z := (bb_min_z + bb_max_z) / 2.0
+			# Конёк на полную длину (без inset)
+			var r0 := Vector3(bb_min_x, ridge_top, mid_z)
+			var r1 := Vector3(bb_max_x, ridge_top, mid_z)
+			var half_w := roof_sz / 2.0
+			var slope_l := sqrt(half_w * half_w + ridge_h * ridge_h)
+			var n_front := Vector3(0, half_w / slope_l, -ridge_h / slope_l)
+			var n_back := Vector3(0, half_w / slope_l, ridge_h / slope_l)
+
+			# Скат front (прямоугольник): c0, c1, r1, r0
+			var vi: int = 0
+			rv.append(c0); rv.append(c1); rv.append(r1); rv.append(r0)
+			ru.append(Vector2(0, 1)); ru.append(Vector2(roof_sx * 0.2, 1))
+			ru.append(Vector2(roof_sx * 0.2, 0)); ru.append(Vector2(0, 0))
+			for _i in 4: rn.append(n_front)
+			ri.append_array([0, 1, 2, 0, 2, 3])
+
+			# Скат back (прямоугольник): c3, r0, r1, c2
+			vi = rv.size()
+			rv.append(c3); rv.append(r0); rv.append(r1); rv.append(c2)
+			ru.append(Vector2(0, 1)); ru.append(Vector2(0, 0))
+			ru.append(Vector2(roof_sx * 0.2, 0)); ru.append(Vector2(roof_sx * 0.2, 1))
+			for _i in 4: rn.append(n_back)
+			ri.append_array([vi, vi + 1, vi + 2, vi, vi + 2, vi + 3])
+
+			# Фронтон left (вертикальный треугольник): c0, c3, r0
+			var n_left := Vector3(-1, 0, 0)
+			vi = 0
+			fv.append(c0); fv.append(c3); fv.append(r0)
+			fu.append(Vector2(0, 0)); fu.append(Vector2(1, 0)); fu.append(Vector2(0.5, 1))
+			for _i in 3: fn.append(n_left)
+			fi.append_array([0, 1, 2])
+
+			# Фронтон right (вертикальный треугольник): c1, r1, c2
+			var n_right := Vector3(1, 0, 0)
+			vi = fv.size()
+			fv.append(c1); fv.append(r1); fv.append(c2)
+			fu.append(Vector2(0, 0)); fu.append(Vector2(0.5, 1)); fu.append(Vector2(1, 0))
+			for _i in 3: fn.append(n_right)
+			fi.append_array([vi, vi + 1, vi + 2])
+		else:
+			var mid_x := (bb_min_x + bb_max_x) / 2.0
+			var r0 := Vector3(mid_x, ridge_top, bb_min_z)
+			var r1 := Vector3(mid_x, ridge_top, bb_max_z)
+			var half_w := roof_sx / 2.0
+			var slope_l := sqrt(half_w * half_w + ridge_h * ridge_h)
+			var n_left := Vector3(-ridge_h / slope_l, half_w / slope_l, 0)
+			var n_right := Vector3(ridge_h / slope_l, half_w / slope_l, 0)
+
+			# Скат left: c0, r0, r1, c3
+			var vi: int = 0
+			rv.append(c0); rv.append(r0); rv.append(r1); rv.append(c3)
+			ru.append(Vector2(0, 1)); ru.append(Vector2(0, 0))
+			ru.append(Vector2(roof_sz * 0.2, 0)); ru.append(Vector2(roof_sz * 0.2, 1))
+			for _i in 4: rn.append(n_left)
+			ri.append_array([0, 1, 2, 0, 2, 3])
+
+			# Скат right: c1, c2, r1, r0
+			vi = rv.size()
+			rv.append(c1); rv.append(c2); rv.append(r1); rv.append(r0)
+			ru.append(Vector2(0, 1)); ru.append(Vector2(roof_sz * 0.2, 1))
+			ru.append(Vector2(roof_sz * 0.2, 0)); ru.append(Vector2(0, 0))
+			for _i in 4: rn.append(n_right)
+			ri.append_array([vi, vi + 1, vi + 2, vi, vi + 2, vi + 3])
+
+			# Фронтон front: c0, c1, r0
+			var n_front := Vector3(0, 0, -1)
+			vi = 0
+			fv.append(c0); fv.append(c1); fv.append(r0)
+			fu.append(Vector2(0, 0)); fu.append(Vector2(1, 0)); fu.append(Vector2(0.5, 1))
+			for _i in 3: fn.append(n_front)
+			fi.append_array([0, 1, 2])
+
+			# Фронтон back: c3, r1, c2
+			var n_back := Vector3(0, 0, 1)
+			vi = fv.size()
+			fv.append(c3); fv.append(r1); fv.append(c2)
+			fu.append(Vector2(0, 0)); fu.append(Vector2(0.5, 1)); fu.append(Vector2(1, 0))
+			for _i in 3: fn.append(n_back)
+			fi.append_array([vi, vi + 1, vi + 2])
+
+		# Скаты крыши
+		var roof_arrays := []
+		roof_arrays.resize(Mesh.ARRAY_MAX)
+		roof_arrays[Mesh.ARRAY_VERTEX] = rv
+		roof_arrays[Mesh.ARRAY_TEX_UV] = ru
+		roof_arrays[Mesh.ARRAY_NORMAL] = rn
+		roof_arrays[Mesh.ARRAY_INDEX] = ri
+
+		var roof_mesh := ArrayMesh.new()
+		roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, roof_arrays)
+
+		var roof_mesh_instance := MeshInstance3D.new()
+		roof_mesh_instance.mesh = roof_mesh
+		roof_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		roof_mesh_instance.material_override = _gabled_roof_material
+		wall_mesh_instance.add_child(roof_mesh_instance)
+
+		# Фронтоны — отдельный меш с цветным материалом
+		if fi.size() > 0:
+			var gable_arrays := []
+			gable_arrays.resize(Mesh.ARRAY_MAX)
+			gable_arrays[Mesh.ARRAY_VERTEX] = fv
+			gable_arrays[Mesh.ARRAY_TEX_UV] = fu
+			gable_arrays[Mesh.ARRAY_NORMAL] = fn
+			gable_arrays[Mesh.ARRAY_INDEX] = fi
+
+			var gable_mesh := ArrayMesh.new()
+			gable_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, gable_arrays)
+
+			var gable_material := StandardMaterial3D.new()
+			gable_material.albedo_color = building_override.gable_color
+			gable_material.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+			var gable_instance := MeshInstance3D.new()
+			gable_instance.mesh = gable_mesh
+			gable_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			gable_instance.material_override = gable_material
+			wall_mesh_instance.add_child(gable_instance)
+
 	else:
-		# === ПЛОСКАЯ КРЫША ===
+		# === ПЛОСКАЯ КРЫША (с per-vertex heights для педиментов) ===
 		var roof_indices_2d := Geometry2D.triangulate_polygon(points)
 		if roof_indices_2d.size() >= 3:
 			var roof_arrays := []
@@ -10699,97 +10999,53 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 			wall_mesh_instance.add_child(roof_mesh_instance)
 
 		# === ПАРАПЕТ: наружная, нижняя грани + угловые заполнения ===
-		var parapet_arrays := []
-		parapet_arrays.resize(Mesh.ARRAY_MAX)
-		var par_vertices := PackedVector3Array()
-		var par_uvs := PackedVector2Array()
-		var par_normals := PackedVector3Array()
-		var par_indices := PackedInt32Array()
+		if effective_roof_type != "eaved":
+			var parapet_arrays := []
+			parapet_arrays.resize(Mesh.ARRAY_MAX)
+			var par_vertices := PackedVector3Array()
+			var par_uvs := PackedVector2Array()
+			var par_normals := PackedVector3Array()
+			var par_indices := PackedInt32Array()
 
-		var n_pts := points.size()
-		var parapet_top := roof_y + 0.50
-		var parapet_bottom := roof_y
+			var n_pts := points.size()
+			var parapet_top := roof_y + 0.50
+			var parapet_bottom := roof_y
 
-		# Предвычисляем offset каждого ребра (normal_sign из signed area)
-		var edge_offsets := PackedVector2Array()
-		for ei in n_pts:
-			var ei_next := (ei + 1) % n_pts
-			var edir := (points[ei_next] - points[ei]).normalized()
-			edge_offsets.append(Vector2(-edir.y * normal_sign, edir.x * normal_sign) * 0.20)
+			# Предвычисляем offset каждого ребра (normal_sign из signed area)
+			var edge_offsets := PackedVector2Array()
+			for ei in n_pts:
+				var ei_next := (ei + 1) % n_pts
+				var edir := (points[ei_next] - points[ei]).normalized()
+				edge_offsets.append(Vector2(-edir.y * normal_sign, edir.x * normal_sign) * 0.20)
 
-		for i in n_pts:
-			var i_next := (i + 1) % n_pts
-			var p0 := points[i]
-			var p1 := points[i_next]
-			var off := edge_offsets[i]
-			var dir2 := (p1 - p0).normalized()
-			var out_normal := Vector3(-dir2.y * normal_sign, 0.0, dir2.x * normal_sign)
+			for i in n_pts:
+				var i_next := (i + 1) % n_pts
+				# Skip parapet for edges with raised pediment walls
+				if extra_height[i] > 0.0 or extra_height[i_next] > 0.0:
+					continue
+				var p0 := points[i]
+				var p1 := points[i_next]
+				var off := edge_offsets[i]
+				var dir2 := (p1 - p0).normalized()
+				var out_normal := Vector3(-dir2.y * normal_sign, 0.0, dir2.x * normal_sign)
 
-			var op0 := p0 + off
-			var op1 := p1 + off
+				var op0 := p0 + off
+				var op1 := p1 + off
 
-			# Наружная грань
-			var vi := par_vertices.size()
-			par_vertices.append(Vector3(op0.x, parapet_top, op0.y))
-			par_vertices.append(Vector3(op1.x, parapet_top, op1.y))
-			par_vertices.append(Vector3(op1.x, parapet_bottom, op1.y))
-			par_vertices.append(Vector3(op0.x, parapet_bottom, op0.y))
-			par_uvs.append(Vector2(0, 0))
-			par_uvs.append(Vector2(1, 0))
-			par_uvs.append(Vector2(1, 1))
-			par_uvs.append(Vector2(0, 1))
-			par_normals.append(out_normal)
-			par_normals.append(out_normal)
-			par_normals.append(out_normal)
-			par_normals.append(out_normal)
-			par_indices.append(vi + 0)
-			par_indices.append(vi + 1)
-			par_indices.append(vi + 2)
-			par_indices.append(vi + 0)
-			par_indices.append(vi + 2)
-			par_indices.append(vi + 3)
-
-			# Нижняя грань
-			vi = par_vertices.size()
-			par_vertices.append(Vector3(op0.x, parapet_bottom, op0.y))
-			par_vertices.append(Vector3(op1.x, parapet_bottom, op1.y))
-			par_vertices.append(Vector3(p1.x, parapet_bottom, p1.y))
-			par_vertices.append(Vector3(p0.x, parapet_bottom, p0.y))
-			par_uvs.append(Vector2(0, 0))
-			par_uvs.append(Vector2(1, 0))
-			par_uvs.append(Vector2(1, 1))
-			par_uvs.append(Vector2(0, 1))
-			par_normals.append(Vector3.DOWN)
-			par_normals.append(Vector3.DOWN)
-			par_normals.append(Vector3.DOWN)
-			par_normals.append(Vector3.DOWN)
-			par_indices.append(vi + 0)
-			par_indices.append(vi + 1)
-			par_indices.append(vi + 2)
-			par_indices.append(vi + 0)
-			par_indices.append(vi + 2)
-			par_indices.append(vi + 3)
-
-			# Угловое заполнение
-			var next_off := edge_offsets[i_next]
-			var corner_a := p1 + off
-			var corner_b := p1 + next_off
-			if corner_a.distance_squared_to(corner_b) > 0.0001:
-				var mid_dir := (off.normalized() + next_off.normalized()).normalized()
-				var face_normal := Vector3(mid_dir.x, 0.0, mid_dir.y)
-				vi = par_vertices.size()
-				par_vertices.append(Vector3(corner_a.x, parapet_top, corner_a.y))
-				par_vertices.append(Vector3(corner_b.x, parapet_top, corner_b.y))
-				par_vertices.append(Vector3(corner_b.x, parapet_bottom, corner_b.y))
-				par_vertices.append(Vector3(corner_a.x, parapet_bottom, corner_a.y))
+				# Наружная грань
+				var vi := par_vertices.size()
+				par_vertices.append(Vector3(op0.x, parapet_top, op0.y))
+				par_vertices.append(Vector3(op1.x, parapet_top, op1.y))
+				par_vertices.append(Vector3(op1.x, parapet_bottom, op1.y))
+				par_vertices.append(Vector3(op0.x, parapet_bottom, op0.y))
 				par_uvs.append(Vector2(0, 0))
 				par_uvs.append(Vector2(1, 0))
 				par_uvs.append(Vector2(1, 1))
 				par_uvs.append(Vector2(0, 1))
-				par_normals.append(face_normal)
-				par_normals.append(face_normal)
-				par_normals.append(face_normal)
-				par_normals.append(face_normal)
+				par_normals.append(out_normal)
+				par_normals.append(out_normal)
+				par_normals.append(out_normal)
+				par_normals.append(out_normal)
 				par_indices.append(vi + 0)
 				par_indices.append(vi + 1)
 				par_indices.append(vi + 2)
@@ -10797,26 +11053,74 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 				par_indices.append(vi + 2)
 				par_indices.append(vi + 3)
 
-		parapet_arrays[Mesh.ARRAY_VERTEX] = par_vertices
-		parapet_arrays[Mesh.ARRAY_TEX_UV] = par_uvs
-		parapet_arrays[Mesh.ARRAY_NORMAL] = par_normals
-		parapet_arrays[Mesh.ARRAY_INDEX] = par_indices
+				# Нижняя грань
+				vi = par_vertices.size()
+				par_vertices.append(Vector3(op0.x, parapet_bottom, op0.y))
+				par_vertices.append(Vector3(op1.x, parapet_bottom, op1.y))
+				par_vertices.append(Vector3(p1.x, parapet_bottom, p1.y))
+				par_vertices.append(Vector3(p0.x, parapet_bottom, p0.y))
+				par_uvs.append(Vector2(0, 0))
+				par_uvs.append(Vector2(1, 0))
+				par_uvs.append(Vector2(1, 1))
+				par_uvs.append(Vector2(0, 1))
+				par_normals.append(Vector3.DOWN)
+				par_normals.append(Vector3.DOWN)
+				par_normals.append(Vector3.DOWN)
+				par_normals.append(Vector3.DOWN)
+				par_indices.append(vi + 0)
+				par_indices.append(vi + 1)
+				par_indices.append(vi + 2)
+				par_indices.append(vi + 0)
+				par_indices.append(vi + 2)
+				par_indices.append(vi + 3)
 
-		var parapet_mesh := ArrayMesh.new()
-		parapet_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, parapet_arrays)
+				# Угловое заполнение
+				var next_off := edge_offsets[i_next]
+				var corner_a := p1 + off
+				var corner_b := p1 + next_off
+				if corner_a.distance_squared_to(corner_b) > 0.0001:
+					var mid_dir := (off.normalized() + next_off.normalized()).normalized()
+					var face_normal := Vector3(mid_dir.x, 0.0, mid_dir.y)
+					vi = par_vertices.size()
+					par_vertices.append(Vector3(corner_a.x, parapet_top, corner_a.y))
+					par_vertices.append(Vector3(corner_b.x, parapet_top, corner_b.y))
+					par_vertices.append(Vector3(corner_b.x, parapet_bottom, corner_b.y))
+					par_vertices.append(Vector3(corner_a.x, parapet_bottom, corner_a.y))
+					par_uvs.append(Vector2(0, 0))
+					par_uvs.append(Vector2(1, 0))
+					par_uvs.append(Vector2(1, 1))
+					par_uvs.append(Vector2(0, 1))
+					par_normals.append(face_normal)
+					par_normals.append(face_normal)
+					par_normals.append(face_normal)
+					par_normals.append(face_normal)
+					par_indices.append(vi + 0)
+					par_indices.append(vi + 1)
+					par_indices.append(vi + 2)
+					par_indices.append(vi + 0)
+					par_indices.append(vi + 2)
+					par_indices.append(vi + 3)
 
-		var parapet_mesh_instance := MeshInstance3D.new()
-		parapet_mesh_instance.mesh = parapet_mesh
-		parapet_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			parapet_arrays[Mesh.ARRAY_VERTEX] = par_vertices
+			parapet_arrays[Mesh.ARRAY_TEX_UV] = par_uvs
+			parapet_arrays[Mesh.ARRAY_NORMAL] = par_normals
+			parapet_arrays[Mesh.ARRAY_INDEX] = par_indices
 
-		var parapet_material := ShaderMaterial.new()
-		parapet_material.shader = BuildingWallShader
-		parapet_material.set_shader_parameter("use_texture", false)
-		parapet_material.set_shader_parameter("albedo_color", Color(0.5, 0.5, 0.5))
-		parapet_material.set_shader_parameter("roughness_base", 0.7)
-		parapet_mesh_instance.material_override = parapet_material
+			var parapet_mesh := ArrayMesh.new()
+			parapet_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, parapet_arrays)
 
-		wall_mesh_instance.add_child(parapet_mesh_instance)
+			var parapet_mesh_instance := MeshInstance3D.new()
+			parapet_mesh_instance.mesh = parapet_mesh
+			parapet_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+			var parapet_material := ShaderMaterial.new()
+			parapet_material.shader = BuildingWallShader
+			parapet_material.set_shader_parameter("use_texture", false)
+			parapet_material.set_shader_parameter("albedo_color", Color(0.5, 0.5, 0.5))
+			parapet_material.set_shader_parameter("roughness_base", 0.7)
+			parapet_mesh_instance.material_override = parapet_material
+
+			wall_mesh_instance.add_child(parapet_mesh_instance)
 
 	# === ФУНДАМЕНТ ===
 	var fnd_ci2 := int(abs(points[0].x * 73.0 + points[0].y * 137.0)) % 4
@@ -15119,6 +15423,472 @@ func _add_roof_signs_from_override(points: PackedVector2Array, parent: Node3D, b
 		parent.add_child(sign_light)
 
 		print("RoofSign: added at roof for way %d" % way_id)
+
+
+func _add_pediments_from_override(points: PackedVector2Array, parent: Node3D, building_height: float, base_elev: float, way_id: int) -> void:
+	"""Generates gable roof cap over raised pediment sections using actual polygon vertices."""
+	if not _decoration_layer or way_id <= 0:
+		return
+	var override = _decoration_layer.get_building_override_for_way(way_id)
+	if not override or override.pediments.is_empty():
+		return
+
+	var roof_y := base_elev + building_height
+
+	# Центр здания для вычисления inward
+	var center := Vector2.ZERO
+	for p in points:
+		center += p
+	center /= points.size()
+
+	for ped_data in override.pediments:
+		var rect_h: float = ped_data.get("rect_height", 2.0)
+		var tri_h: float = ped_data.get("tri_height", 2.0)
+		var depth: float = ped_data.get("depth", 6.0)
+
+		if not ped_data.has("p1") or not ped_data.has("p2"):
+			continue
+		var p1_ll: Array = ped_data["p1"]
+		var p2_ll: Array = ped_data["p2"]
+		if p1_ll.size() < 2 or p2_ll.size() < 2:
+			continue
+
+		var p1 := _latlon_to_local(p1_ll[0], p1_ll[1])
+		var p2 := _latlon_to_local(p2_ll[0], p2_ll[1])
+
+		# Find polygon vertex indices for p1 and p2
+		var idx1 := -1
+		var idx2 := -1
+		var best_d1 := 1e18
+		var best_d2 := 1e18
+		for vi in points.size():
+			var d1 := points[vi].distance_squared_to(p1)
+			var d2 := points[vi].distance_squared_to(p2)
+			if d1 < best_d1:
+				best_d1 = d1
+				idx1 = vi
+			if d2 < best_d2:
+				best_d2 = d2
+				idx2 = vi
+		if idx1 < 0 or idx2 < 0 or idx1 == idx2:
+			continue
+
+		# Walk from idx1 to idx2, pick shorter path
+		var walk := []
+		var vi_cur := idx1
+		while vi_cur != idx2:
+			walk.append(vi_cur)
+			vi_cur = (vi_cur + 1) % points.size()
+		walk.append(idx2)
+		var walk_rev := []
+		vi_cur = idx1
+		while vi_cur != idx2:
+			walk_rev.append(vi_cur)
+			vi_cur = (vi_cur - 1 + points.size()) % points.size()
+		walk_rev.append(idx2)
+		if walk_rev.size() < walk.size():
+			walk = walk_rev
+
+		# Compute extra_height per walk vertex (same logic as wall extension)
+		var walk_extra := []
+		for wi in walk.size():
+			if wi == 0 or wi == walk.size() - 1:
+				walk_extra.append(rect_h)
+			else:
+				var t: float = float(wi) / float(walk.size() - 1)
+				var tri_contrib: float = tri_h * (1.0 - abs(t - 0.5) / 0.5)
+				walk_extra.append(rect_h + tri_contrib)
+
+		# Inward direction (from front wall toward building center)
+		var wall_dir := (p2 - p1).normalized()
+		var normal_2d := Vector2(wall_dir.y, -wall_dir.x)
+		var wall_center_2d := (p1 + p2) / 2.0
+		if normal_2d.dot(wall_center_2d - center) < 0:
+			normal_2d = -normal_2d
+		var inward_dir := Vector3(-normal_2d.x, 0, -normal_2d.y)
+		var inward := inward_dir * depth
+		# Свес крыши: выступ наружу от стен
+		var overhang := 0.5
+		var outward := -inward_dir * overhang
+
+		# Build roof slopes per edge in walk — each slope quad goes from
+		# front edge (at actual polygon vertex heights + overhang) to back edge (at roof_y + inward)
+		var rv := PackedVector3Array()
+		var ru := PackedVector2Array()
+		var rn := PackedVector3Array()
+		var ri := PackedInt32Array()
+
+		for wi in range(walk.size() - 1):
+			var left_idx: int = walk[wi]
+			var right_idx: int = walk[wi + 1]
+			var left_pt: Vector2 = points[left_idx]
+			var right_pt: Vector2 = points[right_idx]
+			var left_y: float = roof_y + float(walk_extra[wi])
+			var right_y: float = roof_y + float(walk_extra[wi + 1])
+
+			# Front edge: polygon vertices + outward overhang, slightly lower
+			var f_left := Vector3(left_pt.x, left_y - 0.1, left_pt.y) + outward
+			var f_right := Vector3(right_pt.x, right_y - 0.1, right_pt.y) + outward
+			# Back edge: same XZ offset by inward, at roof_y (flat at back)
+			var b_left := Vector3(left_pt.x, roof_y, left_pt.y) + inward
+			var b_right := Vector3(right_pt.x, roof_y, right_pt.y) + inward
+
+			var vi_base: int = rv.size()
+			rv.append(f_left)   # 0
+			rv.append(f_right)  # 1
+			rv.append(b_right)  # 2
+			rv.append(b_left)   # 3
+
+			var slope_n := (f_right - f_left).cross(b_left - f_left).normalized()
+			if slope_n.y < 0:
+				slope_n = -slope_n
+			for _i in 4:
+				rn.append(slope_n)
+
+			ru.append(Vector2(0, 0))
+			ru.append(Vector2(1, 0))
+			ru.append(Vector2(1, 1))
+			ru.append(Vector2(0, 1))
+
+			ri.append_array([vi_base, vi_base + 1, vi_base + 2, vi_base, vi_base + 2, vi_base + 3])
+
+		if rv.size() < 3:
+			continue
+
+		var roof_arrays := []
+		roof_arrays.resize(Mesh.ARRAY_MAX)
+		roof_arrays[Mesh.ARRAY_VERTEX] = rv
+		roof_arrays[Mesh.ARRAY_TEX_UV] = ru
+		roof_arrays[Mesh.ARRAY_NORMAL] = rn
+		roof_arrays[Mesh.ARRAY_INDEX] = ri
+
+		var roof_mesh := ArrayMesh.new()
+		roof_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, roof_arrays)
+
+		var roof_inst := MeshInstance3D.new()
+		roof_inst.mesh = roof_mesh
+		roof_inst.material_override = _gabled_roof_material
+		roof_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+		roof_inst.name = "PedimentRoof_%d" % way_id
+		parent.add_child(roof_inst)
+
+		print("PedimentRoof: gable cap for way %d, walk=%s, extras=%s" % [way_id, str(walk), str(walk_extra)])
+
+		# === Logo on front face ===
+		if ped_data.has("logo"):
+			var logo_path: String = "res://textures/" + ped_data["logo"]
+			var logo_tex: Texture2D = load(logo_path) as Texture2D
+			if logo_tex:
+				# Center of front wall: midpoint between p1 and p2
+				var mid_2d := (p1 + p2) / 2.0
+				# Find peak extra height for vertical centering
+				var max_extra := 0.0
+				for we in walk_extra:
+					if float(we) > max_extra:
+						max_extra = float(we)
+				# Logo center Y: middle of the rect_height section, raised 0.3m
+				var logo_center_y := roof_y + rect_h * 0.5 + 0.3
+				# Logo size: aspect ratio from texture
+				var logo_aspect: float = float(logo_tex.get_width()) / float(logo_tex.get_height())
+				var logo_h := rect_h * 1.2
+				var logo_w := logo_h * logo_aspect
+				# Wall tangent and outward normal
+				var logo_wall_dir := (p2 - p1).normalized()
+				var logo_tangent := Vector3(logo_wall_dir.x, 0, logo_wall_dir.y)
+				var logo_outward := Vector3(normal_2d.x, 0, normal_2d.y) * 0.05
+				var logo_center := Vector3(mid_2d.x, logo_center_y, mid_2d.y) + logo_outward
+
+				var lv := PackedVector3Array()
+				lv.append(logo_center - logo_tangent * logo_w * 0.5 - Vector3(0, logo_h * 0.5, 0))
+				lv.append(logo_center + logo_tangent * logo_w * 0.5 - Vector3(0, logo_h * 0.5, 0))
+				lv.append(logo_center + logo_tangent * logo_w * 0.5 + Vector3(0, logo_h * 0.5, 0))
+				lv.append(logo_center - logo_tangent * logo_w * 0.5 + Vector3(0, logo_h * 0.5, 0))
+				var lu := PackedVector2Array([Vector2(0, 1), Vector2(1, 1), Vector2(1, 0), Vector2(0, 0)])
+				var ln_vec := Vector3(normal_2d.x, 0, normal_2d.y).normalized()
+				var ln := PackedVector3Array([ln_vec, ln_vec, ln_vec, ln_vec])
+				var li := PackedInt32Array([0, 1, 2, 0, 2, 3])
+
+				var logo_arrays := []
+				logo_arrays.resize(Mesh.ARRAY_MAX)
+				logo_arrays[Mesh.ARRAY_VERTEX] = lv
+				logo_arrays[Mesh.ARRAY_TEX_UV] = lu
+				logo_arrays[Mesh.ARRAY_NORMAL] = ln
+				logo_arrays[Mesh.ARRAY_INDEX] = li
+
+				var logo_mesh := ArrayMesh.new()
+				logo_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, logo_arrays)
+
+				var logo_shader := Shader.new()
+				logo_shader.code = """
+shader_type spatial;
+render_mode cull_disabled, diffuse_lambert_wrap;
+uniform sampler2D logo_texture : source_color, filter_linear_mipmap;
+uniform float emission_energy : hint_range(0.0, 8.0) = 2.0;
+global uniform bool is_night_global;
+void fragment() {
+	vec4 tex = texture(logo_texture, UV);
+	if (tex.a < 0.5) discard;
+	ALBEDO = tex.rgb;
+	ROUGHNESS = 0.4;
+	METALLIC = 0.0;
+	if (!FRONT_FACING) NORMAL = -NORMAL;
+	if (is_night_global) {
+		EMISSION = tex.rgb * emission_energy;
+	}
+}
+"""
+				var logo_mat := ShaderMaterial.new()
+				logo_mat.shader = logo_shader
+				logo_mat.set_shader_parameter("logo_texture", logo_tex)
+				logo_mat.set_shader_parameter("emission_energy", 2.0)
+
+				var logo_inst := MeshInstance3D.new()
+				logo_inst.mesh = logo_mesh
+				logo_inst.material_override = logo_mat
+				logo_inst.name = "PedimentLogo_%d" % way_id
+				parent.add_child(logo_inst)
+
+		# === Entrance group along pediment front wall ===
+		var entrance_text: String = ped_data.get("entrance_text", "")
+		if entrance_text != "":
+			var ground_y := base_elev
+			var entrance_h := 3.5  # one story
+			var wall_width_full := p1.distance_to(p2)
+			var outward_3d := Vector3(normal_2d.x, 0, normal_2d.y)
+			var tangent_3d := Vector3(wall_dir.x, 0, wall_dir.y)
+			var canopy_depth := 1.5
+			var canopy_thick := 0.1
+			var frame_width := 0.08
+			var panel_count := int(wall_width_full / 2.0)
+			if panel_count < 3:
+				panel_count = 3
+			var panel_width := wall_width_full / panel_count
+
+			# Glass panels + frames
+			var gv := PackedVector3Array()
+			var gu := PackedVector2Array()
+			var gn := PackedVector3Array()
+			var gi := PackedInt32Array()
+			var fv := PackedVector3Array()  # frames
+			var fu := PackedVector2Array()
+			var fn := PackedVector3Array()
+			var fi := PackedInt32Array()
+
+			var n3d := outward_3d.normalized()
+			var wall_offset := outward_3d * 0.15  # in front of wall to avoid z-fighting
+
+			for pi in panel_count:
+				var t_left := float(pi) / panel_count
+				var t_right := float(pi + 1) / panel_count
+				var left_2d := p1.lerp(p2, t_left)
+				var right_2d := p1.lerp(p2, t_right)
+
+				# Glass panel (inset by frame_width)
+				var gl := left_2d + wall_dir * frame_width
+				var gr := right_2d - wall_dir * frame_width
+				var gidx := gv.size()
+				gv.append(Vector3(gl.x, ground_y + frame_width, gl.y) + wall_offset)
+				gv.append(Vector3(gr.x, ground_y + frame_width, gr.y) + wall_offset)
+				gv.append(Vector3(gr.x, ground_y + entrance_h - frame_width, gr.y) + wall_offset)
+				gv.append(Vector3(gl.x, ground_y + entrance_h - frame_width, gl.y) + wall_offset)
+				gu.append(Vector2(0, 1)); gu.append(Vector2(1, 1))
+				gu.append(Vector2(1, 0)); gu.append(Vector2(0, 0))
+				for _i in 4: gn.append(n3d)
+				gi.append_array([gidx, gidx+1, gidx+2, gidx, gidx+2, gidx+3])
+
+				# Vertical frame left
+				var fidx := fv.size()
+				fv.append(Vector3(left_2d.x, ground_y, left_2d.y) + wall_offset)
+				fv.append(Vector3(gl.x, ground_y, gl.y) + wall_offset)
+				fv.append(Vector3(gl.x, ground_y + entrance_h, gl.y) + wall_offset)
+				fv.append(Vector3(left_2d.x, ground_y + entrance_h, left_2d.y) + wall_offset)
+				fu.append(Vector2(0, 1)); fu.append(Vector2(1, 1))
+				fu.append(Vector2(1, 0)); fu.append(Vector2(0, 0))
+				for _i in 4: fn.append(n3d)
+				fi.append_array([fidx, fidx+1, fidx+2, fidx, fidx+2, fidx+3])
+
+			# Right-most frame
+			var fidx2 := fv.size()
+			fv.append(Vector3(p2.x, ground_y, p2.y) + wall_offset - tangent_3d * frame_width)
+			fv.append(Vector3(p2.x, ground_y, p2.y) + wall_offset)
+			fv.append(Vector3(p2.x, ground_y + entrance_h, p2.y) + wall_offset)
+			fv.append(Vector3(p2.x, ground_y + entrance_h, p2.y) + wall_offset - tangent_3d * frame_width)
+			fu.append(Vector2(0, 1)); fu.append(Vector2(1, 1))
+			fu.append(Vector2(1, 0)); fu.append(Vector2(0, 0))
+			for _i in 4: fn.append(n3d)
+			fi.append_array([fidx2, fidx2+1, fidx2+2, fidx2, fidx2+2, fidx2+3])
+
+			# Top frame bar
+			fidx2 = fv.size()
+			fv.append(Vector3(p1.x, ground_y + entrance_h - frame_width, p1.y) + wall_offset)
+			fv.append(Vector3(p2.x, ground_y + entrance_h - frame_width, p2.y) + wall_offset)
+			fv.append(Vector3(p2.x, ground_y + entrance_h, p2.y) + wall_offset)
+			fv.append(Vector3(p1.x, ground_y + entrance_h, p1.y) + wall_offset)
+			fu.append(Vector2(0, 1)); fu.append(Vector2(1, 1))
+			fu.append(Vector2(1, 0)); fu.append(Vector2(0, 0))
+			for _i in 4: fn.append(n3d)
+			fi.append_array([fidx2, fidx2+1, fidx2+2, fidx2, fidx2+2, fidx2+3])
+
+			# Bottom frame bar
+			fidx2 = fv.size()
+			fv.append(Vector3(p1.x, ground_y, p1.y) + wall_offset)
+			fv.append(Vector3(p2.x, ground_y, p2.y) + wall_offset)
+			fv.append(Vector3(p2.x, ground_y + frame_width, p2.y) + wall_offset)
+			fv.append(Vector3(p1.x, ground_y + frame_width, p1.y) + wall_offset)
+			fu.append(Vector2(0, 1)); fu.append(Vector2(1, 1))
+			fu.append(Vector2(1, 0)); fu.append(Vector2(0, 0))
+			for _i in 4: fn.append(n3d)
+			fi.append_array([fidx2, fidx2+1, fidx2+2, fidx2, fidx2+2, fidx2+3])
+
+			# Create glass mesh
+			var glass_arrays := []
+			glass_arrays.resize(Mesh.ARRAY_MAX)
+			glass_arrays[Mesh.ARRAY_VERTEX] = gv
+			glass_arrays[Mesh.ARRAY_TEX_UV] = gu
+			glass_arrays[Mesh.ARRAY_NORMAL] = gn
+			glass_arrays[Mesh.ARRAY_INDEX] = gi
+			var frame_arrays := []
+			frame_arrays.resize(Mesh.ARRAY_MAX)
+			frame_arrays[Mesh.ARRAY_VERTEX] = fv
+			frame_arrays[Mesh.ARRAY_TEX_UV] = fu
+			frame_arrays[Mesh.ARRAY_NORMAL] = fn
+			frame_arrays[Mesh.ARRAY_INDEX] = fi
+
+			var entrance_mesh := ArrayMesh.new()
+			entrance_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, glass_arrays)
+			entrance_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, frame_arrays)
+
+			# Glass material
+			var glass_shader := Shader.new()
+			glass_shader.code = """
+shader_type spatial;
+render_mode cull_disabled, diffuse_lambert_wrap;
+global uniform bool is_night_global;
+global uniform float wetness_global;
+void fragment() {
+	ALBEDO = vec3(0.25, 0.35, 0.5);
+	ALPHA = 0.95;
+	ROUGHNESS = 0.05;
+	METALLIC = 0.15;
+	SPECULAR = 0.8;
+	if (!FRONT_FACING) NORMAL = -NORMAL;
+	if (is_night_global) {
+		EMISSION = vec3(0.15, 0.12, 0.08) * 0.5;
+	}
+}
+"""
+			var glass_mat := ShaderMaterial.new()
+			glass_mat.shader = glass_shader
+
+			# Frame material
+			var frame_mat := ShaderMaterial.new()
+			frame_mat.shader = BuildingWallShader
+			frame_mat.set_shader_parameter("use_texture", false)
+			frame_mat.set_shader_parameter("albedo_color", Color(0.15, 0.15, 0.18))
+			frame_mat.set_shader_parameter("roughness_base", 0.3)
+
+			var entrance_inst := MeshInstance3D.new()
+			entrance_inst.mesh = entrance_mesh
+			entrance_inst.set_surface_override_material(0, glass_mat)
+			entrance_inst.set_surface_override_material(1, frame_mat)
+			entrance_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			entrance_inst.name = "PedimentEntrance_%d" % way_id
+			parent.add_child(entrance_inst)
+
+			# Collision wall for entrance — trimesh at exact vertex positions
+			var col_body := StaticBody3D.new()
+			col_body.name = "PedimentEntranceCol_%d" % way_id
+			var col_off := outward_3d * 0.15
+			var c1 := Vector3(p1.x, ground_y, p1.y) + col_off
+			var c2 := Vector3(p2.x, ground_y, p2.y) + col_off
+			var c3 := Vector3(p2.x, ground_y + entrance_h, p2.y) + col_off
+			var c4 := Vector3(p1.x, ground_y + entrance_h, p1.y) + col_off
+			var col_faces := PackedVector3Array([c1, c2, c3, c1, c3, c4])
+			var col_shape := CollisionShape3D.new()
+			var concave := ConcavePolygonShape3D.new()
+			concave.set_faces(col_faces)
+			col_shape.shape = concave
+			col_body.add_child(col_shape)
+			parent.add_child(col_body)
+
+			# Canopy above entrance
+			var canopy_y := ground_y + entrance_h
+			var cv := PackedVector3Array()
+			var cu := PackedVector2Array()
+			var cn := PackedVector3Array()
+			var ci := PackedInt32Array()
+			# Top face
+			cv.append(Vector3(p1.x, canopy_y + canopy_thick, p1.y) + wall_offset)
+			cv.append(Vector3(p2.x, canopy_y + canopy_thick, p2.y) + wall_offset)
+			cv.append(Vector3(p2.x, canopy_y + canopy_thick, p2.y) + wall_offset + outward_3d * canopy_depth)
+			cv.append(Vector3(p1.x, canopy_y + canopy_thick, p1.y) + wall_offset + outward_3d * canopy_depth)
+			cu.append(Vector2(0, 0)); cu.append(Vector2(1, 0))
+			cu.append(Vector2(1, 1)); cu.append(Vector2(0, 1))
+			for _i in 4: cn.append(Vector3.UP)
+			ci.append_array([0, 1, 2, 0, 2, 3])
+			# Bottom face
+			var cidx := cv.size()
+			cv.append(Vector3(p1.x, canopy_y, p1.y) + wall_offset + outward_3d * canopy_depth)
+			cv.append(Vector3(p2.x, canopy_y, p2.y) + wall_offset + outward_3d * canopy_depth)
+			cv.append(Vector3(p2.x, canopy_y, p2.y) + wall_offset)
+			cv.append(Vector3(p1.x, canopy_y, p1.y) + wall_offset)
+			cu.append(Vector2(0, 0)); cu.append(Vector2(1, 0))
+			cu.append(Vector2(1, 1)); cu.append(Vector2(0, 1))
+			for _i in 4: cn.append(Vector3.DOWN)
+			ci.append_array([cidx, cidx+1, cidx+2, cidx, cidx+2, cidx+3])
+			# Front edge
+			cidx = cv.size()
+			cv.append(Vector3(p1.x, canopy_y, p1.y) + wall_offset + outward_3d * canopy_depth)
+			cv.append(Vector3(p2.x, canopy_y, p2.y) + wall_offset + outward_3d * canopy_depth)
+			cv.append(Vector3(p2.x, canopy_y + canopy_thick, p2.y) + wall_offset + outward_3d * canopy_depth)
+			cv.append(Vector3(p1.x, canopy_y + canopy_thick, p1.y) + wall_offset + outward_3d * canopy_depth)
+			cu.append(Vector2(0, 1)); cu.append(Vector2(1, 1))
+			cu.append(Vector2(1, 0)); cu.append(Vector2(0, 0))
+			for _i in 4: cn.append(n3d)
+			ci.append_array([cidx, cidx+1, cidx+2, cidx, cidx+2, cidx+3])
+
+			var canopy_arrays := []
+			canopy_arrays.resize(Mesh.ARRAY_MAX)
+			canopy_arrays[Mesh.ARRAY_VERTEX] = cv
+			canopy_arrays[Mesh.ARRAY_TEX_UV] = cu
+			canopy_arrays[Mesh.ARRAY_NORMAL] = cn
+			canopy_arrays[Mesh.ARRAY_INDEX] = ci
+
+			var canopy_mesh := ArrayMesh.new()
+			canopy_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, canopy_arrays)
+			var canopy_mat := ShaderMaterial.new()
+			canopy_mat.shader = BuildingWallShader
+			canopy_mat.set_shader_parameter("use_texture", false)
+			canopy_mat.set_shader_parameter("albedo_color", Color(0.3, 0.3, 0.32))
+			canopy_mat.set_shader_parameter("roughness_base", 0.4)
+
+			var canopy_inst := MeshInstance3D.new()
+			canopy_inst.mesh = canopy_mesh
+			canopy_inst.material_override = canopy_mat
+			canopy_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			canopy_inst.name = "PedimentCanopy_%d" % way_id
+			parent.add_child(canopy_inst)
+
+			# Text label directly on building wall (no background)
+			var sign_mid := (p1 + p2) / 2.0
+			var label_y := canopy_y + canopy_thick + 0.5
+			var label := Label3D.new()
+			label.text = entrance_text
+			label.font = load("res://ui/fonts/arial_bold.ttf") as Font
+			if not label.font:
+				label.font = ThemeDB.fallback_font
+			label.font_size = 128
+			label.pixel_size = 0.005
+			label.modulate = Color(0.1, 0.1, 0.5)
+			label.outline_modulate = Color(0.05, 0.05, 0.3)
+			label.outline_size = 8
+			label.no_depth_test = false
+			label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+			label.position = Vector3(sign_mid.x, label_y, sign_mid.y) + outward_3d * 0.06
+			label.rotation.y = atan2(normal_2d.x, normal_2d.y)
+			label.name = "PedimentSignText_%d" % way_id
+			parent.add_child(label)
 
 
 func _create_shop_back_wall(height: float, width: float, colors: Array) -> MeshInstance3D:
