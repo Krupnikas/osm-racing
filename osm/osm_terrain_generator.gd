@@ -204,6 +204,7 @@ var _pending_road_tasks_by_chunk: Dictionary = {}  # chunk_key -> int active wor
 var _road_batch_data: Dictionary = {}  # key: chunk_key -> { "highway": {vertices, uvs, normals, indices}, "primary": {...}, ...}
 var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batches (нужно финализировать)
 var _chunk_terrain_roads: Dictionary = {}  # chunk_key → Array[{points: PackedVector2Array, width: float}] — для отложенного выреза террейна
+var _deferred_path_polys: Dictionary = {}  # chunk_key → Array[{polys, raw_points, width, height_offset, parent}] — footpath polygons waiting for road clipping at finalization
 var _chunk_water_polygons: Dictionary = {}  # chunk_key → Array[PackedVector2Array] — водоёмы для выреза террейна + берег
 var _deferred_terrain_chunks: Array[String] = []  # Чанки ожидающие terrain clipping (ждут соседей)
 
@@ -2817,6 +2818,7 @@ func reset_terrain() -> void:
 	_road_batch_data.clear()
 	_chunk_terrain_roads.clear()
 	_chunk_water_polygons.clear()
+	_deferred_path_polys.clear()
 	_deferred_terrain_chunks.clear()
 
 	# Reset draw call stats (prevent stale stats across location changes)
@@ -4156,7 +4158,8 @@ func _apply_road_result(result: Dictionary) -> void:
 				"smoothed_points": cleaned,
 				"width": width,
 				"tags": result.get("tags", {}),
-				"parent": parent
+				"parent": parent,
+				"way_id": result.get("way_id", 0),
 			})
 	else:
 		# Merge geometry into batch data
@@ -4915,7 +4918,7 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 			item["_in_parking"] = in_parking
 			return false  # resume next frame
 		var p: Vector2 = smoothed_points[pt_idx]
-		on_road.append(_is_point_on_vehicle_road(p, 1.0, ck))
+		on_road.append(_is_point_on_vehicle_road_neighborhood(p, 1.0, ck))
 		in_parking.append(_is_point_in_any_parking(p, ck))
 		pt_idx += 1
 
@@ -4960,14 +4963,20 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 			current_pts.append(edge_pt)
 			if current_pts.size() >= 2:
 				if current_on:
-					var is_full: bool = is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, smoothed_points[i], ck))
+					var road_info: Dictionary = {}
+					if not is_tagged_crossing and has_before_off:
+						road_info = _detect_road_crossing(last_off_road_pt, smoothed_points[i], ck)
+					var is_full: bool = is_tagged_crossing or not road_info.is_empty()
 					if is_full:
-						# Crossing markings are an overlay; keep a plain road base under them
-						# so curb openings do not expose fallback terrain.
-						_add_road_to_batch_fast(current_pts, width, "intersection", 0.012, parent)
-						_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+						var cross_pts := current_pts
+						var cross_w := width
+						if not road_info.is_empty():
+							cross_pts = _build_crossing_strip(road_info, width)
+							cross_w = width  # footway width = crossing depth
+						_add_road_to_batch_fast(cross_pts, cross_w, "intersection", 0.012, parent)
+						_add_road_to_batch_fast(cross_pts, cross_w, "crossing", 0.013, parent)
 						if enable_crossing_signs:
-							_enqueue_crossing_signs(current_pts, parent, ck)
+							_enqueue_crossing_signs(cross_pts, parent, ck)
 				else:
 					last_off_road_pt = smoothed_points[i - 1]
 					has_before_off = true
@@ -4982,9 +4991,18 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 	if current_pts.size() >= 2:
 		if current_on:
 			var last_pt: Vector2 = smoothed_points[smoothed_points.size() - 1]
-			if is_tagged_crossing or (has_before_off and _is_full_road_crossing(last_off_road_pt, last_pt, ck)):
-				_add_road_to_batch_fast(current_pts, width, "intersection", 0.012, parent)
-				_add_road_to_batch_fast(current_pts, width, "crossing", 0.013, parent)
+			var road_info_end: Dictionary = {}
+			if not is_tagged_crossing and has_before_off:
+				road_info_end = _detect_road_crossing(last_off_road_pt, last_pt, ck)
+			var is_full_end: bool = is_tagged_crossing or not road_info_end.is_empty()
+			if is_full_end:
+				var cross_pts_end := current_pts
+				var cross_w_end := width
+				if not road_info_end.is_empty():
+					cross_pts_end = _build_crossing_strip(road_info_end, width)
+					cross_w_end = width
+				_add_road_to_batch_fast(cross_pts_end, cross_w_end, "intersection", 0.012, parent)
+				_add_road_to_batch_fast(cross_pts_end, cross_w_end, "crossing", 0.013, parent)
 				if enable_crossing_signs:
 					_enqueue_crossing_signs(current_pts, parent, ck)
 	return true
@@ -5144,7 +5162,42 @@ func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, he
 	if polys.is_empty():
 		return
 
-	# 3. Клипим road corridors (обрезаем тротуар по дорогам, с запасом 0.5м)
+	# 3. Defer road/intersection/parking clipping to finalization time,
+	#    when _chunk_terrain_roads from all neighbours are populated.
+	#    For "initial" mode (no chunks), clip immediately as before.
+	if chunk_key != "initial":
+		if not _deferred_path_polys.has(chunk_key):
+			_deferred_path_polys[chunk_key] = []
+		_deferred_path_polys[chunk_key].append({
+			"polys": polys,
+			"validated": validated,
+			"width": width,
+			"height_offset": height_offset,
+			"parent": parent,
+			"ck_x": ck_x,
+			"ck_z": ck_z,
+		})
+		return
+
+	# --- "initial" mode: clip and add immediately (legacy path) ---
+	polys = _clip_path_polys_by_roads_and_intersections(polys, ck_x, ck_z, "initial")
+
+	# Фильтрация мелких осколков
+	var filtered: Array[PackedVector2Array] = []
+	for poly in polys:
+		if poly.size() >= 3 and absf(_polygon_area(poly)) >= 0.5:
+			filtered.append(poly)
+	if filtered.is_empty():
+		return
+
+	# Добавляем в road batch (триангулированные полигоны)
+	_add_path_polys_to_batch(filtered, validated, width, height_offset, "initial", parent)
+
+
+## Clips path polygons by road corridors, intersection contours, and parking polygons.
+## Extracted so it can be called both inline ("initial") and deferred (chunk finalization).
+func _clip_path_polys_by_roads_and_intersections(polys: Array[PackedVector2Array], ck_x: int, ck_z: int, chunk_key: String) -> Array[PackedVector2Array]:
+	# Road corridors
 	if chunk_key != "initial":
 		var terrain_roads: Array = []
 		for dx in range(-1, 2):
@@ -5155,7 +5208,6 @@ func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, he
 		for road_corridor in terrain_roads:
 			if road_corridor.size() < 4:
 				continue
-			# Inflate corridor by 0.5m to avoid thin slivers at road edge
 			var inflated: Array[PackedVector2Array] = Geometry2D.offset_polygon(road_corridor, 0.5)
 			if inflated.is_empty():
 				inflated = [road_corridor]
@@ -5168,9 +5220,9 @@ func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, he
 							new_polys.append(cp)
 				polys = new_polys
 				if polys.is_empty():
-					return
+					return polys
 
-	# 4. Клипим intersection contours
+	# Intersection contours
 	if not polys.is_empty():
 		var ch_min_x := float(ck_x) * chunk_size
 		var ch_max_x := ch_min_x + chunk_size
@@ -5192,9 +5244,9 @@ func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, he
 						new_polys.append(cp)
 			polys = new_polys
 			if polys.is_empty():
-				return
+				return polys
 
-	# 5. Клипим parking polygons (per-chunk)
+	# Parking polygons
 	if not polys.is_empty():
 		for ck_p in _chunk_parking_hashes:
 			var pk_data: Dictionary = _chunk_parking_hashes[ck_p]
@@ -5210,17 +5262,13 @@ func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, he
 							new_polys.append(cp)
 				polys = new_polys
 				if polys.is_empty():
-					return
+					return polys
 
-	# 6. Фильтрация мелких осколков
-	var filtered: Array[PackedVector2Array] = []
-	for poly in polys:
-		if poly.size() >= 3 and absf(_polygon_area(poly)) >= 0.5:
-			filtered.append(poly)
-	if filtered.is_empty():
-		return
+	return polys
 
-	# 7. Добавляем в road batch (триангулированные полигоны)
+
+## Adds pre-clipped path polygons to road batch data for triangulation.
+func _add_path_polys_to_batch(filtered: Array[PackedVector2Array], validated: PackedVector2Array, width: float, height_offset: float, chunk_key: String, parent: Node3D) -> void:
 	if not _road_batch_data.has(chunk_key):
 		_road_batch_data[chunk_key] = {}
 	var texture_key := "path"
@@ -5257,6 +5305,22 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	var prof_start_total = 0
 	if _profiler:
 		prof_start_total = _profiler.start_measure("road_batch_finalize_total_" + chunk_key)
+
+	# Flush deferred path polygons — clip against now-populated road corridors
+	var _had_deferred_paths := false
+	if _deferred_path_polys.has(chunk_key):
+		var deferred_items: Array = _deferred_path_polys[chunk_key]
+		_deferred_path_polys.erase(chunk_key)
+		for item in deferred_items:
+			var polys: Array[PackedVector2Array] = item.polys
+			polys = _clip_path_polys_by_roads_and_intersections(polys, item.ck_x, item.ck_z, chunk_key)
+			var filtered: Array[PackedVector2Array] = []
+			for poly in polys:
+				if poly.size() >= 3 and absf(_polygon_area(poly)) >= 0.5:
+					filtered.append(poly)
+			if not filtered.is_empty():
+				_add_path_polys_to_batch(filtered, item.validated, item.width, item.height_offset, chunk_key, item.parent)
+				_had_deferred_paths = true
 
 	if not _road_batch_data.has(chunk_key):
 		# Нет дорог — но террейн всё равно создаём
@@ -11735,6 +11799,9 @@ func _chunk_has_pending_road_inputs(chunk_key: String) -> bool:
 	return _pending_road_task_count_for_chunk(chunk_key) > 0
 
 
+
+
+
 func _get_prioritized_road_queue_keys() -> Array:
 	var finalizing: Array = []
 	var activating: Array = []
@@ -11954,6 +12021,7 @@ func _drop_chunk_runtime_state(chunk_key: String, free_node: bool = true) -> voi
 	_purge_chunk_queues(chunk_key)
 	_chunk_terrain_roads.erase(chunk_key)
 	_chunk_water_polygons.erase(chunk_key)
+	_deferred_path_polys.erase(chunk_key)
 	_remove_loading_placeholder(chunk_key)
 	if parent and is_instance_valid(parent):
 		_terrain_objects_queue = _terrain_objects_queue.filter(func(item): return item.get("parent") != parent)
@@ -13103,6 +13171,46 @@ func _is_point_near_road_fast(point: Vector2, min_distance: float, ck: String = 
 # Проверяет, находится ли точка внутри коридора автомобильной дороги (width >= 4.0)
 # или внутри контура перекрёстка
 # margin: запас за пределами края дороги (0 = точно по краю)
+## Like _is_point_on_vehicle_road but queries road hash from 3x3 chunk neighbourhood.
+## Used for footway on_road classification — footway in chunk A may cross a road
+## whose segments are stored in chunk B's road hash.
+func _is_point_on_vehicle_road_neighborhood(point: Vector2, margin: float, ck: String) -> bool:
+	if ck == "":
+		return _is_point_on_vehicle_road(point, margin)
+	var parts := ck.split(",")
+	var cx := int(parts[0])
+	var cz := int(parts[1])
+	# Check parking in own chunk only (fast path)
+	if _is_point_in_any_parking(point, ck):
+		return false
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			# Query road hash from 3x3 chunk neighbourhood
+			for cdx in range(-1, 2):
+				for cdz in range(-1, 2):
+					var nk := "%d,%d" % [cx + cdx, cz + cdz]
+					var segs := _query_road_hash(key, nk)
+					for seg in segs:
+						if seg.width < 4.0:
+							continue
+						var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+						if point.distance_to(closest) < seg.width / 2.0 + margin:
+							return true
+	for i in range(_intersection_contours.size()):
+		var contour: PackedVector2Array = _intersection_contours[i]
+		if contour.size() < 3:
+			continue
+		if i < _intersection_positions.size():
+			if point.distance_to(_intersection_positions[i]) > 30.0:
+				continue
+		if Geometry2D.is_point_in_polygon(point, contour):
+			return true
+	return false
+
+
 func _is_point_on_vehicle_road(point: Vector2, margin: float = 1.0, ck: String = "") -> bool:
 	# 0. Парковки: footpath поверх парковки остаётся тротуаром (не crossing)
 	if _is_point_in_any_parking(point, ck):
@@ -13134,15 +13242,16 @@ func _is_point_on_vehicle_road(point: Vector2, margin: float = 1.0, ck: String =
 	return false
 
 
-# Проверяет, является ли on_road участок footpath полным пересечением дороги:
-# before_pt и after_pt лежат по разные стороны от ближайшей дороги.
-func _is_full_road_crossing(before_pt: Vector2, after_pt: Vector2, ck: String = "") -> bool:
+# Finds the closest vehicle road (width >= 4m) near midpoint of before_pt/after_pt.
+# Returns Dictionary with road info if full crossing, or empty dict if not.
+func _detect_road_crossing(before_pt: Vector2, after_pt: Vector2, ck: String = "") -> Dictionary:
 	var mid := (before_pt + after_pt) * 0.5
 	var cell_x := int(floor(mid.x / ROAD_CELL_SIZE))
 	var cell_y := int(floor(mid.y / ROAD_CELL_SIZE))
 	var best_dist := 999.0
 	var best_seg_p1 := Vector2.ZERO
 	var best_seg_p2 := Vector2.ZERO
+	var best_width := 0.0
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			var key := Vector2i(cell_x + dx, cell_y + dy)
@@ -13156,13 +13265,45 @@ func _is_full_road_crossing(before_pt: Vector2, after_pt: Vector2, ck: String = 
 					best_dist = dist
 					best_seg_p1 = seg.p1
 					best_seg_p2 = seg.p2
+					best_width = seg.width
 	if best_dist > 50.0:
-		return false
+		return {}
 	var road_dir: Vector2 = (best_seg_p2 - best_seg_p1).normalized()
 	var cross_before: float = road_dir.cross(before_pt - best_seg_p1)
 	var cross_after: float = road_dir.cross(after_pt - best_seg_p1)
-	# Разные знаки → разные стороны дороги → полное пересечение
-	return cross_before * cross_after < 0.0
+	# cross_b * cross_a <= 0 → opposite sides (or one exactly on road line)
+	if cross_before * cross_after <= 0.0 and (absf(cross_before) > 0.01 or absf(cross_after) > 0.01):
+		return {
+			"mid": mid,
+			"road_dir": road_dir,
+			"road_width": best_width,
+			"road_p1": best_seg_p1,
+			"road_p2": best_seg_p2,
+		}
+	return {}
+
+
+# Legacy wrapper — returns bool only.
+func _is_full_road_crossing(before_pt: Vector2, after_pt: Vector2, ck: String = "") -> bool:
+	return not _detect_road_crossing(before_pt, after_pt, ck).is_empty()
+
+
+## Builds a 2-point crossing strip perpendicular to the road, spanning its full width.
+## The strip is centered at the projection of the footway midpoint onto the road centerline.
+## `road_info` comes from _detect_road_crossing(). `fw_width` is the footway visual width
+## (used as the "depth" of the crossing strip along the road direction).
+func _build_crossing_strip(road_info: Dictionary, _fw_width: float) -> PackedVector2Array:
+	var road_dir: Vector2 = road_info.road_dir
+	var road_width: float = road_info.road_width
+	var mid: Vector2 = road_info.mid
+	var road_p1: Vector2 = road_info.road_p1
+	var road_p2: Vector2 = road_info.road_p2
+	# Project footway midpoint onto road centerline
+	var center := Geometry2D.get_closest_point_to_segment(mid, road_p1, road_p2)
+	# Perpendicular to road direction
+	var perp := Vector2(-road_dir.y, road_dir.x)
+	var half_w := road_width * 0.5
+	return PackedVector2Array([center - perp * half_w, center + perp * half_w])
 
 
 # Находит точку на отрезке [p1, p2], где проходит край дороги (binary search)
@@ -15470,7 +15611,6 @@ func _add_wall_signs_from_override(points: PackedVector2Array, parent: Node3D, b
 		var roof_y := base_elev + building_height
 		# height_ratio: 0.0 = ground level, 1.0 = roof line
 		var sign_center_y := base_elev + building_height * height_ratio
-		print("WallSign height debug: base_elev=%.2f building_height=%.2f roof_y=%.2f sign_y=%.2f ratio=%.2f" % [base_elev, building_height, roof_y, sign_center_y, height_ratio])
 
 		# Logo dimensions from texture aspect ratio
 		var logo_aspect: float = float(logo_tex.get_width()) / float(logo_tex.get_height())
