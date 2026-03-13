@@ -195,10 +195,14 @@ func _load_building_overrides_json(path: String) -> void:
 		# Skip all auto-generated POI signs
 		if od.has("skip_all_pois"):
 			override.skip_all_pois = od["skip_all_pois"]
+		if od.has("no_foundation"):
+			override.no_foundation = od["no_foundation"]
 
 		# Roof-mounted signs
 		if od.has("roof_signs"):
 			override.roof_signs = od["roof_signs"]
+		if od.has("wall_signs"):
+			override.wall_signs = od["wall_signs"]
 
 		# Pediments (надстройки-фронтоны)
 		if od.has("pediments"):

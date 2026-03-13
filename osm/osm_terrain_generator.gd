@@ -6304,6 +6304,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	# Вывески на крыше
 	if way_id > 0 and _decoration_layer:
 		_add_roof_signs_from_override(points, parent, building_height, base_elev, way_id)
+		_add_wall_signs_from_override(points, parent, building_height, base_elev, way_id)
 		_add_pediments_from_override(points, parent, building_height, base_elev, way_id)
 
 
@@ -10388,7 +10389,7 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 
 	# Высоты с учётом террейна
-	var fnd_h := _get_foundation_height(points)
+	var fnd_h := 0.0 if building_override.no_foundation else _get_foundation_height(points)
 	var floor_y := base_elev + fnd_h
 	var foundation_y := base_elev + fnd_h
 	var roof_y := base_elev + building_height
@@ -10422,11 +10423,19 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		median_width = sorted_widths[mid]
 
 	# UV масштаб: texture_repeat_x повторов на весь периметр (0 = авто)
-	# Дефолт для ВСЕХ кастомных текстур: 0.1 (старый масштаб)
-	# Процедурные PBR-текстуры используют 0.4 в других функциях
 	var texture_repeat_x: float = building_override.texture_repeat_x if building_override.texture_repeat_x > 0 else 0.0
-	var default_uv_scale := 0.1  # Кастомные текстуры (фото и советские .png) используют старый дефолт
-	var uv_scale_x := texture_repeat_x / perimeter if texture_repeat_x > 0 else default_uv_scale
+	var uv_scale_x := 0.0
+	if texture_repeat_x > 0:
+		uv_scale_x = texture_repeat_x / perimeter
+	elif custom_texture and building_height > 0.1:
+		# Авто: сохраняем пропорции текстуры. Один тайл по высоте = building_height / repeat_y.
+		# Ширина тайла в метрах = tile_h * (tex_w / tex_h). uv_scale_x = 1 / tile_w_meters.
+		var tex_aspect: float = float(custom_texture.get_width()) / float(custom_texture.get_height())
+		var tile_h: float = building_height / texture_repeat_y
+		var tile_w: float = tile_h * tex_aspect
+		uv_scale_x = 1.0 / tile_w if tile_w > 0.1 else 0.1
+	else:
+		uv_scale_x = 0.1  # Дефолт для текстур без авто-расчёта
 	var uv_offset_x: float = building_override.texture_offset_x
 
 	var is_ccw := _is_polygon_ccw(points)
@@ -15423,6 +15432,143 @@ func _add_roof_signs_from_override(points: PackedVector2Array, parent: Node3D, b
 		parent.add_child(sign_light)
 
 		print("RoofSign: added at roof for way %d" % way_id)
+
+
+func _add_wall_signs_from_override(points: PackedVector2Array, parent: Node3D, building_height: float, base_elev: float, way_id: int) -> void:
+	"""Places logo signs on building walls with white background."""
+	if not _decoration_layer or way_id <= 0:
+		return
+	var override = _decoration_layer.get_building_override_for_way(way_id)
+	if not override or override.wall_signs.is_empty():
+		return
+
+	for sign_data in override.wall_signs:
+		var lat: float = sign_data.get("lat", 0.0)
+		var lon: float = sign_data.get("lon", 0.0)
+		var logo_name: String = sign_data.get("logo", "")
+		var height_ratio: float = sign_data.get("height_ratio", 0.75)  # 0=ground, 1=roof
+		var sign_width: float = sign_data.get("width", 5.0)
+		var padding: float = sign_data.get("padding", 0.3)
+		if lat == 0.0 or lon == 0.0 or logo_name == "":
+			continue
+
+		var logo_path := "res://textures/" + logo_name
+		var logo_tex: Texture2D = load(logo_path) as Texture2D
+		if not logo_tex:
+			push_warning("WallSign: logo not found: " + logo_path)
+			continue
+
+		var sign_pos := _latlon_to_local(lat, lon)
+		var wall := _find_closest_wall_to_point(points, sign_pos, 3.0)
+		if wall.is_empty():
+			continue
+
+		var snap_point: Vector2 = wall["closest_point"]
+		var wall_normal: Vector3 = wall["normal"]
+		var normal_2d := Vector2(wall_normal.x, wall_normal.z)
+
+		var roof_y := base_elev + building_height
+		# height_ratio: 0.0 = ground level, 1.0 = roof line
+		var sign_center_y := base_elev + building_height * height_ratio
+		print("WallSign height debug: base_elev=%.2f building_height=%.2f roof_y=%.2f sign_y=%.2f ratio=%.2f" % [base_elev, building_height, roof_y, sign_center_y, height_ratio])
+
+		# Logo dimensions from texture aspect ratio
+		var logo_aspect: float = float(logo_tex.get_width()) / float(logo_tex.get_height())
+		var sign_h := sign_width / logo_aspect
+		var bg_w := sign_width + padding * 2
+		var bg_h := sign_h + padding * 2
+
+		# Wall tangent — derived from outward normal via cross product
+		# This guarantees "right" is correct for the viewer regardless of polygon winding
+		var tangent := Vector3.UP.cross(wall_normal).normalized()
+		var outward := wall_normal * 0.06
+
+		var center := Vector3(snap_point.x, sign_center_y, snap_point.y) + outward
+
+		# White background quad — vertex order: BL, BR, TR, TL (same as Новый Век logo)
+		var bv := PackedVector3Array()
+		bv.append(center - tangent * bg_w * 0.5 - Vector3(0, bg_h * 0.5, 0))  # 0: bottom-left
+		bv.append(center + tangent * bg_w * 0.5 - Vector3(0, bg_h * 0.5, 0))  # 1: bottom-right
+		bv.append(center + tangent * bg_w * 0.5 + Vector3(0, bg_h * 0.5, 0))  # 2: top-right
+		bv.append(center - tangent * bg_w * 0.5 + Vector3(0, bg_h * 0.5, 0))  # 3: top-left
+		var bu := PackedVector2Array([Vector2(0, 1), Vector2(1, 1), Vector2(1, 0), Vector2(0, 0)])
+		var n3d := wall_normal.normalized()
+		var bn := PackedVector3Array([n3d, n3d, n3d, n3d])
+		var bi := PackedInt32Array([0, 1, 2, 0, 2, 3])
+
+		var bg_arrays := []
+		bg_arrays.resize(Mesh.ARRAY_MAX)
+		bg_arrays[Mesh.ARRAY_VERTEX] = bv
+		bg_arrays[Mesh.ARRAY_TEX_UV] = bu
+		bg_arrays[Mesh.ARRAY_NORMAL] = bn
+		bg_arrays[Mesh.ARRAY_INDEX] = bi
+
+		var bg_mesh := ArrayMesh.new()
+		bg_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, bg_arrays)
+		var bg_mat := ShaderMaterial.new()
+		bg_mat.shader = BuildingWallShader
+		bg_mat.set_shader_parameter("use_texture", false)
+		bg_mat.set_shader_parameter("albedo_color", Color(0.97, 0.97, 0.97))
+		bg_mat.set_shader_parameter("roughness_base", 0.5)
+
+		var bg_inst := MeshInstance3D.new()
+		bg_inst.mesh = bg_mesh
+		bg_inst.material_override = bg_mat
+		bg_inst.name = "WallSignBg_%d" % way_id
+		parent.add_child(bg_inst)
+
+		# Logo quad — vertex order: BL, BR, TR, TL (same as Новый Век logo)
+		var logo_center := center + outward
+		var lv := PackedVector3Array()
+		lv.append(logo_center - tangent * sign_width * 0.5 - Vector3(0, sign_h * 0.5, 0))  # 0: bottom-left
+		lv.append(logo_center + tangent * sign_width * 0.5 - Vector3(0, sign_h * 0.5, 0))  # 1: bottom-right
+		lv.append(logo_center + tangent * sign_width * 0.5 + Vector3(0, sign_h * 0.5, 0))  # 2: top-right
+		lv.append(logo_center - tangent * sign_width * 0.5 + Vector3(0, sign_h * 0.5, 0))  # 3: top-left
+		var lu := PackedVector2Array([Vector2(0, 1), Vector2(1, 1), Vector2(1, 0), Vector2(0, 0)])
+		var ln := PackedVector3Array([n3d, n3d, n3d, n3d])
+		var li := PackedInt32Array([0, 1, 2, 0, 2, 3])
+
+		var logo_arrays := []
+		logo_arrays.resize(Mesh.ARRAY_MAX)
+		logo_arrays[Mesh.ARRAY_VERTEX] = lv
+		logo_arrays[Mesh.ARRAY_TEX_UV] = lu
+		logo_arrays[Mesh.ARRAY_NORMAL] = ln
+		logo_arrays[Mesh.ARRAY_INDEX] = li
+
+		var logo_mesh := ArrayMesh.new()
+		logo_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, logo_arrays)
+
+		var logo_shader := Shader.new()
+		logo_shader.code = """
+shader_type spatial;
+render_mode cull_disabled, diffuse_lambert_wrap;
+uniform sampler2D logo_texture : source_color, filter_linear_mipmap;
+uniform float emission_energy : hint_range(0.0, 8.0) = 2.0;
+global uniform bool is_night_global;
+void fragment() {
+	vec4 tex = texture(logo_texture, UV);
+	if (tex.a < 0.5) discard;
+	ALBEDO = tex.rgb;
+	ROUGHNESS = 0.3;
+	METALLIC = 0.0;
+	if (!FRONT_FACING) NORMAL = -NORMAL;
+	if (is_night_global) {
+		EMISSION = tex.rgb * emission_energy;
+	}
+}
+"""
+		var logo_mat := ShaderMaterial.new()
+		logo_mat.shader = logo_shader
+		logo_mat.set_shader_parameter("logo_texture", logo_tex)
+		logo_mat.set_shader_parameter("emission_energy", 1.5)
+
+		var logo_inst := MeshInstance3D.new()
+		logo_inst.mesh = logo_mesh
+		logo_inst.material_override = logo_mat
+		logo_inst.name = "WallSignLogo_%d" % way_id
+		parent.add_child(logo_inst)
+
+		print("WallSign: added for way %d at (%.6f, %.6f)" % [way_id, lat, lon])
 
 
 func _add_pediments_from_override(points: PackedVector2Array, parent: Node3D, building_height: float, base_elev: float, way_id: int) -> void:

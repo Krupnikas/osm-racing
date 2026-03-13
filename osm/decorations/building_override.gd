@@ -63,8 +63,14 @@ var custom_entrances: Array = []
 # Skip all auto-generated POI signs for this building
 var skip_all_pois: bool = false
 
+# No foundation (texture goes from roof to ground)
+var no_foundation: bool = false
+
 # Roof-mounted signs [{lat: float, lon: float, logo: String}]
 var roof_signs: Array = []
+
+# Wall signs [{lat, lon, logo, height_ratio, width}] — logos/signs on building walls
+var wall_signs: Array = []
 
 # Pediments — надстройки-фронтоны на стене [{lat, lon, rect_height, tri_height, color: [R,G,B]}]
 var pediments: Array = []

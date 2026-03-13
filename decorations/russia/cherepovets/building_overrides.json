@@ -702,6 +702,24 @@
           "entrance_text": "ТОРГОВЫЙ  ЦЕНТР"
         }
       ]
+    },
+    {
+      "osm_way_id": 188954120,
+      "comment": "Макси (Победы 200)",
+      "wall_texture": "buildings/maxi-pobedy-200.png",
+      "repeat_y": 1.0,
+      "no_foundation": true,
+      "skip_all_pois": true,
+      "wall_signs": [
+        {
+          "lat": 59.120159,
+          "lon": 38.000534,
+          "logo": "buildings/trc-maxi-logo.png",
+          "height_ratio": 0.885,
+          "width": 6.0,
+          "padding": 0.4
+        }
+      ]
     }
   ],
   "custom_models": [
