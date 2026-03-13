@@ -38,6 +38,22 @@ Added `_is_point_on_vehicle_road_neighborhood()` — queries road hash from 3x3 
 
 ---
 
+## Issue 3: Sidewalk doesn't reach curb (grass gap) — IN PROGRESS
+
+### History
+- **March 2** (`0c066f9`, krupnikas): Added `_add_path_clipped_to_batch()` — sidewalks built as corridor polygons clipped by same road corridors as terrain. Sidewalk edges aligned perfectly with curbs.
+- **March 7** (`ef6ec9e`, krupnikas): "Fix trees on roads" commit also added `Geometry2D.offset_polygon(road_corridor, 0.5)` before clipping sidewalks (line 5211). This inflates road corridors by 0.5m, pushing the sidewalk clip edge 0.5m inward from the curb.
+
+### Root Cause
+`_clip_path_polys_by_roads_and_intersections()` inflates each road corridor by 0.5m before clipping sidewalk polygons. The curb sits at the original road corridor edge. Result: 0.5m grass strip between curb and sidewalk.
+
+Terrain clipping does NOT inflate — only sidewalk clipping does. The inflation was added as a side-effect of the trees-on-roads fix and wasn't needed for sidewalk correctness.
+
+### Fix
+Remove the 0.5m inflation from `_clip_path_polys_by_roads_and_intersections()`. Use the road corridor as-is (same as terrain clipping).
+
+---
+
 ## Changes Summary
 
 | File | Change |

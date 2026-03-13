@@ -5208,19 +5208,15 @@ func _clip_path_polys_by_roads_and_intersections(polys: Array[PackedVector2Array
 		for road_corridor in terrain_roads:
 			if road_corridor.size() < 4:
 				continue
-			var inflated: Array[PackedVector2Array] = Geometry2D.offset_polygon(road_corridor, 0.5)
-			if inflated.is_empty():
-				inflated = [road_corridor]
-			for inf_poly in inflated:
-				var new_polys: Array[PackedVector2Array] = []
-				for poly in polys:
-					var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, inf_poly)
-					for cp in clipped:
-						if cp.size() >= 3:
-							new_polys.append(cp)
-				polys = new_polys
-				if polys.is_empty():
-					return polys
+			var new_polys: Array[PackedVector2Array] = []
+			for poly in polys:
+				var clipped: Array[PackedVector2Array] = Geometry2D.clip_polygons(poly, road_corridor)
+				for cp in clipped:
+					if cp.size() >= 3:
+						new_polys.append(cp)
+			polys = new_polys
+			if polys.is_empty():
+				return polys
 
 	# Intersection contours
 	if not polys.is_empty():
