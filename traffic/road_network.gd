@@ -66,10 +66,10 @@ const SPEED_LIMITS := {
 }
 
 
-func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_key: String, bridge_info: Dictionary = {}) -> void:
+func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_key: String, bridge_info: Dictionary = {}, oneway: String = "") -> void:
 	"""Добавляет дорожный сегмент в навигационную сеть
 	Примечание: _chunk_key не используется, каждый waypoint определяет свой чанк по позиции
-	Создаёт waypoints в ОБОИХ направлениях для двустороннего движения
+	oneway: "" или "no" = оба направления, "yes" = по порядку нод, "-1" = против порядка нод
 	bridge_info содержит информацию о мосте: is_bridge, bridge_height, ramp_length"""
 	if points.size() < 2:
 		return
@@ -88,23 +88,35 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_k
 	var road_id := _next_road_id
 	_next_road_id += 1
 
-	# Создаём waypoints в прямом направлении
-	var forward_waypoints := _create_directional_waypoints(points, speed_limit, width, lanes, false, road_id, bridge_info)
+	var is_oneway_forward: bool = oneway == "yes" or oneway == "true" or oneway == "1"
+	var is_oneway_reverse: bool = oneway == "-1" or oneway == "reverse"
+	var is_bidirectional: bool = not is_oneway_forward and not is_oneway_reverse
+
+	# Создаём waypoints в прямом направлении (порядок нод OSM)
+	var forward_waypoints: Array[Waypoint] = []
+	if is_bidirectional or is_oneway_forward:
+		forward_waypoints = _create_directional_waypoints(points, speed_limit, width, lanes, false, road_id, bridge_info)
 
 	# Создаём waypoints в обратном направлении
-	var reverse_waypoints := _create_directional_waypoints(points, speed_limit, width, lanes, true, road_id, bridge_info)
+	var reverse_waypoints: Array[Waypoint] = []
+	if is_bidirectional or is_oneway_reverse:
+		reverse_waypoints = _create_directional_waypoints(points, speed_limit, width, lanes, true, road_id, bridge_info)
 
 	# Замыкаем кольцевые дороги (последняя точка совпадает с первой)
 	if points.size() >= 3:
 		var first_2d := points[0]
 		var last_2d := points[points.size() - 1]
 		if first_2d.distance_to(last_2d) < 1.0:
-			_close_loop(forward_waypoints)
-			_close_loop(reverse_waypoints)
+			if not forward_waypoints.is_empty():
+				_close_loop(forward_waypoints)
+			if not reverse_waypoints.is_empty():
+				_close_loop(reverse_waypoints)
 
 	# Откладываем соединение перекрёстков — порционно по кадрам через process_pending_connections()
-	_pending_connections.append(forward_waypoints)
-	_pending_connections.append(reverse_waypoints)
+	if not forward_waypoints.is_empty():
+		_pending_connections.append(forward_waypoints)
+	if not reverse_waypoints.is_empty():
+		_pending_connections.append(reverse_waypoints)
 
 
 func _close_loop(waypoints: Array) -> void:

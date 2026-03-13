@@ -38,6 +38,7 @@ var _decoration_layer: Node = null  # DecorationLayer
 
 # Кэш текстур (создаются один раз)
 var _road_textures: Dictionary = {}
+var _cached_road_albedo: Texture2D = null  # Shared asphalt albedo for lane-aware keys
 var _building_textures: Dictionary = {}
 var _window_shader: Shader = null  # Кэш шейдера окон (создается один раз)
 var _shop_back_wall_shader: Shader = null  # Кэш шейдера задней стенки магазина
@@ -455,6 +456,18 @@ const ROAD_WIDTHS := {
 	"track": 3.5
 }
 
+const LANE_WIDTH := 3.5  # Стандартная ширина полосы (метры)
+
+## Ширина дороги с учётом lanes (фолбэк на ROAD_WIDTHS)
+static func _get_road_width(tags: Dictionary) -> float:
+	var highway_type: String = tags.get("highway", "residential")
+	var lanes_str: String = str(tags.get("lanes", ""))
+	if lanes_str.is_valid_int():
+		var lanes: int = int(lanes_str)
+		if lanes >= 1 and lanes <= 8:
+			return lanes * LANE_WIDTH
+	return ROAD_WIDTHS.get(highway_type, 5.0)
+
 # Константы для мостов и туннелей
 # Эталон: Северное шоссе (way 63269622) - 107.5м длина, 3м высота
 const BRIDGE_REFERENCE_LENGTH := 100.0  # Эталонная длина моста для полной высоты (метры)
@@ -597,17 +610,15 @@ func _init_textures() -> void:
 	var road_albedo_tex: Texture2D = load("res://textures/road/Asphalt026B_1K-JPG_Color.jpg")
 	var sidewalk_albedo_tex: Texture2D = load("res://textures/road/Asphalt022_1K-JPG_Color.jpg")
 
-	# Все типы дорог используют одну PBR текстуру асфальта
-	_road_textures["highway"] = road_albedo_tex
-	_road_textures["primary"] = road_albedo_tex
-	_road_textures["residential"] = road_albedo_tex
-	_road_textures["crossing"] = road_albedo_tex
-	_road_textures["intersection"] = road_albedo_tex
+	# Albedo — единая PBR текстура асфальта для всех типов дорог
+	# Ключи с числом полос: "ow2", "ow3", "bi2", "bi4" и т.д.
+	_cached_road_albedo = road_albedo_tex
+	for key in ["crossing", "intersection", "residential"]:
+		_road_textures[key] = road_albedo_tex
 	_road_textures["path"] = sidewalk_albedo_tex
+	# Lane-aware keys are registered lazily in _ensure_lane_textures()
 
-	# Разметка (белые линии на прозрачном фоне)
-	_road_textures["marking_highway"] = TextureGeneratorScript.create_highway_markings(512, 4)
-	_road_textures["marking_primary"] = TextureGeneratorScript.create_primary_markings(512, 4)
+	# Разметка — общие (без полосовой разметки)
 	_road_textures["marking_residential"] = TextureGeneratorScript.create_residential_markings(256)
 	_road_textures["marking_crossing"] = TextureGeneratorScript.create_crossing_markings(256)
 
@@ -3028,7 +3039,7 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 		# Road segments -> spatial hash
 		if tags.has("highway") and nodes.size() >= 2:
 			var highway_type: String = tags.get("highway", "residential")
-			var road_w: float = ROAD_WIDTHS.get(highway_type, 5.0)
+			var road_w: float = _get_road_width(tags)
 			var raw_pts := PackedVector2Array()
 			raw_pts.resize(nodes.size())
 			for j in range(nodes.size()):
@@ -3100,7 +3111,7 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 		var highway_type: String = tags.get("highway", "")
 		if highway_type in ["footway", "path", "cycleway", "track", "steps"]:
 			continue
-		var road_width: float = ROAD_WIDTHS.get(highway_type, 5.0)
+		var road_width: float = _get_road_width(tags)
 
 		# Конвертируем в local и сглаживаем — directions перекрёстков должны
 		# совпадать с фактическими сглаженными дорогами, а не с сырыми OSM-узлами.
@@ -3742,7 +3753,7 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 							cp_hash[cell_key] = []
 						cp_hash[cell_key].append({"idx": pidx, "p1": ep1, "p2": ep2})
 		if tags.has("highway") and nodes.size() >= 2:
-			var road_w: float = ROAD_WIDTHS.get(tags.get("highway", "residential"), 5.0)
+			var road_w: float = _get_road_width(tags)
 			var raw_pts := PackedVector2Array()
 			raw_pts.resize(nodes.size())
 			for j in range(nodes.size()):
@@ -3898,7 +3909,7 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 	if skip_spatial_hash:
 		return
 	var highway_type: String = tags.get("highway", "residential")
-	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
+	var width: float = _get_road_width(tags)
 	var raw_pts := PackedVector2Array()
 	raw_pts.resize(nodes.size())
 	for i in range(nodes.size()):
@@ -3920,7 +3931,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	var chunk_key: String = task_data.chunk_key
 
 	var highway_type: String = tags.get("highway", "residential")
-	var width: float = ROAD_WIDTHS.get(highway_type, 5.0)
+	var width: float = _get_road_width(tags)
 
 	# lat/lon → local (thread-safe: uses only passed constants)
 	var local_points := PackedVector2Array()
@@ -3940,20 +3951,27 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	var is_bridge: bool = elevation_info.get("is_bridge", false)
 
 	# Road parameters
+	# Oneway + lanes → texture_key
+	var oneway: String = tags.get("oneway", "")
+	var is_oneway: bool = oneway == "yes" or oneway == "-1" or oneway == "true" or oneway == "1"
+	var lanes_str: String = str(tags.get("lanes", ""))
 	var texture_key: String
 	var height_offset: float
 	var curb_height: float
 	match highway_type:
 		"motorway", "trunk":
-			texture_key = "highway"
+			var lanes: int = int(lanes_str) if lanes_str.is_valid_int() else (3 if is_oneway else 4)
+			texture_key = ("ow%d" if is_oneway else "bi%d") % lanes
 			height_offset = 0.012
 			curb_height = 0.0
 		"primary":
-			texture_key = "primary"
+			var lanes: int = int(lanes_str) if lanes_str.is_valid_int() else (2 if is_oneway else 4)
+			texture_key = ("ow%d" if is_oneway else "bi%d") % lanes
 			height_offset = 0.010
 			curb_height = 0.0
 		"secondary":
-			texture_key = "primary"
+			var lanes: int = int(lanes_str) if lanes_str.is_valid_int() else (2 if is_oneway else 4)
+			texture_key = ("ow%d" if is_oneway else "bi%d") % lanes
 			height_offset = 0.008
 			curb_height = 0.0
 		"tertiary":
@@ -4946,7 +4964,6 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 			on_road[i] = false
 
 	var is_tagged_crossing: bool = item.tags.get("footway", "") == "crossing"
-
 	# Path base is needed even for tagged crossings so curb returns and sidewalk ramps
 	# are filled; the on-road portion is still removed by road-corridor clipping.
 	_add_path_clipped_to_batch(smoothed_points, width, 0.23, parent)
@@ -4965,16 +4982,40 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 				if current_on:
 					var road_info: Dictionary = {}
 					if not is_tagged_crossing and has_before_off:
-						road_info = _detect_road_crossing(last_off_road_pt, smoothed_points[i], ck)
+						var on_start: Vector2 = current_pts[0]
+						var on_end: Vector2 = current_pts[current_pts.size() - 1]
+						# Try edge points first (mid lands on the road → correct segment found)
+						road_info = _detect_road_crossing(on_start, on_end, ck)
+						if road_info.is_empty():
+							# Edge points on same side (short on-road segment).
+							# Find nearest road at on-road midpoint directly.
+							var on_mid: Vector2 = (on_start + on_end) * 0.5
+							road_info = _find_nearest_road_at_point(on_mid, ck)
 					var is_full: bool = is_tagged_crossing or not road_info.is_empty()
 					if is_full:
-						var cross_pts := current_pts
+						var cross_pts := PackedVector2Array([current_pts[0], current_pts[current_pts.size() - 1]])
+						var edge_span: float = cross_pts[0].distance_to(cross_pts[1])
+						var road_w: float = road_info.get("road_width", 0.0)
+						if edge_span >= 4.0:
+							# Edge points span enough — use them directly (accurate angle)
+							if not road_info.is_empty() and edge_span < road_w * 0.7:
+								cross_pts = _build_crossing_strip(road_info, width)
+						else:
+							# Short on-road segment — use footway direction instead of spatial hash
+							# Center on midpoint of off-road points (opposite sides of road),
+							# not edge_pts (which cluster near one road edge)
+							var fw_dir: Vector2 = (smoothed_points[i] - last_off_road_pt).normalized()
+							var road_center: Vector2 = (last_off_road_pt + smoothed_points[i]) * 0.5
+							var half_span := 5.0
+							if road_w > 0.0:
+								half_span = road_w * 0.5 + 2.0
+							cross_pts = PackedVector2Array([road_center - fw_dir * half_span, road_center + fw_dir * half_span])
 						var cross_w := width
-						if not road_info.is_empty():
-							cross_pts = _build_crossing_strip(road_info, width)
-							cross_w = width  # footway width = crossing depth
-						_add_road_to_batch_fast(cross_pts, cross_w, "intersection", 0.012, parent)
-						_add_road_to_batch_fast(cross_pts, cross_w, "crossing", 0.013, parent)
+						_add_road_to_batch_fast(cross_pts, cross_w, "intersection", 0.016, parent)
+						_add_road_to_batch_fast(cross_pts, cross_w, "crossing", 0.017, parent)
+						# Re-enqueue chunk for finalization (crossing added after initial batch build)
+						if not _pending_batch_chunks.has(ck):
+							_pending_batch_chunks.append(ck)
 						if enable_crossing_signs:
 							_enqueue_crossing_signs(cross_pts, parent, ck)
 				else:
@@ -4993,16 +5034,32 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 			var last_pt: Vector2 = smoothed_points[smoothed_points.size() - 1]
 			var road_info_end: Dictionary = {}
 			if not is_tagged_crossing and has_before_off:
-				road_info_end = _detect_road_crossing(last_off_road_pt, last_pt, ck)
+				var on_start_end: Vector2 = current_pts[0]
+				var on_end_end: Vector2 = current_pts[current_pts.size() - 1]
+				road_info_end = _detect_road_crossing(on_start_end, on_end_end, ck)
+				if road_info_end.is_empty():
+					var on_mid_end: Vector2 = (on_start_end + on_end_end) * 0.5
+					road_info_end = _find_nearest_road_at_point(on_mid_end, ck)
 			var is_full_end: bool = is_tagged_crossing or not road_info_end.is_empty()
 			if is_full_end:
-				var cross_pts_end := current_pts
+				var cross_pts_end := PackedVector2Array([current_pts[0], current_pts[current_pts.size() - 1]])
+				var edge_span_end: float = cross_pts_end[0].distance_to(cross_pts_end[1])
+				var road_w_end: float = road_info_end.get("road_width", 0.0)
+				if edge_span_end >= 4.0:
+					if not road_info_end.is_empty() and edge_span_end < road_w_end * 0.7:
+						cross_pts_end = _build_crossing_strip(road_info_end, width)
+				else:
+					var fw_dir_end: Vector2 = (last_pt - last_off_road_pt).normalized()
+					var road_center_e: Vector2 = (last_off_road_pt + last_pt) * 0.5
+					var half_span_e := 5.0
+					if road_w_end > 0.0:
+						half_span_e = road_w_end * 0.5 + 2.0
+					cross_pts_end = PackedVector2Array([road_center_e - fw_dir_end * half_span_e, road_center_e + fw_dir_end * half_span_e])
 				var cross_w_end := width
-				if not road_info_end.is_empty():
-					cross_pts_end = _build_crossing_strip(road_info_end, width)
-					cross_w_end = width
-				_add_road_to_batch_fast(cross_pts_end, cross_w_end, "intersection", 0.012, parent)
-				_add_road_to_batch_fast(cross_pts_end, cross_w_end, "crossing", 0.013, parent)
+				_add_road_to_batch_fast(cross_pts_end, cross_w_end, "intersection", 0.016, parent)
+				_add_road_to_batch_fast(cross_pts_end, cross_w_end, "crossing", 0.017, parent)
+				if not _pending_batch_chunks.has(ck):
+					_pending_batch_chunks.append(ck)
 				if enable_crossing_signs:
 					_enqueue_crossing_signs(current_pts, parent, ck)
 	return true
@@ -5296,6 +5353,28 @@ func _add_path_polys_to_batch(filtered: Array[PackedVector2Array], validated: Pa
 			batch["indices"].append(base_idx + idx)
 
 
+## Ensures albedo + marking textures exist for a lane-aware texture_key like "ow2", "bi4".
+## Called lazily — generates and caches on first use.
+func _ensure_lane_textures(texture_key: String) -> void:
+	if _road_textures.has(texture_key):
+		return
+	# Albedo — always the same asphalt
+	_road_textures[texture_key] = _cached_road_albedo
+	# Parse key: "ow{N}" = oneway N lanes, "bi{N}" = bidirectional N lanes
+	var marking_key := "marking_" + texture_key
+	if _road_textures.has(marking_key):
+		return
+	var is_oneway: bool = texture_key.begins_with("ow")
+	var lanes: int = int(texture_key.substr(2))
+	if lanes < 1:
+		lanes = 2
+	if is_oneway:
+		_road_textures[marking_key] = TextureGeneratorScript.create_oneway_markings(512, lanes)
+	else:
+		# Bidirectional: center line + dashed lane dividers
+		_road_textures[marking_key] = TextureGeneratorScript.create_primary_markings(512, lanes)
+
+
 # Финализирует road batches для чанка - создаёт merged meshes
 func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	var prof_start_total = 0
@@ -5370,6 +5449,9 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	# Track draw calls
 	if _draw_call_logging_enabled:
 		_draw_call_stats["roads"] += 1
+
+	# Lazy-register lane-aware textures (e.g., "ow2", "bi4")
+	_ensure_lane_textures(texture_key)
 
 	# Создаём материал с шейдером (noise вариация roughness + лужи + разметка)
 	var albedo_tex: Texture2D = _road_textures.get(texture_key, null)
@@ -13306,6 +13388,41 @@ func _detect_road_crossing(before_pt: Vector2, after_pt: Vector2, ck: String = "
 	return {}
 
 
+# Finds nearest road segment at a point (no crossing validation).
+# Used when we already know a point is on-road and just need geometry.
+func _find_nearest_road_at_point(point: Vector2, ck: String = "") -> Dictionary:
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+	var best_dist := 999.0
+	var best_seg_p1 := Vector2.ZERO
+	var best_seg_p2 := Vector2.ZERO
+	var best_width := 0.0
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			var segs := _query_road_hash(key, ck)
+			for seg in segs:
+				if seg.width < 4.0:
+					continue
+				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+				var dist: float = point.distance_to(closest)
+				if dist < best_dist:
+					best_dist = dist
+					best_seg_p1 = seg.p1
+					best_seg_p2 = seg.p2
+					best_width = seg.width
+	if best_dist > 20.0:
+		return {}
+	var road_dir: Vector2 = (best_seg_p2 - best_seg_p1).normalized()
+	return {
+		"mid": point,
+		"road_dir": road_dir,
+		"road_width": best_width,
+		"road_p1": best_seg_p1,
+		"road_p2": best_seg_p2,
+	}
+
+
 # Legacy wrapper — returns bool only.
 func _is_full_road_crossing(before_pt: Vector2, after_pt: Vector2, ck: String = "") -> bool:
 	return not _detect_road_crossing(before_pt, after_pt, ck).is_empty()
@@ -14680,7 +14797,8 @@ func _extract_road_for_traffic(nodes: Array, tags: Dictionary, bridge_info: Dict
 	var highway_type: String = tags.get("highway", "residential")
 
 	# Добавляем дорожный сегмент в RoadNetwork (с информацией о мосте если есть)
-	road_network.add_road_segment(local_points, highway_type, chunk_key, bridge_info)
+	var oneway: String = tags.get("oneway", "")
+	road_network.add_road_segment(local_points, highway_type, chunk_key, bridge_info, oneway)
 
 
 # Fast variant: accepts pre-computed local_points
@@ -14699,7 +14817,8 @@ func _extract_road_for_traffic_fast(local_points: PackedVector2Array, tags: Dict
 	var chunk_z := int(floor(first_point.y / chunk_size))
 	var chunk_key := "%d,%d" % [chunk_x, chunk_z]
 	var highway_type: String = tags.get("highway", "residential")
-	road_network.add_road_segment(local_points, highway_type, chunk_key, bridge_info)
+	var oneway: String = tags.get("oneway", "")
+	road_network.add_road_segment(local_points, highway_type, chunk_key, bridge_info, oneway)
 
 
 # === NIGHT MODE ===

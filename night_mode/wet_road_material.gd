@@ -184,18 +184,15 @@ static func create_dry_road_material(base_color: Color = Color(0.2, 0.2, 0.22)) 
 
 
 static func apply_road_type_params(mat: ShaderMaterial, road_type: String) -> void:
-	match road_type:
-		"intersection", "crossing":
-			mat.set_shader_parameter("macro_roughness_dry", 0.05)
-			mat.set_shader_parameter("macro_albedo_dry", 0.02)
-			# Curb bias не нужен на перекрёстках (нет краёв)
-			mat.set_shader_parameter("curb_puddle_bias", 0.0)
-		"highway":
-			mat.set_shader_parameter("macro_roughness_dry", 0.06)
-			mat.set_shader_parameter("macro_albedo_dry", 0.02)
-			mat.set_shader_parameter("micro_scale", 15.0)
-		"path":
-			mat.set_shader_parameter("macro_roughness_dry", 0.04)
-			mat.set_shader_parameter("micro_roughness_dry", 0.03)
-		_:
-			pass
+	if road_type in ["intersection", "crossing"]:
+		mat.set_shader_parameter("macro_roughness_dry", 0.05)
+		mat.set_shader_parameter("macro_albedo_dry", 0.02)
+		mat.set_shader_parameter("curb_puddle_bias", 0.0)
+	elif road_type.begins_with("ow") or road_type.begins_with("bi"):
+		# Lane-aware road keys (ow2, bi4, etc.) — highway-style params
+		mat.set_shader_parameter("macro_roughness_dry", 0.06)
+		mat.set_shader_parameter("macro_albedo_dry", 0.02)
+		mat.set_shader_parameter("micro_scale", 15.0)
+	elif road_type == "path":
+		mat.set_shader_parameter("macro_roughness_dry", 0.04)
+		mat.set_shader_parameter("micro_roughness_dry", 0.03)

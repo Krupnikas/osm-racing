@@ -853,6 +853,28 @@ static func create_primary_markings(size: int = 512, lanes: int = 4) -> ImageTex
 	return ImageTexture.create_from_image(image)
 
 
+## One-way road markings: only dashed lane dividers, no center line
+static func create_oneway_markings(size: int = 512, lanes: int = 4) -> ImageTexture:
+	var image := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+
+	var line_width := size / 128
+	var dash_length := size / 4
+	var gap_length := size / 4
+	var lane_width := size / lanes
+
+	for y in range(size):
+		for x in range(size):
+			for lane_i in range(1, lanes):
+				var lane_x := lane_i * lane_width
+				if abs(x - lane_x) < line_width:
+					var dash_pos := y % (dash_length + gap_length)
+					if dash_pos < dash_length:
+						image.set_pixel(x, y, Color(0.88, 0.88, 0.86, 1.0))
+
+	return ImageTexture.create_from_image(image)
+
+
 ## Crossing markings: zebra stripes
 static func create_crossing_markings(size: int = 256) -> ImageTexture:
 	var image := Image.create(size, size, false, Image.FORMAT_RGBA8)
