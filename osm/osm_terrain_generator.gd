@@ -12720,8 +12720,35 @@ func _create_bus_stop(pos: Vector2, elevation: float, tags: Dictionary, parent: 
 		return
 	_created_bus_stop_positions[pos_key] = true
 
-	# Находим направление к ближайшей дороге
-	var road_dir := _get_direction_to_nearest_road(pos)
+	# Находим ближайшую дорогу и смещаем остановку с проезжей части на обочину
+	var nearby_segs := _get_nearby_road_segments(pos)
+	var road_dir := Vector2(0, 1)
+	var min_dist := INF
+	var best_road_half_w := 3.0
+	for seg in nearby_segs:
+		var road_p1: Vector2 = seg.p1
+		var road_p2: Vector2 = seg.p2
+		var road_vec: Vector2 = road_p2 - road_p1
+		var road_len: float = road_vec.length()
+		if road_len < 0.1:
+			continue
+		var t: float = clamp((pos - road_p1).dot(road_vec) / (road_len * road_len), 0.0, 1.0)
+		var closest: Vector2 = road_p1 + road_vec * t
+		var dist: float = pos.distance_to(closest)
+		if dist < min_dist:
+			min_dist = dist
+			best_road_half_w = seg.width * 0.5
+			if dist > 0.1:
+				road_dir = (closest - pos).normalized()
+			else:
+				road_dir = Vector2(-road_vec.y, road_vec.x).normalized()
+
+	# Если остановка на дороге или слишком близко — сдвигаем за край дороги
+	var shelter_offset := 2.5  # Метры от края дороги до центра навеса
+	if min_dist < best_road_half_w + shelter_offset:
+		var move_dist: float = best_road_half_w + shelter_offset - min_dist
+		pos = pos - road_dir * move_dist  # Отодвигаем ОТ дороги
+
 	var angle := atan2(road_dir.x, road_dir.y) - PI / 2.0  # -90°
 
 	# Создаём контейнер
