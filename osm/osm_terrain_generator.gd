@@ -168,6 +168,7 @@ var _parking_sign_front_mat: StandardMaterial3D
 var _deferred_lamp_queue: Dictionary = {}  # chunk_key → Array[{points, width, parent}]
 var _deferred_manhole_queue: Dictionary = {}  # chunk_key → Array[{points, width, parent}]
 var _deferred_traffic_queue: Array = []  # Deferred traffic network extraction
+var _deferred_tram_queue: Array = []  # Deferred tram track network extraction
 var _finalization_state := 0  # 0=not started, 1=lamps, 2=signs, 3=done
 
 # Многопоточная генерация зданий
@@ -203,6 +204,8 @@ var _pending_road_tasks_by_chunk: Dictionary = {}  # chunk_key -> int active wor
 
 # Road batching system - накопление geometry данных для mesh merging
 var _road_batch_data: Dictionary = {}  # key: chunk_key -> { "highway": {vertices, uvs, normals, indices}, "primary": {...}, ...}
+var _dispatched_tram_ways: Dictionary = {}  # way_id+chunk → true — dedup tram rendering dispatches
+var _dispatched_tram_network: Dictionary = {}  # way_id → true — dedup tram NETWORK extraction (once per way globally)
 var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batches (нужно финализировать)
 var _chunk_terrain_roads: Dictionary = {}  # chunk_key → Array[{points: PackedVector2Array, width: float}] — для отложенного выреза террейна
 var _deferred_path_polys: Dictionary = {}  # chunk_key → Array[{polys, raw_points, width, height_offset, parent}] — footpath polygons waiting for road clipping at finalization
@@ -453,7 +456,9 @@ const ROAD_WIDTHS := {
 	"footway": 2.0,
 	"path": 1.5,
 	"cycleway": 2.5,
-	"track": 3.5
+	"track": 3.5,
+	"tram": 2.2,
+	"tram_rails": 2.2
 }
 
 const LANE_WIDTH := 3.5  # Стандартная ширина полосы (метры)
@@ -617,6 +622,10 @@ func _init_textures() -> void:
 		_road_textures[key] = road_albedo_tex
 	_road_textures["path"] = sidewalk_albedo_tex
 	# Lane-aware keys are registered lazily in _ensure_lane_textures()
+
+	# Tram track textures
+	_road_textures["tram_bed"] = TextureGeneratorScript.create_tram_bed(256)
+	_road_textures["tram_rails"] = TextureGeneratorScript.create_tram_rails(256)
 
 	# Разметка — общие (без полосовой разметки)
 	_road_textures["marking_residential"] = TextureGeneratorScript.create_residential_markings(256)
@@ -1712,6 +1721,8 @@ func start_loading() -> void:
 	_deferred_lamp_queue.clear()
 	_deferred_manhole_queue.clear()
 	_deferred_traffic_queue.clear()
+	_deferred_tram_queue.clear()
+	_dispatched_tram_network.clear()
 	_deferred_billboard_queue.clear()
 	_deferred_footway_queue.clear()
 	_deferred_building_collisions.clear()
@@ -2798,6 +2809,8 @@ func reset_terrain() -> void:
 	_deferred_lamp_queue.clear()
 	_deferred_manhole_queue.clear()
 	_deferred_traffic_queue.clear()
+	_deferred_tram_queue.clear()
+	_dispatched_tram_network.clear()
 	_deferred_billboard_queue.clear()
 	_chunk_activation_pending.clear()
 	_chunk_culling_cooldown.clear()
@@ -3541,7 +3554,7 @@ func _process_phase3_queue() -> bool:
 				continue
 			if filter_by_chunk:
 				# highway и waterway — рисуем ВСЕ из overlap данных, клиппинг к bbox внутри _create_road/_create_waterway
-				if tags.has("highway") or tags.has("waterway"):
+				if tags.has("highway") or tags.has("waterway") or tags.get("railway", "") == "tram":
 					pass  # Не фильтруем — каждый чанк рисует свой клипнутый кусок
 				elif tags.has("building") or tags.has("amenity"):
 					var center := _get_way_center(nodes)
@@ -3556,6 +3569,19 @@ func _process_phase3_queue() -> bool:
 				continue
 			if tags.has("highway"):
 				_create_road(nodes, tags, target, null, way_id_raw, true)  # skip_spatial_hash: already built by Phase 1+2
+			elif tags.get("railway", "") == "tram":
+				var tram_dedup_key := "%d_%s" % [way_id_raw, chunk_key]
+				if _dispatched_tram_ways.has(tram_dedup_key):
+					continue
+				_dispatched_tram_ways[tram_dedup_key] = true
+				print("[TRAM] Dispatching tram way %d to _create_road, chunk=%s nodes=%d" % [way_id_raw, chunk_key, nodes.size()])
+				var tram_tags: Dictionary = tags.duplicate()
+				tram_tags["highway"] = "tram"
+				_create_road(nodes, tram_tags, target, null, way_id_raw, true)
+				# Rails overlay — renders above roads at crossings
+				var rails_tags: Dictionary = tags.duplicate()
+				rails_tags["highway"] = "tram_rails"
+				_create_road(nodes, rails_tags, target, null, way_id_raw, true)
 			elif tags.has("building"):
 				_create_building(nodes, tags, target, null, way_id_raw, chunk_entrance_nodes, chunk_poi_nodes, true)  # skip_spatial_hash
 			elif tags.has("amenity") and not tags.has("building"):
@@ -3779,6 +3805,10 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 			continue
 		if tags.has("highway"):
 			_create_road(nodes, tags, target, null, way_id_raw)
+		elif tags.get("railway", "") == "tram":
+			var tram_tags: Dictionary = tags.duplicate()
+			tram_tags["highway"] = "tram"
+			_create_road(nodes, tram_tags, target, null, way_id_raw)
 		elif tags.has("building"):
 			_create_building(nodes, tags, target, null, way_id_raw, chunk_entrance_nodes, chunk_poi_nodes)
 		elif tags.has("amenity") and not tags.has("building"):
@@ -3909,6 +3939,8 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 	if skip_spatial_hash:
 		return
 	var highway_type: String = tags.get("highway", "residential")
+	if highway_type in ["tram", "tram_rails"]:
+		return  # Tram tracks must NOT be in road spatial hash
 	var width: float = _get_road_width(tags)
 	var raw_pts := PackedVector2Array()
 	raw_pts.resize(nodes.size())
@@ -3986,6 +4018,14 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			texture_key = "residential"
 			height_offset = 0.004
 			curb_height = 0.0
+		"tram":
+			texture_key = "tram_bed"
+			height_offset = 0.003  # Below all roads so ties hidden at crossings
+			curb_height = 0.0
+		"tram_rails":
+			texture_key = "tram_rails"
+			height_offset = 0.05  # 5cm above road — visually raised, car bounces
+			curb_height = 0.0
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
 			height_offset = 0.23
@@ -3995,8 +4035,12 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			height_offset = 0.006
 			curb_height = 0.0
 
-	# Smoothing (thread-safe: pure math)
-	var smoothed_points: PackedVector2Array = _smooth_road_corners(local_points)
+	# Smoothing (thread-safe: pure math) — skip for tram (straight tracks, smoothing creates wobble)
+	var smoothed_points: PackedVector2Array
+	if highway_type in ["tram", "tram_rails"]:
+		smoothed_points = local_points
+	else:
+		smoothed_points = _smooth_road_corners(local_points)
 	# Save full smoothed points BEFORE clip — needed for corridor polygon
 	var full_smoothed_points: PackedVector2Array = smoothed_points
 	# Клипаем smoothed_points к bbox чанка (используется для curbs, lamps)
@@ -4035,7 +4079,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		# Manual perp-based construction self-intersects at sharp turns, causing
 		# Geometry2D.clip_polygons to produce unpredictable terrain artifacts.
 		var full_validated: PackedVector2Array = _validate_road_direction(full_smoothed_points)
-		if full_validated.size() >= 2 and highway_type not in ["cycleway", "track", "steps"]:
+		if full_validated.size() >= 2 and highway_type not in ["cycleway", "track", "steps", "tram_rails"]:
 			var corridor_delta: float = half_w + 0.1  # 10cm buffer over mesh width
 			var clip_rect := PackedVector2Array()
 			if chunk_key != "initial" and chunk_key != "":
@@ -4118,6 +4162,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	# Store result via mutex
 	var result := {
 		"smoothed_points": smoothed_points,
+		"full_smoothed_points": full_smoothed_points,
 		"vertices": vertices,
 		"uvs": uvs,
 		"normals": normals,
@@ -4247,9 +4292,53 @@ func _apply_road_result(result: Dictionary) -> void:
 		if mh_pts.size() >= 2:
 			_deferred_append(_deferred_manhole_queue, mh_ck, {"points": mh_pts, "width": width, "parent": parent})
 
-	# Road network for NPC - deferred
-	_deferred_traffic_queue.append({"points": smoothed_points, "tags": result.tags, "elevation_info": elevation_info})
+	# Road/tram network - deferred (use FULL unclipped points for complete waypoint chain)
+	if highway_type == "tram":
+		var tram_way_id: int = result.get("way_id", 0)
+		if not _dispatched_tram_network.has(tram_way_id):
+			_dispatched_tram_network[tram_way_id] = true
+			var full_pts: PackedVector2Array = result.get("full_smoothed_points", smoothed_points)
+			_deferred_tram_queue.append({"points": full_pts, "tags": result.tags})
+	elif highway_type == "tram_rails":
+		# Create collision for raised rails — thin boxes along each rail line
+		_create_rail_collision(smoothed_points, parent)
+	else:
+		_deferred_traffic_queue.append({"points": smoothed_points, "tags": result.tags, "elevation_info": elevation_info})
 
+
+
+## Creates collision shapes along tram rail lines (two rails per track, gauge 1520mm)
+func _create_rail_collision(points: PackedVector2Array, parent: Node3D) -> void:
+	if points.size() < 2 or not is_instance_valid(parent):
+		return
+	var rail_h := 0.05  # 5cm rail height
+	var rail_w := 0.07  # 7cm rail width
+	var gauge_half := 0.76  # Half gauge (1520mm / 2)
+	var body := StaticBody3D.new()
+	body.name = "TramRailCollision"
+	for i in range(points.size() - 1):
+		var p0 := points[i]
+		var p1 := points[i + 1]
+		var seg := p1 - p0
+		var seg_len := seg.length()
+		if seg_len < 0.5:
+			continue
+		var dir := seg / seg_len
+		var perp := Vector2(-dir.y, dir.x)
+		var mid_2d := (p0 + p1) * 0.5
+		var angle := atan2(dir.x, dir.y)
+		# Two rails offset by gauge
+		for rail_offset in [-gauge_half, gauge_half]:
+			var ro: float = rail_offset
+			var rail_mid: Vector2 = mid_2d + perp * ro
+			var shape := BoxShape3D.new()
+			shape.size = Vector3(rail_w, rail_h, seg_len)
+			var col := CollisionShape3D.new()
+			col.shape = shape
+			col.position = Vector3(rail_mid.x, rail_h * 0.5, rail_mid.y)
+			col.rotation.y = -angle
+			body.add_child(col)
+	parent.add_child(body)
 
 
 ## Создаёт дорогу-мост с рампами подъёма/спуска и опорами
@@ -5456,18 +5545,35 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	# Создаём материал с шейдером (noise вариация roughness + лужи + разметка)
 	var albedo_tex: Texture2D = _road_textures.get(texture_key, null)
 	var is_sidewalk := texture_key == "path"
-	var normal_tex: Texture2D = _normal_textures.get("sidewalk" if is_sidewalk else "asphalt", null)
-	var roughness_tex: Texture2D = _road_textures.get("sidewalk_roughness" if is_sidewalk else "road_roughness", null)
-	var marking_tex: Texture2D = _road_textures.get("marking_" + texture_key, null)
-	var material: Material = WetRoadMaterial.create_road_shader_material(
-		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode,
-		_noise_textures.get("micro", null),
-		_noise_textures.get("macro", null),
-		roughness_tex,
-		marking_tex
-	)
-	if material is ShaderMaterial:
-		WetRoadMaterial.apply_road_type_params(material, texture_key)
+	var material: Material
+	if texture_key == "tram_bed":
+		var mat := StandardMaterial3D.new()
+		mat.albedo_texture = albedo_tex
+		mat.roughness = 0.7
+		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+		material = mat
+	elif texture_key == "tram_rails":
+		var mat := StandardMaterial3D.new()
+		mat.albedo_texture = albedo_tex
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+		mat.alpha_scissor_threshold = 0.5
+		mat.metallic = 0.7
+		mat.roughness = 0.3
+		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+		material = mat
+	else:
+		var normal_tex: Texture2D = _normal_textures.get("sidewalk" if is_sidewalk else "asphalt", null)
+		var roughness_tex: Texture2D = _road_textures.get("sidewalk_roughness" if is_sidewalk else "road_roughness", null)
+		var marking_tex: Texture2D = _road_textures.get("marking_" + texture_key, null)
+		material = WetRoadMaterial.create_road_shader_material(
+			albedo_tex, normal_tex, _is_wet_mode, _is_night_mode,
+			_noise_textures.get("micro", null),
+			_noise_textures.get("macro", null),
+			roughness_tex,
+			marking_tex
+		)
+		if material is ShaderMaterial:
+			WetRoadMaterial.apply_road_type_params(material, texture_key)
 
 	# Добавляем в parent (chunk node)
 	var parent: Node3D = batch["parent"]
@@ -9097,6 +9203,13 @@ func _process_road_queue() -> void:
 			break
 		var item: Dictionary = _deferred_traffic_queue.pop_front()
 		_extract_road_for_traffic_fast(item.points, item.tags, item.elevation_info)
+
+	# Tram network extraction
+	while not _deferred_tram_queue.is_empty():
+		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+			break
+		var tram_item: Dictionary = _deferred_tram_queue.pop_front()
+		_extract_tram_for_network(tram_item.points, tram_item.tags)
 
 	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 		return
@@ -14798,7 +14911,7 @@ func _extract_road_for_traffic(nodes: Array, tags: Dictionary, bridge_info: Dict
 
 	# Добавляем дорожный сегмент в RoadNetwork (с информацией о мосте если есть)
 	var oneway: String = tags.get("oneway", "")
-	road_network.add_road_segment(local_points, highway_type, chunk_key, bridge_info, oneway)
+	road_network.add_road_segment(local_points, highway_type, chunk_key, bridge_info, oneway, tags)
 
 
 # Fast variant: accepts pre-computed local_points
@@ -14818,7 +14931,30 @@ func _extract_road_for_traffic_fast(local_points: PackedVector2Array, tags: Dict
 	var chunk_key := "%d,%d" % [chunk_x, chunk_z]
 	var highway_type: String = tags.get("highway", "residential")
 	var oneway: String = tags.get("oneway", "")
-	road_network.add_road_segment(local_points, highway_type, chunk_key, bridge_info, oneway)
+	road_network.add_road_segment(local_points, highway_type, chunk_key, bridge_info, oneway, tags)
+
+
+func _extract_tram_for_network(local_points: PackedVector2Array, tags: Dictionary) -> void:
+	print("[TRAM] _extract_tram_for_network: %d points, range X=[%.1f..%.1f] Z=[%.1f..%.1f]" % [
+		local_points.size(),
+		local_points[0].x if local_points.size() > 0 else 0,
+		local_points[local_points.size()-1].x if local_points.size() > 0 else 0,
+		local_points[0].y if local_points.size() > 0 else 0,
+		local_points[local_points.size()-1].y if local_points.size() > 0 else 0
+	])
+	if not get_parent().has_node("TrafficManager"):
+		return
+	var traffic_mgr = get_parent().get_node("TrafficManager")
+	if not traffic_mgr.has_method("get_road_network"):
+		return
+	var road_network = traffic_mgr.get_road_network()
+	if road_network == null:
+		return
+	var first_point: Vector2 = local_points[0]
+	var chunk_x := int(floor(first_point.x / chunk_size))
+	var chunk_z := int(floor(first_point.y / chunk_size))
+	var chunk_key := "%d,%d" % [chunk_x, chunk_z]
+	road_network.add_tram_segment(local_points, chunk_key)
 
 
 # === NIGHT MODE ===

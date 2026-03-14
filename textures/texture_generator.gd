@@ -933,3 +933,105 @@ static func create_noise_macro(size: int = 512) -> NoiseTexture2D:
 	tex.noise = noise
 	tex.normalize = true
 	return tex
+
+
+## Tram track bed — ties + ballast on ground, 3m width
+## UV: x = across track (0-1), y = along track (repeating)
+## Gauge 1520mm on 2.2m bed → inner rails at 0.5 ± 0.345
+static func create_tram_bed(size: int = 256) -> ImageTexture:
+	var image := Image.create(size, size, true, Image.FORMAT_RGBA8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 77701
+
+	# Rail UV positions (gauge 1520mm centered in 2.2m bed)
+	var bed_w: float = 2.2
+	var rail_center_l: float = (bed_w * 0.5 - 0.76) / bed_w  # ~0.155
+	var rail_center_r: float = (bed_w * 0.5 + 0.76) / bed_w  # ~0.845
+	var rail_w: float = 0.09 / bed_w  # wider rail ~9cm for visibility
+	var rail_highlight_w: float = 0.03 / bed_w  # bright top strip
+
+	# Tie spacing: 0.6m real. UV scale = 0.1 → 1 UV = 10m → 0.6m = 0.06 UV
+	var tie_spacing_px: int = maxi(int(size * 0.06), 4)
+	var tie_height_px: int = maxi(int(size * 0.02), 2)
+
+	for y in range(size):
+		for x in range(size):
+			var u: float = float(x) / float(size)
+
+			# Check if on tie (wooden cross-beam)
+			var on_tie: bool = false
+			var y_in_tie: int = y % tie_spacing_px
+			if y_in_tie < tie_height_px:
+				var tie_left: float = rail_center_l - rail_w - 0.04
+				var tie_right: float = rail_center_r + rail_w + 0.04
+				if u >= tie_left and u <= tie_right:
+					on_tie = true
+
+			# Check if on rail (wider) or rail highlight (bright top)
+			var on_rail: bool = false
+			var on_rail_top: bool = false
+			var dist_l: float = absf(u - rail_center_l)
+			var dist_r: float = absf(u - rail_center_r)
+			if dist_l < rail_w or dist_r < rail_w:
+				on_rail = true
+				if dist_l < rail_highlight_w or dist_r < rail_highlight_w:
+					on_rail_top = true
+
+			if on_rail_top:
+				# Bright shiny rail top
+				rng.seed = 77701 + x * 13 + y * 29
+				var g: float = 0.55 + rng.randf() * 0.1
+				image.set_pixel(x, y, Color(g * 0.9, g * 0.92, g, 1.0))
+			elif on_rail:
+				# Dark rail sides
+				rng.seed = 77701 + x * 13 + y * 29
+				var g: float = 0.2 + rng.randf() * 0.05
+				image.set_pixel(x, y, Color(g * 0.9, g * 0.88, g * 0.85, 1.0))
+			elif on_tie:
+				# Wooden tie — warm brown
+				rng.seed = 77701 + x * 7 + y * 19
+				var b: float = 0.3 + rng.randf() * 0.1
+				image.set_pixel(x, y, Color(b * 1.2, b * 0.8, b * 0.45, 1.0))
+			else:
+				# Gravel/ballast — grey-brown
+				rng.seed = 77701 + x * 23 + y * 41
+				var g: float = 0.35 + rng.randf() * 0.12
+				image.set_pixel(x, y, Color(g * 0.9, g * 0.85, g * 0.7, 1.0))
+
+	image.generate_mipmaps()
+	return ImageTexture.create_from_image(image)
+
+
+## Tram rails only — thin steel lines on transparent background
+## Renders above road surface so rails are always visible at crossings
+static func create_tram_rails(size: int = 256) -> ImageTexture:
+	var image := Image.create(size, size, true, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 77702
+
+	# Rail UV positions (gauge 1520mm centered in 2.2m bed)
+	var bed_w: float = 2.2
+	var rail_center_l: float = (bed_w * 0.5 - 0.76) / bed_w  # ~0.155
+	var rail_center_r: float = (bed_w * 0.5 + 0.76) / bed_w  # ~0.845
+	var rail_w: float = 0.09 / bed_w  # wider rail ~9cm
+	var rail_highlight_w: float = 0.03 / bed_w  # bright top strip
+
+	for y in range(size):
+		for x in range(size):
+			var u: float = float(x) / float(size)
+			var dist_l: float = absf(u - rail_center_l)
+			var dist_r: float = absf(u - rail_center_r)
+			if dist_l < rail_w or dist_r < rail_w:
+				rng.seed = 77702 + x * 13 + y * 29
+				if dist_l < rail_highlight_w or dist_r < rail_highlight_w:
+					# Bright shiny rail top
+					var g: float = 0.55 + rng.randf() * 0.1
+					image.set_pixel(x, y, Color(g * 0.9, g * 0.92, g, 1.0))
+				else:
+					# Dark rail sides
+					var g: float = 0.25 + rng.randf() * 0.05
+					image.set_pixel(x, y, Color(g * 0.9, g * 0.88, g * 0.85, 1.0))
+
+	image.generate_mipmaps()
+	return ImageTexture.create_from_image(image)

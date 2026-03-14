@@ -193,6 +193,9 @@ static func apply_road_type_params(mat: ShaderMaterial, road_type: String) -> vo
 		mat.set_shader_parameter("macro_roughness_dry", 0.06)
 		mat.set_shader_parameter("macro_albedo_dry", 0.02)
 		mat.set_shader_parameter("micro_scale", 15.0)
+	elif road_type.begins_with("tram"):
+		mat.set_shader_parameter("macro_roughness_dry", 0.02)
+		mat.set_shader_parameter("macro_albedo_dry", 0.005)
 	elif road_type == "path":
 		mat.set_shader_parameter("macro_roughness_dry", 0.04)
 		mat.set_shader_parameter("micro_roughness_dry", 0.03)

@@ -288,28 +288,24 @@ func _get_lookahead_point(distance: float) -> Vector3:
 
 
 func _calculate_lane_offset(wp: Variant) -> float:
-	"""Вычисляет смещение от центра дороги для текущей полосы"""
-	# Waypoint находится в центре дороги
-	# Нужно сместиться вправо в нашу полосу
-	#
-	# Логика для правостороннего движения:
-	# - Центр дороги = 0
-	# - Правая половина дороги = полосы в нашем направлении
-	# - Ширина одного направления = width / 2
-	# - Если 2 полосы: полоса 0 = правая, полоса 1 = левая (ближе к центру)
-	# - Если 1 полоса: полоса 0 = единственная
-
+	"""Вычисляет смещение от центра way для текущей полосы"""
 	var lanes: int = wp.lanes_count if wp.lanes_count > 0 else 1
-	var half_road: float = wp.width / 2.0  # Ширина нашей стороны дороги
-	var lane_width: float = half_road / lanes  # Ширина одной полосы
+	var effective_lane: int = min(chosen_lane, lanes - 1)
 
-	# Смещение в центр нашей полосы
-	# Полоса 0 = крайняя правая = смещение на (half_road - lane_width/2)
-	# Полоса 1 = вторая справа = смещение на (half_road - lane_width * 1.5)
-	var effective_lane: int = min(chosen_lane, lanes - 1)  # Не выходим за пределы полос
-	var offset: float = half_road - lane_width * (0.5 + effective_lane)
-
-	return offset
+	if wp.is_oneway:
+		# Oneway: waypoint в центре ПРОЕЗЖЕЙ ЧАСТИ (одна сторона дороги).
+		# Полосы распределены симметрично вокруг центра.
+		# width = ширина проезжей части (напр. 7.0m для 2 полос по 3.5m)
+		# Lane 0 (правая): offset > 0, Lane 1 (левая): offset < 0
+		var lane_w: float = wp.width / float(lanes)
+		return wp.width / 2.0 - lane_w * (0.5 + effective_lane)
+	else:
+		# Bidirectional: waypoint в центре ВСЕЙ дороги.
+		# NPC всегда смещается ВПРАВО (правостороннее движение).
+		# width = ширина всей дороги, half_road = ширина одного направления
+		var half_road: float = wp.width / 2.0
+		var lane_w: float = half_road / float(lanes)
+		return half_road - lane_w * (0.5 + effective_lane)
 
 
 func _check_obstacle_ahead() -> bool:

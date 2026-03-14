@@ -245,6 +245,7 @@ func _start_network_request() -> void:
 [out:json][timeout:30];
 (
   way["highway"](%s);
+  way["railway"="tram"](%s);
   way["building"](%s);
   way["landuse"](%s);
   way["natural"](%s);
@@ -267,7 +268,7 @@ func _start_network_request() -> void:
 out body geom;
 >;
 out skel qt;
-""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
+""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
 	retry_count = 0
@@ -416,11 +417,14 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 					way_nodes.append(nodes[node_id])
 
 			if way_nodes.size() > 1:
+				var tags_d: Dictionary = element.get("tags", {})
 				var way_data := {
-					"id": element.id,  # OSM way ID для decoration layer
+					"id": element.id,
 					"nodes": way_nodes,
-					"tags": element.get("tags", {})
+					"tags": tags_d
 				}
+				if tags_d.get("railway", "") == "tram":
+					print("[TRAM] Loaded tram way %d with %d nodes, tags=%s" % [element.id, way_nodes.size(), str(tags_d)])
 				ways.append(way_data)
 				way_by_id[element.id] = way_nodes
 

@@ -61,6 +61,12 @@ func _ready() -> void:
 	road_network = RoadNetworkScript.new()
 	add_child(road_network)
 
+	# Создаём TramManager
+	var TramManagerScript = preload("res://traffic/tram_manager.gd")
+	var tram_mgr = TramManagerScript.new()
+	tram_mgr.name = "TramManager"
+	add_child(tram_mgr)
+
 	# Ищем terrain generator
 	await get_tree().process_frame
 	terrain_generator = get_node_or_null("../OSMTerrain")
@@ -282,15 +288,18 @@ func _count_npcs_in_chunk(chunk_key: String) -> int:
 
 func _calculate_spawn_position_on_lane(wp: Variant, lane: int) -> Vector3:
 	"""Вычисляет позицию спавна на конкретной полосе"""
-	# Логика как в NPCCar._calculate_lane_offset
 	var lanes: int = wp.lanes_count if wp.lanes_count > 0 else 1
-	var half_road: float = wp.width / 2.0
-	var lane_width: float = half_road / lanes
-
 	var effective_lane: int = min(lane, lanes - 1)
-	var offset: float = half_road - lane_width * (0.5 + effective_lane)
 
-	# Вычисляем вектор вправо (защита от нулевого direction)
+	var offset: float
+	if wp.is_oneway:
+		var lane_w: float = wp.width / float(lanes)
+		offset = wp.width / 2.0 - lane_w * (0.5 + effective_lane)
+	else:
+		var half_road: float = wp.width / 2.0
+		var lane_w: float = half_road / float(lanes)
+		offset = half_road - lane_w * (0.5 + effective_lane)
+
 	var dir_flat := Vector3(wp.direction.x, 0, wp.direction.z)
 	if dir_flat.length_squared() < 0.0001:
 		return wp.position
