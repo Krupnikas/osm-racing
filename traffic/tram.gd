@@ -8,7 +8,7 @@ var road_network: Node  # RoadNetwork
 var waypoint_path: Array = []
 var current_waypoint_index: int = 0
 var speed: float = 0.0
-var max_speed: float = 11.0  # ~40 km/h in m/s
+var max_speed: float = 8.33  # ~30 km/h in m/s
 
 # GLTF model: front = +X, ~25.8m long, ~3.4m tall, ~6.4m wide
 const MODEL_SCALE := 0.58

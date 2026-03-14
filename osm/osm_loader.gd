@@ -264,11 +264,12 @@ func _start_network_request() -> void:
   node["amenity"="bus_station"](%s);
   node["public_transport"="platform"](%s);
   node["public_transport"="station"](%s);
+  node["railway"="tram_stop"](%s);
 );
 out body geom;
 >;
 out skel qt;
-""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
+""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
 	retry_count = 0
@@ -362,6 +363,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	var entrance_nodes := []  # Входы в здания
 	var poi_nodes := []  # Точечные заведения (shop, amenity как node)
 	var bus_stops := []  # Автобусные остановки
+	var tram_stops := []  # Трамвайные остановки
 
 	# Собираем все узлы
 	for element in data.get("elements", []):
@@ -397,6 +399,14 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 				var is_platform: bool = pt_value == "platform" or pt_value == "station"
 				if is_bus_stop or is_bus_station or is_platform:
 					bus_stops.append({
+						"lat": element.lat,
+						"lon": element.lon,
+						"tags": tags
+					})
+
+				# Трамвайные остановки
+				if tags.get("railway", "") == "tram_stop":
+					tram_stops.append({
 						"lat": element.lat,
 						"lon": element.lon,
 						"tags": tags
@@ -487,7 +497,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	if relations_found > 0:
 		print("OSM: Found %d relations, %d with valid geometry" % [relations_found, relations_with_nodes])
 
-	print("OSM: Parsed %d nodes, %d ways, %d point objects, %d entrances, %d POI nodes, %d bus stops" % [nodes.size(), ways.size(), point_objects.size(), entrance_nodes.size(), poi_nodes.size(), bus_stops.size()])
+	print("OSM: Parsed %d nodes, %d ways, %d point objects, %d entrances, %d POI nodes, %d bus stops, %d tram stops" % [nodes.size(), ways.size(), point_objects.size(), entrance_nodes.size(), poi_nodes.size(), bus_stops.size(), tram_stops.size()])
 
 	return {
 		"center_lat": center_lat,
@@ -497,7 +507,8 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 		"point_objects": point_objects,
 		"entrance_nodes": entrance_nodes,
 		"poi_nodes": poi_nodes,
-		"bus_stops": bus_stops
+		"bus_stops": bus_stops,
+		"tram_stops": tram_stops
 	}
 
 # Конвертация координат в локальные метры относительно центра

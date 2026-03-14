@@ -21,6 +21,7 @@ const STREET_LAMP_SCENE = preload("res://models/street_lamp/Lone_Street_Lamp_on_
 const TireTrackManagerScript = preload("res://tracks/tire_track_manager.gd")
 const CROSSING_SIGN_TEXTURE = preload("res://textures/signs/pedestrian_crossing.png")
 const PARKING_SIGN_TEXTURE = preload("res://textures/signs/parking.png")
+const TRAM_STOP_SIGN_TEXTURE = preload("res://textures/signs/tram_stop.png")
 const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
 const WheelDirtScript = preload("res://effects/wheel_dirt.gd")
 
@@ -143,6 +144,7 @@ const WATER_CELL_SIZE := 30.0
 var _chunk_hash_cells: Dictionary = {}
 # Per-chunk spatial hashes (independent, include overlap data — used by vegetation threads)
 var _chunk_road_hashes: Dictionary = {}  # chunk_key → Dictionary (Vector2i → Array of seg)
+var _chunk_tram_hashes: Dictionary = {}  # chunk_key → Dictionary (Vector2i → Array of tram seg)
 var _chunk_building_hashes: Dictionary = {}  # chunk_key → Dictionary
 var _chunk_building_poly_hashes: Dictionary = {}  # chunk_key → Dictionary
 var _chunk_parking_hashes: Dictionary = {}  # chunk_key → Dictionary
@@ -165,6 +167,7 @@ var _pending_parking_signs: Array = []  # Отложенные знаки пар
 var _crossing_sign_front_mat: StandardMaterial3D
 var _crossing_sign_back_mat: StandardMaterial3D
 var _parking_sign_front_mat: StandardMaterial3D
+var _tram_stop_sign_front_mat: StandardMaterial3D
 var _deferred_lamp_queue: Dictionary = {}  # chunk_key → Array[{points, width, parent}]
 var _deferred_manhole_queue: Dictionary = {}  # chunk_key → Array[{points, width, parent}]
 var _deferred_traffic_queue: Array = []  # Deferred traffic network extraction
@@ -540,6 +543,13 @@ func _ready() -> void:
 	_parking_sign_front_mat.albedo_texture = PARKING_SIGN_TEXTURE
 	_parking_sign_front_mat.metallic = 0.3
 	_parking_sign_front_mat.roughness = 0.5
+
+	_tram_stop_sign_front_mat = StandardMaterial3D.new()
+	_tram_stop_sign_front_mat.albedo_texture = TRAM_STOP_SIGN_TEXTURE
+	_tram_stop_sign_front_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	_tram_stop_sign_front_mat.alpha_scissor_threshold = 0.5
+	_tram_stop_sign_front_mat.metallic = 0.3
+	_tram_stop_sign_front_mat.roughness = 0.5
 
 	# Инициализируем шейдер окон (один раз для всех батчей)
 	_init_window_shader()
@@ -3575,6 +3585,26 @@ func _process_phase3_queue() -> bool:
 					continue
 				_dispatched_tram_ways[tram_dedup_key] = true
 				print("[TRAM] Dispatching tram way %d to _create_road, chunk=%s nodes=%d" % [way_id_raw, chunk_key, nodes.size()])
+				# Store tram segments in separate hash for sign placement
+				var tram_pts := PackedVector2Array()
+				tram_pts.resize(nodes.size())
+				for j_t in range(nodes.size()):
+					tram_pts[j_t] = _latlon_to_local(nodes[j_t].lat, nodes[j_t].lon)
+				if not _chunk_tram_hashes.has(chunk_key):
+					_chunk_tram_hashes[chunk_key] = {}
+				var th: Dictionary = _chunk_tram_hashes[chunk_key]
+				for j_t in range(tram_pts.size() - 1):
+					var seg_dict := {"p1": tram_pts[j_t], "p2": tram_pts[j_t + 1], "width": 2.2}
+					var min_cx := int(floor(minf(tram_pts[j_t].x, tram_pts[j_t + 1].x) / ROAD_CELL_SIZE))
+					var max_cx := int(floor(maxf(tram_pts[j_t].x, tram_pts[j_t + 1].x) / ROAD_CELL_SIZE))
+					var min_cy := int(floor(minf(tram_pts[j_t].y, tram_pts[j_t + 1].y) / ROAD_CELL_SIZE))
+					var max_cy := int(floor(maxf(tram_pts[j_t].y, tram_pts[j_t + 1].y) / ROAD_CELL_SIZE))
+					for tcx in range(min_cx, max_cx + 1):
+						for tcy in range(min_cy, max_cy + 1):
+							var tkey := Vector2i(tcx, tcy)
+							if not th.has(tkey):
+								th[tkey] = []
+							th[tkey].append(seg_dict)
 				var tram_tags: Dictionary = tags.duplicate()
 				tram_tags["highway"] = "tram"
 				_create_road(nodes, tram_tags, target, null, way_id_raw, true)
@@ -3709,6 +3739,22 @@ func _process_phase3_queue() -> bool:
 				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
 					continue
 			_create_bus_stop(local, 0.0, tags, target)
+		# Done with bus stops — move to tram stops
+		entry.phase = "tram_stops"
+		entry.way_idx = 0
+		return true
+
+	if phase == "tram_stops":
+		var tram_stops: Array = osm_data.get("tram_stops", [])
+		var idx: int = entry.way_idx
+		while idx < tram_stops.size():
+			var stop: Dictionary = tram_stops[idx]
+			idx += 1
+			var local: Vector2 = _latlon_to_local(stop.get("lat", 0.0), stop.get("lon", 0.0))
+			if filter_by_chunk:
+				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
+					continue
+			_enqueue_tram_stop_sign(local, target, chunk_key)
 		# Done — finalize
 		entry.phase = "finalize"
 		return true
@@ -7104,6 +7150,122 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 	parent.add_child(body)
 
 
+func _enqueue_tram_stop_sign(pos: Vector2, parent: Node3D, chunk_key: String) -> void:
+	# Dedup
+	var pos_key := "ts_%d_%d" % [int(pos.x), int(pos.y)]
+	if _created_sign_positions.has(pos_key):
+		return
+	# Find nearest tram segment from SEPARATE tram hash (not road hash!)
+	var cell_x := int(floor(pos.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(pos.y / ROAD_CELL_SIZE))
+	var best_seg: Dictionary = {}
+	var best_dist := 999.0
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			# Search all chunk tram hashes
+			for ck in _chunk_tram_hashes:
+				var th: Dictionary = _chunk_tram_hashes[ck]
+				if not th.has(key):
+					continue
+				for seg in th[key]:
+					var closest := Geometry2D.get_closest_point_to_segment(pos, seg.p1, seg.p2)
+					var dist: float = pos.distance_to(closest)
+					if dist < best_dist:
+						best_dist = dist
+						best_seg = seg
+	if best_seg.is_empty() or best_dist > 30.0:
+		return
+	_created_sign_positions[pos_key] = true
+	var road_dir: Vector2 = (best_seg.p2 - best_seg.p1).normalized()
+	var half_w: float = best_seg.width / 2.0
+	# Project tram_stop onto track center, offset OUTWARD (left perp = always away from corridor center)
+	var closest := Geometry2D.get_closest_point_to_segment(pos, best_seg.p1, best_seg.p2)
+	var left_perp := Vector2(-road_dir.y, road_dir.x)
+	var sign_pos: Vector2 = closest + left_perp * (half_w + 0.2)
+	# Face oncoming tram (opposite of travel direction)
+	var rotation_y: float = atan2(-road_dir.x, -road_dir.y)
+	_infrastructure_queue.append({
+		"type": "tram_stop_sign",
+		"pos": sign_pos,
+		"elevation": 0.0,
+		"parent": parent,
+		"rotation": rotation_y,
+		"chunk_key": chunk_key
+	})
+
+
+func _create_tram_stop_sign_immediate(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> void:
+	if not is_instance_valid(parent):
+		return
+	var body := RigidBody3D.new()
+	body.name = "TramStopSign"
+	body.position = Vector3(pos.x, elevation, pos.y)
+	if elevation != 0.0:
+		body.set_meta("_elevation_applied", true)
+	body.rotation.y = rotation_y
+	body.collision_layer = 4
+	body.collision_mask = 7
+	body.mass = 15.0
+	body.freeze = true
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	body.contact_monitor = true
+	body.max_contacts_reported = 4
+	body.body_entered.connect(_on_sign_hit.bind(body))
+
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.05
+	shape.height = 2.5
+	collision.shape = shape
+	collision.position.y = 1.25
+	body.add_child(collision)
+
+	var pole := MeshInstance3D.new()
+	var pole_mesh := CylinderMesh.new()
+	pole_mesh.top_radius = 0.03
+	pole_mesh.bottom_radius = 0.04
+	pole_mesh.height = 2.5
+	pole.mesh = pole_mesh
+	var pole_mat := StandardMaterial3D.new()
+	pole_mat.albedo_color = Color(0.5, 0.5, 0.5)
+	pole_mat.metallic = 0.8
+	pole.material_override = pole_mat
+	pole.position.y = 1.25
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	body.add_child(pole)
+
+	# Лицевая сторона знака (текстура трамвайной остановки)
+	var sign_front := MeshInstance3D.new()
+	var front_mesh := QuadMesh.new()
+	front_mesh.size = Vector2(0.6, 0.6)
+	sign_front.mesh = front_mesh
+	sign_front.material_override = _tram_stop_sign_front_mat
+	sign_front.position = Vector3(0, 2.3, 0.051)
+	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	body.add_child(sign_front)
+
+	# Обратная сторона (серый изношенный металл)
+	var sign_back := MeshInstance3D.new()
+	var back_mesh := QuadMesh.new()
+	back_mesh.size = Vector2(0.6, 0.6)
+	sign_back.mesh = back_mesh
+	sign_back.material_override = _crossing_sign_back_mat
+	sign_back.position = Vector3(0, 2.3, 0.029)
+	sign_back.rotation.y = PI
+	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	body.add_child(sign_back)
+
+	pole.visibility_range_end = 150.0
+	sign_front.visibility_range_end = 150.0
+	sign_back.visibility_range_end = 150.0
+
+	if _draw_call_logging_enabled:
+		_draw_call_stats["signs"] += 2
+
+	parent.add_child(body)
+
+
 ## Немедленное создание природного объекта (вызывается из очереди)
 func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> void:
 	if not is_instance_valid(parent):
@@ -10013,6 +10175,9 @@ func _process_infrastructure_queue() -> void:
 			"crossing_sign":
 				_create_crossing_sign_immediate(item.pos, elevation, item.get("rotation", 0.0), item.parent)
 				_record_perf("infra_crossing_sign", Time.get_ticks_usec() - t0)
+			"tram_stop_sign":
+				_create_tram_stop_sign_immediate(item.pos, elevation, item.get("rotation", 0.0), item.parent)
+				_record_perf("infra_tram_stop_sign", Time.get_ticks_usec() - t0)
 		processed += 1
 
 

@@ -736,6 +736,24 @@ func clear_chunk(chunk_key: String) -> void:
 		tram_waypoints_by_chunk.erase(chunk_key)
 
 
+## Returns the nearest tram waypoint to a given world position (x, z), or null
+func get_nearest_tram_waypoint(world_pos: Vector2, max_dist: float = 50.0) -> Waypoint:
+	var gx := int(floor(world_pos.x / GRID_CELL_SIZE))
+	var gz := int(floor(world_pos.y / GRID_CELL_SIZE))
+	var best_wp: Waypoint = null
+	var best_dist_sq: float = max_dist * max_dist
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			var key := "%d,%d" % [gx + dx, gz + dz]
+			if _tram_spatial_grid.has(key):
+				for wp in _tram_spatial_grid[key]:
+					var d_sq: float = (wp.position.x - world_pos.x) ** 2 + (wp.position.z - world_pos.y) ** 2
+					if d_sq < best_dist_sq:
+						best_dist_sq = d_sq
+						best_wp = wp
+	return best_wp
+
+
 func _get_road_width(highway_type: String) -> float:
 	"""Получает ширину дороги по типу"""
 	const ROAD_WIDTHS := {
