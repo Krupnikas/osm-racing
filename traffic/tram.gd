@@ -21,6 +21,14 @@ var _taillight_r: OmniLight3D
 var _model_node: Node3D
 var _logged_stuck: bool = false
 
+# Tram stop behavior
+var _is_stopped: bool = false
+var _stop_timer: float = 0.0
+var _visited_stops: Dictionary = {}  # stop_index -> true
+const STOP_DISTANCE := 15.0  # Distance to trigger stop (meters)
+const STOP_LATERAL_MAX := 1.5  # Max perpendicular distance to count as same track (meters)
+const STOP_DURATION := 5.0  # How long to wait at stop (seconds)
+
 
 func _ready() -> void:
 	_load_model()
@@ -168,6 +176,46 @@ func _physics_process(delta: float) -> void:
 	var night_manager = get_node_or_null("/root/Main/NightModeManager")
 	if night_manager and night_manager.has_method("is_night"):
 		_set_lights_enabled(night_manager.is_night())
+
+	# Handle tram stop waiting
+	if _is_stopped:
+		_stop_timer -= delta
+		if _stop_timer <= 0.0:
+			_is_stopped = false
+		else:
+			return
+
+	# Check proximity to tram stops — smooth braking + same-track filter
+	if road_network and road_network.get("tram_stop_positions") != null:
+		var stops: Array = road_network.tram_stop_positions
+		if not stops.is_empty():
+			var my_pos := global_position
+			var fwd := Vector2(sin(global_rotation.y), cos(global_rotation.y))
+			var best_i := -1
+			var best_dist := 9999.0
+			for i in range(stops.size()):
+				if _visited_stops.has(i):
+					continue
+				var stop_pos: Vector3 = stops[i]
+				var to_stop := Vector2(stop_pos.x - my_pos.x, stop_pos.z - my_pos.z)
+				var along: float = to_stop.dot(fwd)
+				# Only care about stops ahead
+				if along < 0.0:
+					continue
+				# Lateral distance — filter out parallel track
+				var lateral: float = absf(to_stop.x * fwd.y - to_stop.y * fwd.x)
+				if lateral > STOP_LATERAL_MAX:
+					continue
+				if along < best_dist:
+					best_dist = along
+					best_i = i
+
+			if best_i >= 0 and best_dist < STOP_DISTANCE:
+				_is_stopped = true
+				_stop_timer = STOP_DURATION
+				_visited_stops[best_i] = true
+				speed = 0.0
+				return
 
 	speed = move_toward(speed, max_speed, 2.0 * delta)
 

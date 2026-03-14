@@ -53,6 +53,9 @@ var _current_connect_index: int = 0  # Индекс в текущем батче
 var _pending_tram_connections: Array = []
 var _tram_spatial_grid: Dictionary = {}  # Separate spatial grid for tram waypoints
 
+# Tram stop positions (world coordinates) for tram stopping behavior
+var tram_stop_positions: Array[Vector3] = []
+
 # Константы
 const WAYPOINT_SPACING := 8.0  # Расстояние между waypoints в метрах
 const INTERSECTION_THRESHOLD := 8.0  # Расстояние для определения пересечений

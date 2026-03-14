@@ -3755,6 +3755,12 @@ func _process_phase3_queue() -> bool:
 				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
 					continue
 			_enqueue_tram_stop_sign(local, target, chunk_key)
+			# Register stop position for tram stopping behavior
+			var traffic_mgr = get_parent().get_node_or_null("TrafficManager")
+			if traffic_mgr and traffic_mgr.has_method("get_road_network"):
+				var rn = traffic_mgr.get_road_network()
+				if rn:
+					rn.tram_stop_positions.append(Vector3(local.x, 0.0, local.y))
 		# Done — finalize
 		entry.phase = "finalize"
 		return true
