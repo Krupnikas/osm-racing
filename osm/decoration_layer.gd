@@ -208,6 +208,14 @@ func _load_building_overrides_json(path: String) -> void:
 		if od.has("pediments"):
 			override.pediments = od["pediments"]
 
+		# Custom 3D model (replaces entire building)
+		if od.has("custom_model"):
+			override.custom_model_path = od["custom_model"]
+			override.custom_model_scale = od.get("custom_model_scale", 1.0)
+			override.custom_model_rotation_y = od.get("custom_model_rotation_y", 0.0)
+			override.custom_model_y_offset = od.get("custom_model_y_offset", 0.0)
+			override.custom_model_visibility_range = od.get("custom_model_visibility_range", 500.0)
+
 		_building_overrides.append(override)
 
 	# Custom models (гаражи, веранды и т.д. по координатам)

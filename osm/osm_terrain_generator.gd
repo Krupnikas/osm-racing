@@ -3116,6 +3116,31 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 					pcells.append(Vector2i(pcx, pcy))
 			building_poly_entries.append({"poly": bpoints, "cells": pcells})
 
+	# Pedestrian areas — register in building poly hash to block trees
+	var ped_areas: Array = osm_data.get("pedestrian_areas", [])
+	for ped_nodes in ped_areas:
+		if ped_nodes.size() < 3:
+			continue
+		var ped_pts := PackedVector2Array()
+		for node in ped_nodes:
+			var dx: float = (node["lon"] - t_start_lon) * t_lon_scale
+			var dz: float = (node["lat"] - t_start_lat) * 111000.0
+			ped_pts.append(Vector2(dx, -dz))
+		var pp_min_x: float = ped_pts[0].x
+		var pp_max_x: float = ped_pts[0].x
+		var pp_min_y: float = ped_pts[0].y
+		var pp_max_y: float = ped_pts[0].y
+		for p in ped_pts:
+			pp_min_x = minf(pp_min_x, p.x)
+			pp_max_x = maxf(pp_max_x, p.x)
+			pp_min_y = minf(pp_min_y, p.y)
+			pp_max_y = maxf(pp_max_y, p.y)
+		var pp_cells: Array = []
+		for pcx in range(int(floor(pp_min_x / BUILDING_CELL_SIZE)), int(floor(pp_max_x / BUILDING_CELL_SIZE)) + 1):
+			for pcy in range(int(floor(pp_min_y / BUILDING_CELL_SIZE)), int(floor(pp_max_y / BUILDING_CELL_SIZE)) + 1):
+				pp_cells.append(Vector2i(pcx, pcy))
+		building_poly_entries.append({"poly": ped_pts, "cells": pp_cells})
+
 	# ========== PHASE 2: Intersection detection ==========
 	var node_usage: Dictionary = {}
 	var node_arms: Dictionary = {}
@@ -3761,6 +3786,35 @@ func _process_phase3_queue() -> bool:
 				var rn = traffic_mgr.get_road_network()
 				if rn:
 					rn.tram_stop_positions.append(Vector3(local.x, 0.0, local.y))
+		# Done with tram stops — move to pedestrian areas
+		entry.phase = "pedestrian_areas"
+		entry.way_idx = 0
+		return true
+
+	if phase == "pedestrian_areas":
+		var ped_areas: Array = osm_data.get("pedestrian_areas", [])
+		var idx: int = entry.way_idx
+		while idx < ped_areas.size():
+			var ped_nodes: Array = ped_areas[idx]
+			idx += 1
+			if ped_nodes.size() < 3:
+				continue
+			var ped_points := PackedVector2Array()
+			for node in ped_nodes:
+				ped_points.append(_latlon_to_local(node["lat"], node["lon"]))
+			# Only create in the chunk where center falls (avoid duplicates across chunks)
+			if filter_by_chunk:
+				var cx := 0.0
+				var cy := 0.0
+				for p in ped_points:
+					cx += p.x
+					cy += p.y
+				cx /= ped_points.size()
+				cy /= ped_points.size()
+				if not (cx >= chunk_min_x and cx < chunk_max_x and cy >= chunk_min_z and cy < chunk_max_z):
+					continue
+			_create_pedestrian_area(ped_points, target, chunk_key)
+			print("OSM: Created pedestrian area with %d points in chunk %s" % [ped_points.size(), chunk_key])
 		# Done — finalize
 		entry.phase = "finalize"
 		return true
@@ -3873,6 +3927,20 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 			_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target})
 		elif tags.has("waterway"):
 			_create_waterway(nodes, tags, target, null)
+	# Pedestrian areas (from relations, separate from highway ways)
+	var ped_areas: Array = osm_data.get("pedestrian_areas", [])
+	if ped_areas.size() > 0:
+		print("OSM: Processing %d pedestrian areas for chunk %s" % [ped_areas.size(), chunk_key])
+	for ped_nodes in ped_areas:
+		if ped_nodes.size() < 3:
+			continue
+		var ped_points := PackedVector2Array()
+		for node in ped_nodes:
+			ped_points.append(_latlon_to_local(node["lat"], node["lon"]))
+		_create_pedestrian_area(ped_points, target, chunk_key)
+		# Block trees
+		_add_building_poly_to_hash(ped_points, chunk_key)
+
 	var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
 	if not _pending_batch_chunks.has(batch_chunk_key):
 		_pending_batch_chunks.append(batch_chunk_key)
@@ -6524,8 +6592,10 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	if building_override and building_override.height_override > 0:
 		building_height = building_override.height_override
 
-	# Если есть override с текстурой или цветом, используем прямой рендеринг вместо батчинга
-	if building_override and building_override.wall_texture_path != "":
+	# Custom 3D model — полностью заменяет геометрию здания
+	if building_override and building_override.custom_model_path != "":
+		_place_custom_building_model(building_override, center, parent, base_elev)
+	elif building_override and building_override.wall_texture_path != "":
 		# Кастомная текстура с опциональным normal map
 		_create_3d_building_with_custom_texture(points, building_height, building_override, parent, base_elev, debug_name)
 		print("OSM: Building override applied for way %d with texture %s" % [way_id, building_override.wall_texture_path])
@@ -6740,6 +6810,56 @@ func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void
 			if not _chunk_road_materials.has(chunk_key):
 				_chunk_road_materials[chunk_key] = []
 			_chunk_road_materials[chunk_key].append(material)
+
+
+func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_key: String = "") -> void:
+	"""Создаёт пешеходную площадь с материалом тротуара"""
+	var indices := Geometry2D.triangulate_polygon(points)
+	if indices.is_empty():
+		return
+
+	var mesh := MeshInstance3D.new()
+	mesh.name = "PedestrianArea"
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var albedo_tex: Texture2D = _road_textures.get("path", null)
+	var normal_tex: Texture2D = _normal_textures.get("sidewalk", null)
+	var roughness_tex: Texture2D = _road_textures.get("sidewalk_roughness", null)
+	var material: Material = WetRoadMaterial.create_road_shader_material(
+		albedo_tex, normal_tex, _is_wet_mode, _is_night_mode,
+		_noise_textures.get("micro", null),
+		_noise_textures.get("macro", null),
+		roughness_tex
+	)
+	if material is ShaderMaterial:
+		WetRoadMaterial.apply_road_type_params(material, "path")
+
+	st.set_material(material)
+
+	var height_offset := 0.23  # Same as footway (1cm above grass terrain at 0.22)
+	var uv_ws := 1.0 / 4.0
+
+	for i in range(0, indices.size(), 3):
+		for j in range(3):
+			var idx = indices[i + j]
+			var p = points[idx]
+			st.set_uv(Vector2(p.x * uv_ws, p.y * uv_ws))
+			st.set_normal(Vector3.UP)
+			st.add_vertex(Vector3(p.x, height_offset, p.y))
+
+	mesh.mesh = st.commit()
+	parent.add_child(mesh)
+
+	if material is ShaderMaterial:
+		var ck := chunk_key
+		if ck.is_empty() and parent.name.begins_with("Chunk_"):
+			ck = parent.name.substr(6)
+		if ck != "":
+			if not _chunk_road_materials.has(ck):
+				_chunk_road_materials[ck] = []
+			_chunk_road_materials[ck].append(material)
 
 
 func _spawn_parked_cars(parking_points: PackedVector2Array, parent: Node3D) -> void:
@@ -12788,6 +12908,29 @@ func _create_garbage_container(pos: Vector2, elevation: float, parent: Node3D) -
 	for child in instance.get_children():
 		_set_no_shadow_recursive(child)
 	parent.add_child(instance)
+
+
+func _place_custom_building_model(override, center: Vector2, parent: Node3D, base_elev: float) -> void:
+	var model_path: String = override.custom_model_path
+	if not _custom_model_cache.has(model_path):
+		if ResourceLoader.exists(model_path):
+			_custom_model_cache[model_path] = load(model_path)
+		else:
+			push_warning("Custom building model not found: " + model_path)
+			return
+	var scene: PackedScene = _custom_model_cache[model_path]
+	if not scene:
+		return
+	var inst: Node3D = scene.instantiate()
+	var scale_val: float = override.custom_model_scale
+	inst.position = Vector3(center.x, base_elev + override.custom_model_y_offset, center.y)
+	inst.scale = Vector3.ONE * scale_val
+	inst.rotation_degrees.y = override.custom_model_rotation_y
+	var vis_range: float = override.custom_model_visibility_range
+	_set_visibility_range_recursive(inst, vis_range)
+	parent.add_child(inst)
+	print("OSM: Placed custom building model '%s' at (%.1f, %.1f), scale=%.2f, vis=%.0fm" % [
+		model_path.get_file(), center.x, center.y, scale_val, vis_range])
 
 
 func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:

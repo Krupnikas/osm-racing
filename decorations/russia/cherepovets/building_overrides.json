@@ -720,6 +720,15 @@
           "padding": 0.4
         }
       ]
+    },
+    {
+      "osm_way_id": 46884947,
+      "comment": "Ледовый дворец",
+      "custom_model": "res://models/ice_palace/ice-palace-cherepovets.glb",
+      "custom_model_scale": 65.0,
+      "custom_model_rotation_y": 0,
+      "custom_model_y_offset": 0.22,
+      "custom_model_visibility_range": 500.0
     }
   ],
   "custom_models": [

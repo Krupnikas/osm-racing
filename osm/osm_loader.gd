@@ -254,6 +254,7 @@ func _start_network_request() -> void:
   way["amenity"](%s);
   relation["building"](%s);
   relation["amenity"](%s);
+  relation["highway"="pedestrian"](%s);
   node["natural"="tree"](%s);
   node["traffic_sign"](%s);
   node["highway"="street_lamp"](%s);
@@ -269,7 +270,7 @@ func _start_network_request() -> void:
 out body geom;
 >;
 out skel qt;
-""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
+""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
 	retry_count = 0
@@ -364,6 +365,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	var poi_nodes := []  # Точечные заведения (shop, amenity как node)
 	var bus_stops := []  # Автобусные остановки
 	var tram_stops := []  # Трамвайные остановки
+	var pedestrian_areas := []  # Пешеходные площади (relation highway=pedestrian area=yes)
 
 	# Собираем все узлы
 	for element in data.get("elements", []):
@@ -474,10 +476,14 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 
 			if outer_nodes.size() > 2:
 				relations_with_nodes += 1
-				ways.append({
-					"nodes": outer_nodes,
-					"tags": tags
-				})
+				if tags.get("highway", "") == "pedestrian" and tags.get("area", "") == "yes":
+					# Pedestrian areas go to separate array (not mixed with roads)
+					pedestrian_areas.append(outer_nodes)
+				else:
+					ways.append({
+						"nodes": outer_nodes,
+						"tags": tags
+					})
 
 	# Убираем building/amenity теги у ways которые являются members building-relations
 	# (relation уже добавлен как целый building, individual way не нужен)
@@ -497,7 +503,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	if relations_found > 0:
 		print("OSM: Found %d relations, %d with valid geometry" % [relations_found, relations_with_nodes])
 
-	print("OSM: Parsed %d nodes, %d ways, %d point objects, %d entrances, %d POI nodes, %d bus stops, %d tram stops" % [nodes.size(), ways.size(), point_objects.size(), entrance_nodes.size(), poi_nodes.size(), bus_stops.size(), tram_stops.size()])
+	print("OSM: Parsed %d nodes, %d ways, %d point objects, %d entrances, %d POI nodes, %d bus stops, %d tram stops, %d pedestrian areas" % [nodes.size(), ways.size(), point_objects.size(), entrance_nodes.size(), poi_nodes.size(), bus_stops.size(), tram_stops.size(), pedestrian_areas.size()])
 
 	return {
 		"center_lat": center_lat,
@@ -508,7 +514,8 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 		"entrance_nodes": entrance_nodes,
 		"poi_nodes": poi_nodes,
 		"bus_stops": bus_stops,
-		"tram_stops": tram_stops
+		"tram_stops": tram_stops,
+		"pedestrian_areas": pedestrian_areas
 	}
 
 # Конвертация координат в локальные метры относительно центра

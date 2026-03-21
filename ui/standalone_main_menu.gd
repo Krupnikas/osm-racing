@@ -12,6 +12,7 @@ const TestTracksScript = preload("res://race/test_tracks.gd")
 const LOCATIONS := {
 	"Череповец": [59.150406, 37.948805],
 	"Новый Век": [59.123567, 37.982864],
+	"Ледовый дворец": [59.089216, 37.917488],
 	"Москва (Отрадное)": [55.860580, 37.599646],
 	"Тбилиси (Важа-Пшавела)": [41.723972, 44.730502],
 	"Дубай (Крик)": [25.208591, 55.344100],
@@ -39,7 +40,8 @@ func _ready() -> void:
 
 	# Музыка автоматически запускается в MusicManager._ready()
 
-	# Генерируем кнопки трасс для режима гонок
+	# Генерируем кнопки локаций и трасс
+	_populate_locations()
 	_populate_tracks()
 
 	# Добавляем кнопку "Выбрать на карте" и "Тестовые трассы" в главное меню
@@ -213,24 +215,17 @@ func _on_location_back_pressed() -> void:
 	$VBox.visible = true
 
 
-func _on_cherepovets_pressed() -> void:
-	_start_free_roam("Череповец")
-
-
-func _on_novy_vek_pressed() -> void:
-	_start_free_roam("Новый Век")
-
-
-func _on_moscow_pressed() -> void:
-	_start_free_roam("Москва (Отрадное)")
-
-
-func _on_tbilisi_pressed() -> void:
-	_start_free_roam("Тбилиси (Важа-Пшавела)")
-
-
-func _on_dubai_pressed() -> void:
-	_start_free_roam("Дубай (Крик)")
+func _populate_locations() -> void:
+	var vbox: VBoxContainer = $LocationPanel/VBox
+	var back_btn: Button = $LocationPanel/VBox/BackButton
+	for location_name in LOCATIONS.keys():
+		var btn := Button.new()
+		btn.text = location_name
+		btn.custom_minimum_size = Vector2(0, 60)
+		btn.add_theme_font_size_override("font_size", 28)
+		btn.pressed.connect(_start_free_roam.bind(location_name))
+		vbox.add_child(btn)
+		vbox.move_child(btn, back_btn.get_index())
 
 
 func _start_free_roam_at_coords(lat: float, lon: float) -> void:
