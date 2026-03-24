@@ -99,3 +99,30 @@ Emission texture в Godot 4 StandardMaterial3D не работает как ма
 **Файлы:**
 - `osm/osm_terrain_generator.gd` — `_create_deferred_terrain()` ~строка 4567 (spatial hash коридоры)
 - `osm/osm_terrain_generator.gd` — `_create_chunk_ground_terrain()` ~строка 10190 (генерация бордюров по краям terrain)
+
+---
+
+## Z-fighting на стыке primary_link и primary дороги
+
+**Статус:** Открыт
+
+**Описание:**
+На пересечении дорог 60119987 (primary, ширина 12м) и 84060676 (primary_link, ширина 5м) видно мерцание (z-fighting). Форма — параболическая: широкая с одной стороны, сужающаяся к точке с другой — повторяет зону перекрытия мешей двух дорог.
+
+**Корневая причина:**
+Link-дорога начинается в общем OSM-узле, который находится в **центре** родительской дороги. Mesh link'а (5м шириной) полностью лежит внутри mesh'а primary (12м шириной) вблизи стыка. Catmull-Rom smoothing усугубляет проблему: при угле 39.3° создаёт 3 дополнительные точки на расстоянии до 7.5м от узла — все внутри primary mesh. Текстуры разные ("residential" у link, "bi4" у primary), высота одинаковая (0.010) → z-fighting.
+
+**Текущие паллиативы в коде:**
+- Shift raw[0]/raw[last] link-дорог на `parent_half_width` вдоль направления link'а перед smoothing (уменьшает зону перекрытия, но не устраняет — edge link'а на 2.5м ближе к центру, чем shifted center)
+- `_chunk_data_received` dedup dictionary (предотвращает дубли mesh'ей от повторных HTTP-ответов Overpass API)
+
+**22 попытки исправления задокументированы:** см. [ROAD_BENDING_DEBUG.md](../ROAD_BENDING_DEBUG.md), Problem 2, Steps 2–22.
+
+**Нерешённые подходы:**
+1. Поднять link на минимальную высоту (1–2мм) — не испробовано, при 5мм (Step 6) разметка link'а была видна поверх primary
+2. Clip link mesh по контуру parent road (вырезать перекрывающуюся часть)
+3. Увеличить shift на `parent_half_width + link_half_width` (8.5м вместо 6м) — рискует срезать короткие link'и целиком
+
+**Файлы:**
+- `osm/osm_terrain_generator.gd` — link shift (~строка 4188), height_offset (~строка 4137)
+- `ROAD_BENDING_DEBUG.md` — полный лог расследования
