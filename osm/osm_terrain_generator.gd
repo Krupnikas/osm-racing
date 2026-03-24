@@ -108,6 +108,7 @@ var _debug_log_absolute_path := ""
 var _profiler: PerformanceProfiler  # Для измерения производительности
 var _loaded_chunks: Dictionary = {}  # key: "x,z" -> value: Node3D (chunk node)
 var _loading_chunks: Dictionary = {}  # key: "x,z" -> value: timestamp (start time in msec)
+var _chunk_data_received: Dictionary = {}  # key: "x,z" -> true — dedup for duplicate HTTP callbacks
 var _chunk_state: Dictionary = {}  # key: "x,z" -> lifecycle/debug state
 var _loading_placeholders: Dictionary = {}  # key: "x,z" -> MeshInstance3D placeholder
 const CHUNK_LOAD_TIMEOUT := 30.0  # Таймаут загрузки чанка (секунд) — must be > HTTP timeout × retries
@@ -1706,6 +1707,7 @@ func start_loading() -> void:
 	if _loading_chunks.size() > 0:
 		print("OSM: WARNING - _loading_chunks not empty, clearing...")
 		_loading_chunks.clear()
+	_chunk_data_received.clear()
 	_chunk_state.clear()
 
 	_loading_paused = false
@@ -2666,6 +2668,7 @@ func _unload_chunk(chunk_key: String) -> void:
 		var chunk_node: Node3D = _loaded_chunks[chunk_key]
 		chunk_node.queue_free()
 		_loaded_chunks.erase(chunk_key)
+		_chunk_data_received.erase(chunk_key)
 		if _chunk_state.has(chunk_key):
 			var state: Dictionary = _chunk_state[chunk_key]
 			state["node"] = null
@@ -2751,6 +2754,7 @@ func reset_terrain() -> void:
 
 	# Сбрасываем состояние
 	_loading_chunks.clear()
+	_chunk_data_received.clear()
 	_chunk_state.clear()
 	for ph_key in _loading_placeholders.keys():
 		_remove_loading_placeholder(ph_key)
@@ -2909,6 +2913,13 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 		loader.queue_free()
 		return
 
+	# Дедупликация: если данные для этого чанка уже получены — игнорируем повторный callback (от failover retry)
+	if _chunk_data_received.has(chunk_key):
+		print("OSM: Ignoring duplicate data for chunk %s" % chunk_key)
+		loader.queue_free()
+		return
+	_chunk_data_received[chunk_key] = true
+
 	print("OSM: Chunk %s data loaded" % chunk_key)
 	_emit_chunk_debug("CHUNK_HTTP_OK key=%s gen=%d ways=%d nodes=%d" % [
 		chunk_key,
@@ -2916,8 +2927,6 @@ func _on_chunk_data_loaded(osm_data: Dictionary, chunk_key: String, loader: Node
 		int(osm_data.get("ways", []).size()),
 		int(osm_data.get("nodes", {}).size())
 	])
-	# НЕ удаляем из _loading_chunks здесь — удалим в _generate_chunk_async после генерации
-	# Это предотвращает повторную загрузку пока идёт генерация с frame budgeting
 	_current_load_count = max(0, _current_load_count - 1)  # Декремент счётчика
 
 	# Change placeholder color to "processing" (data loaded, finalizing)
@@ -3646,7 +3655,7 @@ func _process_phase3_queue() -> bool:
 			elif tags.has("landuse"):
 				_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 			elif tags.has("leisure"):
-				_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target})
+				_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 			elif tags.has("waterway"):
 				_create_waterway(nodes, tags, target, null)
 		# Done with ways — move to intersections
@@ -3924,7 +3933,7 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 		elif tags.has("landuse"):
 			_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 		elif tags.has("leisure"):
-			_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target})
+			_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 		elif tags.has("waterway"):
 			_create_waterway(nodes, tags, target, null)
 	# Pedestrian areas (from relations, separate from highway ways)
@@ -4116,9 +4125,17 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			texture_key = ("ow%d" if is_oneway else "bi%d") % lanes
 			height_offset = 0.012
 			curb_height = 0.0
+		"motorway_link", "trunk_link":
+			texture_key = "residential"
+			height_offset = 0.012
+			curb_height = 0.0
 		"primary":
 			var lanes: int = int(lanes_str) if lanes_str.is_valid_int() else (2 if is_oneway else 4)
 			texture_key = ("ow%d" if is_oneway else "bi%d") % lanes
+			height_offset = 0.010
+			curb_height = 0.0
+		"primary_link":
+			texture_key = "residential"
 			height_offset = 0.010
 			curb_height = 0.0
 		"secondary":
@@ -4126,7 +4143,11 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			texture_key = ("ow%d" if is_oneway else "bi%d") % lanes
 			height_offset = 0.008
 			curb_height = 0.0
-		"tertiary":
+		"secondary_link":
+			texture_key = "residential"
+			height_offset = 0.008
+			curb_height = 0.0
+		"tertiary", "tertiary_link":
 			texture_key = "residential"
 			height_offset = 0.007
 			curb_height = 0.0
@@ -4155,14 +4176,62 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			height_offset = 0.006
 			curb_height = 0.0
 
+	# Debug: log specific ways
+	var _debug_way_id: int = task_data.get("way_id", 0)
+	var _debug_way: bool = _debug_way_id in [60119987, 84060676]
+
+	# For _link roads: shift first/last raw point from parent road center to parent road edge.
+	# Link roads start at a shared junction node (center of parent road). Their mesh overlaps
+	# the parent road mesh, causing z-fighting when textures differ.
+	# By moving raw[0] along the link direction by parent_half_width, the link starts at the
+	# parent edge, and smoothing creates a curve from there — preserving roundings, no overlap.
+	if highway_type.ends_with("_link") and local_points.size() >= 2:
+		var parent_hw: float = 6.0
+		if highway_type in ["motorway_link", "trunk_link"]:
+			parent_hw = 7.0
+		elif highway_type in ["primary_link"]:
+			parent_hw = 6.0
+		elif highway_type in ["secondary_link"]:
+			parent_hw = 5.0
+		else:
+			parent_hw = 4.0
+		# Shift start point
+		var dir_start: Vector2 = (local_points[1] - local_points[0]).normalized()
+		var shift_dist_start: float = minf(parent_hw, local_points[0].distance_to(local_points[1]) * 0.5)
+		local_points[0] = local_points[0] + dir_start * shift_dist_start
+		# Shift end point
+		var last_idx: int = local_points.size() - 1
+		var dir_end: Vector2 = (local_points[last_idx - 1] - local_points[last_idx]).normalized()
+		var shift_dist_end: float = minf(parent_hw, local_points[last_idx].distance_to(local_points[last_idx - 1]) * 0.5)
+		local_points[last_idx] = local_points[last_idx] + dir_end * shift_dist_end
+
 	# Smoothing (thread-safe: pure math) — skip for tram (straight tracks, smoothing creates wobble)
 	var smoothed_points: PackedVector2Array
 	if highway_type in ["tram", "tram_rails"]:
 		smoothed_points = local_points
 	else:
 		smoothed_points = _smooth_road_corners(local_points)
+
 	# Save full smoothed points BEFORE clip — needed for corridor polygon
 	var full_smoothed_points: PackedVector2Array = smoothed_points
+
+	if _debug_way:
+		print("ROAD_DEBUG way=%d type=%s width=%.1f chunk=%s raw=%d smoothed=%d" % [_debug_way_id, highway_type, width, chunk_key, local_points.size(), smoothed_points.size()])
+		# Show raw points with angles
+		for i in range(local_points.size()):
+			var angle_info := ""
+			if i > 0 and i < local_points.size() - 1:
+				var d1: Vector2 = (local_points[i] - local_points[i-1]).normalized()
+				var d2: Vector2 = (local_points[i+1] - local_points[i]).normalized()
+				var dot_val: float = d1.dot(d2)
+				var angle_deg: float = rad_to_deg(acos(clampf(dot_val, -1.0, 1.0)))
+				angle_info = " angle=%.1f°" % angle_deg
+			print("  raw[%d] = (%.3f, %.3f)%s" % [i, local_points[i].x, local_points[i].y, angle_info])
+		# Show smoothed with distance from junction
+		var junction_pt: Vector2 = local_points[0]
+		for i in range(mini(smoothed_points.size(), 10)):
+			var dist_from_junc: float = smoothed_points[i].distance_to(junction_pt)
+			print("  smoothed[%d] = (%.3f, %.3f) dist_from_start=%.2fm" % [i, smoothed_points[i].x, smoothed_points[i].y, dist_from_junc])
 	# Клипаем smoothed_points к bbox чанка (используется для curbs, lamps)
 	if chunk_key != "initial" and chunk_key != "":
 		var ck_parts_sm: PackedStringArray = chunk_key.split(",")
@@ -4229,10 +4298,27 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				float(ck_z) * t_chunk_size - margin,
 				float(ck_z + 1) * t_chunk_size + margin)
 
+		if _debug_way:
+			print("ROAD_DEBUG way=%d validated=%d clipped=%d chunk=%s margin=%.1f" % [_debug_way_id, validated.size(), points.size(), chunk_key, half_w + 1.0])
+			for i in range(points.size()):
+				print("  final[%d] = (%.3f, %.3f)" % [i, points[i].x, points[i].y])
+			# Show chunk boundaries and overlap zone
+			if chunk_key != "initial" and chunk_key != "":
+				var _ck_p: PackedStringArray = chunk_key.split(",")
+				var _cx := int(_ck_p[0])
+				var _cz := int(_ck_p[1])
+				var _cs := t_chunk_size
+				print("  chunk_bounds: x=[%.1f, %.1f] z=[%.1f, %.1f]" % [float(_cx) * _cs, float(_cx + 1) * _cs, float(_cz) * _cs, float(_cz + 1) * _cs])
+				print("  clip_bounds: x=[%.1f, %.1f] z=[%.1f, %.1f]" % [float(_cx) * _cs - half_w - 1.0, float(_cx + 1) * _cs + half_w + 1.0, float(_cz) * _cs - half_w - 1.0, float(_cz + 1) * _cs + half_w + 1.0])
+
 		if points.size() >= 2:
-			var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-			var z_offset: float = hash_val * 0.00003
+			# Hash from ORIGINAL first point (before clip) so all chunks get same height for same road
+			var hash_val: int = int(abs(local_points[0].x * 1000 + local_points[0].y * 7919)) % 100
+			var z_offset: float = hash_val * 0.000005
 			var h: float = height_offset + z_offset
+
+			if _debug_way:
+				print("ROAD_DEBUG way=%d height_offset=%.4f z_offset=%.5f total_h=%.5f hash=%d" % [_debug_way_id, height_offset, z_offset, h, hash_val])
 			var n_points: int = points.size()
 
 			# Perpendiculars
@@ -4250,6 +4336,10 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 					var dir_out: Vector2 = (points[i + 1] - points[i]).normalized()
 					perp = Vector2(-dir_out.y, dir_out.x)
 				perpendiculars[i] = perp
+
+			if _debug_way:
+				for i in range(n_points):
+					print("  perp[%d] = (%.4f, %.4f) at (%.3f, %.3f)" % [i, perpendiculars[i].x, perpendiculars[i].y, points[i].x, points[i].y])
 
 			# Vertices
 			var accumulated_length: float = 0.0
@@ -4890,7 +4980,7 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 
 	# Z-fighting offset based on hash
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-	var z_offset: float = hash_val * 0.00003
+	var z_offset: float = hash_val * 0.000005
 
 	var arrays: Array = []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -5061,7 +5151,7 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 
 	# Z-fighting offset
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-	var z_offset: float = hash_val * 0.00003
+	var z_offset: float = hash_val * 0.000005
 
 	# Генерируем geometry для этого road segment
 	var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
@@ -5314,7 +5404,7 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 			return
 
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-	var z_offset: float = hash_val * 0.00003
+	var z_offset: float = hash_val * 0.000005
 
 	var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
 	var vertex_offset: int = batch["vertices"].size()
@@ -5545,7 +5635,7 @@ func _add_path_polys_to_batch(filtered: Array[PackedVector2Array], validated: Pa
 	var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
 
 	var hash_val: int = int(abs(validated[0].x * 1000 + validated[0].y * 7919)) % 100
-	var z_offset: float = hash_val * 0.00003
+	var z_offset: float = hash_val * 0.000005
 	var h: float = height_offset + z_offset
 	var uv_scale: float = 1.0 / width
 
@@ -7508,7 +7598,7 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 
 
 ## Немедленное создание объекта отдыха (вызывается из очереди)
-func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -> void:
+func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, way_id: int = 0) -> void:
 	if not is_instance_valid(parent):
 		return
 	if nodes.size() < 3:
@@ -7538,6 +7628,9 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -
 	var chunk_key := _get_chunk_key_from_node(parent)
 	var clipped_polys := _clip_polygon_to_chunk(points, chunk_key)
 
+	# Забор для конкретных парков по way_id
+	var fenced_parks := [307915405]  # Парк Серпантин (outer way)
+
 	for clipped in clipped_polys:
 		# Добавляем коллизию с группой Park для высокого сопротивления качению
 		if leisure_type in ["park", "garden", "pitch"]:
@@ -7545,6 +7638,9 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -
 		# Генерируем деревья в парках и садах
 		if leisure_type in ["park", "garden"]:
 			_generate_trees_in_polygon(clipped, parent, false)
+		# Забор для указанных парков
+		if way_id in fenced_parks:
+			_add_fence_to_batch(clipped, parent)
 
 	# Трава уже покрыта per-chunk terrain, пропускаем чтобы не было z-fighting
 	if texture_key == "grass":
@@ -9810,7 +9906,7 @@ func _init_curb_mesh_state(item: Dictionary) -> void:
 
 	var curb_width := 0.15
 	var hash_val := int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
-	var z_offset := hash_val * 0.00003  # Совпадает с z_offset дороги
+	var z_offset := hash_val * 0.000005  # Совпадает с z_offset дороги
 
 	# Предварительно вычисляем валидные сегменты (не в контурах перекрёстков)
 	var valid_segments: Array[int] = []
@@ -10243,7 +10339,7 @@ func _process_terrain_objects_queue() -> void:
 				_create_landuse_immediate(item.nodes, item.tags, item.parent, item.get("way_id", 0))
 				_record_perf("terrain_landuse", Time.get_ticks_usec() - t0)
 			"leisure":
-				_create_leisure_immediate(item.nodes, item.tags, item.parent)
+				_create_leisure_immediate(item.nodes, item.tags, item.parent, item.get("way_id", 0))
 				_record_perf("terrain_leisure", Time.get_ticks_usec() - t0)
 
 		processed += 1
@@ -12529,6 +12625,7 @@ func _drop_chunk_runtime_state(chunk_key: String, free_node: bool = true) -> voi
 	_terrain_thread_mutex.unlock()
 	if _loaded_chunks.has(chunk_key):
 		_loaded_chunks.erase(chunk_key)
+	_chunk_data_received.erase(chunk_key)
 	if free_node and parent and is_instance_valid(parent):
 		parent.queue_free()
 	_cleanup_chunk_hash_cells(chunk_key)
@@ -17554,6 +17651,7 @@ func _add_boundary_slit(corridor: PackedVector2Array, ch_x0: float, ch_x1: float
 
 ## Validates road direction to remove points that create loops/flips
 ## Removes points where the direction changes by more than 75 degrees
+## Also removes backtracking points (where road reverses direction)
 func _validate_road_direction(points: PackedVector2Array) -> PackedVector2Array:
 	if points.size() < 3:
 		return points
@@ -17578,6 +17676,27 @@ func _validate_road_direction(points: PackedVector2Array) -> PackedVector2Array:
 		prev_dir = current_dir
 
 	result.append(points[points.size() - 1])  # Always keep last point
+
+	# Second pass: remove backtracking points where consecutive segments reverse direction
+	# This catches micro-loops created by smoothing (e.g. two very close points in wrong order)
+	if result.size() >= 4:
+		var cleaned := PackedVector2Array()
+		cleaned.append(result[0])
+		for i in range(1, result.size() - 1):
+			var dir_in: Vector2 = (result[i] - cleaned[cleaned.size() - 1]).normalized()
+			var dir_out: Vector2 = (result[i + 1] - result[i]).normalized()
+			# Skip if this point creates a reversal (dot < 0 = >90 degrees)
+			if dir_in.dot(dir_out) < 0.0:
+				continue
+			# Skip if distance to previous point is tiny and creates a kink
+			if cleaned[cleaned.size() - 1].distance_to(result[i]) < 0.5:
+				var overall_dir: Vector2 = (result[i + 1] - cleaned[cleaned.size() - 1]).normalized()
+				if dir_in.dot(overall_dir) < 0.5:
+					continue
+			cleaned.append(result[i])
+		cleaned.append(result[result.size() - 1])
+		result = cleaned
+
 	return result
 
 

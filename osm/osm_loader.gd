@@ -255,6 +255,7 @@ func _start_network_request() -> void:
   relation["building"](%s);
   relation["amenity"](%s);
   relation["highway"="pedestrian"](%s);
+  relation["leisure"](%s);
   node["natural"="tree"](%s);
   node["traffic_sign"](%s);
   node["highway"="street_lamp"](%s);
@@ -270,7 +271,7 @@ func _start_network_request() -> void:
 out body geom;
 >;
 out skel qt;
-""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
+""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
 	retry_count = 0
@@ -451,12 +452,15 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 			var tags: Dictionary = element.get("tags", {})
 			# Берём только outer members для построения контура
 			var outer_nodes := []
+			var outer_way_ref: int = 0  # First outer member way ref (used as way_id for leisure relations)
 			var is_building_relation: bool = tags.has("building") or tags.has("amenity")
 			for member in element.get("members", []):
 				if member.get("type") == "way" and member.get("role", "outer") == "outer":
+					var ref_id: int = member.get("ref", 0)
+					if outer_way_ref == 0 and ref_id > 0:
+						outer_way_ref = ref_id
 					# Запоминаем member way IDs чтобы не дублировать building из relation
 					if is_building_relation:
-						var ref_id: int = member.get("ref", 0)
 						if ref_id > 0:
 							relation_member_way_ids[ref_id] = true
 					# С out geom геометрия включена в member.geometry
@@ -481,6 +485,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 					pedestrian_areas.append(outer_nodes)
 				else:
 					ways.append({
+						"id": outer_way_ref,
 						"nodes": outer_nodes,
 						"tags": tags
 					})
