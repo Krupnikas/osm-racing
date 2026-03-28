@@ -220,10 +220,11 @@ func load_area(lat: float, lon: float, radius: float = 500.0) -> void:
 	if use_cache:
 		var cache_path := _get_cache_path(current_cache_key)
 		if FileAccess.file_exists(cache_path):
-			print("OSM: Loading from cache (threaded): " + current_cache_key)
+			print("OSM: CACHE HIT: " + current_cache_key)
 			_load_from_cache_threaded(current_cache_key)
 			return
 
+	print("OSM: CACHE MISS — fetching from Overpass: " + current_cache_key)
 	_start_network_request()
 
 

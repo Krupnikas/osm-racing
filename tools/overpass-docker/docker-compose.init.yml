@@ -1,0 +1,17 @@
+version: "3"
+services:
+  overpass:
+    image: wiktorn/overpass-api
+    container_name: overpass-cherepovets
+    volumes:
+      - overpass_db:/db
+      - ./source:/db/source
+    environment:
+      - OVERPASS_META=yes
+      - OVERPASS_MODE=init
+      - OVERPASS_PLANET_URL=file:///db/source/cherepovets.osm.bz2
+      - OVERPASS_RULES_LOAD=10
+      - OVERPASS_USE_AREAS=false
+
+volumes:
+  overpass_db:

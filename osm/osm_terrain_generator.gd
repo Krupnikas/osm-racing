@@ -2451,6 +2451,15 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 	var chunk_lat := start_lat - center_z / 111000.0
 	var chunk_lon := start_lon + center_x / (111000.0 * cos(deg_to_rad(start_lat)))
 
+	# Привязка к глобальной сетке — кеш переиспользуется независимо от точки спавна
+	# Snap lat first, then use snapped lat for lon_step (must match Python precache script)
+	var lat_step := chunk_size / 111000.0
+	var lat_idx := int(roundf(chunk_lat / lat_step))
+	chunk_lat = snapped(float(lat_idx) * lat_step, 0.0001)
+	var lon_step := chunk_size / (111000.0 * cos(deg_to_rad(chunk_lat)))
+	var lon_idx := int(roundf(chunk_lon / lon_step))
+	chunk_lon = snapped(float(lon_idx) * lon_step, 0.0001)
+
 	print("OSM: Loading chunk %s at lat=%.4f, lon=%.4f" % [chunk_key, chunk_lat, chunk_lon])
 
 	# Тестовый режим — данные без HTTP, но тот же async flow что и в игре
@@ -7629,7 +7638,7 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 	var clipped_polys := _clip_polygon_to_chunk(points, chunk_key)
 
 	# Забор для конкретных парков по way_id
-	var fenced_parks := [307915405]  # Парк Серпантин (outer way)
+	var fenced_parks := [307915405, 45550044]  # Парк Серпантин, Парк 200-летия Череповца
 
 	for clipped in clipped_polys:
 		# Добавляем коллизию с группой Park для высокого сопротивления качению

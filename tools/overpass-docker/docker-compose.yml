@@ -1,0 +1,15 @@
+version: "3"
+services:
+  overpass:
+    image: wiktorn/overpass-api
+    container_name: overpass-cherepovets
+    volumes:
+      - overpass_db:/db
+      - ./run.sh:/run.sh:ro
+    entrypoint: ["/bin/bash", "/run.sh"]
+    ports:
+      - "12346:80"
+    restart: unless-stopped
+
+volumes:
+  overpass_db:

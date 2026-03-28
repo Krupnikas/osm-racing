@@ -1,0 +1,4 @@
+*.osm.pbf
+*.osm.bz2
+source/
+data/
