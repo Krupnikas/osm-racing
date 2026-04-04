@@ -226,8 +226,14 @@ func _start_loading() -> void:
 		_car_rigidbody.linear_velocity = Vector3.ZERO
 		_car_rigidbody.angular_velocity = Vector3.ZERO
 		_car_rigidbody.freeze = true
-		# Сбрасываем позицию только после заморозки
-		_car.global_position = Vector3(0, 2, 0)
+		# Сбрасываем позицию только после заморозки — используем высоту из кеша elevation
+		var spawn_y: float = 2.0
+		if _terrain_generator and _terrain_generator.get("enable_elevation"):
+			var elev: float = _terrain_generator.get_spawn_elevation()
+			if elev > 0.0:
+				spawn_y = elev + 2.0
+				print("MainMenu: Spawn elevation from cache: %.1fm ASL" % elev)
+		_car.global_position = Vector3(0, spawn_y, 0)
 		_car.rotation = Vector3.ZERO
 	elif _car:
 		print("WARNING: Car RigidBody not found, cannot reset safely!")
@@ -267,7 +273,12 @@ func _start_loading_for_race() -> void:
 		_car_rigidbody.linear_velocity = Vector3.ZERO
 		_car_rigidbody.angular_velocity = Vector3.ZERO
 		_car_rigidbody.freeze = true
-		_car.global_position = Vector3(0, 2, 0)
+		var spawn_y2: float = 2.0
+		if _terrain_generator and _terrain_generator.get("enable_elevation"):
+			var elev2: float = _terrain_generator.get_spawn_elevation()
+			if elev2 > 0.0:
+				spawn_y2 = elev2 + 2.0
+		_car.global_position = Vector3(0, spawn_y2, 0)
 		_car.rotation = Vector3.ZERO
 
 	# Сбрасываем камеру
@@ -403,8 +414,9 @@ func _spawn_car_on_road() -> void:
 
 	# Находим реальную высоту поверхности рейкастом
 	var space_state := _car.get_world_3d().direct_space_state
-	var ray_from := Vector3(road_pos.x, road_pos.y + 200.0, road_pos.z)
-	var ray_to := Vector3(road_pos.x, road_pos.y - 200.0, road_pos.z)
+	# Raycast from high enough to find roads at any ASL elevation (e.g. Tbilisi ~500m)
+	var ray_from := Vector3(road_pos.x, maxf(road_pos.y + 200.0, 2000.0), road_pos.z)
+	var ray_to := Vector3(road_pos.x, minf(road_pos.y - 200.0, -10.0), road_pos.z)
 	var ray_query := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
 	ray_query.collision_mask = 1
 	var ray_result := space_state.intersect_ray(ray_query)

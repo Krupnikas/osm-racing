@@ -103,6 +103,7 @@ script = ExtResource("4_osm")
 start_lat = 59.149886
 start_lon = 37.94937
 chunk_size = 200.0
+enable_elevation = true
 load_distance = 500.0
 unload_distance = 700.0
 car_path = NodePath("../Car")
