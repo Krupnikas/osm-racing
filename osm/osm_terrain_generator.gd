@@ -94,11 +94,17 @@ const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slop
 @export var enable_manholes := true  # Включить люки на дорогах
 @export var enable_crossing_signs := true  # Включить знаки пешеходных переходов
 @export var enable_fences := true  # Включить заборы (промзоны, территории)
+@export var enable_elevation := false  # Включить elevation из SRTM30m
 @export var manhole_spacing := 100.0  # Расстояние между люками (метры)
 
 ## Тестовый режим: провайдер данных вместо HTTP (Callable(lat, lon, size) -> Dictionary)
 var test_data_provider: Callable = Callable()
 ## Тестовый режим: провайдер высот (Callable(chunk_key, lat, lon) -> Dictionary)
+
+# Elevation system
+const ElevationLoaderScript = preload("res://osm/elevation_loader.gd")
+var _chunk_elevation_data: Dictionary = {}  # chunk_key -> grid dict
+var _base_elevation := 0.0  # No offset — 1:1 ASL elevation
 
 var osm_loader: Node
 var _car: Node3D
@@ -2055,8 +2061,8 @@ func _update_chunks(player_pos: Vector3) -> void:
 		var coords: Array = chunk_key.split(",")
 		var chunk_x := int(coords[0])
 		var chunk_z := int(coords[1])
-		var chunk_center := Vector3(chunk_x * chunk_size + chunk_size / 2, 0, chunk_z * chunk_size + chunk_size / 2)
-		if player_pos.distance_to(chunk_center) > unload_distance:
+		var chunk_center := Vector2(chunk_x * chunk_size + chunk_size / 2, chunk_z * chunk_size + chunk_size / 2)
+		if Vector2(player_pos.x, player_pos.z).distance_to(chunk_center) > unload_distance:
 			_chunks_to_unload.append(chunk_key)
 
 ## Фиксированные 16 чанков для начальной загрузки (4×4, по 2 в каждую сторону)
@@ -2082,8 +2088,8 @@ func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 		for dz in range(-radius_chunks, radius_chunks + 1):
 			var cx := player_chunk_x + dx
 			var cz := player_chunk_z + dz
-			var chunk_center := Vector3(cx * chunk_size + chunk_size / 2, 0, cz * chunk_size + chunk_size / 2)
-			if player_pos.distance_to(chunk_center) <= load_distance:
+			var chunk_center := Vector2(cx * chunk_size + chunk_size / 2, cz * chunk_size + chunk_size / 2)
+			if Vector2(player_pos.x, player_pos.z).distance_to(chunk_center) <= load_distance:
 				result.append("%d,%d" % [cx, cz])
 
 	return result
@@ -2124,12 +2130,14 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 		var coords: Array = chunk_key.split(",")
 		var chunk_x := int(coords[0])
 		var chunk_z := int(coords[1])
-		var chunk_center := Vector3(chunk_x * chunk_size + chunk_size / 2, 0, chunk_z * chunk_size + chunk_size / 2)
-		var dist := player_pos.distance_to(chunk_center)
+		var chunk_center := Vector2(chunk_x * chunk_size + chunk_size / 2, chunk_z * chunk_size + chunk_size / 2)
+		var dist := Vector2(player_pos.x, player_pos.z).distance_to(chunk_center)
 		var max_dist := unload_distance
 		if move_dir.length_squared() > 0.5:
-			var to_chunk := (chunk_center - player_pos).normalized()
-			if to_chunk.dot(move_dir) < -0.3:  # Чанк сзади
+			var player_xz := Vector2(player_pos.x, player_pos.z)
+			var to_chunk := (chunk_center - player_xz).normalized()
+			var move_xz := Vector2(move_dir.x, move_dir.z)
+			if to_chunk.dot(move_xz) < -0.3:  # Чанк сзади
 				max_dist = 300.0
 		if dist > max_dist:
 			_chunks_to_unload.append(chunk_key)
@@ -2140,12 +2148,14 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 		var coords: Array = chunk_key.split(",")
 		var chunk_x := int(coords[0])
 		var chunk_z := int(coords[1])
-		var chunk_center := Vector3(chunk_x * chunk_size + chunk_size / 2, 0, chunk_z * chunk_size + chunk_size / 2)
-		var dist := player_pos.distance_to(chunk_center)
+		var chunk_center := Vector2(chunk_x * chunk_size + chunk_size / 2, chunk_z * chunk_size + chunk_size / 2)
+		var dist := Vector2(player_pos.x, player_pos.z).distance_to(chunk_center)
 		var max_dist := unload_distance
 		if move_dir.length_squared() > 0.5:
-			var to_chunk := (chunk_center - player_pos).normalized()
-			if to_chunk.dot(move_dir) < -0.3:
+			var player_xz := Vector2(player_pos.x, player_pos.z)
+			var to_chunk := (chunk_center - player_xz).normalized()
+			var move_xz := Vector2(move_dir.x, move_dir.z)
+			if to_chunk.dot(move_xz) < -0.3:
 				max_dist = 300.0
 		if dist > max_dist:
 			cancel_keys.append(chunk_key)
@@ -2337,13 +2347,12 @@ func _unload_distant_chunks(player_pos: Vector3, velocity: Vector3) -> void:
 		var coords: Array = chunk_key.split(",")
 		var chunk_x := int(coords[0])
 		var chunk_z := int(coords[1])
-		var chunk_center := Vector3(
+		var chunk_center := Vector2(
 			chunk_x * chunk_size + chunk_size / 2,
-			0,
 			chunk_z * chunk_size + chunk_size / 2
 		)
 
-		var dist := player_pos.distance_to(chunk_center)
+		var dist := Vector2(player_pos.x, player_pos.z).distance_to(chunk_center)
 
 		# При низкой скорости - стандартная радиальная выгрузка
 		if speed < min_speed_for_prediction:
@@ -2352,10 +2361,11 @@ func _unload_distant_chunks(player_pos: Vector3, velocity: Vector3) -> void:
 			continue
 
 		# Направленная выгрузка
-		var to_chunk := chunk_center - player_pos
-		to_chunk.y = 0
-		var dir_to_chunk := to_chunk.normalized() if to_chunk.length() > 0.01 else Vector3.ZERO
-		var alignment := move_dir.dot(dir_to_chunk)
+		var player_xz := Vector2(player_pos.x, player_pos.z)
+		var to_chunk := chunk_center - player_xz
+		var dir_to_chunk := to_chunk.normalized() if to_chunk.length() > 0.01 else Vector2.ZERO
+		var move_xz := Vector2(move_dir.x, move_dir.z)
+		var alignment := move_xz.dot(dir_to_chunk)
 
 		# Пороги выгрузки по направлению
 		var effective_unload_dist: float
@@ -2380,12 +2390,11 @@ func _get_chunk_distance(chunk_key: String, pos: Vector3) -> float:
 	var coords: Array = chunk_key.split(",")
 	var chunk_x := int(coords[0])
 	var chunk_z := int(coords[1])
-	var chunk_center := Vector3(
+	var chunk_center := Vector2(
 		chunk_x * chunk_size + chunk_size / 2,
-		0,
 		chunk_z * chunk_size + chunk_size / 2
 	)
-	return pos.distance_to(chunk_center)
+	return Vector2(pos.x, pos.z).distance_to(chunk_center)
 
 
 func _create_loading_placeholder(chunk_key: String, chunk_x: int, chunk_z: int) -> void:
@@ -2482,6 +2491,9 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 		var fake_loader := Node.new()
 		fake_loader.name = "FakeLoader_" + chunk_key
 		add_child(fake_loader)
+		# Test mode: store empty elevation so phase3 won't wait
+		if enable_elevation and not _chunk_elevation_data.has(chunk_key):
+			_chunk_elevation_data[chunk_key] = {}
 		_on_chunk_data_loaded(osm_data, chunk_key, fake_loader, _load_generation)
 		return
 
@@ -2493,10 +2505,53 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 	loader.load_failed.connect(_on_chunk_load_failed.bind(chunk_key, loader, gen))
 	loader.load_area(chunk_lat, chunk_lon, maxf(chunk_size, 150.0) + chunk_size / 2)  # overlap не менее 150м с каждой стороны
 
+	# Elevation — independent parallel request
+	if enable_elevation:
+		_request_elevation(chunk_key, chunk_x, chunk_z)
+
 func _load_chunk_at_position(pos: Vector3) -> void:
 	var chunk_x := int(floor(pos.x / chunk_size))
 	var chunk_z := int(floor(pos.z / chunk_size))
 	_load_chunk(chunk_x, chunk_z)
+
+func _request_elevation(chunk_key: String, cx: int, cz: int) -> void:
+	if _chunk_elevation_data.has(chunk_key):
+		return  # Already loaded
+	var loader := ElevationLoaderScript.new()
+	add_child(loader)
+	var gen := _load_generation
+	loader.elevation_loaded.connect(_on_elevation_loaded.bind(gen, loader))
+	loader.elevation_failed.connect(_on_elevation_failed.bind(gen, loader))
+	loader.load_elevation(chunk_key, cx, cz, chunk_size, start_lat, start_lon)
+
+
+func _on_elevation_loaded(chunk_key: String, grid_data: Dictionary, gen: int, loader: Node) -> void:
+	if is_instance_valid(loader):
+		loader.queue_free()
+	if gen != _load_generation:
+		return  # Stale
+	_chunk_elevation_data[chunk_key] = grid_data
+
+
+var _elevation_retries: Dictionary = {}  # chunk_key -> retry count
+const MAX_ELEVATION_RETRIES := 3
+
+func _on_elevation_failed(chunk_key: String, error: String, gen: int, loader: Node) -> void:
+	if is_instance_valid(loader):
+		loader.queue_free()
+	if gen != _load_generation:
+		return
+	var retries: int = _elevation_retries.get(chunk_key, 0)
+	if retries < MAX_ELEVATION_RETRIES:
+		_elevation_retries[chunk_key] = retries + 1
+		push_warning("ELEV: Failed %s: %s — retry %d/%d" % [chunk_key, error, retries + 1, MAX_ELEVATION_RETRIES])
+		var coords: Array = chunk_key.split(",")
+		_request_elevation(chunk_key, int(coords[0]), int(coords[1]))
+	else:
+		push_warning("ELEV: Failed %s after %d retries: %s — chunk will render flat" % [chunk_key, MAX_ELEVATION_RETRIES, error])
+		# Store empty dict so phase3 won't wait forever
+		_chunk_elevation_data[chunk_key] = {}
+
 
 func _clean_timed_out_chunks() -> void:
 	if _loading_chunks.is_empty():
@@ -2543,6 +2598,9 @@ func _unload_chunk(chunk_key: String) -> void:
 				if is_instance_valid(light):
 					light.queue_free()
 			_lamp_lights_by_chunk.erase(chunk_key)
+
+		# Clean up elevation data
+		_chunk_elevation_data.erase(chunk_key)
 
 		# Clean up tree batch data if not yet finalized
 		if _tree_batch_data.has(chunk_key):
@@ -2784,6 +2842,8 @@ func reset_terrain() -> void:
 	_initial_chunks_loaded = 0
 	_initial_chunks_completed.clear()
 	_chunk_profile.clear()
+	_chunk_elevation_data.clear()
+	_base_elevation = 0.0
 	_loading_paused = true
 	_finalization_state = 0  # Сбрасываем состояние финализации
 	# Предиктивная загрузка
@@ -3560,6 +3620,9 @@ func _process_phase3_queue() -> bool:
 		var ck: String = _phase3_queue[pi].chunk_key
 		if not _should_process_chunk(ck):
 			continue
+		# Wait for elevation data before placing any objects
+		if enable_elevation and not _chunk_elevation_data.has(ck):
+			continue
 		var ps := _chunk_priority_score(ck)
 		if ps < best_score:
 			best_score = ps
@@ -3734,13 +3797,14 @@ func _process_phase3_queue() -> bool:
 			if intersection_idx >= 0:
 				var angle: float = _intersection_angles[intersection_idx]
 				sign_offset = Vector2(cos(angle), sin(angle)) * (max_width * 0.5 + 0.5)
-			var has_primary := "primary" in road_types or "secondary" in road_types
-			if has_primary and node_road_count[node_key] >= 3:
-				_create_traffic_light(pos + sign_offset, 0.0, target)
-			else:
-				_create_yield_sign(pos + sign_offset, 0.0, target)
-			if major_road_count >= 1:
-				_create_intersection_patch(pos, target, intersection_idx, max_height_offset, chunk_key)
+			if not enable_elevation:
+				var has_primary := "primary" in road_types or "secondary" in road_types
+				if has_primary and node_road_count[node_key] >= 3:
+					_create_traffic_light(pos + sign_offset, 0.0, target)
+				else:
+					_create_yield_sign(pos + sign_offset, 0.0, target)
+				if major_road_count >= 1:
+					_create_intersection_patch(pos, target, intersection_idx, max_height_offset, chunk_key)
 		# Done with intersections — move to points
 		entry.phase = "points"
 		entry.way_idx = 0
@@ -3761,19 +3825,20 @@ func _process_phase3_queue() -> bool:
 				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
 					continue
 			var pt_ck := chunk_key if not chunk_key.is_empty() else "%d,%d" % [int(floor(local.x / chunk_size)), int(floor(local.y / chunk_size))]
+			var pt_elev := _sample_elevation(local.x, local.y)
 			if tags.get("natural") == "tree":
 				if not _is_point_near_road(local, 3.0, pt_ck) and not _is_point_in_water(local, pt_ck):
-					_add_tree_to_batch(pt_ck, local, 0.0, target)
+					_add_tree_to_batch(pt_ck, local, pt_elev, target)
 			elif tags.get("amenity") == "waste_disposal":
-				_create_garbage_container(local, 0.0, target)
+				_create_garbage_container(local, pt_elev, target)
 			elif tags.has("traffic_sign"):
-				_create_traffic_sign(local, 0.0, tags, target)
+				_create_traffic_sign(local, pt_elev, tags, target)
 			elif tags.get("highway") == "street_lamp":
 				if not _is_point_in_any_parking(local, pt_ck) and not _is_point_near_road(local, 0.1, pt_ck) and not _is_point_in_water(local, pt_ck):
 					if chunk_key != "":
-						_add_lamp_to_batch(chunk_key, Vector3(local.x, 0.0, local.y), Vector3.FORWARD, target)
+						_add_lamp_to_batch(chunk_key, Vector3(local.x, pt_elev, local.y), Vector3.FORWARD, target)
 					else:
-						_create_street_lamp(local, 0.0, target)
+						_create_street_lamp(local, pt_elev, target)
 		# Done with points — move to bus stops
 		entry.phase = "bus_stops"
 		entry.way_idx = 0
@@ -4336,10 +4401,8 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			# Hash from ORIGINAL first point (before clip) so all chunks get same height for same road
 			var hash_val: int = int(abs(local_points[0].x * 1000 + local_points[0].y * 7919)) % 100
 			var z_offset: float = hash_val * 0.000005
-			var h: float = height_offset + z_offset
-
 			if _debug_way:
-				print("ROAD_DEBUG way=%d height_offset=%.4f z_offset=%.5f total_h=%.5f hash=%d" % [_debug_way_id, height_offset, z_offset, h, hash_val])
+				print("ROAD_DEBUG way=%d height_offset=%.4f z_offset=%.5f hash=%d" % [_debug_way_id, height_offset, z_offset, hash_val])
 			var n_points: int = points.size()
 
 			# Perpendiculars
@@ -4373,6 +4436,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				var uv_y: float = accumulated_length * uv_scale
 				var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 				var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
+				var h: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
 				vertices.append(Vector3(left_pos.x, h, left_pos.y))
 				uvs.append(Vector2(0.0, uv_y))
 				normals.append(Vector3.UP)
@@ -5040,20 +5104,17 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 			accumulated_length += points[i - 1].distance_to(p)
 		var uv_y: float = accumulated_length * uv_scale
 
-		# Sample elevation at left, center, right — use max(center, edge) to prevent grass mid-road
 		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
-		var h_center: float = 0.0 + height_offset + z_offset
-		var h_left: float = maxf(0.0 + height_offset + z_offset, h_center)
-		var h_right: float = maxf(0.0 + height_offset + z_offset, h_center)
+		var h: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
 
 		# Left vertex
-		vertices.append(Vector3(left_pos.x, h_left, left_pos.y))
+		vertices.append(Vector3(left_pos.x, h, left_pos.y))
 		uvs.append(Vector2(0.0, uv_y))
 		normals.append(Vector3.UP)
 
 		# Right vertex
-		vertices.append(Vector3(right_pos.x, h_right, right_pos.y))
+		vertices.append(Vector3(right_pos.x, h, right_pos.y))
 		uvs.append(Vector2(1.0, uv_y))
 		normals.append(Vector3.UP)
 
@@ -5117,6 +5178,23 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 	if _profiler:
 		_profiler.end_measure("road_generation", prof_start)
 
+## Subdivide road segments longer than max_seg meters so roads follow terrain elevation.
+## Without this, straight roads with sparse vertices skip over terrain undulations.
+func _subdivide_for_elevation(points: PackedVector2Array, max_seg: float = 25.0) -> PackedVector2Array:
+	if not enable_elevation or points.size() < 2:
+		return points
+	var result := PackedVector2Array()
+	result.append(points[0])
+	for i in range(1, points.size()):
+		var seg_len := points[i - 1].distance_to(points[i])
+		if seg_len > max_seg:
+			var n_sub := int(ceil(seg_len / max_seg))
+			for j in range(1, n_sub):
+				var t := float(j) / float(n_sub)
+				result.append(points[i - 1].lerp(points[i], t))
+		result.append(points[i])
+	return result
+
 # OPTIMIZATION: Road Batching System (Mesh Merging)
 # Добавляет дорогу в batch вместо создания отдельного MeshInstance3D
 func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_offset: float, parent: Node3D) -> void:
@@ -5170,6 +5248,9 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 		if points.size() < 2:
 			return
 
+	# Subdivide long segments so road follows terrain elevation
+	points = _subdivide_for_elevation(points)
+
 	# Z-fighting offset
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
 	var z_offset: float = hash_val * 0.000005
@@ -5207,22 +5288,27 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 			accumulated_length += points[i - 1].distance_to(p)
 		var uv_y: float = accumulated_length * uv_scale
 
-		# Sample elevation at left, center, right — use max(center, edge) to prevent grass mid-road
 		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
-		var h_center: float = 0.0 + height_offset + z_offset
-		var h_left: float = maxf(0.0 + height_offset + z_offset, h_center)
-		var h_right: float = maxf(0.0 + height_offset + z_offset, h_center)
+		var h_left: float = _sample_elevation(left_pos.x, left_pos.y) + height_offset + z_offset
+		var h_right: float = _sample_elevation(right_pos.x, right_pos.y) + height_offset + z_offset
 
 		# Left vertex
 		batch["vertices"].append(Vector3(left_pos.x, h_left, left_pos.y))
 		batch["uvs"].append(Vector2(0.0, uv_y))
-		batch["normals"].append(Vector3.UP)
 
 		# Right vertex
 		batch["vertices"].append(Vector3(right_pos.x, h_right, right_pos.y))
 		batch["uvs"].append(Vector2(1.0, uv_y))
-		batch["normals"].append(Vector3.UP)
+
+		# Normal from cross-section tilt
+		var cross := Vector3(right_pos.x - left_pos.x, h_right - h_left, right_pos.y - left_pos.y)
+		var fwd := Vector3(perp.y, 0.0, -perp.x)  # road forward direction
+		var n := cross.cross(fwd).normalized()
+		if n.y < 0.0:
+			n = -n
+		batch["normals"].append(n)
+		batch["normals"].append(n)
 
 	# Generate indices (с учётом vertex_offset)
 	for i in range(points.size() - 1):
@@ -5331,13 +5417,14 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 								half_span = road_w * 0.5 + 2.0
 							cross_pts = PackedVector2Array([road_center - fw_dir * half_span, road_center + fw_dir * half_span])
 						var cross_w := width
-						_add_road_to_batch_fast(cross_pts, cross_w, "intersection", 0.016, parent)
-						_add_road_to_batch_fast(cross_pts, cross_w, "crossing", 0.017, parent)
-						# Re-enqueue chunk for finalization (crossing added after initial batch build)
-						if not _pending_batch_chunks.has(ck):
-							_pending_batch_chunks.append(ck)
-						if enable_crossing_signs:
-							_enqueue_crossing_signs(cross_pts, parent, ck)
+						if not enable_elevation:
+							_add_road_to_batch_fast(cross_pts, cross_w, "intersection", 0.016, parent)
+							_add_road_to_batch_fast(cross_pts, cross_w, "crossing", 0.017, parent)
+							# Re-enqueue chunk for finalization (crossing added after initial batch build)
+							if not _pending_batch_chunks.has(ck):
+								_pending_batch_chunks.append(ck)
+							if enable_crossing_signs:
+								_enqueue_crossing_signs(cross_pts, parent, ck)
 				else:
 					last_off_road_pt = smoothed_points[i - 1]
 					has_before_off = true
@@ -5376,12 +5463,13 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 						half_span_e = road_w_end * 0.5 + 2.0
 					cross_pts_end = PackedVector2Array([road_center_e - fw_dir_end * half_span_e, road_center_e + fw_dir_end * half_span_e])
 				var cross_w_end := width
-				_add_road_to_batch_fast(cross_pts_end, cross_w_end, "intersection", 0.016, parent)
-				_add_road_to_batch_fast(cross_pts_end, cross_w_end, "crossing", 0.017, parent)
-				if not _pending_batch_chunks.has(ck):
-					_pending_batch_chunks.append(ck)
-				if enable_crossing_signs:
-					_enqueue_crossing_signs(current_pts, parent, ck)
+				if not enable_elevation:
+					_add_road_to_batch_fast(cross_pts_end, cross_w_end, "intersection", 0.016, parent)
+					_add_road_to_batch_fast(cross_pts_end, cross_w_end, "crossing", 0.017, parent)
+					if not _pending_batch_chunks.has(ck):
+						_pending_batch_chunks.append(ck)
+					if enable_crossing_signs:
+						_enqueue_crossing_signs(current_pts, parent, ck)
 	return true
 
 
@@ -5424,6 +5512,9 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 		if points.size() < 2:
 			return
 
+	# Subdivide long segments so road follows terrain elevation
+	points = _subdivide_for_elevation(points)
+
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
 	var z_offset: float = hash_val * 0.000005
 
@@ -5451,7 +5542,6 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 			perp = Vector2(-dir_out.y, dir_out.x)
 		perpendiculars[i] = perp
 
-	var h: float = height_offset + z_offset
 	for i in range(n_points):
 		var p: Vector2 = points[i]
 		var perp: Vector2 = perpendiculars[i]
@@ -5462,14 +5552,22 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 
 		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
+		var h_left: float = _sample_elevation(left_pos.x, left_pos.y) + height_offset + z_offset
+		var h_right: float = _sample_elevation(right_pos.x, right_pos.y) + height_offset + z_offset
 
-		batch["vertices"].append(Vector3(left_pos.x, h, left_pos.y))
+		batch["vertices"].append(Vector3(left_pos.x, h_left, left_pos.y))
 		batch["uvs"].append(Vector2(0.0, uv_y))
-		batch["normals"].append(Vector3.UP)
 
-		batch["vertices"].append(Vector3(right_pos.x, h, right_pos.y))
+		batch["vertices"].append(Vector3(right_pos.x, h_right, right_pos.y))
 		batch["uvs"].append(Vector2(1.0, uv_y))
-		batch["normals"].append(Vector3.UP)
+
+		var cross := Vector3(right_pos.x - left_pos.x, h_right - h_left, right_pos.y - left_pos.y)
+		var fwd := Vector3(perp.y, 0.0, -perp.x)
+		var n := cross.cross(fwd).normalized()
+		if n.y < 0.0:
+			n = -n
+		batch["normals"].append(n)
+		batch["normals"].append(n)
 
 	# Generate indices
 	for i in range(n_points - 1):
@@ -5657,7 +5755,6 @@ func _add_path_polys_to_batch(filtered: Array[PackedVector2Array], validated: Pa
 
 	var hash_val: int = int(abs(validated[0].x * 1000 + validated[0].y * 7919)) % 100
 	var z_offset: float = hash_val * 0.000005
-	var h: float = height_offset + z_offset
 	var uv_scale: float = 1.0 / width
 
 	for poly in filtered:
@@ -5666,6 +5763,7 @@ func _add_path_polys_to_batch(filtered: Array[PackedVector2Array], validated: Pa
 			continue
 		var base_idx: int = batch["vertices"].size()
 		for p in poly:
+			var h: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
 			batch["vertices"].append(Vector3(p.x, h, p.y))
 			batch["uvs"].append(Vector2(p.x * uv_scale, p.y * uv_scale))
 			batch["normals"].append(Vector3.UP)
@@ -6174,8 +6272,8 @@ func _compute_curb_collisions_thread(task: Dictionary) -> void:
 			var dir := (p2 - p1).normalized()
 			var perp := Vector2(-dir.y, dir.x)
 
-			var h_center1 := 0.0
-			var h_center2 := 0.0
+			var h_center1 := _sample_elevation(p1.x, p1.y)
+			var h_center2 := _sample_elevation(p2.x, p2.y)
 			var slab_thickness := 0.02  # 2 см толщина
 			var wall_angle := atan2(p2.y - p1.y, p2.x - p1.x)
 
@@ -6696,7 +6794,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 					color = Color(0.65, 0.55, 0.45)  # Стандартный коричневатый
 
 	var center := _get_polygon_center(points)
-	var base_elev := 0.22  # Уровень террейна (sidewalk_height)
+	var base_elev := 0.22 + _sample_elevation(center.x, center.y)
 
 	# Вычисляем расстояние до игрока для LOD (shadows)
 	var distance_to_player: float = 0.0
@@ -10046,8 +10144,8 @@ func _process_curb_segments(max_count: int) -> int:
 				perp2 = avg.normalized()
 
 		# Elevation в центре и на краях — как дорога использует maxf(edge, center)
-		var h_center1 := 0.0
-		var h_center2 := 0.0
+		var h_center1 := _sample_elevation(p1.x, p1.y)
+		var h_center2 := _sample_elevation(p2.x, p2.y)
 
 		var left_inner1 := p1 + perp1 * (road_width * 0.5)
 		var left_outer1 := p1 + perp1 * (road_width * 0.5 + curb_width)
@@ -10416,7 +10514,7 @@ func _process_infrastructure_queue() -> void:
 		if parent == null or not is_instance_valid(parent):
 			continue
 
-		var elevation := 0.0
+		var elevation := _sample_elevation(item.pos.x, item.pos.y)
 		var t0 := Time.get_ticks_usec()
 
 		match item_type:
@@ -10496,6 +10594,9 @@ func _process_vegetation_queue() -> void:
 		var ck_water_hash: Dictionary = ck_water_data.get("hash", {})
 		var ck_water_polys: Array = ck_water_data.get("polys", [])
 
+		var elev_grid: Dictionary = _chunk_elevation_data.get(chunk_key, {})
+		var base_elev: float = 0.0
+
 		match veg_type:
 			"trees":
 				var task_data := {
@@ -10508,7 +10609,9 @@ func _process_vegetation_queue() -> void:
 					"building_poly_hash": ck_building_poly_hash,
 					"water_spatial_hash": ck_water_hash,
 					"water_polygons": ck_water_polys,
-					"parent": item.parent
+					"parent": item.parent,
+					"elev_grid": elev_grid,
+					"base_elevation": base_elev,
 				}
 				_pending_veg_tasks += 1
 				WorkerThreadPool.add_task(_compute_trees_thread.bind(task_data))
@@ -10523,7 +10626,9 @@ func _process_vegetation_queue() -> void:
 					"parking_polygons": ck_parking_polys,
 					"water_spatial_hash": ck_water_hash,
 					"water_polygons": ck_water_polys,
-					"parent": item.parent
+					"parent": item.parent,
+					"elev_grid": elev_grid,
+					"base_elevation": base_elev,
 				}
 				_pending_veg_tasks += 1
 				WorkerThreadPool.add_task(_compute_chunk_trees_thread.bind(task_data))
@@ -12103,6 +12208,113 @@ func _latlon_to_local(lat: float, lon: float) -> Vector2:
 	return Vector2(dx, -dz)  # Инвертируем Z для корректной ориентации карты
 
 
+## Get spawn elevation by reading the elevation cache for chunk 0,0.
+## Returns ASL elevation at spawn point, or 0.0 if no cache.
+func get_spawn_elevation() -> float:
+	if not enable_elevation:
+		return 0.0
+	# Cache key includes lat/lon to be location-aware
+	var cache_key := "elev_v2_%.4f_%.4f_0,0.json" % [start_lat, start_lon]
+	var cache_path := ProjectSettings.globalize_path("user://osm_cache/" + cache_key)
+	var file := FileAccess.open(cache_path, FileAccess.READ)
+	if not file:
+		cache_key = "elev_v2_%.4f_%.4f_-1,-1.json" % [start_lat, start_lon]
+		cache_path = ProjectSettings.globalize_path("user://osm_cache/" + cache_key)
+		file = FileAccess.open(cache_path, FileAccess.READ)
+		if not file:
+			return 0.0
+	var json_string := file.get_as_text()
+	file.close()
+	var json := JSON.new()
+	if json.parse(json_string) != OK:
+		return 0.0
+	var data: Dictionary = json.data
+	var grid: Array = data.get("grid", [])
+	var res: int = data.get("grid_res", 5)
+	var center := res / 2
+	if grid.size() > center and grid[center].size() > center:
+		return float(grid[center][center])
+	return 0.0
+
+
+## Sample terrain elevation at world position using bilinear interpolation.
+## Returns ASL elevation. Returns 0.0 if no data.
+func _sample_elevation(world_x: float, world_z: float) -> float:
+	if not enable_elevation:
+		return 0.0
+	# Find which chunk contains this position
+	var cx := int(floor(world_x / chunk_size))
+	var cz := int(floor(world_z / chunk_size))
+	var ck := "%d,%d" % [cx, cz]
+	var grid_data: Dictionary = _chunk_elevation_data.get(ck, {})
+	if grid_data.is_empty():
+		# Position falls in unloaded chunk — try neighbors (fixes chunk boundary vertices)
+		for dz in range(-1, 2):
+			for dx in range(-1, 2):
+				if dx == 0 and dz == 0:
+					continue
+				var nk := "%d,%d" % [cx + dx, cz + dz]
+				grid_data = _chunk_elevation_data.get(nk, {})
+				if not grid_data.is_empty():
+					break
+			if not grid_data.is_empty():
+				break
+		if grid_data.is_empty():
+			return 0.0
+	var grid: Array = grid_data.get("grid", [])
+	var grid_res: int = grid_data.get("grid_res", 5)
+	var base_x: float = grid_data.get("base_x", 0.0)
+	var base_z: float = grid_data.get("base_z", 0.0)
+	var step: float = grid_data.get("grid_step", 50.0)
+	if grid.size() < grid_res:
+		return 0.0
+	# Normalized position within grid
+	var fx: float = clampf((world_x - base_x) / step, 0.0, float(grid_res - 1))
+	var fz: float = clampf((world_z - base_z) / step, 0.0, float(grid_res - 1))
+	var ix: int = mini(int(fx), grid_res - 2)
+	var iz: int = mini(int(fz), grid_res - 2)
+	var tx: float = fx - float(ix)
+	var tz: float = fz - float(iz)
+	# Bilinear interpolation
+	var h00: float = grid[iz][ix]
+	var h10: float = grid[iz][ix + 1]
+	var h01: float = grid[iz + 1][ix]
+	var h11: float = grid[iz + 1][ix + 1]
+	var h0: float = h00 * (1.0 - tx) + h10 * tx
+	var h1: float = h01 * (1.0 - tx) + h11 * tx
+	var raw: float = h0 * (1.0 - tz) + h1 * tz
+	return raw
+
+
+## Thread-safe elevation sampling from pre-fetched grid data (no instance vars).
+## Used by worker threads that receive elevation data via task_data.
+static func _sample_elevation_static(world_x: float, world_z: float,
+		elev_grid: Dictionary, base_elev: float) -> float:
+	if elev_grid.is_empty():
+		return 0.0
+	var grid: Array = elev_grid.get("grid", [])
+	var grid_res: int = elev_grid.get("grid_res", 5)
+	var base_x: float = elev_grid.get("base_x", 0.0)
+	var base_z: float = elev_grid.get("base_z", 0.0)
+	var step: float = elev_grid.get("grid_step", 50.0)
+	if grid.size() < grid_res:
+		return 0.0
+	var fx: float = clampf((world_x - base_x) / step, 0.0, float(grid_res - 1))
+	var fz: float = clampf((world_z - base_z) / step, 0.0, float(grid_res - 1))
+	var ix: int = mini(int(fx), grid_res - 2)
+	var iz: int = mini(int(fz), grid_res - 2)
+	var tx: float = fx - float(ix)
+	var tz: float = fz - float(iz)
+	var h00: float = grid[iz][ix]
+	var h10: float = grid[iz][ix + 1]
+	var h01: float = grid[iz + 1][ix]
+	var h11: float = grid[iz + 1][ix + 1]
+	var h0: float = h00 * (1.0 - tx) + h10 * tx
+	var h1: float = h01 * (1.0 - tx) + h11 * tx
+	var raw: float = h0 * (1.0 - tz) + h1 * tz
+	return raw
+
+
 ## Предзагрузка чанков вдоль маршрута гонки
 ## waypoints: Array[Vector2] - массив точек (lat, lon)
 func preload_route_chunks(waypoints: Array) -> void:
@@ -13544,6 +13756,8 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 	var poly_hash: Dictionary = task_data.building_poly_hash
 	var water_hash: Dictionary = task_data.get("water_spatial_hash", {})
 	var water_polys: Array = task_data.get("water_polygons", [])
+	var t_elev_grid: Dictionary = task_data.get("elev_grid", {})
+	var t_base_elev: float = task_data.get("base_elevation", 0.0)
 
 	var min_x := points[0].x
 	var max_x := points[0].x
@@ -13598,7 +13812,7 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 		if _is_point_in_water_threadsafe(test_point, water_hash, water_polys):
 			continue
 
-		var elevation := 0.0
+		var elevation := _sample_elevation_static(test_point.x, test_point.y, t_elev_grid, t_base_elev)
 		var is_pine := dense and fmod(hash1 * 97.0 + hash2 * 53.0, 1.0) < PINE_MIX_RATIO
 
 		# Детерминистичные масштаб/поворот (не randf для потокобезопасности)
@@ -13648,6 +13862,8 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 	var parking_polys: Array = task_data.parking_polygons
 	var water_hash: Dictionary = task_data.get("water_spatial_hash", {})
 	var water_polys: Array = task_data.get("water_polygons", [])
+	var t_elev_grid: Dictionary = task_data.get("elev_grid", {})
+	var t_base_elev: float = task_data.get("base_elevation", 0.0)
 
 	var coords: Array = chunk_key.split(",")
 	var chunk_x := int(coords[0])
@@ -13686,7 +13902,7 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 		if _is_point_in_water_threadsafe(test_point, water_hash, water_polys):
 			continue
 
-		var elevation := 0.0
+		var elevation := _sample_elevation_static(test_point.x, test_point.y, t_elev_grid, t_base_elev)
 
 		# Детерминистичные масштаб/поворот
 		var scale_hash := fmod(float(seed_value + i * 3571) * 0.7236, 1.0)
@@ -13780,7 +13996,7 @@ func _create_trees_immediate(points: PackedVector2Array, parent: Node3D, dense: 
 		if _is_point_near_road(test_point, 3.0, tree_ck):
 			continue
 
-		var elevation := 0.0
+		var elevation := _sample_elevation(test_point.x, test_point.y)
 
 		# Детерминистичный выбор типа: pine ~15% в лесах
 		var is_pine := dense and fmod(hash1 * 97.0 + hash2 * 53.0, 1.0) < PINE_MIX_RATIO
@@ -14339,25 +14555,31 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 				p1 -= dir * curb_w
 			if not p2_on_boundary:
 				p2 += dir * curb_w
+			var e1 := _sample_elevation(p1.x, p1.y)
+			var e2 := _sample_elevation(p2.x, p2.y)
+			var top1 := top + e1
+			var top2 := top + e2
+			var bot1 := bot + e1
+			var bot2 := bot + e2
 			var n_front := Vector3(outward.x, 0.0, outward.y)
 			var ci := curb_verts.size()
 			# Передняя грань
-			curb_verts.append(Vector3(p1_out.x, bot, p1_out.y))
-			curb_verts.append(Vector3(p2_out.x, bot, p2_out.y))
-			curb_verts.append(Vector3(p2_out.x, top, p2_out.y))
-			curb_verts.append(Vector3(p1_out.x, top, p1_out.y))
+			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))
+			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))
+			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))
+			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))
 			for _j in 4: curb_norms.append(n_front)
 			# Верхняя грань
-			curb_verts.append(Vector3(p1.x, top, p1.y))
-			curb_verts.append(Vector3(p2.x, top, p2.y))
-			curb_verts.append(Vector3(p2_out.x, top, p2_out.y))
-			curb_verts.append(Vector3(p1_out.x, top, p1_out.y))
+			curb_verts.append(Vector3(p1.x, top1, p1.y))
+			curb_verts.append(Vector3(p2.x, top2, p2.y))
+			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))
+			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))
 			for _j in 4: curb_norms.append(Vector3.UP)
 			# Нижняя грань
-			curb_verts.append(Vector3(p1_out.x, bot, p1_out.y))
-			curb_verts.append(Vector3(p2_out.x, bot, p2_out.y))
-			curb_verts.append(Vector3(p2.x, bot, p2.y))
-			curb_verts.append(Vector3(p1.x, bot, p1.y))
+			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))
+			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))
+			curb_verts.append(Vector3(p2.x, bot2, p2.y))
+			curb_verts.append(Vector3(p1.x, bot1, p1.y))
 			for _j in 4: curb_norms.append(Vector3.DOWN)
 			# Передняя грань (offset 0) — 0,1,2 / 0,2,3
 			curb_idxs.append(ci + 0); curb_idxs.append(ci + 1); curb_idxs.append(ci + 2)
@@ -14393,7 +14615,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 			continue
 		var base_idx: int = all_vertices.size()
 		for p in poly:
-			var h := 0.0 + sidewalk_height
+			var h := sidewalk_height + _sample_elevation(p.x, p.y)
 			all_vertices.append(Vector3(p.x, h, p.y))
 			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
 			all_normals.append(Vector3.UP)
@@ -14503,7 +14725,7 @@ func _create_chunk_trees_immediate(chunk_key: String, parent: Node3D) -> void:
 		if _is_point_in_water(test_point, chunk_key):
 			continue
 
-		var elevation := 0.0
+		var elevation := _sample_elevation(test_point.x, test_point.y)
 		_add_tree_to_batch(chunk_key, test_point, elevation, parent)
 
 		tree_count += 1
@@ -14587,7 +14809,8 @@ func _generate_industrial_buildings(points: PackedVector2Array, parent: Node3D) 
 				break
 
 		if all_inside:
-			var base_elev := 0.22
+			var bld_ctr := _get_polygon_center(bld_points)
+			var base_elev := 0.22 + _sample_elevation(bld_ctr.x, bld_ctr.y)
 			_create_3d_building(bld_points, building_color, bld_height, parent, base_elev)
 
 
@@ -14655,13 +14878,13 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 		var left_in_intersection := _is_point_in_intersection_shape(lamp_pos_left, false, left_ck) >= 0
 		if not left_in_intersection and not _is_point_in_any_parking(lamp_pos_left, left_ck) and not _is_point_near_road(lamp_pos_left, 0.1, left_ck) and not _is_point_in_water(lamp_pos_left, left_ck):
 			if _loaded_chunks.has(left_ck):
-				_add_lamp_to_batch(left_ck, Vector3(lamp_pos_left.x, 0.0, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[left_ck])
+				_add_lamp_to_batch(left_ck, Vector3(lamp_pos_left.x, _sample_elevation(lamp_pos_left.x, lamp_pos_left.y), lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[left_ck])
 
 		if both_sides:
 			var right_ck := "%d,%d" % [int(floor(lamp_pos_right.x / chunk_size)), int(floor(lamp_pos_right.y / chunk_size))]
 			if _is_point_in_intersection_shape(lamp_pos_right, false, right_ck) < 0 and not _is_point_in_any_parking(lamp_pos_right, right_ck) and not _is_point_near_road(lamp_pos_right, 0.1, right_ck) and not _is_point_in_water(lamp_pos_right, right_ck):
 				if _loaded_chunks.has(right_ck):
-					_add_lamp_to_batch(right_ck, Vector3(lamp_pos_right.x, 0.0, lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[right_ck])
+					_add_lamp_to_batch(right_ck, Vector3(lamp_pos_right.x, _sample_elevation(lamp_pos_right.x, lamp_pos_right.y), lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[right_ck])
 
 		next_lamp_dist += lamp_spacing
 
@@ -18387,7 +18610,7 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 	var z_off := 0.005
 
 	# Elevation в центре перекрёстка
-	var h_center := 0.0
+	var h_center := _sample_elevation(pos.x, pos.y)
 	var center_y := h_center + height_offset + z_off
 
 	# Центральная вершина (индекс 0) — world-space UV
