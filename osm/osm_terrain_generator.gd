@@ -3625,6 +3625,12 @@ func _process_phase3_queue() -> bool:
 					var center := _get_way_center(nodes)
 					if not (center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z):
 						continue
+				elif tags.get("natural", "") == "water":
+					# Huge water polygons (rivers, reservoirs) cannot be center-filtered —
+					# the centre is far from any single chunk. Use bbox-overlap instead.
+					var bbox := _get_way_local_bbox(nodes)
+					if bbox.position.x > chunk_max_x or bbox.end.x < chunk_min_x or bbox.position.y > chunk_max_z or bbox.end.y < chunk_min_z:
+						continue
 				else:
 					var center := _get_way_center(nodes)
 					if not (center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z):
@@ -3672,7 +3678,13 @@ func _process_phase3_queue() -> bool:
 			elif tags.has("amenity") and not tags.has("building"):
 				_create_amenity_building(nodes, tags, target, null, true)  # skip_spatial_hash
 			elif tags.has("natural"):
-				_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+				# Large water polygons (reservoirs, lakes) must be processed first so
+				# that narrower water strips contained inside them can skip redundant
+				# shore edges facing open water.
+				if tags.get("natural", "") == "water" and nodes.size() > 200:
+					_terrain_objects_queue.push_front({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+				else:
+					_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
 			elif tags.has("landuse"):
 				_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 			elif tags.has("leisure"):
@@ -3950,7 +3962,13 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 		elif tags.has("amenity") and not tags.has("building"):
 			_create_amenity_building(nodes, tags, target, null)
 		elif tags.has("natural"):
-			_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+			# Large water polygons (reservoirs, lakes) must be processed first so
+			# that narrower water strips contained inside them can skip redundant
+			# shore edges facing open water.
+			if tags.get("natural", "") == "water" and nodes.size() > 200:
+				_terrain_objects_queue.push_front({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+			else:
+				_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
 		elif tags.has("landuse"):
 			_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 		elif tags.has("leisure"):
@@ -4692,13 +4710,24 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
+	# Lane-aware albedo + marking textures (lazily generate if missing).
+	# Without this the bridge has no lane stripes and no roughness map → looks flat / shimmers.
+	if texture_key.begins_with("ow") or texture_key.begins_with("bi"):
+		_ensure_lane_textures(texture_key)
+	var albedo_tex: Texture2D = _road_textures.get(texture_key, null)
+	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
+	var roughness_tex: Texture2D = _road_textures.get("road_roughness", null)
+	var marking_tex: Texture2D = _road_textures.get("marking_" + texture_key, null)
+
 	# Материал
 	var material: Material = WetRoadMaterial.create_road_shader_material(
-		_road_textures.get(texture_key, null),
-		_normal_textures.get("asphalt", null),
+		albedo_tex,
+		normal_tex,
 		_is_wet_mode, _is_night_mode,
 		_noise_textures.get("micro", null),
-		_noise_textures.get("macro", null)
+		_noise_textures.get("macro", null),
+		roughness_tex,
+		marking_tex
 	)
 	if material is ShaderMaterial:
 		WetRoadMaterial.apply_road_type_params(material, texture_key)
@@ -4726,6 +4755,7 @@ func _create_bridge_collision(vertices: PackedVector3Array, indices: PackedInt32
 	var body := StaticBody3D.new()
 	body.name = "BridgeCollision"
 	body.collision_layer = 1  # Road layer
+	body.add_to_group("Road")  # NPC off-road detection needs this — bridge is still "road"
 
 	var shape := CollisionShape3D.new()
 	var coll_shape := ConcavePolygonShape3D.new()
@@ -7551,7 +7581,7 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -
 		if is_water:
 			_register_water_polygon(clipped, parent)
 			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
-			_create_shore_mesh(clipped, parent)
+			call_deferred("_create_shore_mesh", clipped, parent)
 		elif texture_key != "grass":
 			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
 		# Генерируем густые деревья внутри лесных полигонов
@@ -7621,7 +7651,7 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 		if is_water:
 			_register_water_polygon(clipped, parent)
 			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
-			_create_shore_mesh(clipped, parent)
+			call_deferred("_create_shore_mesh", clipped, parent)
 		elif texture_key != "grass":
 			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
 		if landuse_type == "forest":
@@ -7681,7 +7711,7 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 		if is_water:
 			_register_water_polygon(clipped, parent)
 			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
-			_create_shore_mesh(clipped, parent)
+			call_deferred("_create_shore_mesh", clipped, parent)
 		else:
 			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
 
@@ -8229,6 +8259,14 @@ func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 	# Chunk boundary tolerance for edge detection
 	var edge_tol := 0.5  # meters
 
+	# Other water polygons in this chunk — used to skip shore edges that face
+	# open water (e.g. narrow river strip embedded inside the reservoir).
+	var other_water_polys: Array = []
+	if not shore_ck.is_empty():
+		for ex: PackedVector2Array in _chunk_water_polygons.get(shore_ck, []):
+			if ex.size() >= 3 and ex != water_poly:
+				other_water_polys.append(ex)
+
 	for ei in range(pn):
 		var i0 := ei
 		var i1 := (ei + 1) % pn
@@ -8258,6 +8296,18 @@ func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 		var in1 := poly[i1]
 		var out0 := outer[i0]
 		var out1 := outer[i1]
+
+		# Skip shore edge if its outer top midpoint is inside another water polygon
+		# (this edge is not a real shoreline — it's facing open water).
+		if not other_water_polys.is_empty():
+			var mid := (out0 + out1) * 0.5
+			var in_other := false
+			for ow: PackedVector2Array in other_water_polys:
+				if Geometry2D.is_point_in_polygon(mid, ow):
+					in_other = true
+					break
+			if in_other:
+				continue
 		# Нормаль наклонной поверхности (примерно 45° наружу-вверх)
 		var edge_dir := (in1 - in0).normalized()
 		var outward_2d := Vector2(edge_dir.y, -edge_dir.x) * out_sign
@@ -8360,7 +8410,7 @@ func _create_waterway(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	for clipped in clipped_polys:
 		_register_water_polygon(clipped, parent)
 		_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
-		_create_shore_mesh(clipped, parent)
+		call_deferred("_create_shore_mesh", clipped, parent)
 
 func _create_3d_building(points: PackedVector2Array, color: Color, building_height: float, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
 	# Минимум 4 точки для нормального здания (3 - треугольник, плохо)
@@ -12212,6 +12262,22 @@ func _get_way_center(nodes: Array) -> Vector2:
 		center += local
 	return center / nodes.size()
 
+
+## Returns axis-aligned bounding box of a way's nodes in local coordinates.
+func _get_way_local_bbox(nodes: Array) -> Rect2:
+	if nodes.size() == 0:
+		return Rect2()
+	var first: Vector2 = _latlon_to_local(nodes[0].lat, nodes[0].lon)
+	var min_pt := first
+	var max_pt := first
+	for i in range(1, nodes.size()):
+		var p: Vector2 = _latlon_to_local(nodes[i].lat, nodes[i].lon)
+		min_pt.x = minf(min_pt.x, p.x)
+		min_pt.y = minf(min_pt.y, p.y)
+		max_pt.x = maxf(max_pt.x, p.x)
+		max_pt.y = maxf(max_pt.y, p.y)
+	return Rect2(min_pt, max_pt - min_pt)
+
 ## Get chunk key from parent node name (e.g. "Chunk_1_2" -> "1,2")
 func _get_chunk_key_from_node(node: Node3D) -> String:
 	if not node:
@@ -13102,8 +13168,9 @@ func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
 		inst.position = Vector3(pos.x, y_offset, pos.y)
 		inst.scale = Vector3.ONE * scale_val
 		inst.rotation_degrees.y = entry.rotation_y
-		# Visibility range 150m (like traffic signs)
-		_set_visibility_range_recursive(inst, 150.0)
+		# Visibility range from JSON (default 150m, can be overridden for landmarks)
+		var vis_range: float = entry.get("visibility_range", 150.0)
+		_set_visibility_range_recursive(inst, vis_range)
 		_set_no_shadow_recursive(inst)
 		parent.add_child(inst)
 		print("OSM: Placed custom model '%s' at (%.1f, %.1f) in chunk %s, scale=%.1f" % [
@@ -13778,6 +13845,8 @@ func _create_trees_immediate(points: PackedVector2Array, parent: Node3D, dense: 
 		if not in_poly:
 			continue
 		if _is_point_near_road(test_point, 3.0, tree_ck):
+			continue
+		if _is_point_in_water(test_point, tree_ck):
 			continue
 
 		var elevation := 0.0
@@ -14992,49 +15061,43 @@ func _is_point_in_any_parking(point: Vector2, ck: String = "") -> bool:
 	return false
 
 
-## Проверяет, находится ли точка внутри водного полигона (main thread)
-func _is_point_in_water(point: Vector2, ck: String = "") -> bool:
-	var cell_x := int(floor(point.x / WATER_CELL_SIZE))
-	var cell_y := int(floor(point.y / WATER_CELL_SIZE))
-	var chunks_to_check: Array = [ck] if ck != "" else _chunk_water_hashes.keys()
-	for c in chunks_to_check:
-		if not _chunk_water_hashes.has(c):
+## Returns true if every vertex of `poly` lies inside some already-registered
+## water polygon for the given chunk. Used to drop redundant inner water features.
+func _is_water_poly_contained(poly: PackedVector2Array, ck: String) -> bool:
+	if poly.size() < 3 or ck.is_empty():
+		return false
+	var existing: Array = _chunk_water_polygons.get(ck, [])
+	for ex: PackedVector2Array in existing:
+		if ex.size() < 3:
 			continue
-		var data: Dictionary = _chunk_water_hashes[c]
-		var h: Dictionary = data.get("hash", {})
-		var polys: Array = data.get("polys", [])
-		for dx in range(-1, 2):
-			for dy in range(-1, 2):
-				var key := Vector2i(cell_x + dx, cell_y + dy)
-				if not h.has(key):
-					continue
-				for entry in h[key]:
-					var widx: int = entry.idx
-					if widx < polys.size():
-						var wp: PackedVector2Array = polys[widx]
-						if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
-							return true
+		var all_in := true
+		for v in poly:
+			if not Geometry2D.is_point_in_polygon(v, ex):
+				all_in = false
+				break
+		if all_in:
+			return true
+	return false
+
+
+## Проверяет, находится ли точка внутри водного полигона (main thread).
+## NOTE: direct polygon check — edge spatial hash misses interior of large
+## polygons like the Rybinsk Reservoir that fully cover a chunk.
+func _is_point_in_water(point: Vector2, ck: String = "") -> bool:
+	var chunks_to_check: Array = [ck] if ck != "" else _chunk_water_polygons.keys()
+	for c in chunks_to_check:
+		var polys: Array = _chunk_water_polygons.get(c, [])
+		for wp: PackedVector2Array in polys:
+			if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
+				return true
 	return false
 
 
 ## Проверяет, находится ли точка внутри водного полигона (thread-safe)
 static func _is_point_in_water_threadsafe(point: Vector2, water_hash: Dictionary, water_polys: Array) -> bool:
-	var cell_x := int(floor(point.x / WATER_CELL_SIZE))
-	var cell_y := int(floor(point.y / WATER_CELL_SIZE))
-	var checked: Dictionary = {}
-	for dx in range(-1, 2):
-		for dy in range(-1, 2):
-			var key := Vector2i(cell_x + dx, cell_y + dy)
-			if not water_hash.has(key):
-				continue
-			for entry in water_hash[key]:
-				var widx: int = entry.idx
-				if not checked.has(widx):
-					checked[widx] = true
-					if widx < water_polys.size():
-						var wp: PackedVector2Array = water_polys[widx]
-						if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
-							return true
+	for wp: PackedVector2Array in water_polys:
+		if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
+			return true
 	return false
 
 

@@ -227,7 +227,8 @@ func _load_building_overrides_json(path: String) -> void:
 			"lon": md.get("lon", 0.0),
 			"rotation_y": md.get("rotation_y", 0.0),
 			"scale": md.get("scale", 1.0),
-			"y_offset": md.get("y_offset", 0.0)
+			"y_offset": md.get("y_offset", 0.0),
+			"visibility_range": md.get("visibility_range", 150.0)
 		})
 
 	# Landuse overrides (деревья на конкретных landuse зонах)

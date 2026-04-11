@@ -111,6 +111,8 @@ def build_overpass_query(center_lat: float, center_lon: float, radius_m: int) ->
   relation["amenity"]({b});
   relation["highway"="pedestrian"]({b});
   relation["leisure"]({b});
+  relation["natural"="water"]({b});
+  relation["waterway"="riverbank"]({b});
   node["natural"="tree"]({b});
   node["traffic_sign"]({b});
   node["highway"="street_lamp"]({b});
@@ -127,6 +129,53 @@ out body geom;
 >;
 out skel qt;
 """
+
+
+def _nodes_equal(a, b):
+    return abs(float(a["lat"]) - float(b["lat"])) < 1e-7 and abs(float(a["lon"]) - float(b["lon"])) < 1e-7
+
+
+def _join_relation_rings(member_ways):
+    """Join outer member ways head-to-tail into closed rings."""
+    rings = []
+    pending = list(member_ways)
+    while pending:
+        current = pending.pop(0)
+        ring_nodes = list(current["nodes"])
+        ring_way_ref = current["way_ref"]
+        while True:
+            if len(ring_nodes) < 2:
+                break
+            first = ring_nodes[0]
+            last = ring_nodes[-1]
+            if _nodes_equal(first, last):
+                break  # closed
+            found_idx = -1
+            found_reverse = False
+            for i, w in enumerate(pending):
+                w_nodes = w["nodes"]
+                if not w_nodes:
+                    continue
+                if _nodes_equal(w_nodes[0], last):
+                    found_idx = i
+                    found_reverse = False
+                    break
+                if _nodes_equal(w_nodes[-1], last):
+                    found_idx = i
+                    found_reverse = True
+                    break
+            if found_idx < 0:
+                break
+            next_member = pending.pop(found_idx)
+            next_nodes = list(next_member["nodes"])
+            if found_reverse:
+                next_nodes.reverse()
+            ring_nodes.extend(next_nodes[1:])
+        if len(ring_nodes) >= 3:
+            if not _nodes_equal(ring_nodes[0], ring_nodes[-1]):
+                ring_nodes.append(ring_nodes[0])
+        rings.append({"nodes": ring_nodes, "way_ref": ring_way_ref})
+    return rings
 
 
 def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
@@ -198,39 +247,42 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
     for el in data.get("elements", []):
         if el.get("type") == "relation":
             tags = el.get("tags", {})
-            outer_nodes = []
-            outer_way_ref = 0
             is_building_relation = "building" in tags or "amenity" in tags
-
+            outer_member_ways = []  # list of {nodes, way_ref}
             for member in el.get("members", []):
                 if member.get("type") == "way" and member.get("role", "outer") == "outer":
                     ref_id = member.get("ref", 0)
-                    if outer_way_ref == 0 and ref_id > 0:
-                        outer_way_ref = ref_id
                     if is_building_relation and ref_id > 0:
                         relation_member_way_ids.add(ref_id)
 
+                    member_nodes = []
                     geometry = member.get("geometry", [])
                     if geometry:
                         for pt in geometry:
-                            outer_nodes.append({
+                            member_nodes.append({
                                 "lat": pt.get("lat", 0.0),
                                 "lon": pt.get("lon", 0.0),
                             })
-                    else:
-                        wid = member.get("ref", 0)
-                        if wid in way_by_id:
-                            outer_nodes.extend(way_by_id[wid])
+                    elif ref_id in way_by_id:
+                        member_nodes.extend(way_by_id[ref_id])
+                    if len(member_nodes) >= 2:
+                        outer_member_ways.append({"nodes": member_nodes, "way_ref": ref_id})
 
-            if len(outer_nodes) > 2:
+            outer_rings = _join_relation_rings(outer_member_ways)
+
+            if outer_rings:
                 if tags.get("highway") == "pedestrian" and tags.get("area") == "yes":
-                    pedestrian_areas.append(outer_nodes)
+                    for ring in outer_rings:
+                        if len(ring["nodes"]) > 2:
+                            pedestrian_areas.append(ring["nodes"])
                 else:
-                    ways.append({
-                        "id": outer_way_ref,
-                        "nodes": outer_nodes,
-                        "tags": tags,
-                    })
+                    for ring in outer_rings:
+                        if len(ring["nodes"]) > 2:
+                            ways.append({
+                                "id": ring["way_ref"],
+                                "nodes": ring["nodes"],
+                                "tags": tags,
+                            })
 
     # Deduplicate building ways that are relation members
     if relation_member_way_ids:

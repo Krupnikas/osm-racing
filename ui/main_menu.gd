@@ -441,6 +441,12 @@ func _spawn_car_on_road() -> void:
 		_car.rotation = Vector3(0, yaw, 0)
 		final_yaw = yaw
 
+	# Optional explicit heading override (set by main menu for landmark spawns).
+	if not is_nan(RaceState.spawn_heading_yaw):
+		final_yaw = RaceState.spawn_heading_yaw
+		_car.rotation = Vector3(0, final_yaw, 0)
+		RaceState.spawn_heading_yaw = NAN  # consume once
+
 	# ПРОВЕРКА: Убедимся что rotation не стал NaN
 	if not _car.rotation.is_finite():
 		print("ERROR: Car rotation became NaN! Yaw was: ", final_yaw)

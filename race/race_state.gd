@@ -11,6 +11,10 @@ var free_roam_location: String = ""
 var free_roam_lat: float = 0.0
 var free_roam_lon: float = 0.0
 
+# Optional spawn-heading override (radians). NAN = no override (use road direction).
+# Consumed once by main_menu._spawn_car_on_road() and reset to NAN.
+var spawn_heading_yaw: float = NAN
+
 # Тестовая трасса (без OSM)
 var test_track_id: String = ""  # "test_flat" или "test_suspension"
 

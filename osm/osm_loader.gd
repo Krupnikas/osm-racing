@@ -257,6 +257,8 @@ func _start_network_request() -> void:
   relation["amenity"](%s);
   relation["highway"="pedestrian"](%s);
   relation["leisure"](%s);
+  relation["natural"="water"](%s);
+  relation["waterway"="riverbank"](%s);
   node["natural"="tree"](%s);
   node["traffic_sign"](%s);
   node["highway"="street_lamp"](%s);
@@ -272,7 +274,7 @@ func _start_network_request() -> void:
 out body geom;
 >;
 out skel qt;
-""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
+""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
 	retry_count = 0
@@ -451,45 +453,50 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 		if element.get("type") == "relation":
 			relations_found += 1
 			var tags: Dictionary = element.get("tags", {})
-			# Берём только outer members для построения контура
-			var outer_nodes := []
-			var outer_way_ref: int = 0  # First outer member way ref (used as way_id for leisure relations)
+			# Multipolygon: outer members are individual ways (often open lines) that need to
+			# be JOINED head-to-tail into closed rings. Concatenating them naively or treating
+			# each as a polygon both produce broken geometry for relations like the Rybinsk
+			# Reservoir water (637 members forming many separate rings).
 			var is_building_relation: bool = tags.has("building") or tags.has("amenity")
+			var outer_member_ways: Array = []  # Array[ {nodes: Array, way_ref: int} ]
 			for member in element.get("members", []):
 				if member.get("type") == "way" and member.get("role", "outer") == "outer":
 					var ref_id: int = member.get("ref", 0)
-					if outer_way_ref == 0 and ref_id > 0:
-						outer_way_ref = ref_id
 					# Запоминаем member way IDs чтобы не дублировать building из relation
-					if is_building_relation:
-						if ref_id > 0:
-							relation_member_way_ids[ref_id] = true
-					# С out geom геометрия включена в member.geometry
+					if is_building_relation and ref_id > 0:
+						relation_member_way_ids[ref_id] = true
+					var member_nodes: Array = []
 					var geometry: Array = member.get("geometry", [])
 					if geometry.size() > 0:
 						for point in geometry:
-							outer_nodes.append({
+							member_nodes.append({
 								"lat": point.get("lat", 0.0),
 								"lon": point.get("lon", 0.0)
 							})
-					else:
-						# Fallback на старый метод через way_by_id
-						var way_id: int = member.get("ref", 0)
-						if way_by_id.has(way_id):
-							for node in way_by_id[way_id]:
-								outer_nodes.append(node)
+					elif way_by_id.has(ref_id):
+						for node in way_by_id[ref_id]:
+							member_nodes.append(node)
+					if member_nodes.size() >= 2:
+						outer_member_ways.append({"nodes": member_nodes, "way_ref": ref_id})
 
-			if outer_nodes.size() > 2:
+			# Join member ways into closed rings (each ring is a separate polygon)
+			var outer_rings: Array = _join_relation_rings(outer_member_ways)
+
+			if not outer_rings.is_empty():
 				relations_with_nodes += 1
 				if tags.get("highway", "") == "pedestrian" and tags.get("area", "") == "yes":
-					# Pedestrian areas go to separate array (not mixed with roads)
-					pedestrian_areas.append(outer_nodes)
+					# Pedestrian areas go to separate array (not mixed with roads).
+					for ring in outer_rings:
+						if ring.nodes.size() > 2:
+							pedestrian_areas.append(ring.nodes)
 				else:
-					ways.append({
-						"id": outer_way_ref,
-						"nodes": outer_nodes,
-						"tags": tags
-					})
+					for ring in outer_rings:
+						if ring.nodes.size() > 2:
+							ways.append({
+								"id": ring.way_ref,
+								"nodes": ring.nodes,
+								"tags": tags
+							})
 
 	# Убираем building/amenity теги у ways которые являются members building-relations
 	# (relation уже добавлен как целый building, individual way не нужен)
@@ -523,6 +530,65 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 		"tram_stops": tram_stops,
 		"pedestrian_areas": pedestrian_areas
 	}
+
+## Joins relation outer member ways head-to-tail into closed rings.
+## Each member is an open polyline; consecutive members chain via shared endpoints.
+## Returns Array of {nodes: Array, way_ref: int}, each entry being one closed (or auto-closed) ring.
+func _join_relation_rings(member_ways: Array) -> Array:
+	var rings: Array = []
+	var pending: Array = member_ways.duplicate()
+	while not pending.is_empty():
+		var current: Dictionary = pending.pop_front()
+		var ring_nodes: Array = (current["nodes"] as Array).duplicate()
+		var ring_way_ref: int = int(current.get("way_ref", 0))
+		while true:
+			if ring_nodes.size() < 2:
+				break
+			var first: Dictionary = ring_nodes[0]
+			var last: Dictionary = ring_nodes[ring_nodes.size() - 1]
+			if _nodes_equal(first, last):
+				break  # closed
+			var found_idx: int = -1
+			var found_reverse: bool = false
+			for i in range(pending.size()):
+				var w_dict: Dictionary = pending[i]
+				var w_nodes: Array = w_dict["nodes"]
+				if w_nodes.is_empty():
+					continue
+				var w_first: Dictionary = w_nodes[0]
+				var w_last: Dictionary = w_nodes[w_nodes.size() - 1]
+				if _nodes_equal(w_first, last):
+					found_idx = i
+					found_reverse = false
+					break
+				if _nodes_equal(w_last, last):
+					found_idx = i
+					found_reverse = true
+					break
+			if found_idx < 0:
+				break  # no more chainable members
+			var next_member: Dictionary = pending[found_idx]
+			pending.remove_at(found_idx)
+			var next_nodes: Array = (next_member["nodes"] as Array).duplicate()
+			if found_reverse:
+				next_nodes.reverse()
+			# skip first node (duplicate of our last)
+			for j in range(1, next_nodes.size()):
+				ring_nodes.append(next_nodes[j])
+		# Auto-close ring if not naturally closed (data clipped at bbox)
+		if ring_nodes.size() >= 3:
+			var first2: Dictionary = ring_nodes[0]
+			var last2: Dictionary = ring_nodes[ring_nodes.size() - 1]
+			if not _nodes_equal(first2, last2):
+				ring_nodes.append(first2)
+		rings.append({"nodes": ring_nodes, "way_ref": ring_way_ref})
+	return rings
+
+
+static func _nodes_equal(a: Dictionary, b: Dictionary) -> bool:
+	# Tolerance ~0.01m at this latitude
+	return absf(float(a["lat"]) - float(b["lat"])) < 1e-7 and absf(float(a["lon"]) - float(b["lon"])) < 1e-7
+
 
 # Конвертация координат в локальные метры относительно центра
 func latlon_to_local(lat: float, lon: float) -> Vector2:

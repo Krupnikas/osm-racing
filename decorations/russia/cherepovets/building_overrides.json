@@ -749,6 +749,16 @@
       "rotation_y": 170,
       "scale": 4.0,
       "y_offset": 1.56
+    },
+    {
+      "comment": "Октябрьский мост — V-pylon (cable-stayed support, OSM way 304729544)",
+      "model": "res://models/oktyabrskii_bridge_pylon/oktyabrskii_bridge_pylon.glb",
+      "lat": 59.1137542,
+      "lon": 37.9035627,
+      "rotation_y": 0,
+      "scale": 77.0,
+      "y_offset": 60.0,
+      "visibility_range": 2000.0
     }
   ],
   "landuse_overrides": [

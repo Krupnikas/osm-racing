@@ -13,10 +13,15 @@ const LOCATIONS := {
 	"Череповец": [59.150406, 37.948805],
 	"Новый Век": [59.123567, 37.982864],
 	"Ледовый дворец": [59.089216, 37.917488],
+	"Октябрьский мост": [59.113453, 37.903733],
 	"Москва (Отрадное)": [55.860580, 37.599646],
 	"Тбилиси (Важа-Пшавела)": [41.723972, 44.730502],
 	"Дубай (Крик)": [25.208591, 55.344100],
 }
+
+# Pylon centroid of OSM way 304729544 — used to face the car at it on spawn.
+const OKTYABRSKY_PYLON_LAT := 59.1137542
+const OKTYABRSKY_PYLON_LON := 37.9035627
 
 var _current_mode: String = "sprint"  # "sprint" или "checkpoint"
 var _map_selected_lat: float = 0.0
@@ -250,6 +255,24 @@ func _start_free_roam(location_name: String) -> void:
 	RaceState.free_roam_lat = coords[0]
 	RaceState.free_roam_lon = coords[1]
 	RaceState.selected_track = null  # Не гонка
+
+	# Optional: face the car at a specific landmark on spawn.
+	if location_name == "Октябрьский мост":
+		var spawn_lat: float = coords[0]
+		var spawn_lon: float = coords[1]
+		var lon_scale: float = cos(deg_to_rad(spawn_lat)) * 111000.0
+		# Local-meters offset to the pylon (matches osm_terrain_generator._latlon_to_local: north → -Z).
+		var dx: float = (OKTYABRSKY_PYLON_LON - spawn_lon) * lon_scale
+		var dz: float = -((OKTYABRSKY_PYLON_LAT - spawn_lat) * 111000.0)
+		# GEVP cars: forward = -Z. We want -Z to point at (dx, dz):
+		#   -Z·dir = (sin(yaw), -cos(yaw)) → match (dx, dz)
+		#   yaw = atan2(dx, -dz)
+		RaceState.spawn_heading_yaw = atan2(dx, -dz)
+		print("MainMenu: spawn_heading_yaw = %.3f rad (%.1f°) for Октябрьский мост" % [
+			RaceState.spawn_heading_yaw, rad_to_deg(RaceState.spawn_heading_yaw)
+		])
+	else:
+		RaceState.spawn_heading_yaw = NAN
 
 	# Переключаем музыку
 	if MusicManager:
