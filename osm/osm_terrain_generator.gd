@@ -1488,7 +1488,19 @@ func _process(delta: float) -> void:
 	# Critical pipeline step — always runs (has own internal 4ms budget)
 	if not _phase3_queue.is_empty():
 		t0 = Time.get_ticks_usec()
-		_process_phase3_queue()
+		# During initial loading, drain multiple chunks per frame within 500ms budget.
+		# During gameplay, process one chunk's phase per frame to avoid stutter.
+		var phase3_budget_us: int = 500000 if _initial_loading else 4000
+		var phase3_iterations := 0
+		var phase3_max_iterations: int = 32 if _initial_loading else 1
+		while phase3_iterations < phase3_max_iterations:
+			phase3_iterations += 1
+			if (Time.get_ticks_usec() - t0) > phase3_budget_us:
+				break
+			if _phase3_queue.is_empty():
+				break
+			if not _process_phase3_queue():
+				break
 		_record_perf("phase3_queue", Time.get_ticks_usec() - t0)
 
 	# Обрабатываем очередь terrain объектов (has own 2ms budget)
@@ -6269,64 +6281,74 @@ func _process_deferred_nodes() -> void:
 	var BUDGET_USEC := 500000 if _initial_loading else 2000
 	var start := Time.get_ticks_usec()
 
-	# 1. Road/terrain collisions (тяжёлые — 1 за кадр, ConcavePolygonShape3D ~5-15ms)
-	if not _deferred_road_collisions.is_empty():
+	# 1. Road/terrain collisions (тяжёлые — 1 за кадр в gameplay, drain в initial loading)
+	# ConcavePolygonShape3D.set_faces is ~5-15ms, but during initial loading the user is on the
+	# loading screen, so we can drain everything within the 500ms budget.
+	while not _deferred_road_collisions.is_empty():
 		if _add_child_count >= _add_child_budget:
+			return
+		if (Time.get_ticks_usec() - start) > BUDGET_USEC:
 			return
 		var _rc_keys := _get_prioritized_keys(_deferred_road_collisions)
-		if not _rc_keys.is_empty():
-			var rc_ck: String = _rc_keys[0]
-			var rc_arr: Array = _deferred_road_collisions[rc_ck]
-			var item: Dictionary = rc_arr.pop_front()
-			if rc_arr.is_empty():
-				_deferred_road_collisions.erase(rc_ck)
-			if is_instance_valid(item["body"]):
-				var verts: PackedVector3Array = item["vertices"]
-				var idxs: PackedInt32Array = item["indices"]
-				var faces := PackedVector3Array()
-				faces.resize(idxs.size())
-				for fi in range(idxs.size()):
-					faces[fi] = verts[idxs[fi]]
-				var shape := ConcavePolygonShape3D.new()
-				shape.set_faces(faces)
-				var col_shape := CollisionShape3D.new()
-				col_shape.shape = shape
-				_budgeted_add_child(item["body"], col_shape)
-			_record_perf("deferred_road_coll", Time.get_ticks_usec() - start)
-			return  # 1 heavy collision за кадр
+		if _rc_keys.is_empty():
+			break
+		var rc_ck: String = _rc_keys[0]
+		var rc_arr: Array = _deferred_road_collisions[rc_ck]
+		var item: Dictionary = rc_arr.pop_front()
+		if rc_arr.is_empty():
+			_deferred_road_collisions.erase(rc_ck)
+		if is_instance_valid(item["body"]):
+			var verts: PackedVector3Array = item["vertices"]
+			var idxs: PackedInt32Array = item["indices"]
+			var faces := PackedVector3Array()
+			faces.resize(idxs.size())
+			for fi in range(idxs.size()):
+				faces[fi] = verts[idxs[fi]]
+			var shape := ConcavePolygonShape3D.new()
+			shape.set_faces(faces)
+			var col_shape := CollisionShape3D.new()
+			col_shape.shape = shape
+			_budgeted_add_child(item["body"], col_shape)
+		_record_perf("deferred_road_coll", Time.get_ticks_usec() - start)
+		if not _initial_loading:
+			return  # Gameplay: one heavy collision per frame to avoid stutter
 
-	if not _deferred_terrain_collisions.is_empty():
+	while not _deferred_terrain_collisions.is_empty():
 		if _add_child_count >= _add_child_budget:
 			return
-		var _tc_keys := _get_prioritized_keys(_deferred_terrain_collisions)
-		if not _tc_keys.is_empty():
-			var tc_ck: String = _tc_keys[0]
-			var tc_arr: Array = _deferred_terrain_collisions[tc_ck]
-			var item: Dictionary = tc_arr.pop_front()
-			if tc_arr.is_empty():
-				_deferred_terrain_collisions.erase(tc_ck)
-			var t_parent: Node3D = item["parent"]
-			if is_instance_valid(t_parent):
-				var verts: PackedVector3Array = item["vertices"]
-				var idxs: PackedInt32Array = item["indices"]
-				var faces := PackedVector3Array()
-				for i in range(0, idxs.size(), 3):
-					faces.append(verts[idxs[i]])
-					faces.append(verts[idxs[i + 1]])
-					faces.append(verts[idxs[i + 2]])
-				var body := StaticBody3D.new()
-				body.name = "TerrainCollision"
-				body.collision_layer = 1
-				body.collision_mask = 0
-				body.add_to_group("Grass")  # GEVP/tire tracks — определение поверхности
-				var col_shape := CollisionShape3D.new()
-				var concave := ConcavePolygonShape3D.new()
-				concave.set_faces(faces)
-				col_shape.shape = concave
-				body.add_child(col_shape)
-				_budgeted_add_child(t_parent, body)
-			_record_perf("deferred_terrain_coll", Time.get_ticks_usec() - start)
+		if (Time.get_ticks_usec() - start) > BUDGET_USEC:
 			return
+		var _tc_keys := _get_prioritized_keys(_deferred_terrain_collisions)
+		if _tc_keys.is_empty():
+			break
+		var tc_ck: String = _tc_keys[0]
+		var tc_arr: Array = _deferred_terrain_collisions[tc_ck]
+		var item: Dictionary = tc_arr.pop_front()
+		if tc_arr.is_empty():
+			_deferred_terrain_collisions.erase(tc_ck)
+		var t_parent: Node3D = item["parent"]
+		if is_instance_valid(t_parent):
+			var verts: PackedVector3Array = item["vertices"]
+			var idxs: PackedInt32Array = item["indices"]
+			var faces := PackedVector3Array()
+			for i in range(0, idxs.size(), 3):
+				faces.append(verts[idxs[i]])
+				faces.append(verts[idxs[i + 1]])
+				faces.append(verts[idxs[i + 2]])
+			var body := StaticBody3D.new()
+			body.name = "TerrainCollision"
+			body.collision_layer = 1
+			body.collision_mask = 0
+			body.add_to_group("Grass")  # GEVP/tire tracks — определение поверхности
+			var col_shape := CollisionShape3D.new()
+			var concave := ConcavePolygonShape3D.new()
+			concave.set_faces(faces)
+			col_shape.shape = concave
+			body.add_child(col_shape)
+			_budgeted_add_child(t_parent, body)
+		_record_perf("deferred_terrain_coll", Time.get_ticks_usec() - start)
+		if not _initial_loading:
+			return  # Gameplay: one heavy collision per frame
 
 	# 2. Building collisions (budgeted)
 	var bc_done_keys: Array[String] = []
@@ -9501,7 +9523,7 @@ func _process_road_queue() -> void:
 	var n_ready := _road_results.size()
 	_road_mutex.unlock()
 
-	var road_apply_budget: int = 4000 if _initial_loading else 2000  # 4ms initial, 2ms gameplay
+	var road_apply_budget: int = 100000 if _initial_loading else 2000  # 100ms initial (drain everything), 2ms gameplay
 	var applied := 0
 	while applied < n_ready:
 		_road_mutex.lock()
@@ -9521,7 +9543,8 @@ func _process_road_queue() -> void:
 		return
 
 	# Process deferred footway splitting incrementally (budget: remaining time up to 2.5ms from start)
-	var fw_budget_end := queue_start + 2500
+	# During initial loading, drain everything within the broader 500ms budget.
+	var fw_budget_end := queue_start + (200000 if _initial_loading else 2500)
 	var fw_done_keys: Array[String] = []
 	for fw_ck in _get_prioritized_keys(_deferred_footway_queue):
 		if Time.get_ticks_usec() > fw_budget_end:
@@ -9546,20 +9569,22 @@ func _process_road_queue() -> void:
 		return
 
 	# Process deferred lamp/manhole generation with time budget
+	# During initial loading, drain everything within the broader 500ms budget.
+	var lamp_budget_us: int = 200000 if _initial_loading else 3000
 	var lamp_done_keys: Array[String] = []
 	for lamp_ck in _get_prioritized_keys(_deferred_lamp_queue):
-		if (Time.get_ticks_usec() - queue_start) > 3000:
+		if (Time.get_ticks_usec() - queue_start) > lamp_budget_us:
 			break
 		var lamp_arr: Array = _deferred_lamp_queue[lamp_ck]
 		while not lamp_arr.is_empty():
-			if (Time.get_ticks_usec() - queue_start) > 3000:
+			if (Time.get_ticks_usec() - queue_start) > lamp_budget_us:
 				break
 			var item: Dictionary = lamp_arr[0]
 			if not is_instance_valid(item.parent):
 				lamp_arr.pop_front()
 				continue
 			var start_idx: int = item.get("_lamp_seg_idx", 0)
-			var processed: int = _generate_street_lamps_incremental(item.points, item.width, item.parent, start_idx, queue_start, 3000)
+			var processed: int = _generate_street_lamps_incremental(item.points, item.width, item.parent, start_idx, queue_start, lamp_budget_us)
 			if processed >= item.points.size() - 1:
 				lamp_arr.pop_front()
 			else:
@@ -9628,7 +9653,8 @@ func _process_road_queue() -> void:
 
 	# Dispatch roads to worker threads — no time budget needed on main thread!
 	# Limit concurrent tasks to avoid overwhelming thread pool
-	const MAX_CONCURRENT_ROAD_TASKS := 8
+	# During initial loading: unlimited dispatch so all roads run in parallel.
+	var MAX_CONCURRENT_ROAD_TASKS: int = 64 if _initial_loading else 8
 
 	# Ensure lon_scale is initialized
 	if _lon_scale == 0.0:
@@ -9687,12 +9713,15 @@ func _process_road_queue() -> void:
 	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 		return
 
-	# Round-robin: ONE finalization type per frame, ONE chunk per type
-	# This prevents Godot scene tree from processing too many new nodes at once
-	var did_work := false
+	# Round-robin finalization. Normally one phase per frame to avoid scene-tree stutter,
+	# but during initial loading we have a 500ms budget — drain queues until budget exhausted.
+	var max_iterations: int = 64 if _initial_loading else 8
 	var phases_checked := 0
-	while not did_work and phases_checked < 8:
+	while phases_checked < max_iterations:
 		phases_checked += 1
+		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+			break
+		var did_work := false
 		match _finalize_phase:
 			0:  # Roads (1 chunk — visible first)
 				_finalize_phase = 1
