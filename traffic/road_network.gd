@@ -256,6 +256,9 @@ func _create_directional_waypoints(points: PackedVector2Array, speed_limit: floa
 
 		var start_height := 0.0
 		var end_height := 0.0
+		if terrain_generator and terrain_generator.has_method("_sample_elevation"):
+			start_height = terrain_generator._sample_elevation(start_2d.x, start_2d.y)
+			end_height = terrain_generator._sample_elevation(end_2d.x, end_2d.y)
 
 		var start_pos := Vector3(start_2d.x, start_height, start_2d.y)
 		var end_pos := Vector3(end_2d.x, end_height, end_2d.y)

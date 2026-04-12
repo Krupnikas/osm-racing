@@ -26,6 +26,9 @@ const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
 const WheelDirtScript = preload("res://effects/wheel_dirt.gd")
 
 # Текстуры для деревянных одноэтажных домов (Россия)
+const FOUNDATION_DEPTH := 3.0  # How far below terrain each foundation vertex extends
+const FOUNDATION_CAP_DEPTH := 5.0  # Bottom cap Y offset below base_elev
+
 const WOODEN_TEXTURES := [
 	"res://textures/buildings/wooden-house-1.png",
 	"res://textures/buildings/wooden-house-2.png",
@@ -3696,6 +3699,8 @@ func _process_phase3_queue() -> bool:
 				# highway и waterway — рисуем ВСЕ из overlap данных, клиппинг к bbox внутри _create_road/_create_waterway
 				if tags.has("highway") or tags.has("waterway") or tags.get("railway", "") == "tram":
 					pass  # Не фильтруем — каждый чанк рисует свой клипнутый кусок
+				elif tags.get("amenity") == "parking":
+					pass  # Не фильтруем — _create_parking клипает через intersect_polygons
 				elif tags.has("building") or tags.has("amenity"):
 					var center := _get_way_center(nodes)
 					if not (center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z):
@@ -3782,9 +3787,13 @@ func _process_phase3_queue() -> bool:
 			if roundabout_nodes.has(node_key):
 				continue
 			var pos: Vector2 = node_positions[node_key]
-			# Only create objects for nodes within strict chunk bbox (avoid duplicates from margin)
+			var inside_chunk := true
 			if filter_by_chunk:
-				if pos.x < chunk_min_x or pos.x >= chunk_max_x or pos.y < chunk_min_z or pos.y >= chunk_max_z:
+				inside_chunk = pos.x >= chunk_min_x and pos.x < chunk_max_x and pos.y >= chunk_min_z and pos.y < chunk_max_z
+				# Patches can extend beyond center — use margin for patch check
+				var patch_margin := 20.0
+				var near_chunk := pos.x >= chunk_min_x - patch_margin and pos.x < chunk_max_x + patch_margin and pos.y >= chunk_min_z - patch_margin and pos.y < chunk_max_z + patch_margin
+				if not near_chunk:
 					continue
 			var road_types: Array = node_road_types[node_key]
 			var major_road_count := 0
@@ -3805,18 +3814,21 @@ func _process_phase3_queue() -> bool:
 				max_height_offset = maxf(max_height_offset, ho)
 			# Search ALL chunks — intersection may be registered under a different chunk due to overlap
 			var intersection_idx := _find_nearest_intersection(pos, 2.0)
-			var sign_offset := Vector2(5, 5)
-			if intersection_idx >= 0:
-				var angle: float = _intersection_angles[intersection_idx]
-				sign_offset = Vector2(cos(angle), sin(angle)) * (max_width * 0.5 + 0.5)
-			if not enable_elevation:
+			# Signs only in the chunk that contains the center (avoid duplicates)
+			if inside_chunk:
+				var sign_offset := Vector2(5, 5)
+				if intersection_idx >= 0:
+					var angle: float = _intersection_angles[intersection_idx]
+					sign_offset = Vector2(cos(angle), sin(angle)) * (max_width * 0.5 + 0.5)
+				var sign_elev := _sample_elevation(pos.x, pos.y)
 				var has_primary := "primary" in road_types or "secondary" in road_types
 				if has_primary and node_road_count[node_key] >= 3:
-					_create_traffic_light(pos + sign_offset, 0.0, target)
+					_create_traffic_light(pos + sign_offset, sign_elev, target)
 				else:
-					_create_yield_sign(pos + sign_offset, 0.0, target)
-				if major_road_count >= 1:
-					_create_intersection_patch(pos, target, intersection_idx, max_height_offset, chunk_key)
+					_create_yield_sign(pos + sign_offset, sign_elev, target)
+			# Patches in all nearby chunks (clipped to chunk bounds inside)
+			if major_road_count >= 1:
+				_create_intersection_patch(pos, target, intersection_idx, max_height_offset, chunk_key)
 		# Done with intersections — move to points
 		entry.phase = "points"
 		entry.way_idx = 0
@@ -4343,8 +4355,9 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		chunk_max_x = float(ck_x_sm + 1) * t_chunk_size
 		chunk_min_z = float(ck_z_sm) * t_chunk_size
 		chunk_max_z = float(ck_z_sm + 1) * t_chunk_size
+		var clip_margin: float = width * 0.5
 		smoothed_points = _clip_polyline_to_rect(smoothed_points,
-			chunk_min_x, chunk_max_x, chunk_min_z, chunk_max_z)
+			chunk_min_x - clip_margin, chunk_max_x + clip_margin, chunk_min_z - clip_margin, chunk_max_z + clip_margin)
 		if smoothed_points.size() < 2:
 			# Дорога полностью вне чанка — уменьшаем счётчик и выходим
 			_road_mutex.lock()
@@ -4394,10 +4407,10 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			var ck_x := int(ck_parts[0])
 			var ck_z := int(ck_parts[1])
 			points = _clip_polyline_to_rect(points,
-				float(ck_x) * t_chunk_size,
-				float(ck_x + 1) * t_chunk_size,
-				float(ck_z) * t_chunk_size,
-				float(ck_z + 1) * t_chunk_size)
+				float(ck_x) * t_chunk_size - half_w,
+				float(ck_x + 1) * t_chunk_size + half_w,
+				float(ck_z) * t_chunk_size - half_w,
+				float(ck_z + 1) * t_chunk_size + half_w)
 
 		# Insert centerline points where road edges cross chunk boundary
 		points = _insert_chunk_edge_points(points, half_w, chunk_min_x, chunk_max_x, chunk_min_z, chunk_max_z)
@@ -4781,7 +4794,7 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 		var p: Vector2 = points[i]
 		var perp: Vector2 = perpendiculars[i]
 
-		var base_elev: float = height_offset
+		var base_elev: float = _sample_elevation(p.x, p.y) + height_offset
 
 		# Вычисляем высоту моста в этой точке с учётом рамп
 		var point_height := base_elev
@@ -5007,7 +5020,7 @@ func _create_bridge_barriers(points: PackedVector2Array, road_width: float, brid
 			var perp: Vector2 = perpendiculars[i]
 
 			# Базовая высота
-			var base_elev: float = 0.0 + height_offset
+			var base_elev: float = _sample_elevation(p.x, p.y) + height_offset
 
 			# Высота моста в этой точке
 			var bridge_y := 0.0
@@ -5402,7 +5415,8 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 		chunk_max_x = float(ck_x + 1) * chunk_size
 		chunk_min_z = float(ck_z) * chunk_size
 		chunk_max_z = float(ck_z + 1) * chunk_size
-		points = _clip_polyline_to_rect(points, chunk_min_x, chunk_max_x, chunk_min_z, chunk_max_z)
+		var clip_margin: float = width * 0.5
+		points = _clip_polyline_to_rect(points, chunk_min_x - clip_margin, chunk_max_x + clip_margin, chunk_min_z - clip_margin, chunk_max_z + clip_margin)
 		if points.size() < 2:
 			return
 
@@ -5679,7 +5693,8 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 		chunk_max_x = float(ck_x + 1) * chunk_size
 		chunk_min_z = float(ck_z) * chunk_size
 		chunk_max_z = float(ck_z + 1) * chunk_size
-		points = _clip_polyline_to_rect(points, chunk_min_x, chunk_max_x, chunk_min_z, chunk_max_z)
+		var clip_margin: float = width * 0.5
+		points = _clip_polyline_to_rect(points, chunk_min_x - clip_margin, chunk_max_x + clip_margin, chunk_min_z - clip_margin, chunk_max_z + clip_margin)
 		if points.size() < 2:
 			return
 
@@ -6968,7 +6983,10 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 					color = Color(0.65, 0.55, 0.45)  # Стандартный коричневатый
 
 	var center := _get_polygon_center(points)
-	var base_elev := 0.22 + _sample_elevation(center.x, center.y)
+	var max_elev := _sample_elevation(center.x, center.y)
+	for p in points:
+		max_elev = maxf(max_elev, _sample_elevation(p.x, p.y))
+	var base_elev := 0.22 + max_elev
 
 	# Вычисляем расстояние до игрока для LOD (shadows)
 	var distance_to_player: float = 0.0
@@ -7212,7 +7230,23 @@ func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void
 			st.add_vertex(Vector3(p.x, h, p.y))
 
 	mesh.mesh = st.commit()
-	parent.add_child(mesh)
+
+	# Collision — StaticBody3D with trimesh collision
+	var body := StaticBody3D.new()
+	body.name = "ParkingCollision"
+	body.collision_layer = 1
+	body.collision_mask = 1
+	body.add_to_group("Road")
+	body.add_child(mesh)
+	mesh.create_trimesh_collision()
+	for child in mesh.get_children():
+		if child is StaticBody3D:
+			var col_shape := child.get_child(0)
+			if col_shape is CollisionShape3D:
+				child.remove_child(col_shape)
+				body.add_child(col_shape)
+			child.queue_free()
+	parent.add_child(body)
 
 	# Track material for wet mode toggle
 	if material is ShaderMaterial:
@@ -8105,9 +8139,13 @@ func _generate_fence_segment(p1: Vector2, p2: Vector2,
 
 	var center_y := BASE_Y + fence_h * 0.5
 
+	# Elevation at endpoints
+	var elev1 := _sample_elevation(p1.x, p1.y)
+	var elev2 := _sample_elevation(p2.x, p2.y)
+
 	# Posts at both ends — into both LODs
-	var p1_c := Vector3(p1.x, center_y, p1.y)
-	var p2_c := Vector3(p2.x, center_y, p2.y)
+	var p1_c := Vector3(p1.x, center_y + elev1, p1.y)
+	var p2_c := Vector3(p2.x, center_y + elev2, p2.y)
 	_append_fence_box(lod0.vertices, lod0.normals, lod0.indices, p1_c, post_hs, fwd, right)
 	_append_fence_box(lod0.vertices, lod0.normals, lod0.indices, p2_c, post_hs, fwd, right)
 	_append_fence_box(lod1.vertices, lod1.normals, lod1.indices, p1_c, post_hs, fwd, right)
@@ -8119,20 +8157,22 @@ func _generate_fence_segment(p1: Vector2, p2: Vector2,
 		for i in range(1, num_bars):
 			var t := float(i) / float(num_bars)
 			var bp := p1.lerp(p2, t)
-			var bc := Vector3(bp.x, center_y, bp.y)
+			var elev_t := lerpf(elev1, elev2, t)
+			var bc := Vector3(bp.x, center_y + elev_t, bp.y)
 			_append_fence_box(lod0.vertices, lod0.normals, lod0.indices, bc, bar_hs, fwd, right)
 			if i % 2 == 0:
 				_append_fence_box(lod1.vertices, lod1.normals, lod1.indices, bc, bar_hs, fwd, right)
 
 	# Horizontal rails (both LODs)
 	var mid := p1.lerp(p2, 0.5)
+	var elev_mid := (elev1 + elev2) * 0.5
 	var rail_hs := Vector3(RAIL_HS_Z, RAIL_HS_Y, seg_len * 0.5)
 	# Bottom rail
-	var rc_bot := Vector3(mid.x, BASE_Y + BOTTOM_RAIL_Y, mid.y)
+	var rc_bot := Vector3(mid.x, BASE_Y + BOTTOM_RAIL_Y + elev_mid, mid.y)
 	_append_fence_box(lod0.vertices, lod0.normals, lod0.indices, rc_bot, rail_hs, fwd, right)
 	_append_fence_box(lod1.vertices, lod1.normals, lod1.indices, rc_bot, rail_hs, fwd, right)
 	# Top rail
-	var rc_top := Vector3(mid.x, BASE_Y + TOP_RAIL_Y, mid.y)
+	var rc_top := Vector3(mid.x, BASE_Y + TOP_RAIL_Y + elev_mid, mid.y)
 	_append_fence_box(lod0.vertices, lod0.normals, lod0.indices, rc_top, rail_hs, fwd, right)
 	_append_fence_box(lod1.vertices, lod1.normals, lod1.indices, rc_top, rail_hs, fwd, right)
 
@@ -8289,7 +8329,8 @@ func _finalize_fence_batches_for_chunk(chunk_key: String) -> void:
 			var box := BoxShape3D.new()
 			box.size = Vector3(elen, 2.2, 0.08)
 			collision.shape = box
-			collision.position = Vector3(mid.x, 0.12 + 1.1, mid.y)
+			var col_elev := _sample_elevation(mid.x, mid.y)
+			collision.position = Vector3(mid.x, col_elev + 0.12 + 1.1, mid.y)
 			collision.rotation.y = -angle
 			body.add_child(collision)
 		# Defer adding body to scene tree to spread cost
@@ -8334,8 +8375,8 @@ func _create_fence(points: PackedVector2Array, parent: Node3D) -> void:
 		p1 = p1 + outward
 		p2 = p2 + outward
 
-		var h1 := 0.0 + 0.12
-		var h2 := 0.0 + 0.12
+		var h1 := _sample_elevation(p1.x, p1.y) + 0.12
+		var h2 := _sample_elevation(p2.x, p2.y) + 0.12
 
 		var v1 := Vector3(p1.x, h1, p1.y)
 		var v2 := Vector3(p2.x, h2, p2.y)
@@ -8383,8 +8424,8 @@ func _create_fence(points: PackedVector2Array, parent: Node3D) -> void:
 		if wall_length < 0.5:
 			continue
 
-		var h1 := 0.0 + 0.12
-		var h2 := 0.0 + 0.12
+		var h1 := _sample_elevation(p1.x, p1.y) + 0.12
+		var h2 := _sample_elevation(p2.x, p2.y) + 0.12
 		var avg_h := (h1 + h2) / 2.0
 
 		var wall_center := Vector3((p1.x + p2.x) / 2, avg_h + fence_height / 2, (p1.y + p2.y) / 2)
@@ -8561,10 +8602,14 @@ func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 
 		var ci := verts.size()
 		# 4 вершины: out0_top, out1_top, in1_bottom, in0_bottom
-		verts.append(Vector3(out0.x, sidewalk_h, out0.y))
-		verts.append(Vector3(out1.x, sidewalk_h, out1.y))
-		verts.append(Vector3(in1.x, water_h, in1.y))
-		verts.append(Vector3(in0.x, water_h, in0.y))
+		var elev_out0 := _sample_elevation(out0.x, out0.y)
+		var elev_out1 := _sample_elevation(out1.x, out1.y)
+		var elev_in0 := _sample_elevation(in0.x, in0.y)
+		var elev_in1 := _sample_elevation(in1.x, in1.y)
+		verts.append(Vector3(out0.x, elev_out0 + sidewalk_h, out0.y))
+		verts.append(Vector3(out1.x, elev_out1 + sidewalk_h, out1.y))
+		verts.append(Vector3(in1.x, elev_in1 + water_h, in1.y))
+		verts.append(Vector3(in0.x, elev_in0 + water_h, in0.y))
 		for _j in 4:
 			norms.append(slope_normal)
 		# UV: горизонтальная длина и вертикальная от 0 (верх) до 1 (низ)
@@ -8784,7 +8829,6 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 	fnd_mat.metallic_specular = 0.3
 	fnd_mesh.material_override = fnd_mat
 	var fnd_top := base_elev + fnd_h
-	var fnd_bottom := base_elev
 	fnd_im.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
 	for i in range(points.size()):
 		var fp1 := points[i]
@@ -8792,16 +8836,30 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 		var fdir := Vector2(fp2.x - fp1.x, fp2.y - fp1.y).normalized()
 		var fnorm := Vector3(-fdir.y * normal_sign, 0, fdir.x * normal_sign)
 		fnd_im.surface_set_normal(fnorm)
+		var fb1 := _sample_elevation(fp1.x, fp1.y) - FOUNDATION_DEPTH
+		var fb2 := _sample_elevation(fp2.x, fp2.y) - FOUNDATION_DEPTH
 		var fv1 := Vector3(fp1.x, fnd_top, fp1.y)
 		var fv2 := Vector3(fp2.x, fnd_top, fp2.y)
-		var fv3 := Vector3(fp2.x, fnd_bottom, fp2.y)
-		var fv4 := Vector3(fp1.x, fnd_bottom, fp1.y)
+		var fv3 := Vector3(fp2.x, fb2, fp2.y)
+		var fv4 := Vector3(fp1.x, fb1, fp1.y)
 		fnd_im.surface_add_vertex(fv1)
 		fnd_im.surface_add_vertex(fv2)
 		fnd_im.surface_add_vertex(fv3)
 		fnd_im.surface_add_vertex(fv1)
 		fnd_im.surface_add_vertex(fv3)
 		fnd_im.surface_add_vertex(fv4)
+	# Bottom cap — seal foundation from below
+	var bottom_indices := Geometry2D.triangulate_polygon(points)
+	if bottom_indices.size() >= 3:
+		fnd_im.surface_set_normal(Vector3.DOWN)
+		var cap_y := base_elev - FOUNDATION_CAP_DEPTH
+		for i in range(0, bottom_indices.size(), 3):
+			var bp1 := points[bottom_indices[i]]
+			var bp2 := points[bottom_indices[i + 1]]
+			var bp3 := points[bottom_indices[i + 2]]
+			fnd_im.surface_add_vertex(Vector3(bp1.x, cap_y, bp1.y))
+			fnd_im.surface_add_vertex(Vector3(bp3.x, cap_y, bp3.y))
+			fnd_im.surface_add_vertex(Vector3(bp2.x, cap_y, bp2.y))
 	fnd_im.surface_end()
 
 	var body := StaticBody3D.new()
@@ -8840,13 +8898,19 @@ func _create_3d_building(points: PackedVector2Array, color: Color, building_heig
 
 ## Добавляет здание в очередь для генерации в worker thread
 func _queue_building_for_thread(points: PackedVector2Array, building_height: float, texture_type: String, parent: Node3D, base_elev: float, distance_to_player: float = INF) -> void:
+	# Pre-compute per-vertex foundation bottoms (main thread has elevation access)
+	var fnd_bottoms := PackedFloat32Array()
+	fnd_bottoms.resize(points.size())
+	for i in range(points.size()):
+		fnd_bottoms[i] = _sample_elevation(points[i].x, points[i].y) - FOUNDATION_DEPTH
 	var task_data := {
 		"points": points,
 		"building_height": building_height,
 		"texture_type": texture_type,
 		"parent": parent,
 		"base_elev": base_elev,
-		"distance_to_player": distance_to_player  # For shadow LOD
+		"distance_to_player": distance_to_player,  # For shadow LOD
+		"fnd_bottoms": fnd_bottoms,
 	}
 
 	# Добавляем задачу в пул потоков
@@ -8859,6 +8923,7 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 	var points: PackedVector2Array = task_data.points
 	var building_height: float = task_data.building_height
 	var base_elev: float = task_data.base_elev
+	var fnd_bottoms: PackedFloat32Array = task_data.get("fnd_bottoms", PackedFloat32Array())
 
 	# Валидация (повторяем проверки без раннего выхода - просто отмечаем как invalid)
 	var valid := true
@@ -9278,7 +9343,6 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 	var fnd_normals := PackedVector3Array()
 	var fnd_indices := PackedInt32Array()
 	var fnd_top := base_elev + fnd_h
-	var fnd_bottom := base_elev
 	var fnd_material_idx := int(abs(points[0].x * 73.0 + points[0].y * 137.0)) % 4
 
 	for i in range(points.size()):
@@ -9286,12 +9350,14 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		var p2 := points[(i + 1) % points.size()]
 		var dir := (p2 - p1).normalized()
 		var fnormal := Vector3(-dir.y * normal_sign, 0, dir.x * normal_sign)
+		var fb1 := fnd_bottoms[i] if i < fnd_bottoms.size() else base_elev - FOUNDATION_DEPTH
+		var fb2 := fnd_bottoms[(i + 1) % points.size()] if (i + 1) % points.size() < fnd_bottoms.size() else base_elev - FOUNDATION_DEPTH
 
 		var vi := fnd_vertices.size()
 		fnd_vertices.append(Vector3(p1.x, fnd_top, p1.y))
 		fnd_vertices.append(Vector3(p2.x, fnd_top, p2.y))
-		fnd_vertices.append(Vector3(p2.x, fnd_bottom, p2.y))
-		fnd_vertices.append(Vector3(p1.x, fnd_bottom, p1.y))
+		fnd_vertices.append(Vector3(p2.x, fb2, p2.y))
+		fnd_vertices.append(Vector3(p1.x, fb1, p1.y))
 		fnd_uvs.append(Vector2(0, 0))
 		fnd_uvs.append(Vector2(1, 0))
 		fnd_uvs.append(Vector2(1, 1))
@@ -9306,6 +9372,28 @@ func _compute_building_mesh_thread(task_data: Dictionary) -> void:
 		fnd_indices.append(vi + 0)
 		fnd_indices.append(vi + 2)
 		fnd_indices.append(vi + 3)
+
+	# Bottom cap — seal foundation from below
+	var cap_y := base_elev - FOUNDATION_CAP_DEPTH
+	var bottom_tri := Geometry2D.triangulate_polygon(points)
+	if bottom_tri.size() >= 3:
+		for i in range(0, bottom_tri.size(), 3):
+			var bp1 := points[bottom_tri[i]]
+			var bp2 := points[bottom_tri[i + 1]]
+			var bp3 := points[bottom_tri[i + 2]]
+			var vi := fnd_vertices.size()
+			fnd_vertices.append(Vector3(bp1.x, cap_y, bp1.y))
+			fnd_vertices.append(Vector3(bp3.x, cap_y, bp3.y))
+			fnd_vertices.append(Vector3(bp2.x, cap_y, bp2.y))
+			fnd_uvs.append(Vector2(0, 0))
+			fnd_uvs.append(Vector2(0, 0))
+			fnd_uvs.append(Vector2(0, 0))
+			fnd_normals.append(Vector3.DOWN)
+			fnd_normals.append(Vector3.DOWN)
+			fnd_normals.append(Vector3.DOWN)
+			fnd_indices.append(vi + 0)
+			fnd_indices.append(vi + 1)
+			fnd_indices.append(vi + 2)
 
 	# Сохраняем результат
 	var result := {
@@ -11193,17 +11281,18 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 	var fn := PackedVector3Array()
 	var fi := PackedInt32Array()
 	var ft := base_elev + fnd_h
-	var fb := base_elev
 	for i in range(points.size()):
 		var fp1 := points[i]
 		var fp2 := points[(i + 1) % points.size()]
 		var fdir := (fp2 - fp1).normalized()
 		var fnorm := Vector3(-fdir.y * normal_sign, 0.0, fdir.x * normal_sign)
 		var fvi := fv.size()
+		var fb1 := _sample_elevation(fp1.x, fp1.y) - FOUNDATION_DEPTH
+		var fb2 := _sample_elevation(fp2.x, fp2.y) - FOUNDATION_DEPTH
 		fv.append(Vector3(fp1.x, ft, fp1.y))
 		fv.append(Vector3(fp2.x, ft, fp2.y))
-		fv.append(Vector3(fp2.x, fb, fp2.y))
-		fv.append(Vector3(fp1.x, fb, fp1.y))
+		fv.append(Vector3(fp2.x, fb2, fp2.y))
+		fv.append(Vector3(fp1.x, fb1, fp1.y))
 		fu.append(Vector2(0, 0))
 		fu.append(Vector2(1, 0))
 		fu.append(Vector2(1, 1))
@@ -11218,6 +11307,27 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 		fi.append(fvi + 0)
 		fi.append(fvi + 2)
 		fi.append(fvi + 3)
+	# Bottom cap — seal foundation from below
+	var bottom_tri := Geometry2D.triangulate_polygon(points)
+	if bottom_tri.size() >= 3:
+		var cap_y := base_elev - FOUNDATION_CAP_DEPTH
+		for i in range(0, bottom_tri.size(), 3):
+			var bvi := fv.size()
+			var bp1 := points[bottom_tri[i]]
+			var bp2 := points[bottom_tri[i + 1]]
+			var bp3 := points[bottom_tri[i + 2]]
+			fv.append(Vector3(bp1.x, cap_y, bp1.y))
+			fv.append(Vector3(bp3.x, cap_y, bp3.y))
+			fv.append(Vector3(bp2.x, cap_y, bp2.y))
+			fu.append(Vector2.ZERO)
+			fu.append(Vector2.ZERO)
+			fu.append(Vector2.ZERO)
+			fn.append(Vector3.DOWN)
+			fn.append(Vector3.DOWN)
+			fn.append(Vector3.DOWN)
+			fi.append(bvi)
+			fi.append(bvi + 1)
+			fi.append(bvi + 2)
 	if fi.size() >= 3:
 		fnd_arr[Mesh.ARRAY_VERTEX] = fv
 		fnd_arr[Mesh.ARRAY_TEX_UV] = fu
@@ -12114,17 +12224,18 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	var fn2 := PackedVector3Array()
 	var fi2 := PackedInt32Array()
 	var ft2 := base_elev + fnd_h
-	var fb2 := base_elev
 	for i in range(points.size()):
 		var fp1 := points[i]
 		var fp2 := points[(i + 1) % points.size()]
 		var fdir := (fp2 - fp1).normalized()
 		var fnorm := Vector3(-fdir.y * normal_sign, 0.0, fdir.x * normal_sign)
 		var fvi := fv2.size()
+		var fb2_1 := _sample_elevation(fp1.x, fp1.y) - FOUNDATION_DEPTH
+		var fb2_2 := _sample_elevation(fp2.x, fp2.y) - FOUNDATION_DEPTH
 		fv2.append(Vector3(fp1.x, ft2, fp1.y))
 		fv2.append(Vector3(fp2.x, ft2, fp2.y))
-		fv2.append(Vector3(fp2.x, fb2, fp2.y))
-		fv2.append(Vector3(fp1.x, fb2, fp1.y))
+		fv2.append(Vector3(fp2.x, fb2_2, fp2.y))
+		fv2.append(Vector3(fp1.x, fb2_1, fp1.y))
 		fu2.append(Vector2(0, 0))
 		fu2.append(Vector2(1, 0))
 		fu2.append(Vector2(1, 1))
@@ -12139,6 +12250,27 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 		fi2.append(fvi + 0)
 		fi2.append(fvi + 2)
 		fi2.append(fvi + 3)
+	# Bottom cap — seal foundation from below
+	var bottom_tri2 := Geometry2D.triangulate_polygon(points)
+	if bottom_tri2.size() >= 3:
+		var cap_y2 := base_elev - FOUNDATION_CAP_DEPTH
+		for i in range(0, bottom_tri2.size(), 3):
+			var bvi := fv2.size()
+			var bp1 := points[bottom_tri2[i]]
+			var bp2 := points[bottom_tri2[i + 1]]
+			var bp3 := points[bottom_tri2[i + 2]]
+			fv2.append(Vector3(bp1.x, cap_y2, bp1.y))
+			fv2.append(Vector3(bp3.x, cap_y2, bp3.y))
+			fv2.append(Vector3(bp2.x, cap_y2, bp2.y))
+			fu2.append(Vector2.ZERO)
+			fu2.append(Vector2.ZERO)
+			fu2.append(Vector2.ZERO)
+			fn2.append(Vector3.DOWN)
+			fn2.append(Vector3.DOWN)
+			fn2.append(Vector3.DOWN)
+			fi2.append(bvi)
+			fi2.append(bvi + 1)
+			fi2.append(bvi + 2)
 	if fi2.size() >= 3:
 		fnd_arr2[Mesh.ARRAY_VERTEX] = fv2
 		fnd_arr2[Mesh.ARRAY_TEX_UV] = fu2
@@ -12546,7 +12678,7 @@ func _calculate_polygon_area(points: PackedVector2Array) -> float:
 ## Высота фундамента здания (0.5–1.0м), детерминированная по координатам
 static func _get_foundation_height(points: PackedVector2Array) -> float:
 	var hash_val: float = absf(points[0].x * 31.0 + points[0].y * 97.0)
-	return 0.5 + fmod(hash_val, 1.0) * 0.5  # 0.5 to 1.0
+	return 0.1 + fmod(hash_val, 1.0) * 0.1  # 0.1 to 0.2
 
 
 static func _add_recess_quad(
@@ -14696,7 +14828,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 		var pn := poly.size()
 		var curb_w := 0.15
 		var top := sidewalk_height
-		var bot := -0.05  # 5см под землю чтобы не было щели с травой
+		var bot := -3.0  # Extend below terrain to cover elevation differences
 
 		# Miter outer-точка для каждой вершины — внешняя сторона встык
 		var miter_out: PackedVector2Array = PackedVector2Array()
@@ -15018,7 +15150,10 @@ func _generate_industrial_buildings(points: PackedVector2Array, parent: Node3D) 
 
 		if all_inside:
 			var bld_ctr := _get_polygon_center(bld_points)
-			var base_elev := 0.22 + _sample_elevation(bld_ctr.x, bld_ctr.y)
+			var bld_max_elev := _sample_elevation(bld_ctr.x, bld_ctr.y)
+			for bp in bld_points:
+				bld_max_elev = maxf(bld_max_elev, _sample_elevation(bp.x, bp.y))
+			var base_elev := 0.22 + bld_max_elev
 			_create_3d_building(bld_points, building_color, bld_height, parent, base_elev)
 
 
@@ -18811,47 +18946,19 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 	if not _road_textures.has("intersection"):
 		return
 
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-
 	# Z-offset: дороги имеют hash-based z_offset до 0.03, заплатка должна быть выше всех
 	var z_off := 0.005
-
-	# Elevation в центре перекрёстка
-	var h_center := _sample_elevation(pos.x, pos.y)
-	var center_y := h_center + height_offset + z_off
-
-	# Центральная вершина (индекс 0) — world-space UV
 	var uv_ws := 1.0 / 6.0  # Совпадает с residential road uv_scale
-	st.set_uv(Vector2(pos.x * uv_ws, pos.y * uv_ws))
-	st.set_normal(Vector3.UP)
-	st.add_vertex(Vector3(pos.x, center_y, pos.y))
 
-	# Получаем контур перекрёстка или fallback на эллипс
+	# Build full patch polygon (contour or ellipse)
+	var patch_poly := PackedVector2Array()
 	var contour := PackedVector2Array()
 	if intersection_idx >= 0 and intersection_idx < _intersection_contours.size():
 		contour = _intersection_contours[intersection_idx]
 
 	if contour.size() >= 3:
-		# Контурный патч — world-space UV для стыковки с дорогами
-		for cp in contour:
-			var h_edge := 0.0
-			var vertex_y := h_edge + height_offset + z_off
-			var u := cp.x * uv_ws
-			var v := cp.y * uv_ws
-			st.set_uv(Vector2(u, v))
-			st.set_normal(Vector3.UP)
-			st.add_vertex(Vector3(cp.x, vertex_y, cp.y))
-
-		# Fan-триангуляция от центра
-		var n := contour.size()
-		for i in range(n):
-			var next_i := (i + 1) % n
-			st.add_index(0)       # Центр
-			st.add_index(i + 1)   # Текущая вершина
-			st.add_index(next_i + 1)  # Следующая
+		patch_poly = contour
 	else:
-		# Fallback: эллипс (старое поведение)
 		var radius_a := 6.0
 		var radius_b := 6.0
 		var rotation_angle := 0.0
@@ -18859,7 +18966,6 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 			radius_a = _intersection_radii[intersection_idx].x
 			radius_b = _intersection_radii[intersection_idx].y
 			rotation_angle = _intersection_angles[intersection_idx]
-
 		var segments := 16
 		var cos_rot := cos(rotation_angle)
 		var sin_rot := sin(rotation_angle)
@@ -18869,24 +18975,70 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 			var ey := sin(angle) * radius_b
 			var rx := ex * cos_rot - ey * sin_rot
 			var ry := ex * sin_rot + ey * cos_rot
-			var x := pos.x + rx
-			var z_coord := pos.y + ry
-			var edge_pos := Vector2(x, z_coord)
-			var h_edge := 0.0
-			var vertex_y := h_edge + height_offset + z_off
-			st.set_uv(Vector2(x * uv_ws, z_coord * uv_ws))
-			st.set_normal(Vector3.UP)
-			st.add_vertex(Vector3(x, vertex_y, z_coord))
+			patch_poly.append(Vector2(pos.x + rx, pos.y + ry))
 
-		for i in range(segments):
-			var next_i := (i + 1) % segments
-			st.add_index(0)
-			st.add_index(i + 1)
-			st.add_index(next_i + 1)
+	if patch_poly.size() < 3:
+		return
 
-	var mesh := st.commit()
+	# Clip to chunk bounds
+	var polys_to_render: Array[PackedVector2Array] = []
+	if chunk_key != "" and chunk_key != "initial":
+		var ck_parts := chunk_key.split(",")
+		var ck_x := int(ck_parts[0])
+		var ck_z := int(ck_parts[1])
+		var chunk_rect := PackedVector2Array([
+			Vector2(float(ck_x) * chunk_size, float(ck_z) * chunk_size),
+			Vector2(float(ck_x + 1) * chunk_size, float(ck_z) * chunk_size),
+			Vector2(float(ck_x + 1) * chunk_size, float(ck_z + 1) * chunk_size),
+			Vector2(float(ck_x) * chunk_size, float(ck_z + 1) * chunk_size),
+		])
+		# Ensure CCW winding for intersect_polygons
+		if _polygon_area(patch_poly) < 0:
+			patch_poly.reverse()
+		var clipped := Geometry2D.intersect_polygons(patch_poly, chunk_rect)
+		for cp in clipped:
+			if cp.size() >= 3:
+				polys_to_render.append(cp)
+	else:
+		polys_to_render.append(patch_poly)
+
+	if polys_to_render.is_empty():
+		return
+
+	# Build mesh with ArrayMesh for proper clipped polygon triangulation
+	var vertices := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var normals := PackedVector3Array()
+	var indices := PackedInt32Array()
+
+	for poly in polys_to_render:
+		var tri_idx := Geometry2D.triangulate_polygon(poly)
+		if tri_idx.is_empty():
+			continue
+		var base_idx := vertices.size()
+		for p2 in poly:
+			var h := _sample_elevation(p2.x, p2.y) + height_offset + z_off
+			vertices.append(Vector3(p2.x, h, p2.y))
+			uvs.append(Vector2(p2.x * uv_ws, p2.y * uv_ws))
+			normals.append(Vector3.UP)
+		for ti in tri_idx:
+			indices.append(base_idx + ti)
+
+	if vertices.is_empty():
+		return
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = indices
+
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
 	var mesh_instance := MeshInstance3D.new()
-	mesh_instance.mesh = mesh
+	mesh_instance.mesh = arr_mesh
 
 	var albedo_tex: Texture2D = _road_textures.get("intersection", null)
 	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
@@ -18902,13 +19054,29 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 	mesh_instance.material_override = material
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
+	# Collision — StaticBody3D with trimesh collision
+	var body := StaticBody3D.new()
+	body.name = "IntersectionCollision"
+	body.collision_layer = 1
+	body.collision_mask = 1
+	body.add_to_group("Road")
+	body.add_child(mesh_instance)
+	mesh_instance.create_trimesh_collision()
+	for child in mesh_instance.get_children():
+		if child is StaticBody3D:
+			var col_shape := child.get_child(0)
+			if col_shape is CollisionShape3D:
+				child.remove_child(col_shape)
+				body.add_child(col_shape)
+			child.queue_free()
+
 	# Регистрируем материал для wet mode
 	if chunk_key != "" and material is ShaderMaterial:
 		if not _chunk_road_materials.has(chunk_key):
 			_chunk_road_materials[chunk_key] = []
 		_chunk_road_materials[chunk_key].append(material)
 
-	parent.add_child(mesh_instance)
+	parent.add_child(body)
 
 
 ## RenderingServer mesh instance — bypasses scene tree entirely.
