@@ -9,8 +9,8 @@ signal elevation_failed(chunk_key: String, error: String)
 
 const API_URL := "https://api.opentopodata.org/v1/srtm30m"
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 2
-const GRID_RES := 7  # 7x7 grid per chunk (~33m spacing, matches SRTM30m native resolution)
+const CACHE_VERSION := 3
+const GRID_RES := 7  # 7x7 = 49 points per chunk at ~33m spacing (matches SRTM30m)
 
 # Global rate limiting — 1 request per second (API returns 429 otherwise)
 static var _request_queue: Array[ElevationLoader] = []
@@ -188,7 +188,7 @@ func _send_request_immediate() -> void:
 		elevation_failed.emit(chunk_key, "HTTP request error: %d" % error)
 
 
-## Build pipe-separated lat,lon pairs for the 5x5 grid
+## Build pipe-separated lat,lon pairs for the grid
 func _build_locations_string() -> String:
 	var grid_step := chunk_size / (GRID_RES - 1)
 	var parts := PackedStringArray()
@@ -241,7 +241,6 @@ func _on_request_completed(result: int, response_code: int,
 		return
 
 	# Parse into 2D grid
-	var grid_step := chunk_size / (GRID_RES - 1)
 	var grid: Array = []
 	for iz in GRID_RES:
 		var row: Array = []
@@ -262,7 +261,7 @@ func _on_request_completed(result: int, response_code: int,
 		"grid": grid,
 		"base_x": float(chunk_x) * chunk_size,
 		"base_z": float(chunk_z) * chunk_size,
-		"grid_step": grid_step,
+		"grid_step": chunk_size / (GRID_RES - 1),
 	}
 
 	# Log elevation range

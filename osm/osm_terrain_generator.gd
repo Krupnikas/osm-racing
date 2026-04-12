@@ -95,6 +95,7 @@ const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slop
 @export var enable_crossing_signs := true  # Включить знаки пешеходных переходов
 @export var enable_fences := true  # Включить заборы (промзоны, территории)
 @export var enable_elevation := false  # Включить elevation из SRTM30m
+@export var enable_ground_plane := false  # Grey fallback plane at raw elevation under terrain
 @export var enable_water := true  # Включить водные объекты (реки, озера)
 @export var manhole_spacing := 100.0  # Расстояние между люками (метры)
 
@@ -4330,16 +4331,20 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			var dist_from_junc: float = smoothed_points[i].distance_to(junction_pt)
 			print("  smoothed[%d] = (%.3f, %.3f) dist_from_start=%.2fm" % [i, smoothed_points[i].x, smoothed_points[i].y, dist_from_junc])
 	# Клипаем smoothed_points к bbox чанка (используется для curbs, lamps)
+	var chunk_min_x := -INF
+	var chunk_max_x := INF
+	var chunk_min_z := -INF
+	var chunk_max_z := INF
 	if chunk_key != "initial" and chunk_key != "":
 		var ck_parts_sm: PackedStringArray = chunk_key.split(",")
 		var ck_x_sm := int(ck_parts_sm[0])
 		var ck_z_sm := int(ck_parts_sm[1])
-		var sm_margin := width * 0.5 + 1.0
+		chunk_min_x = float(ck_x_sm) * t_chunk_size
+		chunk_max_x = float(ck_x_sm + 1) * t_chunk_size
+		chunk_min_z = float(ck_z_sm) * t_chunk_size
+		chunk_max_z = float(ck_z_sm + 1) * t_chunk_size
 		smoothed_points = _clip_polyline_to_rect(smoothed_points,
-			float(ck_x_sm) * t_chunk_size - sm_margin,
-			float(ck_x_sm + 1) * t_chunk_size + sm_margin,
-			float(ck_z_sm) * t_chunk_size - sm_margin,
-			float(ck_z_sm + 1) * t_chunk_size + sm_margin)
+			chunk_min_x, chunk_max_x, chunk_min_z, chunk_max_z)
 		if smoothed_points.size() < 2:
 			# Дорога полностью вне чанка — уменьшаем счётчик и выходим
 			_road_mutex.lock()
@@ -4388,12 +4393,11 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			var ck_parts: PackedStringArray = chunk_key.split(",")
 			var ck_x := int(ck_parts[0])
 			var ck_z := int(ck_parts[1])
-			var margin := half_w + 1.0
 			points = _clip_polyline_to_rect(points,
-				float(ck_x) * t_chunk_size - margin,
-				float(ck_x + 1) * t_chunk_size + margin,
-				float(ck_z) * t_chunk_size - margin,
-				float(ck_z + 1) * t_chunk_size + margin)
+				float(ck_x) * t_chunk_size,
+				float(ck_x + 1) * t_chunk_size,
+				float(ck_z) * t_chunk_size,
+				float(ck_z + 1) * t_chunk_size)
 
 		if _debug_way:
 			print("ROAD_DEBUG way=%d validated=%d clipped=%d chunk=%s margin=%.1f" % [_debug_way_id, validated.size(), points.size(), chunk_key, half_w + 1.0])
@@ -4447,11 +4451,13 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				var uv_y: float = accumulated_length * uv_scale
 				var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 				var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
-				var h: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
-				vertices.append(Vector3(left_pos.x, h, left_pos.y))
+				# Sample elevation at clamped position to stay within chunk's elevation grid
+				var h_left: float = _sample_elevation(clampf(left_pos.x, chunk_min_x, chunk_max_x), clampf(left_pos.y, chunk_min_z, chunk_max_z)) + height_offset + z_offset
+				var h_right: float = _sample_elevation(clampf(right_pos.x, chunk_min_x, chunk_max_x), clampf(right_pos.y, chunk_min_z, chunk_max_z)) + height_offset + z_offset
+				vertices.append(Vector3(left_pos.x, h_left, left_pos.y))
 				uvs.append(Vector2(0.0, uv_y))
 				normals.append(Vector3.UP)
-				vertices.append(Vector3(right_pos.x, h, right_pos.y))
+				vertices.append(Vector3(right_pos.x, h_right, right_pos.y))
 				uvs.append(Vector2(1.0, uv_y))
 				normals.append(Vector3.UP)
 
@@ -5244,18 +5250,20 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 	# Validate and fix points that create loops/flips
 	points = _validate_road_direction(points)
 
-	# Клиппинг дороги по границам чанка (с запасом на ширину дороги)
-	# Без этого дороги из Overpass API (загружены с +100м overlap) уходят далеко за чанк,
+	# Clip road centerline to chunk boundary
+	var chunk_min_x := -INF
+	var chunk_max_x := INF
+	var chunk_min_z := -INF
+	var chunk_max_z := INF
 	if chunk_key != "initial":
 		var ck_parts: PackedStringArray = chunk_key.split(",")
 		var ck_x := int(ck_parts[0])
 		var ck_z := int(ck_parts[1])
-		var margin := width * 0.5 + 1.0  # Полуширина дороги + 1м на бордюры
-		var clip_min_x := float(ck_x) * chunk_size - margin
-		var clip_max_x := float(ck_x + 1) * chunk_size + margin
-		var clip_min_z := float(ck_z) * chunk_size - margin
-		var clip_max_z := float(ck_z + 1) * chunk_size + margin
-		points = _clip_polyline_to_rect(points, clip_min_x, clip_max_x, clip_min_z, clip_max_z)
+		chunk_min_x = float(ck_x) * chunk_size
+		chunk_max_x = float(ck_x + 1) * chunk_size
+		chunk_min_z = float(ck_z) * chunk_size
+		chunk_max_z = float(ck_z + 1) * chunk_size
+		points = _clip_polyline_to_rect(points, chunk_min_x, chunk_max_x, chunk_min_z, chunk_max_z)
 		if points.size() < 2:
 			return
 
@@ -5301,9 +5309,10 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 
 		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
+		# Sample elevation at clamped position to stay within chunk's elevation grid
 		var h_center: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
-		var h_left: float = _sample_elevation(left_pos.x, left_pos.y) + height_offset + z_offset
-		var h_right: float = _sample_elevation(right_pos.x, right_pos.y) + height_offset + z_offset
+		var h_left: float = _sample_elevation(clampf(left_pos.x, chunk_min_x, chunk_max_x), clampf(left_pos.y, chunk_min_z, chunk_max_z)) + height_offset + z_offset
+		var h_right: float = _sample_elevation(clampf(right_pos.x, chunk_min_x, chunk_max_x), clampf(right_pos.y, chunk_min_z, chunk_max_z)) + height_offset + z_offset
 
 		# Clamp cross-slope: max 15% grade (prevents wild tilt at chunk boundaries)
 		var max_tilt: float = width * 0.15
@@ -5516,16 +5525,19 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 	# Точки уже сглажены вызывающей стороной — только validate
 	var points: PackedVector2Array = _validate_road_direction(raw_points)
 
+	var chunk_min_x := -INF
+	var chunk_max_x := INF
+	var chunk_min_z := -INF
+	var chunk_max_z := INF
 	if chunk_key != "initial":
 		var ck_parts: PackedStringArray = chunk_key.split(",")
 		var ck_x := int(ck_parts[0])
 		var ck_z := int(ck_parts[1])
-		var margin := width * 0.5 + 1.0
-		var clip_min_x := float(ck_x) * chunk_size - margin
-		var clip_max_x := float(ck_x + 1) * chunk_size + margin
-		var clip_min_z := float(ck_z) * chunk_size - margin
-		var clip_max_z := float(ck_z + 1) * chunk_size + margin
-		points = _clip_polyline_to_rect(points, clip_min_x, clip_max_x, clip_min_z, clip_max_z)
+		chunk_min_x = float(ck_x) * chunk_size
+		chunk_max_x = float(ck_x + 1) * chunk_size
+		chunk_min_z = float(ck_z) * chunk_size
+		chunk_max_z = float(ck_z + 1) * chunk_size
+		points = _clip_polyline_to_rect(points, chunk_min_x, chunk_max_x, chunk_min_z, chunk_max_z)
 		if points.size() < 2:
 			return
 
@@ -5569,9 +5581,10 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 
 		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
+		# Sample elevation at clamped position to stay within chunk's elevation grid
 		var h_center: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
-		var h_left: float = _sample_elevation(left_pos.x, left_pos.y) + height_offset + z_offset
-		var h_right: float = _sample_elevation(right_pos.x, right_pos.y) + height_offset + z_offset
+		var h_left: float = _sample_elevation(clampf(left_pos.x, chunk_min_x, chunk_max_x), clampf(left_pos.y, chunk_min_z, chunk_max_z)) + height_offset + z_offset
+		var h_right: float = _sample_elevation(clampf(right_pos.x, chunk_min_x, chunk_max_x), clampf(right_pos.y, chunk_min_z, chunk_max_z)) + height_offset + z_offset
 
 		# Clamp cross-slope: max 15% grade
 		var max_tilt: float = width * 0.15
@@ -5634,12 +5647,11 @@ func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, he
 		var ck_parts: PackedStringArray = chunk_key.split(",")
 		ck_x = int(ck_parts[0])
 		ck_z = int(ck_parts[1])
-		var margin := width + 2.0
 		var chunk_rect := PackedVector2Array([
-			Vector2(float(ck_x) * chunk_size - margin, float(ck_z) * chunk_size - margin),
-			Vector2(float(ck_x + 1) * chunk_size + margin, float(ck_z) * chunk_size - margin),
-			Vector2(float(ck_x + 1) * chunk_size + margin, float(ck_z + 1) * chunk_size + margin),
-			Vector2(float(ck_x) * chunk_size - margin, float(ck_z + 1) * chunk_size + margin),
+			Vector2(float(ck_x) * chunk_size, float(ck_z) * chunk_size),
+			Vector2(float(ck_x + 1) * chunk_size, float(ck_z) * chunk_size),
+			Vector2(float(ck_x + 1) * chunk_size, float(ck_z + 1) * chunk_size),
+			Vector2(float(ck_x) * chunk_size, float(ck_z + 1) * chunk_size),
 		])
 		for raw_corridor in corridor_polys:
 			if raw_corridor.size() < 3:
@@ -9990,11 +10002,10 @@ func _process_curb_queue() -> void:
 				var ck_parts: PackedStringArray = ck.split(",")
 				var ck_x := int(ck_parts[0])
 				var ck_z := int(ck_parts[1])
-				var margin: float = item.width * 0.5 + 1.0
-				var clip_min_x: float = float(ck_x) * chunk_size - margin
-				var clip_max_x: float = float(ck_x + 1) * chunk_size + margin
-				var clip_min_z: float = float(ck_z) * chunk_size - margin
-				var clip_max_z: float = float(ck_z + 1) * chunk_size + margin
+				var clip_min_x: float = float(ck_x) * chunk_size
+				var clip_max_x: float = float(ck_x + 1) * chunk_size
+				var clip_min_z: float = float(ck_z) * chunk_size
+				var clip_max_z: float = float(ck_z + 1) * chunk_size
 				points = _clip_polyline_to_rect(points, clip_min_x, clip_max_x, clip_min_z, clip_max_z)
 				if points.size() < 2:
 					continue
@@ -14667,6 +14678,26 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 
 	_rs_add_mesh(chunk_key, arr_mesh, material)
 
+	# Ground plane: same polygons, 0.5m below raw elevation (fills holes)
+	if enable_ground_plane and enable_elevation:
+		var gp_verts := PackedVector3Array()
+		gp_verts.resize(all_vertices.size())
+		for vi in all_vertices.size():
+			var v := all_vertices[vi]
+			gp_verts[vi] = Vector3(v.x, v.y - sidewalk_height, v.z)
+		var gp_arrays := []
+		gp_arrays.resize(Mesh.ARRAY_MAX)
+		gp_arrays[Mesh.ARRAY_VERTEX] = gp_verts
+		gp_arrays[Mesh.ARRAY_TEX_UV] = all_uvs
+		gp_arrays[Mesh.ARRAY_NORMAL] = all_normals
+		gp_arrays[Mesh.ARRAY_INDEX] = all_indices
+		var gp_mesh := ArrayMesh.new()
+		gp_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, gp_arrays)
+		var gp_mat := StandardMaterial3D.new()
+		gp_mat.albedo_color = Color(0.35, 0.35, 0.32)
+		gp_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		_rs_add_mesh(chunk_key, gp_mesh, gp_mat)
+
 	# Коллизия — отложенная (ConcavePolygonShape3D из реальной геометрии)
 	_deferred_append(_deferred_terrain_collisions, chunk_key, {
 		"parent": parent,
@@ -14678,6 +14709,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 		_draw_call_stats["terrain"] += 1
 
 	# Применяем elevation если уже готов
+
 
 
 # Генерация деревьев по всему чанку (на обычной земле, вне дорог и зданий)
@@ -17788,7 +17820,7 @@ func _build_terrain_corridors_for_polyline(points: PackedVector2Array, delta: fl
 	if not is_closed:
 		var corridor_polys: Array[PackedVector2Array] = Geometry2D.offset_polyline(
 			points, delta,
-			Geometry2D.JOIN_MITER, Geometry2D.END_SQUARE)
+			Geometry2D.JOIN_MITER, Geometry2D.END_BUTT)
 		for raw_corridor in corridor_polys:
 			if raw_corridor.size() < 3:
 				continue

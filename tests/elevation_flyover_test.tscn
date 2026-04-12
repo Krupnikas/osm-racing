@@ -64,8 +64,9 @@ enable_curbs = false
 enable_windows = false
 enable_manholes = false
 enable_fences = false
-enable_roads = false
+enable_roads = true
 enable_elevation = true
+enable_ground_plane = true
 enable_water = false
 enable_frustum_culling = false
 
