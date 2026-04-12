@@ -4411,6 +4411,9 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				float(ck_z) * t_chunk_size,
 				float(ck_z + 1) * t_chunk_size)
 
+		# Insert centerline points where road edges cross chunk boundary
+		points = _insert_chunk_edge_points(points, half_w, chunk_min_x, chunk_max_x, chunk_min_z, chunk_max_z)
+
 		if _debug_way:
 			print("ROAD_DEBUG way=%d validated=%d clipped=%d chunk=%s margin=%.1f" % [_debug_way_id, validated.size(), points.size(), chunk_key, half_w + 1.0])
 			for i in range(points.size()):
@@ -4452,38 +4455,105 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				for i in range(n_points):
 					print("  perp[%d] = (%.4f, %.4f) at (%.3f, %.3f)" % [i, perpendiculars[i].x, perpendiculars[i].y, points[i].x, points[i].y])
 
-			# Vertices
-			var accumulated_length: float = 0.0
+			# Pre-compute raw left/right edges and accumulated lengths
 			var uv_scale: float = 0.1
+			var left_pts := PackedVector2Array()
+			var right_pts := PackedVector2Array()
+			var accum_lens := PackedFloat64Array()
+			var accum_len: float = 0.0
 			for i in range(n_points):
 				var p: Vector2 = points[i]
 				var perp: Vector2 = perpendiculars[i]
 				if i > 0:
-					accumulated_length += points[i - 1].distance_to(p)
-				var uv_y: float = accumulated_length * uv_scale
-				var raw_left := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
-				var raw_right := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
-				# Clamp vertex positions to chunk bounds (corridor polygon is already clipped to chunk rect)
-				var left_pos := Vector2(clampf(raw_left.x, chunk_min_x, chunk_max_x), clampf(raw_left.y, chunk_min_z, chunk_max_z))
-				var right_pos := Vector2(clampf(raw_right.x, chunk_min_x, chunk_max_x), clampf(raw_right.y, chunk_min_z, chunk_max_z))
-				var h_left: float = _sample_elevation(left_pos.x, left_pos.y) + height_offset + z_offset
-				var h_right: float = _sample_elevation(right_pos.x, right_pos.y) + height_offset + z_offset
-				vertices.append(Vector3(left_pos.x, h_left, left_pos.y))
-				uvs.append(Vector2(0.0, uv_y))
-				normals.append(Vector3.UP)
-				vertices.append(Vector3(right_pos.x, h_right, right_pos.y))
-				uvs.append(Vector2(1.0, uv_y))
-				normals.append(Vector3.UP)
+					accum_len += points[i - 1].distance_to(p)
+				left_pts.append(Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w))
+				right_pts.append(Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w))
+				accum_lens.append(accum_len)
 
-			# Indices
-			for i in range(n_points - 1):
-				var idx: int = i * 2
-				indices.append(idx)
-				indices.append(idx + 3)
-				indices.append(idx + 1)
-				indices.append(idx)
-				indices.append(idx + 2)
-				indices.append(idx + 3)
+			# Chunk rect for 2D intersection
+			var mesh_clip_rect := PackedVector2Array()
+			if chunk_min_x != -INF:
+				mesh_clip_rect = PackedVector2Array([
+					Vector2(chunk_min_x, chunk_min_z), Vector2(chunk_max_x, chunk_min_z),
+					Vector2(chunk_max_x, chunk_max_z), Vector2(chunk_min_x, chunk_max_z),
+				])
+
+			# Per-segment: build quad, clip against chunk rect, triangulate
+			for seg in range(n_points - 1):
+				var l0 := left_pts[seg]
+				var l1 := left_pts[seg + 1]
+				var r0 := right_pts[seg]
+				var r1 := right_pts[seg + 1]
+
+				var seg_dir := points[seg + 1] - points[seg]
+				var seg_len := seg_dir.length()
+				if seg_len < 0.001:
+					continue
+				seg_dir /= seg_len
+				var seg_perp := Vector2(-seg_dir.y, seg_dir.x)
+
+				# Check if any vertex is outside chunk
+				var need_clip := false
+				if mesh_clip_rect.size() > 0:
+					for v in [l0, l1, r0, r1]:
+						if v.x < chunk_min_x or v.x > chunk_max_x or v.y < chunk_min_z or v.y > chunk_max_z:
+							need_clip = true
+							break
+
+				if not need_clip:
+					# Fast path: quad fully inside chunk — two triangles
+					var base_idx := vertices.size()
+					var uv_y0: float = accum_lens[seg] * uv_scale
+					var uv_y1: float = accum_lens[seg + 1] * uv_scale
+					var h_l0: float = _sample_elevation(l0.x, l0.y) + height_offset + z_offset
+					var h_r0: float = _sample_elevation(r0.x, r0.y) + height_offset + z_offset
+					var h_l1: float = _sample_elevation(l1.x, l1.y) + height_offset + z_offset
+					var h_r1: float = _sample_elevation(r1.x, r1.y) + height_offset + z_offset
+					vertices.append(Vector3(l0.x, h_l0, l0.y))
+					uvs.append(Vector2(0.0, uv_y0))
+					normals.append(Vector3.UP)
+					vertices.append(Vector3(r0.x, h_r0, r0.y))
+					uvs.append(Vector2(1.0, uv_y0))
+					normals.append(Vector3.UP)
+					vertices.append(Vector3(l1.x, h_l1, l1.y))
+					uvs.append(Vector2(0.0, uv_y1))
+					normals.append(Vector3.UP)
+					vertices.append(Vector3(r1.x, h_r1, r1.y))
+					uvs.append(Vector2(1.0, uv_y1))
+					normals.append(Vector3.UP)
+					indices.append(base_idx)
+					indices.append(base_idx + 3)
+					indices.append(base_idx + 1)
+					indices.append(base_idx)
+					indices.append(base_idx + 2)
+					indices.append(base_idx + 3)
+				else:
+					# 2D intersection: clip road quad against chunk boundary
+					# CCW winding: left-forward then right-backward
+					var quad := PackedVector2Array([l0, l1, r1, r0])
+					if _polygon_area(quad) < 0:
+						quad.reverse()
+					var clipped_list: Array[PackedVector2Array] = Geometry2D.intersect_polygons(quad, mesh_clip_rect)
+					for clip_poly in clipped_list:
+						if clip_poly.size() < 3:
+							continue
+						var tri_idx := Geometry2D.triangulate_polygon(clip_poly)
+						if tri_idx.is_empty():
+							continue
+						var base_idx := vertices.size()
+						for v2 in clip_poly:
+							var h: float = _sample_elevation(v2.x, v2.y) + height_offset + z_offset
+							vertices.append(Vector3(v2.x, h, v2.y))
+							# UV from projection onto segment axes
+							var rel := v2 - points[seg]
+							var along := rel.dot(seg_dir)
+							var cross_d := rel.dot(seg_perp)
+							var uv_x := clampf(cross_d / width + 0.5, 0.0, 1.0)
+							var uv_y := (accum_lens[seg] + along) * uv_scale
+							uvs.append(Vector2(uv_x, uv_y))
+							normals.append(Vector3.UP)
+						for ti in tri_idx:
+							indices.append(base_idx + ti)
 
 	# Store result via mutex
 	var result := {
@@ -5226,6 +5296,73 @@ func _subdivide_for_elevation(points: PackedVector2Array, max_seg: float = 25.0)
 		result.append(points[i])
 	return result
 
+
+## Insert centerline points where road edges (offset by half_w) cross chunk boundaries.
+## At inserted points the perpendicular offset lands exactly on the chunk edge,
+## so clampf barely changes the vertex position — no sideways shift.
+static func _insert_chunk_edge_points(points: PackedVector2Array, half_w: float,
+		min_x: float, max_x: float, min_z: float, max_z: float) -> PackedVector2Array:
+	if points.size() < 2 or min_x == -INF:
+		return points
+	var result := PackedVector2Array()
+	result.append(points[0])
+	for i in range(1, points.size()):
+		var p0 := points[i - 1]
+		var p1 := points[i]
+		var seg_vec := p1 - p0
+		var seg_len := seg_vec.length()
+		if seg_len < 0.001:
+			result.append(p1)
+			continue
+		var dir := seg_vec / seg_len
+		var perp := Vector2(-dir.y, dir.x)
+
+		# Left and right edge endpoints
+		var l0 := p0 - perp * half_w
+		var l1 := p1 - perp * half_w
+		var r0 := p0 + perp * half_w
+		var r1 := p1 + perp * half_w
+
+		# Find t values where left or right edge crosses chunk boundary
+		var t_list: Array = []
+		var e0: Vector2
+		var e1: Vector2
+		for edge_idx in 2:
+			e0 = l0 if edge_idx == 0 else r0
+			e1 = l1 if edge_idx == 0 else r1
+			var dx := e1.x - e0.x
+			var dz := e1.y - e0.y
+			var t: float
+			if absf(dx) > 0.001:
+				t = (min_x - e0.x) / dx
+				if t > 0.01 and t < 0.99:
+					t_list.append(t)
+				t = (max_x - e0.x) / dx
+				if t > 0.01 and t < 0.99:
+					t_list.append(t)
+			if absf(dz) > 0.001:
+				t = (min_z - e0.y) / dz
+				if t > 0.01 and t < 0.99:
+					t_list.append(t)
+				t = (max_z - e0.y) / dz
+				if t > 0.01 and t < 0.99:
+					t_list.append(t)
+
+		if t_list.is_empty():
+			result.append(p1)
+			continue
+
+		# Sort and insert unique centerline points
+		t_list.sort()
+		var prev_t := 0.0
+		for t in t_list:
+			if t - prev_t < 0.01:
+				continue
+			result.append(p0.lerp(p1, t))
+			prev_t = t
+		result.append(p1)
+	return result
+
 # OPTIMIZATION: Road Batching System (Mesh Merging)
 # Добавляет дорогу в batch вместо создания отдельного MeshInstance3D
 func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_offset: float, parent: Node3D) -> void:
@@ -5284,6 +5421,11 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 	# Subdivide long segments so road follows terrain elevation
 	points = _subdivide_for_elevation(points)
 
+	var half_w: float = width * 0.5
+
+	# Insert points where road edges cross chunk boundary for proper edge clipping
+	points = _insert_chunk_edge_points(points, half_w, chunk_min_x, chunk_max_x, chunk_min_z, chunk_max_z)
+
 	# Z-fighting offset
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
 	var z_offset: float = hash_val * 0.000005
@@ -5294,7 +5436,6 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 
 	var uv_scale: float = 0.1
 	var accumulated_length: float = 0.0
-	var half_w: float = width * 0.5
 
 	# Precompute averaged perpendiculars
 	var perpendiculars: PackedVector2Array = PackedVector2Array()
@@ -5321,14 +5462,13 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 			accumulated_length += points[i - 1].distance_to(p)
 		var uv_y: float = accumulated_length * uv_scale
 
-		# Clamp vertex positions to chunk bounds (corridor polygon is already clipped to chunk rect)
 		var left_pos := Vector2(clampf(p.x - perp.x * half_w, chunk_min_x, chunk_max_x), clampf(p.y - perp.y * half_w, chunk_min_z, chunk_max_z))
 		var right_pos := Vector2(clampf(p.x + perp.x * half_w, chunk_min_x, chunk_max_x), clampf(p.y + perp.y * half_w, chunk_min_z, chunk_max_z))
 		var h_center: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
 		var h_left: float = _sample_elevation(left_pos.x, left_pos.y) + height_offset + z_offset
 		var h_right: float = _sample_elevation(right_pos.x, right_pos.y) + height_offset + z_offset
 
-		# Clamp cross-slope: max 15% grade (prevents wild tilt at chunk boundaries)
+		# Clamp cross-slope: max 15% grade
 		var max_tilt: float = width * 0.15
 		h_left = clampf(h_left, h_center - max_tilt, h_center + max_tilt)
 		h_right = clampf(h_right, h_center - max_tilt, h_center + max_tilt)
@@ -5558,6 +5698,11 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 	# Subdivide long segments so road follows terrain elevation
 	points = _subdivide_for_elevation(points)
 
+	var half_w: float = width * 0.5
+
+	# Insert points where road edges cross chunk boundary for proper edge clipping
+	points = _insert_chunk_edge_points(points, half_w, chunk_min_x, chunk_max_x, chunk_min_z, chunk_max_z)
+
 	var hash_val: int = int(abs(points[0].x * 1000 + points[0].y * 7919)) % 100
 	var z_offset: float = hash_val * 0.000005
 
@@ -5566,7 +5711,6 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 	# UV scale: 1 UV unit вдоль = width метров, чтобы текстура тайлилась 1:1
 	var uv_scale: float = 1.0 / width
 	var accumulated_length: float = 0.0
-	var half_w: float = width * 0.5
 	var n_points: int = points.size()
 
 	# Precompute perpendiculars
@@ -5593,7 +5737,6 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 			accumulated_length += points[i - 1].distance_to(p)
 		var uv_y: float = accumulated_length * uv_scale
 
-		# Clamp vertex positions to chunk bounds (corridor polygon is already clipped to chunk rect)
 		var left_pos := Vector2(clampf(p.x - perp.x * half_w, chunk_min_x, chunk_max_x), clampf(p.y - perp.y * half_w, chunk_min_z, chunk_max_z))
 		var right_pos := Vector2(clampf(p.x + perp.x * half_w, chunk_min_x, chunk_max_x), clampf(p.y + perp.y * half_w, chunk_min_z, chunk_max_z))
 		var h_center: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
@@ -12323,15 +12466,11 @@ func _sample_elevation(world_x: float, world_z: float) -> float:
 	var ck := "%d,%d" % [cx, cz]
 	var grid_data: Dictionary = _chunk_elevation_data.get(ck, {})
 	if grid_data.is_empty():
-		# Position falls in unloaded chunk — try neighbors (fixes chunk boundary vertices)
-		for dz in range(-1, 2):
-			for dx in range(-1, 2):
-				if dx == 0 and dz == 0:
-					continue
-				var nk := "%d,%d" % [cx + dx, cz + dz]
-				grid_data = _chunk_elevation_data.get(nk, {})
-				if not grid_data.is_empty():
-					break
+		# Position at chunk boundary or slightly past edge — floor() rounded to
+		# unloaded adjacent chunk. Try previous chunk in each dimension (covers
+		# right/bottom edge boundaries and road vertices extending past edge).
+		for try_key in ["%d,%d" % [cx - 1, cz], "%d,%d" % [cx, cz - 1], "%d,%d" % [cx - 1, cz - 1]]:
+			grid_data = _chunk_elevation_data.get(try_key, {})
 			if not grid_data.is_empty():
 				break
 		if grid_data.is_empty():
