@@ -4461,11 +4461,13 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				if i > 0:
 					accumulated_length += points[i - 1].distance_to(p)
 				var uv_y: float = accumulated_length * uv_scale
-				var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
-				var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
-				# Sample elevation at clamped position to stay within chunk's elevation grid
-				var h_left: float = _sample_elevation(clampf(left_pos.x, chunk_min_x, chunk_max_x), clampf(left_pos.y, chunk_min_z, chunk_max_z)) + height_offset + z_offset
-				var h_right: float = _sample_elevation(clampf(right_pos.x, chunk_min_x, chunk_max_x), clampf(right_pos.y, chunk_min_z, chunk_max_z)) + height_offset + z_offset
+				var raw_left := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
+				var raw_right := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
+				# Clamp vertex positions to chunk bounds (corridor polygon is already clipped to chunk rect)
+				var left_pos := Vector2(clampf(raw_left.x, chunk_min_x, chunk_max_x), clampf(raw_left.y, chunk_min_z, chunk_max_z))
+				var right_pos := Vector2(clampf(raw_right.x, chunk_min_x, chunk_max_x), clampf(raw_right.y, chunk_min_z, chunk_max_z))
+				var h_left: float = _sample_elevation(left_pos.x, left_pos.y) + height_offset + z_offset
+				var h_right: float = _sample_elevation(right_pos.x, right_pos.y) + height_offset + z_offset
 				vertices.append(Vector3(left_pos.x, h_left, left_pos.y))
 				uvs.append(Vector2(0.0, uv_y))
 				normals.append(Vector3.UP)
@@ -5319,12 +5321,12 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 			accumulated_length += points[i - 1].distance_to(p)
 		var uv_y: float = accumulated_length * uv_scale
 
-		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
-		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
-		# Sample elevation at clamped position to stay within chunk's elevation grid
+		# Clamp vertex positions to chunk bounds (corridor polygon is already clipped to chunk rect)
+		var left_pos := Vector2(clampf(p.x - perp.x * half_w, chunk_min_x, chunk_max_x), clampf(p.y - perp.y * half_w, chunk_min_z, chunk_max_z))
+		var right_pos := Vector2(clampf(p.x + perp.x * half_w, chunk_min_x, chunk_max_x), clampf(p.y + perp.y * half_w, chunk_min_z, chunk_max_z))
 		var h_center: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
-		var h_left: float = _sample_elevation(clampf(left_pos.x, chunk_min_x, chunk_max_x), clampf(left_pos.y, chunk_min_z, chunk_max_z)) + height_offset + z_offset
-		var h_right: float = _sample_elevation(clampf(right_pos.x, chunk_min_x, chunk_max_x), clampf(right_pos.y, chunk_min_z, chunk_max_z)) + height_offset + z_offset
+		var h_left: float = _sample_elevation(left_pos.x, left_pos.y) + height_offset + z_offset
+		var h_right: float = _sample_elevation(right_pos.x, right_pos.y) + height_offset + z_offset
 
 		# Clamp cross-slope: max 15% grade (prevents wild tilt at chunk boundaries)
 		var max_tilt: float = width * 0.15
@@ -5591,12 +5593,12 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 			accumulated_length += points[i - 1].distance_to(p)
 		var uv_y: float = accumulated_length * uv_scale
 
-		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
-		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
-		# Sample elevation at clamped position to stay within chunk's elevation grid
+		# Clamp vertex positions to chunk bounds (corridor polygon is already clipped to chunk rect)
+		var left_pos := Vector2(clampf(p.x - perp.x * half_w, chunk_min_x, chunk_max_x), clampf(p.y - perp.y * half_w, chunk_min_z, chunk_max_z))
+		var right_pos := Vector2(clampf(p.x + perp.x * half_w, chunk_min_x, chunk_max_x), clampf(p.y + perp.y * half_w, chunk_min_z, chunk_max_z))
 		var h_center: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
-		var h_left: float = _sample_elevation(clampf(left_pos.x, chunk_min_x, chunk_max_x), clampf(left_pos.y, chunk_min_z, chunk_max_z)) + height_offset + z_offset
-		var h_right: float = _sample_elevation(clampf(right_pos.x, chunk_min_x, chunk_max_x), clampf(right_pos.y, chunk_min_z, chunk_max_z)) + height_offset + z_offset
+		var h_left: float = _sample_elevation(left_pos.x, left_pos.y) + height_offset + z_offset
+		var h_right: float = _sample_elevation(right_pos.x, right_pos.y) + height_offset + z_offset
 
 		# Clamp cross-slope: max 15% grade
 		var max_tilt: float = width * 0.15
