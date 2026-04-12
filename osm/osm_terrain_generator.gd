@@ -4874,7 +4874,7 @@ func _create_bridge_pillars(points: PackedVector2Array, bridge_height: float, ra
 					var t := (pos - seg_start) / segment_length if segment_length > 0 else 0.0
 					t = clampf(t, 0.0, 1.0)
 					var pillar_pos_2d := p1.lerp(p2, t)
-					var ground_elev := 0.0
+					var ground_elev := _sample_elevation(pillar_pos_2d.x, pillar_pos_2d.y)
 
 					# Создаём опору
 					_create_single_pillar(pillar_pos_2d, ground_elev, bridge_height, parent)
@@ -6950,12 +6950,30 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		_add_pediments_from_override(points, parent, building_height, base_elev, way_id)
 
 
-func _create_parking(points: PackedVector2Array, parent: Node3D) -> void:
+func _create_parking(points: PackedVector2Array, parent: Node3D, chunk_key: String = "") -> void:
 	"""Создаёт парковку: асфальтовую поверхность + знак P (знак отложен) + припаркованные машины"""
 	if points.size() < 3:
 		return
 	if not enable_roads:
 		return
+
+	# Clip parking polygon to chunk bounds
+	if chunk_key != "" and chunk_key != "initial":
+		var ck_parts := chunk_key.split(",")
+		var ck_x := int(ck_parts[0])
+		var ck_z := int(ck_parts[1])
+		var chunk_rect := PackedVector2Array([
+			Vector2(float(ck_x) * chunk_size, float(ck_z) * chunk_size),
+			Vector2(float(ck_x + 1) * chunk_size, float(ck_z) * chunk_size),
+			Vector2(float(ck_x + 1) * chunk_size, float(ck_z + 1) * chunk_size),
+			Vector2(float(ck_x) * chunk_size, float(ck_z + 1) * chunk_size),
+		])
+		var clipped := Geometry2D.intersect_polygons(points, chunk_rect)
+		if clipped.is_empty():
+			return
+		points = clipped[0]
+		if points.size() < 3:
+			return
 
 	# Примечание: полигон уже добавлен в _chunk_parking_hashes в первом проходе
 
@@ -7065,7 +7083,7 @@ func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void
 		for j in range(3):
 			var idx = indices[i + j]
 			var p = points[idx]
-			var h = 0.0 + height_offset
+			var h = _sample_elevation(p.x, p.y) + height_offset
 
 			# UV координаты — world-space для seamless стыка с дорогами
 			st.set_uv(Vector2(p.x * uv_ws, p.y * uv_ws))
@@ -7123,7 +7141,7 @@ func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_k
 			var p = points[idx]
 			st.set_uv(Vector2(p.x * uv_ws, p.y * uv_ws))
 			st.set_normal(Vector3.UP)
-			st.add_vertex(Vector3(p.x, height_offset, p.y))
+			st.add_vertex(Vector3(p.x, _sample_elevation(p.x, p.y) + height_offset, p.y))
 
 	mesh.mesh = st.commit()
 	parent.add_child(mesh)
@@ -7178,7 +7196,7 @@ func _spawn_parked_cars(parking_points: PackedVector2Array, parent: Node3D) -> v
 			car = _parked_lada_scene.instantiate()
 
 		# Получаем высоту
-		var elevation: float = 0.0
+		var elevation: float = _sample_elevation(pos.x, pos.y)
 
 		# Позиционируем
 		car.position = Vector3(pos.x, elevation, pos.y)
@@ -7873,7 +7891,8 @@ func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, lo
 
 	# Парковки обрабатываем отдельно
 	if amenity_type == "parking":
-		_create_parking(points, parent)
+		var pk_ck := _get_chunk_key_from_node(parent)
+		_create_parking(points, parent, pk_ck)
 		return
 
 	# Остальные amenity - создаём как маленькие здания (через thread pool)
@@ -12137,7 +12156,7 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 
 	# Добавляем вершины
 	for p in points:
-		var h := 0.0 + height_offset
+		var h := _sample_elevation(p.x, p.y) + height_offset
 		vertices.append(Vector3(p.x, h, p.y))
 		uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
 		normals.append(Vector3.UP)
@@ -12229,7 +12248,7 @@ func _create_park_collision(points: PackedVector2Array, parent: Node3D) -> void:
 
 	var vertices := PackedVector3Array()
 	for p in points:
-		var h := 0.0 + 0.01  # Чуть выше террейна
+		var h := _sample_elevation(p.x, p.y) + 0.01
 		vertices.append(Vector3(p.x, h, p.y))
 
 	# Создаём ConcavePolygonShape3D напрямую из vertices/indices (быстрее чем create_trimesh_collision)
@@ -14996,7 +15015,7 @@ func _generate_manholes_along_road(nodes: Array, road_width: float, parent: Node
 				var road_pos := p1.lerp(p2, t)
 				var manhole_pos := road_pos - perp * offset  # Вправо от центра
 
-				var elev := 0.0
+				var elev := _sample_elevation(manhole_pos.x, manhole_pos.y)
 				_create_manhole_decal(manhole_pos, elev, randf() * TAU, parent)
 				last_manhole = accumulated + pos_along
 
@@ -15030,7 +15049,7 @@ func _generate_manholes_fast(local_points: PackedVector2Array, road_width: float
 				var road_pos := p1.lerp(p2, t)
 				var manhole_pos := road_pos - perp * offset
 
-				_create_manhole_decal(manhole_pos, 0.0, randf() * TAU, parent)
+				_create_manhole_decal(manhole_pos, _sample_elevation(manhole_pos.x, manhole_pos.y), randf() * TAU, parent)
 				last_manhole = accumulated + pos_along
 
 			pos_along += 50.0
@@ -15103,7 +15122,7 @@ func _add_residential_entrances(points: PackedVector2Array, parent: Node3D, base
 			print("OSM Entrances: no wall found for entrance at (%.6f, %.6f)" % [lat, lon])
 			continue
 
-		var elev := 0.0
+		var elev := _sample_elevation(wall.closest_point.x, wall.closest_point.y)
 		var world_pos := Vector3(wall.closest_point.x, elev, wall.closest_point.y)
 		var rotation_y: float = atan2(wall.normal.x, wall.normal.z)
 
@@ -15256,7 +15275,7 @@ func _create_pending_parking_signs() -> void:
 
 		var sign_pos: Vector2 = sign_result.position
 		var sign_rotation: float = sign_result.rotation
-		var base_elev = 0.0
+		var base_elev = _sample_elevation(sign_pos.x, sign_pos.y)
 
 		_create_parking_sign(sign_pos, base_elev, sign_rotation, parent)
 		created += 1
@@ -16454,7 +16473,7 @@ func _add_custom_entrances_from_override(points: PackedVector2Array, parent: Nod
 			print("CustomEntrance: no wall found for %s at (%.6f, %.6f)" % [entrance_type, lat, lon])
 			continue
 
-		var elev := 0.0
+		var elev := _sample_elevation(wall.closest_point.x, wall.closest_point.y)
 		var world_pos := Vector3(wall.closest_point.x, elev, wall.closest_point.y)
 		var rotation_y: float = atan2(wall.normal.x, wall.normal.z)
 
