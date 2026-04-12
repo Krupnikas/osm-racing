@@ -112,6 +112,7 @@ var test_data_provider: Callable = Callable()
 # Elevation system
 const ElevationLoaderScript = preload("res://osm/elevation_loader.gd")
 var _chunk_elevation_data: Dictionary = {}  # chunk_key -> grid dict
+var _elevation_in_flight: Dictionary = {}  # chunk_key -> true (request in progress)
 var _base_elevation := 0.0  # No offset — 1:1 ASL elevation
 
 var osm_loader: Node
@@ -1723,6 +1724,7 @@ func start_loading() -> void:
 		_loading_chunks.clear()
 	_chunk_data_received.clear()
 	_chunk_state.clear()
+	_elevation_in_flight.clear()
 
 	_loading_paused = false
 	_initial_loading = true
@@ -2518,7 +2520,10 @@ func _load_chunk_at_position(pos: Vector3) -> void:
 
 func _request_elevation(chunk_key: String, cx: int, cz: int) -> void:
 	if _chunk_elevation_data.has(chunk_key):
-		return  # Already loaded
+		return  # Already loaded (in-memory)
+	if _elevation_in_flight.has(chunk_key):
+		return  # Request already in progress
+	_elevation_in_flight[chunk_key] = true
 	var loader := ElevationLoaderScript.new()
 	add_child(loader)
 	var gen := _load_generation
@@ -2530,6 +2535,7 @@ func _request_elevation(chunk_key: String, cx: int, cz: int) -> void:
 func _on_elevation_loaded(chunk_key: String, grid_data: Dictionary, gen: int, loader: Node) -> void:
 	if is_instance_valid(loader):
 		loader.queue_free()
+	_elevation_in_flight.erase(chunk_key)
 	if gen != _load_generation:
 		return  # Stale
 	_chunk_elevation_data[chunk_key] = grid_data
@@ -2554,6 +2560,7 @@ const MAX_ELEVATION_RETRIES := 3
 func _on_elevation_failed(chunk_key: String, error: String, gen: int, loader: Node) -> void:
 	if is_instance_valid(loader):
 		loader.queue_free()
+	_elevation_in_flight.erase(chunk_key)
 	if gen != _load_generation:
 		return
 	var retries: int = _elevation_retries.get(chunk_key, 0)
@@ -2614,8 +2621,9 @@ func _unload_chunk(chunk_key: String) -> void:
 					light.queue_free()
 			_lamp_lights_by_chunk.erase(chunk_key)
 
-		# Clean up elevation data
-		_chunk_elevation_data.erase(chunk_key)
+		# Keep elevation data in memory — it's tiny (49 floats per chunk)
+		# and avoids re-reading from disk cache on chunk reload.
+		# Cleared only on reset_terrain() (location change).
 
 		# Clean up tree batch data if not yet finalized
 		if _tree_batch_data.has(chunk_key):
@@ -2858,6 +2866,8 @@ func reset_terrain() -> void:
 	_initial_chunks_completed.clear()
 	_chunk_profile.clear()
 	_chunk_elevation_data.clear()
+	_elevation_in_flight.clear()
+	_elevation_retries.clear()
 	_base_elevation = 0.0
 	_loading_paused = true
 	_finalization_state = 0  # Сбрасываем состояние финализации
@@ -3904,7 +3914,7 @@ func _process_phase3_queue() -> bool:
 			if traffic_mgr and traffic_mgr.has_method("get_road_network"):
 				var rn = traffic_mgr.get_road_network()
 				if rn:
-					rn.tram_stop_positions.append(Vector3(local.x, 0.0, local.y))
+					rn.tram_stop_positions.append(Vector3(local.x, _sample_elevation(local.x, local.y), local.y))
 		# Done with tram stops — move to pedestrian areas
 		entry.phase = "pedestrian_areas"
 		entry.way_idx = 0
@@ -4318,7 +4328,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	# Smoothing (thread-safe: pure math) — skip for tram (straight tracks, smoothing creates wobble)
 	var smoothed_points: PackedVector2Array
 	if highway_type in ["tram", "tram_rails"]:
-		smoothed_points = local_points
+		smoothed_points = _subdivide_for_elevation(local_points, 15.0)
 	else:
 		smoothed_points = _smooth_road_corners(local_points)
 
@@ -4724,6 +4734,7 @@ func _create_rail_collision(points: PackedVector2Array, parent: Node3D) -> void:
 		var perp := Vector2(-dir.y, dir.x)
 		var mid_2d := (p0 + p1) * 0.5
 		var angle := atan2(dir.x, dir.y)
+		var elev_mid := _sample_elevation(mid_2d.x, mid_2d.y)
 		# Two rails offset by gauge
 		for rail_offset in [-gauge_half, gauge_half]:
 			var ro: float = rail_offset
@@ -4732,7 +4743,7 @@ func _create_rail_collision(points: PackedVector2Array, parent: Node3D) -> void:
 			shape.size = Vector3(rail_w, rail_h, seg_len)
 			var col := CollisionShape3D.new()
 			col.shape = shape
-			col.position = Vector3(rail_mid.x, rail_h * 0.5, rail_mid.y)
+			col.position = Vector3(rail_mid.x, elev_mid + rail_h * 0.5, rail_mid.y)
 			col.rotation.y = -angle
 			body.add_child(col)
 	parent.add_child(body)
