@@ -95,7 +95,11 @@ const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slop
 @export var enable_crossing_signs := true  # Включить знаки пешеходных переходов
 @export var enable_fences := true  # Включить заборы (промзоны, территории)
 @export var enable_elevation := false  # Включить elevation из SRTM30m
+@export var enable_water := true  # Включить водные объекты (реки, озера)
 @export var manhole_spacing := 100.0  # Расстояние между люками (метры)
+
+## Фильтр чанков: Callable(cx: int, cz: int) -> bool. Если задан, чанки загружаются только если фильтр вернёт true.
+var chunk_filter: Callable = Callable()
 
 ## Тестовый режим: провайдер данных вместо HTTP (Callable(lat, lon, size) -> Dictionary)
 var test_data_provider: Callable = Callable()
@@ -2072,7 +2076,11 @@ func _get_initial_chunks(player_pos: Vector3) -> Array[String]:
 	var player_chunk_z := int(floor(player_pos.z / chunk_size))
 	for dx in range(-2, 2):
 		for dz in range(-2, 2):
-			result.append("%d,%d" % [player_chunk_x + dx, player_chunk_z + dz])
+			var cx := player_chunk_x + dx
+			var cz := player_chunk_z + dz
+			if chunk_filter.is_valid() and not chunk_filter.call(cx, cz):
+				continue
+			result.append("%d,%d" % [cx, cz])
 	return result
 
 
@@ -2090,6 +2098,8 @@ func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 			var cz := player_chunk_z + dz
 			var chunk_center := Vector2(cx * chunk_size + chunk_size / 2, cz * chunk_size + chunk_size / 2)
 			if Vector2(player_pos.x, player_pos.z).distance_to(chunk_center) <= load_distance:
+				if chunk_filter.is_valid() and not chunk_filter.call(cx, cz):
+					continue
 				result.append("%d,%d" % [cx, cz])
 
 	return result
@@ -2531,6 +2541,19 @@ func _on_elevation_loaded(chunk_key: String, grid_data: Dictionary, gen: int, lo
 	if gen != _load_generation:
 		return  # Stale
 	_chunk_elevation_data[chunk_key] = grid_data
+	# Log elevation grid for debugging
+	if grid_data.is_empty():
+		print("ELEV: chunk %s — empty grid data (flat fallback)" % chunk_key)
+	elif grid_data.has("grid"):
+		var grid: Array = grid_data.grid
+		var all_h: PackedStringArray = []
+		for row in grid:
+			for h in row:
+				if h == null:
+					all_h.append("null")
+				else:
+					all_h.append("%.0f" % float(h))
+		print("ELEV: chunk %s loaded, heights = [%s]" % [chunk_key, ",".join(all_h)])
 
 
 var _elevation_retries: Dictionary = {}  # chunk_key -> retry count
@@ -3740,7 +3763,7 @@ func _process_phase3_queue() -> bool:
 				_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 			elif tags.has("leisure"):
 				_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
-			elif tags.has("waterway"):
+			elif tags.has("waterway") and enable_water:
 				_create_waterway(nodes, tags, target, null)
 		# Done with ways — move to intersections
 		entry.phase = "intersections"
@@ -4020,7 +4043,7 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 			_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 		elif tags.has("leisure"):
 			_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
-		elif tags.has("waterway"):
+		elif tags.has("waterway") and enable_water:
 			_create_waterway(nodes, tags, target, null)
 	# Pedestrian areas (from relations, separate from highway ways)
 	var ped_areas: Array = osm_data.get("pedestrian_areas", [])
@@ -5290,8 +5313,14 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 
 		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
+		var h_center: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
 		var h_left: float = _sample_elevation(left_pos.x, left_pos.y) + height_offset + z_offset
 		var h_right: float = _sample_elevation(right_pos.x, right_pos.y) + height_offset + z_offset
+
+		# Clamp cross-slope: max 15% grade (prevents wild tilt at chunk boundaries)
+		var max_tilt: float = width * 0.15
+		h_left = clampf(h_left, h_center - max_tilt, h_center + max_tilt)
+		h_right = clampf(h_right, h_center - max_tilt, h_center + max_tilt)
 
 		# Left vertex
 		batch["vertices"].append(Vector3(left_pos.x, h_left, left_pos.y))
@@ -5552,8 +5581,14 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 
 		var left_pos := Vector2(p.x - perp.x * half_w, p.y - perp.y * half_w)
 		var right_pos := Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w)
+		var h_center: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
 		var h_left: float = _sample_elevation(left_pos.x, left_pos.y) + height_offset + z_offset
 		var h_right: float = _sample_elevation(right_pos.x, right_pos.y) + height_offset + z_offset
+
+		# Clamp cross-slope: max 15% grade
+		var max_tilt: float = width * 0.15
+		h_left = clampf(h_left, h_center - max_tilt, h_center + max_tilt)
+		h_right = clampf(h_right, h_center - max_tilt, h_center + max_tilt)
 
 		batch["vertices"].append(Vector3(left_pos.x, h_left, left_pos.y))
 		batch["uvs"].append(Vector2(0.0, uv_y))
@@ -5990,56 +6025,60 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 	var ch_max_z := ch_min_z + chunk_size
 
 	# Собираем перекрёстки и парковки, относящиеся к этому чанку (предфильтрация)
+	# Skip intersection clipping when roads are disabled — nothing fills the holes
 	var relevant_contours: Array[PackedVector2Array] = []
 	var relevant_contour_positions: Array[Vector2] = []
-	for i in range(_intersection_contours.size()):
-		var ipos: Vector2 = _intersection_positions[i]
-		if ipos.x >= ch_min_x - 30.0 and ipos.x <= ch_max_x + 30.0 and ipos.y >= ch_min_z - 30.0 and ipos.y <= ch_max_z + 30.0:
-			var contour: PackedVector2Array = _intersection_contours[i]
-			if contour.size() >= 3:
-				relevant_contours.append(contour)
-				relevant_contour_positions.append(ipos)
+	if enable_roads:
+		for i in range(_intersection_contours.size()):
+			var ipos: Vector2 = _intersection_positions[i]
+			if ipos.x >= ch_min_x - 30.0 and ipos.x <= ch_max_x + 30.0 and ipos.y >= ch_min_z - 30.0 and ipos.y <= ch_max_z + 30.0:
+				var contour: PackedVector2Array = _intersection_contours[i]
+				if contour.size() >= 3:
+					relevant_contours.append(contour)
+					relevant_contour_positions.append(ipos)
 
 	var relevant_parking: Array[PackedVector2Array] = []
-	for ck_p in _chunk_parking_hashes:
-		var pk_data: Dictionary = _chunk_parking_hashes[ck_p]
-		var pk_polys: Array = pk_data.get("polys", [])
-		for parking_poly in pk_polys:
-			if parking_poly.size() < 3:
-				continue
-			var in_chunk := false
-			for pp in parking_poly:
-				if pp.x >= ch_min_x - 5.0 and pp.x <= ch_max_x + 5.0 and pp.y >= ch_min_z - 5.0 and pp.y <= ch_max_z + 5.0:
-					in_chunk = true
-					break
-			if in_chunk:
-				relevant_parking.append(parking_poly)
+	if enable_roads:
+		for ck_p in _chunk_parking_hashes:
+			var pk_data: Dictionary = _chunk_parking_hashes[ck_p]
+			var pk_polys: Array = pk_data.get("polys", [])
+			for parking_poly in pk_polys:
+				if parking_poly.size() < 3:
+					continue
+				var in_chunk := false
+				for pp in parking_poly:
+					if pp.x >= ch_min_x - 5.0 and pp.x <= ch_max_x + 5.0 and pp.y >= ch_min_z - 5.0 and pp.y <= ch_max_z + 5.0:
+						in_chunk = true
+						break
+				if in_chunk:
+					relevant_parking.append(parking_poly)
 
 	# Собираем водные полигоны из 3x3 соседей, расширенные на SHORE_WIDTH для выреза
 	var relevant_water_shore: Array[PackedVector2Array] = []
-	for dx2 in range(-1, 2):
-		for dz2 in range(-1, 2):
-			var nk := "%d,%d" % [ck_x + dx2, ck_z + dz2]
-			if _chunk_water_polygons.has(nk):
-				for water_poly in _chunk_water_polygons[nk]:
-					if water_poly.size() < 3:
-						continue
-					# Проверяем пересечение с чанком (грубая проверка по AABB)
-					var in_chunk := false
-					for wp in water_poly:
-						if wp.x >= ch_min_x - SHORE_WIDTH - 5.0 and wp.x <= ch_max_x + SHORE_WIDTH + 5.0 and wp.y >= ch_min_z - SHORE_WIDTH - 5.0 and wp.y <= ch_max_z + SHORE_WIDTH + 5.0:
-							in_chunk = true
-							break
-					if in_chunk:
-						# Расширяем полигон на SHORE_WIDTH для выреза из террейна
-						# offset_polygon: positive delta расширяет CCW, сужает CW
-						var delta := SHORE_WIDTH
-						if not _is_polygon_ccw(water_poly):
-							delta = -delta
-						var expanded := Geometry2D.offset_polygon(water_poly, delta)
-						for ep in expanded:
-							if ep.size() >= 3:
-								relevant_water_shore.append(ep)
+	if enable_water:
+		for dx2 in range(-1, 2):
+			for dz2 in range(-1, 2):
+				var nk := "%d,%d" % [ck_x + dx2, ck_z + dz2]
+				if _chunk_water_polygons.has(nk):
+					for water_poly in _chunk_water_polygons[nk]:
+						if water_poly.size() < 3:
+							continue
+						# Проверяем пересечение с чанком (грубая проверка по AABB)
+						var in_chunk := false
+						for wp in water_poly:
+							if wp.x >= ch_min_x - SHORE_WIDTH - 5.0 and wp.x <= ch_max_x + SHORE_WIDTH + 5.0 and wp.y >= ch_min_z - SHORE_WIDTH - 5.0 and wp.y <= ch_max_z + SHORE_WIDTH + 5.0:
+								in_chunk = true
+								break
+						if in_chunk:
+							# Расширяем полигон на SHORE_WIDTH для выреза из террейна
+							# offset_polygon: positive delta расширяет CCW, сужает CW
+							var delta := SHORE_WIDTH
+							if not _is_polygon_ccw(water_poly):
+								delta = -delta
+							var expanded := Geometry2D.offset_polygon(water_poly, delta)
+							for ep in expanded:
+								if ep.size() >= 3:
+									relevant_water_shore.append(ep)
 
 	# Отправляем клиппинг в worker thread (тяжёлая операция O(n²))
 	var chunk_rect := PackedVector2Array([
@@ -6901,6 +6940,8 @@ func _create_parking(points: PackedVector2Array, parent: Node3D) -> void:
 	"""Создаёт парковку: асфальтовую поверхность + знак P (знак отложен) + припаркованные машины"""
 	if points.size() < 3:
 		return
+	if not enable_roads:
+		return
 
 	# Примечание: полигон уже добавлен в _chunk_parking_hashes в первом проходе
 
@@ -7033,6 +7074,8 @@ func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void
 
 func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_key: String = "") -> void:
 	"""Создаёт пешеходную площадь с материалом тротуара"""
+	if not enable_roads:
+		return
 	var indices := Geometry2D.triangulate_polygon(points)
 	if indices.is_empty():
 		return
@@ -7646,11 +7689,11 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -
 	var chunk_key := _get_chunk_key_from_node(parent)
 	var clipped_polys := _clip_polygon_to_chunk(points, chunk_key)
 	for clipped in clipped_polys:
-		if is_water:
+		if is_water and enable_water:
 			_register_water_polygon(clipped, parent)
 			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
 			_create_shore_mesh(clipped, parent)
-		elif texture_key != "grass":
+		elif texture_key != "grass" and not is_water and enable_vegetation:
 			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
 		# Генерируем густые деревья внутри лесных полигонов
 		if natural_type in ["wood", "tree_row"]:
@@ -7716,11 +7759,11 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 	for clipped in clipped_polys:
 		if has_tree_override:
 			_generate_trees_in_polygon(clipped, parent, dense_override)
-		if is_water:
+		if is_water and enable_water:
 			_register_water_polygon(clipped, parent)
 			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
 			_create_shore_mesh(clipped, parent)
-		elif texture_key != "grass":
+		elif texture_key != "grass" and not is_water and enable_vegetation:
 			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
 		if landuse_type == "forest":
 			_generate_trees_in_polygon(clipped, parent, true)
@@ -7776,11 +7819,11 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 		return
 
 	for clipped in clipped_polys:
-		if is_water:
+		if is_water and enable_water:
 			_register_water_polygon(clipped, parent)
 			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
 			_create_shore_mesh(clipped, parent)
-		else:
+		elif not is_water and enable_vegetation:
 			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
 
 func _create_amenity_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, skip_spatial_hash: bool = false) -> void:
@@ -13249,6 +13292,8 @@ func _set_no_shadow_recursive(node: Node) -> void:
 
 
 func _create_garbage_container(pos: Vector2, elevation: float, parent: Node3D) -> void:
+	if not enable_vegetation:
+		return
 	var instance: Node3D = GARBAGE_CONTAINER_SCENE.instantiate()
 	instance.position = Vector3(pos.x, elevation, pos.y)
 	# Отключаем тени на всех MeshInstance3D
@@ -19019,9 +19064,29 @@ func _update_chunk_culling() -> void:
 		var chunk_x := int(coords[0])
 		var chunk_z := int(coords[1])
 
-		# AABB чанка с учётом высоты
-		var aabb_min := Vector3(chunk_x * chunk_size, -5.0, chunk_z * chunk_size)
-		var aabb_max := Vector3(aabb_min.x + chunk_size, chunk_height, aabb_min.z + chunk_size)
+		# AABB чанка с учётом высоты и elevation
+		var elev_min := 0.0
+		var elev_max := 0.0
+		if enable_elevation:
+			var ck_elev: Dictionary = _chunk_elevation_data.get(chunk_key, {})
+			if ck_elev.has("grid"):
+				var first := true
+				for row in ck_elev.grid:
+					for h in row:
+						if h != null:
+							var hf: float = float(h)
+							if first:
+								elev_min = hf
+								elev_max = hf
+								first = false
+							else:
+								if hf < elev_min:
+									elev_min = hf
+								if hf > elev_max:
+									elev_max = hf
+				elev_min -= 10.0  # margin
+		var aabb_min := Vector3(chunk_x * chunk_size, elev_min - 5.0, chunk_z * chunk_size)
+		var aabb_max := Vector3(aabb_min.x + chunk_size, elev_max + chunk_height, aabb_min.z + chunk_size)
 		var aabb_center := (aabb_min + aabb_max) * 0.5
 		var aabb_half := (aabb_max - aabb_min) * 0.5
 
@@ -19042,14 +19107,20 @@ func _update_chunk_culling() -> void:
 
 		# Тест AABB vs frustum planes
 		var inside_frustum := true
-		for plane in frustum:
+		var failed_plane_idx := -1
+		for pi in frustum.size():
+			var plane: Plane = frustum[pi]
 			var d := aabb_center.dot(plane.normal) + plane.d
 			var r := absf(aabb_half.x * plane.normal.x) + absf(aabb_half.y * plane.normal.y) + absf(aabb_half.z * plane.normal.z)
 			if d + r < 0.0:
 				inside_frustum = false
+				failed_plane_idx = pi
 				break
 
 		var should_hide := not inside_frustum
+		var cull_reason := ""
+		if should_hide:
+			cull_reason = "frustum_plane_%d" % failed_plane_idx
 
 		# Дополнительно: скрываем далёкие чанки строго позади камеры
 		if not should_hide:
@@ -19061,6 +19132,7 @@ func _update_chunk_culling() -> void:
 				# Чанк далеко позади - скрываем
 				if dot < -0.4 and dist > chunk_size * 1.5:
 					should_hide = true
+					cull_reason = "behind(dot=%.2f,dist=%.0f)" % [dot, dist]
 
 		if should_hide:
 			culled_count += 1
@@ -19069,6 +19141,15 @@ func _update_chunk_culling() -> void:
 
 		var want_visible := not should_hide
 		if chunk_node.visible != want_visible:
+			if want_visible:
+				print("CULL: %s SHOW (was hidden)" % chunk_key)
+			else:
+				print("CULL: %s HIDE reason=%s aabb=(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f) cam=(%.0f,%.0f,%.0f) fwd=(%.2f,%.2f) car=(%.0f,%.0f,%.0f)" % [
+					chunk_key, cull_reason,
+					aabb_min.x, aabb_min.y, aabb_min.z, aabb_max.x, aabb_max.y, aabb_max.z,
+					cam_pos.x, cam_pos.y, cam_pos.z,
+					cam_forward.x, cam_forward.z,
+					car_pos.x, car_pos.y, car_pos.z])
 			chunk_node.visible = want_visible
 			# Also toggle RS instances (roads, buildings, fences, terrain)
 			if _chunk_rs_instances.has(chunk_key):

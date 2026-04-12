@@ -10,7 +10,7 @@ signal elevation_failed(chunk_key: String, error: String)
 const API_URL := "https://api.opentopodata.org/v1/srtm30m"
 const CACHE_DIR := "user://osm_cache/"
 const CACHE_VERSION := 2
-const GRID_RES := 5  # 5x5 grid per chunk
+const GRID_RES := 7  # 7x7 grid per chunk (~33m spacing, matches SRTM30m native resolution)
 
 # Global rate limiting — 1 request per second (API returns 429 otherwise)
 static var _request_queue: Array[ElevationLoader] = []
