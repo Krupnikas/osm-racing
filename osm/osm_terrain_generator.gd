@@ -5611,14 +5611,13 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 								half_span = road_w * 0.5 + 2.0
 							cross_pts = PackedVector2Array([road_center - fw_dir * half_span, road_center + fw_dir * half_span])
 						var cross_w := width
-						if not enable_elevation:
-							_add_road_to_batch_fast(cross_pts, cross_w, "intersection", 0.016, parent)
-							_add_road_to_batch_fast(cross_pts, cross_w, "crossing", 0.017, parent)
-							# Re-enqueue chunk for finalization (crossing added after initial batch build)
-							if not _pending_batch_chunks.has(ck):
-								_pending_batch_chunks.append(ck)
-							if enable_crossing_signs:
-								_enqueue_crossing_signs(cross_pts, parent, ck)
+						_add_road_to_batch_fast(cross_pts, cross_w, "intersection", 0.016, parent)
+						_add_road_to_batch_fast(cross_pts, cross_w, "crossing", 0.017, parent)
+						# Re-enqueue chunk for finalization (crossing added after initial batch build)
+						if not _pending_batch_chunks.has(ck):
+							_pending_batch_chunks.append(ck)
+						if enable_crossing_signs:
+							_enqueue_crossing_signs(cross_pts, parent, ck)
 				else:
 					last_off_road_pt = smoothed_points[i - 1]
 					has_before_off = true
@@ -5657,13 +5656,12 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 						half_span_e = road_w_end * 0.5 + 2.0
 					cross_pts_end = PackedVector2Array([road_center_e - fw_dir_end * half_span_e, road_center_e + fw_dir_end * half_span_e])
 				var cross_w_end := width
-				if not enable_elevation:
-					_add_road_to_batch_fast(cross_pts_end, cross_w_end, "intersection", 0.016, parent)
-					_add_road_to_batch_fast(cross_pts_end, cross_w_end, "crossing", 0.017, parent)
-					if not _pending_batch_chunks.has(ck):
-						_pending_batch_chunks.append(ck)
-					if enable_crossing_signs:
-						_enqueue_crossing_signs(current_pts, parent, ck)
+				_add_road_to_batch_fast(cross_pts_end, cross_w_end, "intersection", 0.016, parent)
+				_add_road_to_batch_fast(cross_pts_end, cross_w_end, "crossing", 0.017, parent)
+				if not _pending_batch_chunks.has(ck):
+					_pending_batch_chunks.append(ck)
+				if enable_crossing_signs:
+					_enqueue_crossing_signs(current_pts, parent, ck)
 	return true
 
 
@@ -5965,11 +5963,12 @@ func _add_path_polys_to_batch(filtered: Array[PackedVector2Array], validated: Pa
 	var uv_scale: float = 1.0 / width
 
 	for poly in filtered:
-		var indices := Geometry2D.triangulate_polygon(poly)
+		var subdiv := _subdivide_polygon_edges(poly, 10.0)
+		var indices := Geometry2D.triangulate_polygon(subdiv)
 		if indices.size() < 3:
 			continue
 		var base_idx: int = batch["vertices"].size()
-		for p in poly:
+		for p in subdiv:
 			var h: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
 			batch["vertices"].append(Vector3(p.x, h, p.y))
 			batch["uvs"].append(Vector2(p.x * uv_scale, p.y * uv_scale))
@@ -7209,6 +7208,8 @@ func _find_parking_sign_position(parking_points: PackedVector2Array) -> Dictiona
 
 func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void:
 	"""Создаёт асфальтовую поверхность парковки"""
+	# Subdivide long edges to follow elevation profile
+	points = _subdivide_polygon_edges(points, 10.0)
 	# Триангулируем полигон
 	var indices := Geometry2D.triangulate_polygon(points)
 	if indices.is_empty():
@@ -7285,6 +7286,7 @@ func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_k
 	"""Создаёт пешеходную площадь с материалом тротуара"""
 	if not enable_roads:
 		return
+	points = _subdivide_polygon_edges(points, 10.0)
 	var indices := Geometry2D.triangulate_polygon(points)
 	if indices.is_empty():
 		return
@@ -14958,11 +14960,12 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	var total_tris := 0
 
 	for poly in terrain_polys:
-		var indices := Geometry2D.triangulate_polygon(poly)
+		var subdiv := _subdivide_polygon_edges(poly, 10.0)
+		var indices := Geometry2D.triangulate_polygon(subdiv)
 		if indices.size() < 3:
 			continue
 		var base_idx: int = all_vertices.size()
-		for p in poly:
+		for p in subdiv:
 			var h := sidewalk_height + _sample_elevation(p.x, p.y)
 			all_vertices.append(Vector3(p.x, h, p.y))
 			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
@@ -18225,6 +18228,100 @@ func _polygon_area(poly: PackedVector2Array) -> float:
 	return area * 0.5
 
 
+## Subdivide polygon edges so no edge is longer than max_len.
+## Ensures mesh vertices are dense enough to follow elevation profile.
+static func _subdivide_polygon_edges(poly: PackedVector2Array, max_len: float) -> PackedVector2Array:
+	var result := PackedVector2Array()
+	var n := poly.size()
+	if n < 3:
+		return poly
+	for i in range(n):
+		var p1 := poly[i]
+		var p2 := poly[(i + 1) % n]
+		result.append(p1)
+		var edge_len := p1.distance_to(p2)
+		if edge_len > max_len:
+			var segments := ceili(edge_len / max_len)
+			for s in range(1, segments):
+				var t := float(s) / float(segments)
+				result.append(p1.lerp(p2, t))
+	return result
+
+
+## Triangulate a polygon with interior grid points for proper slope following.
+## Returns {vertices: PackedVector2Array, indices: PackedInt32Array}.
+## Creates a regular grid within the polygon AABB, keeps grid quads that overlap
+## the polygon, and clips boundary triangles to the polygon edge.
+static func _triangulate_polygon_with_grid(poly: PackedVector2Array, grid_step: float) -> Dictionary:
+	var result := {"vertices": PackedVector2Array(), "indices": PackedInt32Array()}
+	if poly.size() < 3:
+		return result
+	# Find AABB
+	var min_x := poly[0].x
+	var max_x := poly[0].x
+	var min_y := poly[0].y
+	var max_y := poly[0].y
+	for i in range(1, poly.size()):
+		min_x = minf(min_x, poly[i].x)
+		max_x = maxf(max_x, poly[i].x)
+		min_y = minf(min_y, poly[i].y)
+		max_y = maxf(max_y, poly[i].y)
+	# If polygon is smaller than grid, just use standard triangulation
+	if (max_x - min_x) < grid_step * 2.0 and (max_y - min_y) < grid_step * 2.0:
+		result.indices = Geometry2D.triangulate_polygon(poly)
+		result.vertices = poly
+		return result
+	# Build grid vertices, snap AABB to grid
+	var gx0 := floorf(min_x / grid_step) * grid_step
+	var gy0 := floorf(min_y / grid_step) * grid_step
+	var cols := ceili((max_x - gx0) / grid_step) + 1
+	var rows := ceili((max_y - gy0) / grid_step) + 1
+	# Create grid points and check which are inside polygon
+	var grid_pts := PackedVector2Array()
+	var inside := PackedInt32Array()  # 1 if inside or on boundary
+	grid_pts.resize(cols * rows)
+	inside.resize(cols * rows)
+	for r in range(rows):
+		for c in range(cols):
+			var pt := Vector2(gx0 + c * grid_step, gy0 + r * grid_step)
+			var idx := r * cols + c
+			grid_pts[idx] = pt
+			inside[idx] = 1 if Geometry2D.is_point_in_polygon(pt, poly) else 0
+	# Build triangles from grid cells where at least one vertex is inside
+	var verts := PackedVector2Array()
+	var idxs := PackedInt32Array()
+	var vert_map := {}  # grid_idx → output vertex idx
+	for r in range(rows - 1):
+		for c in range(cols - 1):
+			var i00 := r * cols + c
+			var i10 := r * cols + c + 1
+			var i01 := (r + 1) * cols + c
+			var i11 := (r + 1) * cols + c + 1
+			var any_inside := inside[i00] or inside[i10] or inside[i01] or inside[i11]
+			if not any_inside:
+				continue
+			# Add vertices if not already added
+			for gi in [i00, i10, i01, i11]:
+				if not vert_map.has(gi):
+					vert_map[gi] = verts.size()
+					verts.append(grid_pts[gi])
+			# Two triangles per cell
+			idxs.append(vert_map[i00])
+			idxs.append(vert_map[i10])
+			idxs.append(vert_map[i11])
+			idxs.append(vert_map[i00])
+			idxs.append(vert_map[i11])
+			idxs.append(vert_map[i01])
+	if idxs.is_empty():
+		# Fallback
+		result.indices = Geometry2D.triangulate_polygon(poly)
+		result.vertices = poly
+		return result
+	result.vertices = verts
+	result.indices = idxs
+	return result
+
+
 ## Add a thin slit (epsilon-width) from corridor to nearest chunk boundary.
 ## If corridor already touches any boundary edge, returns it unchanged.
 ## This prevents clip_polygons from producing CW holes for interior corridors.
@@ -19041,11 +19138,14 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 	var indices := PackedInt32Array()
 
 	for poly in polys_to_render:
-		var tri_idx := Geometry2D.triangulate_polygon(poly)
+		# Grid-based triangulation so patch follows terrain slope on hills
+		var grid_result := _triangulate_polygon_with_grid(poly, 3.0)
+		var tri_verts: PackedVector2Array = grid_result.vertices
+		var tri_idx: PackedInt32Array = grid_result.indices
 		if tri_idx.is_empty():
 			continue
 		var base_idx := vertices.size()
-		for p2 in poly:
+		for p2 in tri_verts:
 			var h := _sample_elevation(p2.x, p2.y) + height_offset + z_off
 			vertices.append(Vector3(p2.x, h, p2.y))
 			uvs.append(Vector2(p2.x * uv_ws, p2.y * uv_ws))
