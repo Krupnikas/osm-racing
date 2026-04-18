@@ -113,6 +113,8 @@ def build_overpass_query(center_lat: float, center_lon: float, radius_m: int) ->
   relation["leisure"]({b});
   relation["natural"="water"]({b});
   relation["waterway"="riverbank"]({b});
+  relation["man_made"="bridge"]({b});
+  node["man_made"="chimney"]({b});
   node["natural"="tree"]({b});
   node["traffic_sign"]({b});
   node["highway"="street_lamp"]({b});
@@ -189,6 +191,7 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
     bus_stops = []
     tram_stops = []
     pedestrian_areas = []
+    bridge_decks = []
 
     for el in data.get("elements", []):
         if el.get("type") == "node":
@@ -271,7 +274,15 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
             outer_rings = _join_relation_rings(outer_member_ways)
 
             if outer_rings:
-                if tags.get("highway") == "pedestrian" and tags.get("area") == "yes":
+                if tags.get("man_made") == "bridge":
+                    for ring in outer_rings:
+                        if len(ring["nodes"]) > 2:
+                            bridge_decks.append({
+                                "nodes": ring["nodes"],
+                                "tags": tags,
+                                "relation_id": el.get("id", 0),
+                            })
+                elif tags.get("highway") == "pedestrian" and tags.get("area") == "yes":
                     for ring in outer_rings:
                         if len(ring["nodes"]) > 2:
                             pedestrian_areas.append(ring["nodes"])
@@ -307,6 +318,7 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
         "bus_stops": bus_stops,
         "tram_stops": tram_stops,
         "pedestrian_areas": pedestrian_areas,
+        "bridge_decks": bridge_decks,
     }
 
 

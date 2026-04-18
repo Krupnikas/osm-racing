@@ -7,6 +7,7 @@ class_name TestRunner
 const TestOSMLoaderScript = preload("res://tests/test_osm_loader.gd")
 const TestRoadTerrainClippingScript = preload("res://tests/test_road_terrain_clipping.gd")
 const TestChunkLifecycleScript = preload("res://tests/test_chunk_lifecycle.gd")
+const TestBridgeDeckScript = preload("res://tests/test_bridge_deck.gd")
 
 var total_passed := 0
 var total_failed := 0
@@ -42,6 +43,12 @@ func run_all() -> void:
 	total_passed += chunk_lifecycle_tests.tests_passed
 	total_failed += chunk_lifecycle_tests.tests_failed
 	chunk_lifecycle_tests.queue_free()
+
+	# Bridge deck tests
+	var bridge_deck_tests := TestBridgeDeckScript.new()
+	bridge_deck_tests.run_all_tests()
+	total_passed += bridge_deck_tests.tests_passed
+	total_failed += bridge_deck_tests.tests_failed
 
 	# Итоговый результат
 	print("\n" + "=".repeat(50))

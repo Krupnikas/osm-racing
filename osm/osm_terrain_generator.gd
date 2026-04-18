@@ -154,6 +154,13 @@ var _chunk_hash_cells: Dictionary = {}
 # See docs/BRIDGE_ELEVATION_REDESIGN.md.
 var _bridge_node_ways: Dictionary = {}
 
+# Bridge deck polygons from man_made=bridge relations. Each entry is a
+# PackedVector2Array in local coords (XZ). When a bridge=yes highway falls
+# inside one of these polygons, it renders as a FLAT road on top of the deck
+# at y = BRIDGE_DECK_HEIGHT + height_offset, with no ramps/barriers/pillars
+# (those come from the deck mesh itself).
+var _bridge_deck_polygons: Array[PackedVector2Array] = []
+
 # Per-chunk spatial hashes (independent, include overlap data — used by vegetation threads)
 var _chunk_road_hashes: Dictionary = {}  # chunk_key → Dictionary (Vector2i → Array of seg)
 var _chunk_tram_hashes: Dictionary = {}  # chunk_key → Dictionary (Vector2i → Array of tram seg)
@@ -2785,6 +2792,7 @@ func reset_terrain() -> void:
 	_chunk_data_received.clear()
 	_chunk_state.clear()
 	_bridge_node_ways.clear()
+	_bridge_deck_polygons.clear()
 	for ph_key in _loading_placeholders.keys():
 		_remove_loading_placeholder(ph_key)
 	_initial_loading = false
@@ -3000,6 +3008,23 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 	# any bridge road rendering starts. Main thread, safe to write global dict.
 	# See docs/BRIDGE_ELEVATION_REDESIGN.md §3.3.
 	_bridge_prescan_ways(osm_data.get("ways", []))
+
+	# Collect bridge deck polygons (man_made=bridge relation outlines)
+	for deck in osm_data.get("bridge_decks", []):
+		var deck_nodes: Array = deck.get("nodes", [])
+		if deck_nodes.size() < 3:
+			continue
+		var poly := PackedVector2Array()
+		for n in deck_nodes:
+			poly.append(_latlon_to_local(n["lat"], n["lon"]))
+		# Deduplicate by checking if this polygon's first point already exists
+		var dominated := false
+		for existing in _bridge_deck_polygons:
+			if existing.size() > 0 and poly.size() > 0 and existing[0].distance_to(poly[0]) < 1.0:
+				dominated = true
+				break
+		if not dominated:
+			_bridge_deck_polygons.append(poly)
 
 	if chunk_key == "":
 		# Initial load (no chunk key) — run synchronously on main thread
@@ -3875,6 +3900,24 @@ func _process_phase3_queue() -> bool:
 					continue
 			_create_pedestrian_area(ped_points, target, chunk_key)
 			print("OSM: Created pedestrian area with %d points in chunk %s" % [ped_points.size(), chunk_key])
+		# Bridge decks (man_made=bridge relation polygons)
+		var bridge_deck_items: Array = osm_data.get("bridge_decks", [])
+		for deck in bridge_deck_items:
+			var deck_nodes: Array = deck.get("nodes", [])
+			var deck_tags: Dictionary = deck.get("tags", {})
+			if deck_nodes.size() < 3:
+				continue
+			var deck_points := PackedVector2Array()
+			for node in deck_nodes:
+				deck_points.append(_latlon_to_local(node["lat"], node["lon"]))
+			var clipped_polys := _clip_polygon_to_chunk(deck_points, chunk_key)
+			for clipped in clipped_polys:
+				if clipped.size() < 3:
+					continue
+				_create_bridge_deck_mesh(clipped, deck_tags, target)
+		if bridge_deck_items.size() > 0:
+			print("OSM: Processed %d bridge deck(s) for chunk %s" % [bridge_deck_items.size(), chunk_key])
+
 		# Done — finalize
 		entry.phase = "finalize"
 		return true
@@ -4007,6 +4050,25 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 		# Block trees
 		_add_building_poly_to_hash(ped_points, chunk_key)
 
+	# Bridge decks (from man_made=bridge relations — elevated platform polygons)
+	var bridge_decks: Array = osm_data.get("bridge_decks", [])
+	if bridge_decks.size() > 0:
+		print("OSM: Processing %d bridge deck(s) for chunk %s" % [bridge_decks.size(), chunk_key])
+	for deck in bridge_decks:
+		var deck_nodes: Array = deck.get("nodes", [])
+		var deck_tags: Dictionary = deck.get("tags", {})
+		if deck_nodes.size() < 3:
+			continue
+		var deck_points := PackedVector2Array()
+		for node in deck_nodes:
+			deck_points.append(_latlon_to_local(node["lat"], node["lon"]))
+		# Clip to chunk bbox
+		var clipped_polys := _clip_polygon_to_chunk(deck_points, chunk_key)
+		for clipped in clipped_polys:
+			if clipped.size() < 3:
+				continue
+			_create_bridge_deck_mesh(clipped, deck_tags, target)
+
 	var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
 	if not _pending_batch_chunks.has(batch_chunk_key):
 		_pending_batch_chunks.append(batch_chunk_key)
@@ -4091,6 +4153,27 @@ func _bridge_endpoint_is_shared(lat: float, lon: float) -> bool:
 	var k := _bridge_coord_key(lat, lon)
 	var entries: Dictionary = _bridge_node_ways.get(k, {})
 	return entries.size() >= 2
+
+
+## Returns true if the given LOCAL point (XZ) lies inside any man_made=bridge
+## deck polygon. Used to determine whether a bridge=yes highway should render
+## as a flat road on the deck (no ramp/barriers) vs. a standalone bridge.
+func _is_point_on_bridge_deck(point: Vector2) -> bool:
+	for poly in _bridge_deck_polygons:
+		if poly.size() >= 3 and Geometry2D.is_point_in_polygon(point, poly):
+			return true
+	return false
+
+
+## Returns true if a bridge=yes way is entirely within a man_made=bridge deck.
+## Checks the midpoint of the way's local-coord polyline.
+func _is_way_on_bridge_deck(nodes: Array) -> bool:
+	if _bridge_deck_polygons.is_empty() or nodes.size() < 2:
+		return false
+	# Check midpoint of the way
+	var mid_idx: int = nodes.size() / 2
+	var mid_local := _latlon_to_local(nodes[mid_idx].lat, nodes[mid_idx].lon)
+	return _is_point_on_bridge_deck(mid_local)
 
 
 ## Returns true if ANY bridge=yes way touches this coordinate. Used by
@@ -4576,8 +4659,111 @@ func _apply_road_result(result: Dictionary) -> void:
 	var is_bridge: bool = result.is_bridge
 	var elevation_info: Dictionary = result.elevation_info
 
+	var on_deck: bool = is_bridge and _is_way_on_bridge_deck(result.nodes)
+
 	if is_bridge:
-		_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent, result.get("way_id", 0))
+		if on_deck:
+			# Way sits on a man_made=bridge deck platform — render as a FLAT road
+			# on top of the deck at deck_height + height_offset. No ramp, no bridge
+			# barriers, no pillars (those come from the deck mesh itself).
+			# Footways get sidewalk elevation (0.23) on top of deck.
+			# Worker thread doesn't generate vertices for bridge ways, so we build
+			# the road strip here from smoothed_points.
+			var is_footway_on_deck: bool = highway_type in ["footway", "path"]
+			var on_deck_offset: float = height_offset
+			if is_footway_on_deck:
+				on_deck_offset = 0.23  # sidewalk height above deck
+			var deck_h: float = BRIDGE_DECK_HEIGHT + on_deck_offset
+			var pts: PackedVector2Array = smoothed_points
+			if pts.size() >= 2:
+				var half_w: float = width * 0.5
+				var perps: Array[Vector2] = _compute_averaged_perpendiculars(pts)
+				var verts := PackedVector3Array()
+				var uv_arr := PackedVector2Array()
+				var norm_arr := PackedVector3Array()
+				var idx_arr := PackedInt32Array()
+				var acc := 0.0
+				for k in range(pts.size()):
+					var p: Vector2 = pts[k]
+					var perp: Vector2 = perps[k]
+					verts.append(Vector3(p.x - perp.x * half_w, deck_h, p.y - perp.y * half_w))
+					verts.append(Vector3(p.x + perp.x * half_w, deck_h, p.y + perp.y * half_w))
+					uv_arr.append(Vector2(0.0, acc * 0.1))
+					uv_arr.append(Vector2(1.0, acc * 0.1))
+					norm_arr.append(Vector3.UP)
+					norm_arr.append(Vector3.UP)
+					if k < pts.size() - 1:
+						acc += pts[k].distance_to(pts[k + 1])
+				for k in range(pts.size() - 1):
+					var bi: int = k * 2
+					idx_arr.append(bi); idx_arr.append(bi + 2); idx_arr.append(bi + 1)
+					idx_arr.append(bi + 1); idx_arr.append(bi + 2); idx_arr.append(bi + 3)
+				if verts.size() >= 4:
+					if not _road_batch_data.has(chunk_key):
+						_road_batch_data[chunk_key] = {}
+					if not _road_batch_data[chunk_key].has(texture_key):
+						_road_batch_data[chunk_key][texture_key] = {
+							"vertices": PackedVector3Array(),
+							"uvs": PackedVector2Array(),
+							"normals": PackedVector3Array(),
+							"indices": PackedInt32Array(),
+							"parent": parent
+						}
+					var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
+					var vertex_offset: int = batch["vertices"].size()
+					batch["vertices"].append_array(verts)
+					batch["uvs"].append_array(uv_arr)
+					batch["normals"].append_array(norm_arr)
+					if vertex_offset > 0:
+						var offset_indices := PackedInt32Array()
+						offset_indices.resize(idx_arr.size())
+						for oi in range(idx_arr.size()):
+							offset_indices[oi] = idx_arr[oi] + vertex_offset
+						batch["indices"].append_array(offset_indices)
+					else:
+						batch["indices"].append_array(idx_arr)
+				# Curb along footway edges on deck (22cm vertical step)
+				if is_footway_on_deck and pts.size() >= 2:
+					var curb_h: float = 0.22  # road-to-sidewalk step
+					var road_y: float = BRIDGE_DECK_HEIGHT + 0.01  # road surface (primary offset)
+					var curb_st := SurfaceTool.new()
+					curb_st.begin(Mesh.PRIMITIVE_TRIANGLES)
+					var curb_mat := StandardMaterial3D.new()
+					curb_mat.albedo_color = Color(0.65, 0.63, 0.60)
+					curb_mat.roughness = 0.9
+					curb_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+					curb_st.set_material(curb_mat)
+					var curb_half_w: float = width * 0.5
+					for side in [-1, 1]:
+						for k in range(pts.size() - 1):
+							var cp1: Vector2 = pts[k]
+							var cp2: Vector2 = pts[k + 1]
+							var cdir: Vector2 = (cp2 - cp1).normalized()
+							var cperp: Vector2 = Vector2(-cdir.y, cdir.x)
+							var e1: Vector2 = cp1 + cperp * curb_half_w * side
+							var e2: Vector2 = cp2 + cperp * curb_half_w * side
+							var cn: Vector3 = Vector3(cperp.x * side, 0, cperp.y * side)
+							var cv1 := Vector3(e1.x, road_y, e1.y)
+							var cv2 := Vector3(e2.x, road_y, e2.y)
+							var cv3 := Vector3(e2.x, road_y + curb_h, e2.y)
+							var cv4 := Vector3(e1.x, road_y + curb_h, e1.y)
+							curb_st.set_normal(cn); curb_st.add_vertex(cv1)
+							curb_st.set_normal(cn); curb_st.add_vertex(cv2)
+							curb_st.set_normal(cn); curb_st.add_vertex(cv3)
+							curb_st.set_normal(cn); curb_st.add_vertex(cv1)
+							curb_st.set_normal(cn); curb_st.add_vertex(cv3)
+							curb_st.set_normal(cn); curb_st.add_vertex(cv4)
+					var curb_committed := curb_st.commit()
+					if curb_committed and curb_committed.get_surface_count() > 0:
+						var curb_mi := MeshInstance3D.new()
+						curb_mi.name = "BridgeSidewalkCurb"
+						curb_mi.mesh = curb_committed
+						curb_mi.material_override = curb_mat
+						curb_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+						parent.add_child(curb_mi)
+		else:
+			# Standalone bridge (no man_made=bridge deck) — own mesh with ramps
+			_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent, result.get("way_id", 0))
 	elif highway_type in ["footway", "path"] and smoothed_points.size() >= 2:
 		# Defer footway splitting + vertex gen to avoid 10-15ms spikes from
 		# _is_point_on_vehicle_road (spatial hash + intersection contours per point)
@@ -7135,6 +7321,253 @@ func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_k
 			if not _chunk_road_materials.has(ck):
 				_chunk_road_materials[ck] = []
 			_chunk_road_materials[ck].append(material)
+
+
+## Renders a bridge deck polygon (from man_made=bridge relation) as a flat
+## elevated platform at BRIDGE_DECK_HEIGHT. Roads and footways with bridge=yes
+## render ON TOP of this surface at their normal height_offset (which adds to
+## deck height). The deck itself is a concrete-textured triangulated mesh.
+func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, parent: Node3D) -> void:
+	if points.size() < 3:
+		return
+
+	var indices := Geometry2D.triangulate_polygon(points)
+	if indices.is_empty():
+		return
+
+	var layer: int = int(str(tags.get("layer", "1"))) if str(tags.get("layer", "1")).is_valid_int() else 1
+	var deck_y: float = BRIDGE_DECK_HEIGHT + maxf(0, layer - 1) * LAYER_HEIGHT
+
+	var vertices := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var normals := PackedVector3Array()
+	var tri_indices := PackedInt32Array()
+	var uv_scale := 0.1  # 10m per UV repeat
+
+	for p in points:
+		vertices.append(Vector3(p.x, deck_y, p.y))
+		uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
+		normals.append(Vector3.UP)
+	tri_indices = indices
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = tri_indices
+
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	# Concrete-like material for the deck surface
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.55, 0.53, 0.50)  # Grey concrete
+	material.roughness = 0.85
+	material.metallic = 0.0
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if _ground_textures.has("sidewalk"):
+		material.albedo_texture = _ground_textures["sidewalk"]
+		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.name = "BridgeDeck"
+	mesh_inst.mesh = arr_mesh
+	mesh_inst.material_override = material
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mesh_inst)
+
+	# Collision for deck (cars can drive on it)
+	var body := StaticBody3D.new()
+	body.name = "BridgeDeckCollision"
+	body.collision_layer = 1
+	body.add_to_group("Road")
+	var shape := CollisionShape3D.new()
+	var coll_shape := ConcavePolygonShape3D.new()
+	var faces := PackedVector3Array()
+	for i in range(0, tri_indices.size(), 3):
+		faces.append(vertices[tri_indices[i]])
+		faces.append(vertices[tri_indices[i + 1]])
+		faces.append(vertices[tri_indices[i + 2]])
+	coll_shape.set_faces(faces)
+	shape.shape = coll_shape
+	body.add_child(shape)
+	parent.add_child(body)
+
+	# Fence-style railing along the deck perimeter (110 cm, metal look)
+	_create_deck_railing(points, deck_y, parent)
+
+
+## Creates a railing of vertical bars along the bridge deck perimeter.
+## Style: evenly spaced thin vertical bars (like kindergarten/park fences), 110cm tall.
+func _create_deck_railing(poly: PackedVector2Array, deck_y: float, parent: Node3D) -> void:
+	if poly.size() < 3:
+		return
+
+	const RAILING_HEIGHT := 1.1   # 110 cm
+	const BAR_SPACING := 0.12     # 12 cm between bars
+	const BAR_RADIUS := 0.015     # 1.5 cm radius (thin metal bar)
+	const RAIL_COLOR := Color(0.3, 0.3, 0.33)  # Dark grey metal
+	const TOP_RAIL_THICKNESS := 0.04  # Horizontal top rail
+
+	var ck := _get_chunk_key_from_node(parent)
+	var has_chunk_rect := false
+	var chunk_rect := Rect2()
+	if not ck.is_empty():
+		chunk_rect = _get_chunk_rect_from_key(ck)
+		has_chunk_rect = true
+	var edge_tol := 0.5
+
+	var material := StandardMaterial3D.new()
+	material.albedo_color = RAIL_COLOR
+	material.metallic = 0.6
+	material.roughness = 0.5
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_material(material)
+
+	var pn := poly.size()
+	for i in range(pn):
+		var p1 := poly[i]
+		var p2 := poly[(i + 1) % pn]
+
+		# Skip chunk-boundary edges
+		if has_chunk_rect:
+			var rx := chunk_rect.position.x
+			var rz := chunk_rect.position.y
+			var rx2 := rx + chunk_rect.size.x
+			var rz2 := rz + chunk_rect.size.y
+			if absf(p1.x - rx) < edge_tol and absf(p2.x - rx) < edge_tol:
+				continue
+			if absf(p1.x - rx2) < edge_tol and absf(p2.x - rx2) < edge_tol:
+				continue
+			if absf(p1.y - rz) < edge_tol and absf(p2.y - rz) < edge_tol:
+				continue
+			if absf(p1.y - rz2) < edge_tol and absf(p2.y - rz2) < edge_tol:
+				continue
+
+		var seg_len := p1.distance_to(p2)
+		if seg_len < 0.3:
+			continue
+
+		var dir := (p2 - p1).normalized()
+		var outward := Vector2(-dir.y, dir.x)
+		var perp3 := Vector3(outward.x, 0, outward.y)
+		var along3 := Vector3(dir.x, 0, dir.y)
+
+		# Vertical bars along this edge
+		var num_bars := int(seg_len / BAR_SPACING)
+		for bi in range(num_bars + 1):
+			var t: float = float(bi) / float(maxi(num_bars, 1))
+			var bp := p1.lerp(p2, t)
+			var cx := bp.x + outward.x * 0.05
+			var cz := bp.y + outward.y * 0.05
+			var base := Vector3(cx, deck_y, cz)
+			# Each bar = thin box (4 faces)
+			var hw := BAR_RADIUS
+			for face in range(4):
+				var n: Vector3
+				var off1: Vector3
+				var off2: Vector3
+				match face:
+					0: n = perp3; off1 = along3 * hw; off2 = -along3 * hw
+					1: n = -perp3; off1 = -along3 * hw; off2 = along3 * hw
+					2: n = along3; off1 = perp3 * hw; off2 = -perp3 * hw
+					3: n = -along3; off1 = -perp3 * hw; off2 = perp3 * hw
+				var v1 := base + off1 + n * hw
+				var v2 := base + off2 + n * hw
+				var v3 := v2 + Vector3(0, RAILING_HEIGHT, 0)
+				var v4 := v1 + Vector3(0, RAILING_HEIGHT, 0)
+				st.set_normal(n)
+				st.add_vertex(v1)
+				st.set_normal(n)
+				st.add_vertex(v2)
+				st.set_normal(n)
+				st.add_vertex(v3)
+				st.set_normal(n)
+				st.add_vertex(v1)
+				st.set_normal(n)
+				st.add_vertex(v3)
+				st.set_normal(n)
+				st.add_vertex(v4)
+
+		# Horizontal top rail (thin flat bar connecting all verticals)
+		var tp1 := Vector3(p1.x + outward.x * 0.05, deck_y + RAILING_HEIGHT, p1.y + outward.y * 0.05)
+		var tp2 := Vector3(p2.x + outward.x * 0.05, deck_y + RAILING_HEIGHT, p2.y + outward.y * 0.05)
+		var th := TOP_RAIL_THICKNESS
+		# Top face
+		st.set_normal(Vector3.UP)
+		st.add_vertex(tp1 + perp3 * th)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(tp2 + perp3 * th)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(tp2 - perp3 * th)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(tp1 + perp3 * th)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(tp2 - perp3 * th)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(tp1 - perp3 * th)
+		# Outer face
+		st.set_normal(perp3)
+		st.add_vertex(tp1 + perp3 * th)
+		st.set_normal(perp3)
+		st.add_vertex(tp2 + perp3 * th)
+		st.set_normal(perp3)
+		st.add_vertex(tp2 + perp3 * th - Vector3(0, th, 0))
+		st.set_normal(perp3)
+		st.add_vertex(tp1 + perp3 * th)
+		st.set_normal(perp3)
+		st.add_vertex(tp2 + perp3 * th - Vector3(0, th, 0))
+		st.set_normal(perp3)
+		st.add_vertex(tp1 + perp3 * th - Vector3(0, th, 0))
+
+	var committed := st.commit()
+	if committed == null or committed.get_surface_count() == 0:
+		return
+
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.name = "BridgeDeckRailing"
+	mesh_inst.mesh = committed
+	mesh_inst.material_override = material
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mesh_inst)
+
+	# Single collision wall per edge (invisible, prevents car from falling off)
+	var coll_body := StaticBody3D.new()
+	coll_body.name = "DeckRailingCollision"
+	coll_body.collision_layer = 2
+	for i in range(pn):
+		var p1 := poly[i]
+		var p2 := poly[(i + 1) % pn]
+		var seg_len := p1.distance_to(p2)
+		if seg_len < 1.0:
+			continue
+		if has_chunk_rect:
+			var rx := chunk_rect.position.x
+			var rz := chunk_rect.position.y
+			var rx2 := rx + chunk_rect.size.x
+			var rz2 := rz + chunk_rect.size.y
+			if absf(p1.x - rx) < edge_tol and absf(p2.x - rx) < edge_tol:
+				continue
+			if absf(p1.x - rx2) < edge_tol and absf(p2.x - rx2) < edge_tol:
+				continue
+			if absf(p1.y - rz) < edge_tol and absf(p2.y - rz) < edge_tol:
+				continue
+			if absf(p1.y - rz2) < edge_tol and absf(p2.y - rz2) < edge_tol:
+				continue
+		var mid_pt := (p1 + p2) * 0.5
+		var coll_shape := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		box.size = Vector3(seg_len, RAILING_HEIGHT, 0.1)
+		coll_shape.shape = box
+		var angle := atan2(p2.y - p1.y, p2.x - p1.x)
+		coll_shape.position = Vector3(mid_pt.x, deck_y + RAILING_HEIGHT * 0.5, mid_pt.y)
+		coll_shape.rotation.y = -angle
+		coll_body.add_child(coll_shape)
+	parent.add_child(coll_body)
 
 
 func _spawn_parked_cars(parking_points: PackedVector2Array, parent: Node3D) -> void:

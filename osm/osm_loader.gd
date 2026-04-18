@@ -259,6 +259,8 @@ func _start_network_request() -> void:
   relation["leisure"](%s);
   relation["natural"="water"](%s);
   relation["waterway"="riverbank"](%s);
+  relation["man_made"="bridge"](%s);
+  node["man_made"="chimney"](%s);
   node["natural"="tree"](%s);
   node["traffic_sign"](%s);
   node["highway"="street_lamp"](%s);
@@ -274,7 +276,7 @@ func _start_network_request() -> void:
 out body geom;
 >;
 out skel qt;
-""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
+""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
 	retry_count = 0
@@ -370,6 +372,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	var bus_stops := []  # Автобусные остановки
 	var tram_stops := []  # Трамвайные остановки
 	var pedestrian_areas := []  # Пешеходные площади (relation highway=pedestrian area=yes)
+	var bridge_decks := []  # Bridge deck outlines (relation man_made=bridge type=multipolygon)
 
 	# Собираем все узлы
 	for element in data.get("elements", []):
@@ -484,7 +487,17 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 
 			if not outer_rings.is_empty():
 				relations_with_nodes += 1
-				if tags.get("highway", "") == "pedestrian" and tags.get("area", "") == "yes":
+				if tags.get("man_made", "") == "bridge":
+					# Bridge deck outlines go to a separate array.
+					# Each ring is a closed polygon of the bridge platform area.
+					for ring in outer_rings:
+						if ring.nodes.size() > 2:
+							bridge_decks.append({
+								"nodes": ring.nodes,
+								"tags": tags,
+								"relation_id": element.get("id", 0)
+							})
+				elif tags.get("highway", "") == "pedestrian" and tags.get("area", "") == "yes":
 					# Pedestrian areas go to separate array (not mixed with roads).
 					for ring in outer_rings:
 						if ring.nodes.size() > 2:
@@ -516,7 +529,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	if relations_found > 0:
 		print("OSM: Found %d relations, %d with valid geometry" % [relations_found, relations_with_nodes])
 
-	print("OSM: Parsed %d nodes, %d ways, %d point objects, %d entrances, %d POI nodes, %d bus stops, %d tram stops, %d pedestrian areas" % [nodes.size(), ways.size(), point_objects.size(), entrance_nodes.size(), poi_nodes.size(), bus_stops.size(), tram_stops.size(), pedestrian_areas.size()])
+	print("OSM: Parsed %d nodes, %d ways, %d point objects, %d entrances, %d POI nodes, %d bus stops, %d tram stops, %d pedestrian areas, %d bridge decks" % [nodes.size(), ways.size(), point_objects.size(), entrance_nodes.size(), poi_nodes.size(), bus_stops.size(), tram_stops.size(), pedestrian_areas.size(), bridge_decks.size()])
 
 	return {
 		"center_lat": center_lat,
@@ -528,7 +541,8 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 		"poi_nodes": poi_nodes,
 		"bus_stops": bus_stops,
 		"tram_stops": tram_stops,
-		"pedestrian_areas": pedestrian_areas
+		"pedestrian_areas": pedestrian_areas,
+		"bridge_decks": bridge_decks,
 	}
 
 ## Joins relation outer member ways head-to-tail into closed rings.
