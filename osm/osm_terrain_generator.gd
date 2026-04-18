@@ -143,6 +143,17 @@ const WATER_CELL_SIZE := 30.0
 # Per-chunk tracking of spatial hash cells for cleanup on unload
 # chunk_key -> {"road": [Vector2i], "building": [Vector2i], "building_poly": [Vector2i], "parking": [Vector2i], "intersection": [Vector2i]}
 var _chunk_hash_cells: Dictionary = {}
+
+# Bridge topology registry. Built incrementally as OSM data arrives (main thread).
+# key: "lat,lon" quantized to 7 decimals (OSM nodes share exact lat/lon when
+# they're the same osm node id).
+# value: Dictionary acting as set — keys are way_ids of bridge=yes highway ways
+#        touching this coordinate (either as endpoint or middle node).
+# A coordinate is considered "shared" if size >= 2 — another bridge way
+# touches it, so ramping at that end should be suppressed.
+# See docs/BRIDGE_ELEVATION_REDESIGN.md.
+var _bridge_node_ways: Dictionary = {}
+
 # Per-chunk spatial hashes (independent, include overlap data — used by vegetation threads)
 var _chunk_road_hashes: Dictionary = {}  # chunk_key → Dictionary (Vector2i → Array of seg)
 var _chunk_tram_hashes: Dictionary = {}  # chunk_key → Dictionary (Vector2i → Array of tram seg)
@@ -478,13 +489,9 @@ static func _get_road_width(tags: Dictionary) -> float:
 	return ROAD_WIDTHS.get(highway_type, 5.0)
 
 # Константы для мостов и туннелей
-# Эталон: Северное шоссе (way 63269622) - 107.5м длина, 3м высота
-const BRIDGE_REFERENCE_LENGTH := 100.0  # Эталонная длина моста для полной высоты (метры)
-const BRIDGE_BASE_HEIGHT := 3.0         # Базовая высота для эталонного моста (метры)
-const BRIDGE_MIN_HEIGHT := 0.5          # Минимальная высота моста (метры) - очень пологий
-const LAYER_HEIGHT := 3.0               # Высота на один layer (разделение уровней)
-const BRIDGE_RAMP_RATIO := 0.4          # Рампа = 40% от длины моста (более пологий подъём)
-const BRIDGE_MAX_RAMP := 35.0           # Максимальная длина рампы (метры)
+const BRIDGE_DECK_HEIGHT := 5.0         # Константная высота деки моста над землёй
+const BRIDGE_RAMP_LENGTH := 35.0        # Длина рампы на СВОБОДНОМ конце (max)
+const LAYER_HEIGHT := 3.0               # Используется для layer>0 эстакад
 const BRIDGE_MIN_LENGTH_FOR_PILLARS := 60.0  # Минимальная длина моста для опор (метры)
 const BRIDGE_PILLAR_SPACING := 20.0     # Расстояние между опорами моста
 const BRIDGE_PILLAR_RADIUS := 0.5       # Радиус опоры моста
@@ -2777,6 +2784,7 @@ func reset_terrain() -> void:
 	_loading_chunks.clear()
 	_chunk_data_received.clear()
 	_chunk_state.clear()
+	_bridge_node_ways.clear()
 	for ph_key in _loading_placeholders.keys():
 		_remove_loading_placeholder(ph_key)
 	_initial_loading = false
@@ -2988,6 +2996,11 @@ func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: 
 ## Dispatch terrain generation: Phase 1+2 run on worker thread, Phase 3 on main thread.
 ## For non-chunk (initial load), runs synchronously on main thread.
 func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String = "", gen: int = -1) -> void:
+	# Pre-scan: populate bridge endpoint registry from this batch of ways BEFORE
+	# any bridge road rendering starts. Main thread, safe to write global dict.
+	# See docs/BRIDGE_ELEVATION_REDESIGN.md §3.3.
+	_bridge_prescan_ways(osm_data.get("ways", []))
+
 	if chunk_key == "":
 		# Initial load (no chunk key) — run synchronously on main thread
 		_generate_terrain_sync(osm_data, parent, chunk_key)
@@ -3093,13 +3106,18 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 		if tags.has("highway") and nodes.size() >= 2:
 			var highway_type: String = tags.get("highway", "residential")
 			var road_w: float = _get_road_width(tags)
+			var is_bridge_way: bool = tags.get("bridge", "") == "yes"
+			var way_id_phase1: int = int(way.get("id", 0))
+			# Skip blacklisted ways from spatial hash too (must match the list in phase 2 / _create_road).
+			if way_id_phase1 in [75621890, 587234728, 587234742, 973550712]:
+				continue
 			var raw_pts := PackedVector2Array()
 			raw_pts.resize(nodes.size())
 			for j in range(nodes.size()):
 				raw_pts[j] = _ll.call(nodes[j].lat, nodes[j].lon)
 			var smoothed_pts := _smooth_road_corners(raw_pts)
 			for j in range(smoothed_pts.size() - 1):
-				var rseg := {"p1": smoothed_pts[j], "p2": smoothed_pts[j + 1], "width": road_w}
+				var rseg := {"p1": smoothed_pts[j], "p2": smoothed_pts[j + 1], "width": road_w, "bridge": is_bridge_way, "way_id": way_id_phase1}
 				var p1: Vector2 = rseg.p1
 				var p2: Vector2 = rseg.p2
 				var min_x: float = minf(p1.x, p2.x) - road_w / 2.0
@@ -3636,7 +3654,7 @@ func _process_phase3_queue() -> bool:
 					if not (center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z):
 						continue
 			var way_id_raw: int = int(way.get("id", 0))
-			if way_id_raw in [75621890]:
+			if way_id_raw in [75621890, 587234728, 587234742, 973550712]:  # blacklisted ways (stairs on Oktyabrsky bridge)
 				continue
 			if tags.has("highway"):
 				_create_road(nodes, tags, target, null, way_id_raw, true)  # skip_spatial_hash: already built by Phase 1+2
@@ -3949,7 +3967,7 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 		if nodes.size() < 2:
 			continue
 		var way_id_raw: int = int(way.get("id", 0))
-		if way_id_raw in [75621890]:
+		if way_id_raw in [75621890, 587234728, 587234742, 973550712]:  # blacklisted ways (stairs on Oktyabrsky bridge)
 			continue
 		if tags.has("highway"):
 			_create_road(nodes, tags, target, null, way_id_raw)
@@ -4016,20 +4034,16 @@ func _calculate_road_elevation(tags: Dictionary, base_elevation: float, road_len
 	result.layer = layer
 
 	# Проверяем bridge
+	# Полная высота деки — константа. Свободно/shared end определяется в
+	# _create_bridge_road через реестр `_bridge_node_ways`, так что здесь
+	# достаточно пометить, что это мост, и вернуть deck height для справки
+	# (реальная высота считается функцией `_bridge_height_at`).
 	var bridge_val: String = str(tags.get("bridge", ""))
 	if bridge_val == "yes" or bridge_val == "viaduct" or bridge_val == "true":
 		result.is_bridge = true
-		# Высота моста пропорциональна длине (эталон: 100м → 3м)
-		# Короткие мосты ниже и с более пологими рампами
-		var length_ratio: float = clampf(road_length / BRIDGE_REFERENCE_LENGTH, 0.0, 1.0) if road_length > 0.0 else 1.0
-		var base_height: float = maxf(BRIDGE_MIN_HEIGHT, BRIDGE_BASE_HEIGHT * length_ratio)
-		# Добавляем layer если есть
-		var bridge_height: float = base_height + maxf(0, layer) * LAYER_HEIGHT
-		result.bridge_height = bridge_height
-		result.height = base_elevation + bridge_height
-		# Рампа пропорциональна длине моста (30% с каждой стороны, макс 30м)
-		var ramp_from_ratio: float = road_length * BRIDGE_RAMP_RATIO if road_length > 0.0 else BRIDGE_MAX_RAMP
-		result.ramp_length = minf(BRIDGE_MAX_RAMP, ramp_from_ratio)
+		result.bridge_height = BRIDGE_DECK_HEIGHT + maxf(0, layer) * LAYER_HEIGHT
+		result.height = base_elevation + result.bridge_height
+		result.ramp_length = BRIDGE_RAMP_LENGTH
 
 	# Проверяем tunnel
 	elif str(tags.get("tunnel", "")) == "yes":
@@ -4037,17 +4051,12 @@ func _calculate_road_elevation(tags: Dictionary, base_elevation: float, road_len
 		# Туннели пока просто помечаем, не опускаем под землю (сложно визуализировать)
 		result.height = base_elevation
 
-	# Только layer без bridge/tunnel - поднимаем эстакады
+	# Только layer без bridge/tunnel — эстакада, тоже проходит через bridge pipeline
 	elif layer > 0:
-		# Эстакада (layer > 0 без bridge=yes) - тоже поднимаем
 		result.is_bridge = true
-		# Для эстакад тоже применяем пропорцию
-		var length_ratio: float = clampf(road_length / BRIDGE_REFERENCE_LENGTH, 0.0, 1.0) if road_length > 0.0 else 1.0
-		var base_height: float = maxf(BRIDGE_MIN_HEIGHT, BRIDGE_BASE_HEIGHT * length_ratio)
-		result.bridge_height = base_height + (layer - 1) * LAYER_HEIGHT  # layer уже учтён в base
+		result.bridge_height = BRIDGE_DECK_HEIGHT + (layer - 1) * LAYER_HEIGHT
 		result.height = base_elevation + result.bridge_height
-		var ramp_from_ratio: float = road_length * BRIDGE_RAMP_RATIO if road_length > 0.0 else BRIDGE_MAX_RAMP
-		result.ramp_length = minf(BRIDGE_MAX_RAMP, ramp_from_ratio)
+		result.ramp_length = BRIDGE_RAMP_LENGTH
 
 	return result
 
@@ -4056,6 +4065,107 @@ func _calculate_road_elevation(tags: Dictionary, base_elevation: float, road_len
 func _smooth_step(t: float) -> float:
 	t = clampf(t, 0.0, 1.0)
 	return t * t * (3.0 - 2.0 * t)
+
+
+## Quantized coordinate key for bridge endpoint matching.
+## OSM nodes have identical lat/lon when they're the same node id, so this is
+## sufficient to detect shared endpoints.
+func _bridge_coord_key(lat: float, lon: float) -> String:
+	return "%.7f,%.7f" % [lat, lon]
+
+
+## Register a node from a bridge way in the global endpoint registry.
+## Called from main thread when OSM data arrives for a chunk, BEFORE any
+## bridge road rendering happens for that chunk.
+func _register_bridge_node(lat: float, lon: float, way_id: int) -> void:
+	var k := _bridge_coord_key(lat, lon)
+	if not _bridge_node_ways.has(k):
+		_bridge_node_ways[k] = {}
+	(_bridge_node_ways[k] as Dictionary)[way_id] = true
+
+
+## Returns true if at least 2 distinct bridge way ids touch the given
+## coordinate. Used to determine whether a bridge way's endpoint should be
+## ramped (free end) or kept at full deck height (shared joint).
+func _bridge_endpoint_is_shared(lat: float, lon: float) -> bool:
+	var k := _bridge_coord_key(lat, lon)
+	var entries: Dictionary = _bridge_node_ways.get(k, {})
+	return entries.size() >= 2
+
+
+## Returns true if ANY bridge=yes way touches this coordinate. Used by
+## non-bridge _link roads to decide whether their endpoint shift should be
+## suppressed — when the link connects to a bridge ramp end, the bridge
+## already ramps to y=0 at the joint so shifting would leave a visible gap.
+func _bridge_endpoint_touches_any(lat: float, lon: float) -> bool:
+	var k := _bridge_coord_key(lat, lon)
+	return _bridge_node_ways.has(k)
+
+
+## Pre-scan a batch of OSM ways (typically from a single chunk load) and
+## register all nodes of every highway+bridge=yes way into the global registry.
+## Registers ALL nodes (not just endpoints) so T-junctions where a ramp joins
+## the MIDDLE of a main bridge are also detected.
+## MUST run in main thread; safe to call multiple times (set semantics).
+func _bridge_prescan_ways(ways: Array) -> void:
+	for way in ways:
+		var tags: Dictionary = way.get("tags", {})
+		if not tags.has("highway"):
+			continue
+		if tags.get("bridge", "") != "yes":
+			continue
+		var nodes: Array = way.get("nodes", [])
+		if nodes.size() < 2:
+			continue
+		var way_id: int = int(way.get("id", 0))
+		# Keep the blacklist in sync with phase1/phase2/_create_road.
+		if way_id in [75621890, 587234728, 587234742, 973550712]:
+			continue
+		for n in nodes:
+			_register_bridge_node(n.lat, n.lon, way_id)
+
+
+## Returns true if `point` lies inside a bridge road corridor with margin.
+## Negative margin so the caller's own barrier edge (sitting at
+## half_width distance from its own centreline) does NOT match — only actual
+## overlapping corridors from other bridge ways do. Used by
+## `_create_bridge_barriers` to open gaps at ramp merges.
+func _point_in_other_bridge_corridor(point: Vector2, ck: String = "", self_way_id: int = 0) -> bool:
+	const MARGIN := -0.5
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			var segs := _query_road_hash(key, ck)
+			for seg in segs:
+				if not seg.get("bridge", false):
+					continue
+				if self_way_id != 0 and seg.get("way_id", 0) == self_way_id:
+					continue
+				var s_width: float = seg.width
+				if s_width < 4.0:
+					continue
+				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+				if point.distance_to(closest) < s_width / 2.0 + MARGIN:
+					return true
+	return false
+
+
+## Height of a bridge way at a given accumulated distance along its centreline.
+## Shared between road mesh, pillars, and barriers so they stay coplanar.
+##   ramp_from_start == 0  → start is shared with another bridge (full deck)
+##   ramp_from_end   == 0  → end is shared with another bridge (full deck)
+## Otherwise each side ramps from 0 to BRIDGE_DECK_HEIGHT over its ramp length.
+## `height_offset` is the base road offset (usually ~0.01 m).
+func _bridge_height_at(accumulated: float, ramp_from_start: float, ramp_from_end: float, total_length: float, height_offset: float) -> float:
+	var h := BRIDGE_DECK_HEIGHT
+	if ramp_from_start > 0.0 and accumulated < ramp_from_start:
+		h = _smooth_step(accumulated / ramp_from_start) * BRIDGE_DECK_HEIGHT
+	elif ramp_from_end > 0.0 and accumulated > total_length - ramp_from_end:
+		var rem: float = total_length - accumulated
+		h = _smooth_step(rem / ramp_from_end) * BRIDGE_DECK_HEIGHT
+	return height_offset + h
 
 
 ## Вычисляет усреднённые перпендикуляры для каждой точки пути
@@ -4224,6 +4334,12 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	# the parent road mesh, causing z-fighting when textures differ.
 	# By moving raw[0] along the link direction by parent_half_width, the link starts at the
 	# parent edge, and smoothing creates a curve from there — preserving roundings, no overlap.
+	#
+	# Exception: if the endpoint is shared with a bridge=yes way, skip the shift for that end.
+	# Bridges already ramp down to y=0 at free ends, so there's no parent-road mesh to overlap
+	# with, and shifting leaves a visible gap between the bridge ramp and the ground road.
+	var t_start_bridge_shared: bool = task_data.get("start_bridge_shared", false)
+	var t_end_bridge_shared: bool = task_data.get("end_bridge_shared", false)
 	if highway_type.ends_with("_link") and local_points.size() >= 2:
 		var parent_hw: float = 6.0
 		if highway_type in ["motorway_link", "trunk_link"]:
@@ -4234,15 +4350,17 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			parent_hw = 5.0
 		else:
 			parent_hw = 4.0
-		# Shift start point
-		var dir_start: Vector2 = (local_points[1] - local_points[0]).normalized()
-		var shift_dist_start: float = minf(parent_hw, local_points[0].distance_to(local_points[1]) * 0.5)
-		local_points[0] = local_points[0] + dir_start * shift_dist_start
-		# Shift end point
-		var last_idx: int = local_points.size() - 1
-		var dir_end: Vector2 = (local_points[last_idx - 1] - local_points[last_idx]).normalized()
-		var shift_dist_end: float = minf(parent_hw, local_points[last_idx].distance_to(local_points[last_idx - 1]) * 0.5)
-		local_points[last_idx] = local_points[last_idx] + dir_end * shift_dist_end
+		if not t_start_bridge_shared:
+			# Shift start point
+			var dir_start: Vector2 = (local_points[1] - local_points[0]).normalized()
+			var shift_dist_start: float = minf(parent_hw, local_points[0].distance_to(local_points[1]) * 0.5)
+			local_points[0] = local_points[0] + dir_start * shift_dist_start
+		if not t_end_bridge_shared:
+			# Shift end point
+			var last_idx: int = local_points.size() - 1
+			var dir_end: Vector2 = (local_points[last_idx - 1] - local_points[last_idx]).normalized()
+			var shift_dist_end: float = minf(parent_hw, local_points[last_idx].distance_to(local_points[last_idx - 1]) * 0.5)
+			local_points[last_idx] = local_points[last_idx] + dir_end * shift_dist_end
 
 	# Smoothing (thread-safe: pure math) — skip for tram (straight tracks, smoothing creates wobble)
 	var smoothed_points: PackedVector2Array
@@ -4459,7 +4577,7 @@ func _apply_road_result(result: Dictionary) -> void:
 	var elevation_info: Dictionary = result.elevation_info
 
 	if is_bridge:
-		_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent)
+		_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent, result.get("way_id", 0))
 	elif highway_type in ["footway", "path"] and smoothed_points.size() >= 2:
 		# Defer footway splitting + vertex gen to avoid 10-15ms spikes from
 		# _is_point_on_vehicle_road (spatial hash + intersection contours per point)
@@ -4590,8 +4708,27 @@ func _create_rail_collision(points: PackedVector2Array, parent: Node3D) -> void:
 	parent.add_child(body)
 
 
-## Создаёт дорогу-мост с рампами подъёма/спуска и опорами
-func _create_bridge_road(nodes: Array, width: float, texture_key: String, height_offset: float, bridge_info: Dictionary, parent: Node3D) -> void:
+## Создаёт дорогу-мост с рампами на свободных концах и опорами.
+##
+## Архитектура:
+##   - Высота деки — КОНСТАНТА BRIDGE_DECK_HEIGHT (не скейлится по длине).
+##   - Shared endpoint'ы (общие OSM-узлы с другим bridge=yes way) определяются
+##     через глобальный реестр `_bridge_node_ways`, заполненный при загрузке
+##     данных в main thread. Там такие узлы находятся "автоматически", без
+##     анализа road_hash.
+##   - Рампа на свободном конце покрывает min(BRIDGE_RAMP_LENGTH, total_length).
+##   - Если оба конца свободные и way короткий, рампы делятся пополам.
+##   - Высота в точке считается одной функцией `height_at(accumulated_length)`
+##     — дорожный меш, отбойники и опоры используют ЕЁ ЖЕ, чтобы гарантированно
+##     совпадать по Y.
+##
+## Связь с чанковой загрузкой: реестр пополняется при поступлении данных чанка
+## в main thread до начала phase 2 (см. `_generate_terrain`), поэтому к моменту
+## первого вызова `_create_bridge_road` для нового чанка все его endpoints
+## (и endpoints уже загруженных соседей) известны.
+##
+## См. docs/BRIDGE_ELEVATION_REDESIGN.md.
+func _create_bridge_road(nodes: Array, width: float, texture_key: String, height_offset: float, _bridge_info: Dictionary, parent: Node3D, way_id: int = 0) -> void:
 	if nodes.size() < 2:
 		return
 
@@ -4601,15 +4738,38 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	# Вычисляем общую длину моста
+	# Общая длина полилинии
 	var total_length := 0.0
 	for i in range(points.size() - 1):
 		total_length += points[i].distance_to(points[i + 1])
-
 	if total_length < 1.0:
 		return
 
-	# Добавляем промежуточные точки для плавных рамп (минимум каждые 10м)
+	# Shared/free endpoints — по OSM-координатам (lat/lon), НЕ по локальным
+	# координатам (которые могут отличаться из-за clipping/smoothing).
+	var first_n: Dictionary = nodes[0]
+	var last_n: Dictionary = nodes[nodes.size() - 1]
+	var start_shared: bool = _bridge_endpoint_is_shared(first_n.lat, first_n.lon)
+	var end_shared: bool = _bridge_endpoint_is_shared(last_n.lat, last_n.lon)
+
+	# Длины рамп на ОБОИХ концах. Shared → 0 (нет рампы, way стыкуется на полной
+	# высоте с соседом). Free → покрываем min(RAMP_LENGTH, total_length), чтобы
+	# короткий way тоже успел подняться до деки.
+	var ramp_from_start: float = 0.0
+	var ramp_from_end: float = 0.0
+	if not start_shared:
+		ramp_from_start = minf(BRIDGE_RAMP_LENGTH, total_length)
+	if not end_shared:
+		ramp_from_end = minf(BRIDGE_RAMP_LENGTH, total_length)
+
+	# Защита: оба конца свободны и way короче, чем две полные рампы — делим
+	# пополам, чтобы они не перекрывались и не обнуляли центр.
+	if not start_shared and not end_shared and total_length < BRIDGE_RAMP_LENGTH * 2.0:
+		ramp_from_start = total_length * 0.5
+		ramp_from_end = total_length * 0.5
+
+	# Подразделение длинных сегментов — обеспечивает плавную линейную
+	# интерполяцию высоты для рамп, иначе смайл-смоуз-степ рисуется ступеньками.
 	const BRIDGE_SEGMENT_LENGTH := 10.0
 	if total_length > BRIDGE_SEGMENT_LENGTH * 2:
 		var refined_points: PackedVector2Array = []
@@ -4618,17 +4778,12 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 			var p2: Vector2 = points[i + 1]
 			var seg_length: float = p1.distance_to(p2)
 			var num_subdivs: int = max(1, int(ceil(seg_length / BRIDGE_SEGMENT_LENGTH)))
-
 			refined_points.append(p1)
 			for j in range(1, num_subdivs):
 				var t: float = float(j) / float(num_subdivs)
 				refined_points.append(p1.lerp(p2, t))
 		refined_points.append(points[points.size() - 1])
 		points = refined_points
-
-	# Параметры моста
-	var bridge_height: float = bridge_info.get("bridge_height", BRIDGE_BASE_HEIGHT)
-	var ramp_length: float = bridge_info.get("ramp_length", minf(BRIDGE_MAX_RAMP, total_length * BRIDGE_RAMP_RATIO))
 
 	# Создаём массивы для меша
 	var vertices := PackedVector3Array()
@@ -4638,35 +4793,12 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 
 	var half_w := width * 0.5
 	var accumulated_length := 0.0
-
-	# Вычисляем перпендикуляры для каждой точки (усреднённые для сглаживания)
 	var perpendiculars: Array[Vector2] = _compute_averaged_perpendiculars(points)
 
 	for i in range(points.size()):
 		var p: Vector2 = points[i]
 		var perp: Vector2 = perpendiculars[i]
-
-		var base_elev: float = height_offset
-
-		# Вычисляем высоту моста в этой точке с учётом рамп
-		var point_height := base_elev
-		if ramp_length > 0.1:
-			# Рампа в начале
-			if accumulated_length < ramp_length:
-				var t: float = accumulated_length / ramp_length
-				t = _smooth_step(t)
-				point_height = base_elev + bridge_height * t
-			# Рампа в конце
-			elif accumulated_length > total_length - ramp_length:
-				var t: float = (total_length - accumulated_length) / ramp_length
-				t = _smooth_step(t)
-				point_height = base_elev + bridge_height * t
-			# Плоская часть моста
-			else:
-				point_height = base_elev + bridge_height
-		else:
-			# Короткий мост - просто приподнимаем
-			point_height = base_elev + bridge_height
+		var point_height: float = _bridge_height_at(accumulated_length, ramp_from_start, ramp_from_end, total_length, height_offset)
 
 		# Добавляем вершины (левая и правая сторона дороги)
 		var left := Vector3(p.x - perp.x * half_w, point_height, p.y - perp.y * half_w)
@@ -4744,10 +4876,10 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 	_create_bridge_collision(vertices, indices, parent)
 
 	# Создаём опоры моста
-	_create_bridge_pillars(points, bridge_height, ramp_length, total_length, parent)
+	_create_bridge_pillars(points, ramp_from_start, ramp_from_end, total_length, parent)
 
 	# Создаём отбойники по краям моста
-	_create_bridge_barriers(points, width, bridge_height, ramp_length, total_length, height_offset, parent)
+	_create_bridge_barriers(nodes, points, width, ramp_from_start, ramp_from_end, total_length, height_offset, parent, way_id)
 
 
 ## Создаёт коллизию для моста
@@ -4773,50 +4905,40 @@ func _create_bridge_collision(vertices: PackedVector3Array, indices: PackedInt32
 	parent.add_child(body)
 
 
-## Создаёт опоры моста
-func _create_bridge_pillars(points: PackedVector2Array, bridge_height: float, ramp_length: float, total_length: float, parent: Node3D) -> void:
-	# Короткие и низкие мосты не нуждаются в опорах
-	if bridge_height < 1.5 or total_length < BRIDGE_MIN_LENGTH_FOR_PILLARS:
+## Создаёт опоры моста. Опоры ставятся ТОЛЬКО на плоской части деки (там, где
+## _bridge_height_at достигает полной BRIDGE_DECK_HEIGHT), каждые BRIDGE_PILLAR_SPACING.
+func _create_bridge_pillars(points: PackedVector2Array, ramp_from_start: float, ramp_from_end: float, total_length: float, parent: Node3D) -> void:
+	# Короткие мосты не нуждаются в опорах
+	if total_length < BRIDGE_MIN_LENGTH_FOR_PILLARS:
 		return
 
-	# Создаём опоры только на плоской части моста (не на рампах)
-	var accumulated := 0.0
-	var last_pillar_pos := -BRIDGE_PILLAR_SPACING  # Чтобы первая опора была сразу после рампы
+	# Плоская зона — между концом start-рампы и началом end-рампы.
+	var flat_start: float = ramp_from_start
+	var flat_end: float = total_length - ramp_from_end
+	if flat_end <= flat_start:
+		return  # мост весь в рампах, опор не ставим
 
+	var accumulated := 0.0
+	var last_pillar_pos: float = -BRIDGE_PILLAR_SPACING
 	for i in range(points.size() - 1):
 		var p1 := points[i]
 		var p2 := points[i + 1]
 		var segment_length := p1.distance_to(p2)
-
-		# Начало и конец сегмента в терминах accumulated distance
 		var seg_start := accumulated
 		var seg_end := accumulated + segment_length
 
-		# Границы плоской части (после рампы в начале, до рампы в конце)
-		var flat_start := ramp_length
-		var flat_end := total_length - ramp_length
-
-		# Пересечение сегмента с плоской частью
 		var check_start := maxf(seg_start, flat_start)
 		var check_end := minf(seg_end, flat_end)
-
 		if check_start < check_end:
-			# Создаём опоры вдоль этого сегмента
 			var pos := check_start
 			while pos <= check_end:
 				if pos - last_pillar_pos >= BRIDGE_PILLAR_SPACING:
-					# Интерполируем позицию на сегменте
-					var t := (pos - seg_start) / segment_length if segment_length > 0 else 0.0
+					var t: float = (pos - seg_start) / segment_length if segment_length > 0 else 0.0
 					t = clampf(t, 0.0, 1.0)
 					var pillar_pos_2d := p1.lerp(p2, t)
-					var ground_elev := 0.0
-
-					# Создаём опору
-					_create_single_pillar(pillar_pos_2d, ground_elev, bridge_height, parent)
+					_create_single_pillar(pillar_pos_2d, 0.0, BRIDGE_DECK_HEIGHT, parent)
 					last_pillar_pos = pos
-
-				pos += BRIDGE_PILLAR_SPACING * 0.5  # Шаг проверки меньше spacing для точности
-
+				pos += BRIDGE_PILLAR_SPACING * 0.5
 		accumulated += segment_length
 
 
@@ -4859,8 +4981,11 @@ func _create_single_pillar(pos: Vector2, ground_elev: float, bridge_height: floa
 	pillar.add_child(body)
 
 
-## Создаёт отбойники по краям моста
-func _create_bridge_barriers(points: PackedVector2Array, road_width: float, bridge_height: float, ramp_length: float, total_length: float, height_offset: float, parent: Node3D) -> void:
+## Создаёт отбойники по краям моста.
+## Высота берётся из общей _bridge_height_at — гарантированно совпадает с
+## дорожным мешем. Сегменты пропускаются там, где они попадают в коридор
+## ДРУГОГО bridge=yes way (merge ramp) — чтобы не блокировать развязку.
+func _create_bridge_barriers(_nodes: Array, points: PackedVector2Array, road_width: float, ramp_from_start: float, ramp_from_end: float, total_length: float, height_offset: float, parent: Node3D, self_way_id: int = 0) -> void:
 	if points.size() < 2:
 		return
 
@@ -4870,37 +4995,28 @@ func _create_bridge_barriers(points: PackedVector2Array, road_width: float, brid
 
 	var half_road := road_width * 0.5
 	var perpendiculars: Array[Vector2] = _compute_averaged_perpendiculars(points)
+	var barrier_ck := _get_chunk_key_from_node(parent)
 
 	# Создаём меши для левого и правого отбойника
 	for side in [-1, 1]:  # -1 = левый, 1 = правый
 		var vertices := PackedVector3Array()
 		var indices := PackedInt32Array()
 		var normals := PackedVector3Array()
+		# skip[i] = true means this vertex sits inside the corridor of another
+		# bridge way (typical at ramp merges), so both adjacent quads will be
+		# dropped to leave a gap for the merge.
+		var skip_point: Array[bool] = []
+		skip_point.resize(points.size())
 
 		var accumulated := 0.0
 
 		for i in range(points.size()):
 			var p: Vector2 = points[i]
 			var perp: Vector2 = perpendiculars[i]
+			var barrier_pt := Vector2(p.x + perp.x * half_road * side, p.y + perp.y * half_road * side)
+			skip_point[i] = _point_in_other_bridge_corridor(barrier_pt, barrier_ck, self_way_id)
 
-			# Базовая высота
-			var base_elev: float = 0.0 + height_offset
-
-			# Высота моста в этой точке
-			var bridge_y := 0.0
-			if ramp_length > 0.1:
-				if accumulated < ramp_length:
-					var t: float = accumulated / ramp_length
-					bridge_y = _smooth_step(t) * bridge_height
-				elif accumulated > total_length - ramp_length:
-					var t: float = (total_length - accumulated) / ramp_length
-					bridge_y = _smooth_step(t) * bridge_height
-				else:
-					bridge_y = bridge_height
-			else:
-				bridge_y = bridge_height
-
-			var road_y: float = base_elev + bridge_y
+			var road_y: float = _bridge_height_at(accumulated, ramp_from_start, ramp_from_end, total_length, height_offset)
 
 			# Позиция отбойника (на краю дороги)
 			var barrier_x: float = p.x + perp.x * half_road * side
@@ -4930,6 +5046,9 @@ func _create_bridge_barriers(points: PackedVector2Array, road_width: float, brid
 
 		# Создаём индексы для граней
 		for i in range(points.size() - 1):
+			# Drop this quad if either endpoint is inside another road corridor.
+			if skip_point[i] or skip_point[i + 1]:
+				continue
 			var base_idx := i * 4
 
 			# Внешняя стенка (2 треугольника)
@@ -5737,6 +5856,11 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		var deferred_items: Array = _deferred_path_polys[chunk_key]
 		_deferred_path_polys.erase(chunk_key)
 		for item in deferred_items:
+			# Parent may have been freed between queue time and here (chunk unloaded
+			# during teleport / track reload). Skip silently instead of hitting a
+			# "previously freed" type error that stops the debugger.
+			if not is_instance_valid(item.parent):
+				continue
 			var polys: Array[PackedVector2Array] = item.polys
 			polys = _clip_path_polys_by_roads_and_intersections(polys, item.ck_x, item.ck_z, chunk_key)
 			var filtered: Array[PackedVector2Array] = []
@@ -9734,6 +9858,18 @@ func _process_road_queue() -> void:
 				str(_chunk_activation_pending.get(chunk_key, null))
 			])
 			var parent: Node3D = item.parent
+			# Check if this road's endpoints are shared with a bridge way. If yes,
+			# _link shift at those endpoints should be skipped — the bridge already
+			# ramps down to y=0 at the joint so there's no parent-road overlap to
+			# avoid, and shifting creates a visible gap between bridge ramp end and
+			# ground road start.
+			var item_nodes: Array = item.nodes
+			var start_bridge_shared: bool = false
+			var end_bridge_shared: bool = false
+			if item_nodes.size() >= 2:
+				start_bridge_shared = _bridge_endpoint_touches_any(item_nodes[0].lat, item_nodes[0].lon)
+				var last_n: Dictionary = item_nodes[item_nodes.size() - 1]
+				end_bridge_shared = _bridge_endpoint_touches_any(last_n.lat, last_n.lon)
 			var task_data := {
 				"nodes": item.nodes,
 				"tags": item.tags,
@@ -9743,7 +9879,9 @@ func _process_road_queue() -> void:
 				"start_lat": start_lat,
 				"start_lon": start_lon,
 				"lon_scale": _lon_scale,
-				"way_id": item.get("way_id", 0)
+				"way_id": item.get("way_id", 0),
+				"start_bridge_shared": start_bridge_shared,
+				"end_bridge_shared": end_bridge_shared,
 			}
 			_road_mutex.lock()
 			_pending_road_tasks += 1

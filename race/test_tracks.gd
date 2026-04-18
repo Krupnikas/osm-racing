@@ -9,6 +9,7 @@ static func get_all_test_tracks() -> Array:
 		_create_suspension_track(),
 		_create_npc_track(),
 		_create_performance_track(),
+		_create_bridge_track(),
 	]
 
 static func _create_flat_track() -> Dictionary:
@@ -38,5 +39,12 @@ static func _create_performance_track() -> Dictionary:
 		"track_name": "Пролёт",
 		"description": "Летающая камера на высоте 50м над городом (60 сек)",
 		"scene_path": "res://tests/chunk_load_test.tscn",
+	}
+
+static func _create_bridge_track() -> Dictionary:
+	return {
+		"track_id": "test_bridge",
+		"track_name": "Мост с развязкой",
+		"description": "Синтетический мост из 5 way'ев + T-развязка + тротуары + дорога под мостом (отладка bridge pipeline)",
 	}
 

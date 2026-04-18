@@ -18,6 +18,7 @@ const SPAWN_POSITIONS := {
 	"test_flat": Vector3(100, 1.0, 0),
 	"test_suspension": Vector3(0, 1.0, 5),
 	"test_npc": Vector3(100, 1.0, 0),
+	"test_bridge": Vector3(300, 1.0, 20),  # южный подход, лицом к мосту (сдвиг +300 чтобы попасть в chunk-центр)
 }
 
 ## Повороты спавна (Y rotation в радианах)
@@ -25,6 +26,7 @@ const SPAWN_ROTATIONS := {
 	"test_flat": 0.0,
 	"test_suspension": PI,  # 180° — лицом к трассе (Z+)
 	"test_npc": 0.0,
+	"test_bridge": PI,  # смотрим в +Z (север) = вглубь моста
 }
 
 
@@ -58,6 +60,11 @@ func _ready() -> void:
 	if not _terrain:
 		push_error("TestTrackScene: OSMTerrain node not found!")
 		return
+
+	# Test tracks use fake_osm coords around (0, 0) — force terrain start to match
+	# so chunk lat/lon passed to fake_osm lines up with the way node lat/lon.
+	_terrain.start_lat = 0.0
+	_terrain.start_lon = 0.0
 
 	# Провайдер данных — FakeOSM отдаёт данные в формате osm_loader
 	var tid := _track_id
