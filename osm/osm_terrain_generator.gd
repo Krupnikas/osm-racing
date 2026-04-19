@@ -3914,7 +3914,7 @@ func _process_phase3_queue() -> bool:
 			for clipped in clipped_polys:
 				if clipped.size() < 3:
 					continue
-				_create_bridge_deck_mesh(clipped, deck_tags, target)
+				_create_bridge_deck_mesh(clipped, deck_tags, target, deck_points)
 		if bridge_deck_items.size() > 0:
 			print("OSM: Processed %d bridge deck(s) for chunk %s" % [bridge_deck_items.size(), chunk_key])
 
@@ -4067,7 +4067,7 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 		for clipped in clipped_polys:
 			if clipped.size() < 3:
 				continue
-			_create_bridge_deck_mesh(clipped, deck_tags, target)
+			_create_bridge_deck_mesh(clipped, deck_tags, target, deck_points)
 
 	var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
 	if not _pending_batch_chunks.has(batch_chunk_key):
@@ -4155,6 +4155,15 @@ func _bridge_endpoint_is_shared(lat: float, lon: float) -> bool:
 	return entries.size() >= 2
 
 
+## Returns the deck surface Y at a given point, using the first matching
+## bridge deck polygon for distance-from-edge ramp. Returns 0 if not on deck.
+func _deck_surface_y_at_cached(point: Vector2) -> float:
+	for poly in _bridge_deck_polygons:
+		if poly.size() >= 3 and Geometry2D.is_point_in_polygon(point, poly):
+			return _deck_surface_y_at(point, poly)
+	return 0.0
+
+
 ## Returns true if the given LOCAL point (XZ) lies inside any man_made=bridge
 ## deck polygon. Used to determine whether a bridge=yes highway should render
 ## as a flat road on the deck (no ramp/barriers) vs. a standalone bridge.
@@ -4206,6 +4215,98 @@ func _bridge_prescan_ways(ways: Array) -> void:
 			continue
 		for n in nodes:
 			_register_bridge_node(n.lat, n.lon, way_id)
+
+
+## Fixes perpendiculars at shared bridge endpoints so adjacent way meshes
+## meet seamlessly. At a shared node, the perpendicular is averaged with the
+## neighbor bridge way's tangent direction (from the road hash).
+func _fix_shared_endpoint_perps(pts: PackedVector2Array, perps: Array[Vector2], nodes: Array, self_way_id: int) -> void:
+	if pts.size() < 2 or nodes.size() < 2:
+		return
+	# Check first endpoint
+	var first_node: Dictionary = nodes[0]
+	if _bridge_endpoint_is_shared(first_node.lat, first_node.lon):
+		var neighbor_dir := _find_neighbor_bridge_tangent(pts[0], self_way_id)
+		if neighbor_dir != Vector2.ZERO:
+			var my_dir: Vector2 = (pts[1] - pts[0]).normalized()
+			var avg_dir: Vector2 = (my_dir + neighbor_dir).normalized()
+			if avg_dir.length_squared() > 0.01:
+				perps[0] = Vector2(-avg_dir.y, avg_dir.x)
+	# Check last endpoint
+	var last_node: Dictionary = nodes[nodes.size() - 1]
+	if _bridge_endpoint_is_shared(last_node.lat, last_node.lon):
+		var last_idx: int = pts.size() - 1
+		var neighbor_dir := _find_neighbor_bridge_tangent(pts[last_idx], self_way_id)
+		if neighbor_dir != Vector2.ZERO:
+			var my_dir: Vector2 = (pts[last_idx] - pts[last_idx - 1]).normalized()
+			var avg_dir: Vector2 = (my_dir + neighbor_dir).normalized()
+			if avg_dir.length_squared() > 0.01:
+				perps[last_idx] = Vector2(-avg_dir.y, avg_dir.x)
+
+
+## Finds the tangent direction of the nearest OTHER bridge road segment at
+## the given point. Used to average perpendiculars at shared endpoints.
+func _find_neighbor_bridge_tangent(point: Vector2, self_way_id: int) -> Vector2:
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+	var best_dist := INF
+	var best_dir := Vector2.ZERO
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			var segs := _query_road_hash(key, "")
+			for seg in segs:
+				if not seg.get("bridge", false):
+					continue
+				if seg.get("way_id", 0) == self_way_id:
+					continue
+				if seg.width < 4.0:
+					continue
+				# Check if either endpoint of this segment is near our point
+				var d1: float = point.distance_to(seg.p1)
+				var d2: float = point.distance_to(seg.p2)
+				var min_d: float = minf(d1, d2)
+				if min_d < 2.0 and min_d < best_dist:  # within 2m = shared node
+					best_dist = min_d
+					# Direction: from the shared endpoint toward the other end
+					if d1 < d2:
+						best_dir = (seg.p2 - seg.p1).normalized()
+					else:
+						best_dir = (seg.p1 - seg.p2).normalized()
+	return best_dir
+
+
+## Finds the distance from `origin` to the midpoint between origin and the
+## nearest OTHER bridge road's centerline in the given `direction`. Returns
+## half the center-to-center distance, so two roads each using this value
+## will meet flush. Returns 0 if no other bridge road found.
+func _find_midpoint_to_other_bridge_road(origin: Vector2, direction: Vector2, self_way_id: int) -> float:
+	var cell_x := int(floor(origin.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(origin.y / ROAD_CELL_SIZE))
+	var best_dist := INF
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			var segs := _query_road_hash(key, "")
+			for seg in segs:
+				if not seg.get("bridge", false):
+					continue
+				if seg.get("way_id", 0) == self_way_id:
+					continue
+				if seg.width < 4.0:
+					continue
+				# Project origin onto this segment's line to find closest point
+				var closest := Geometry2D.get_closest_point_to_segment(origin, seg.p1, seg.p2)
+				# Check if the other road is in the given direction
+				var to_other := closest - origin
+				if to_other.dot(direction) <= 0:
+					continue  # wrong direction
+				var dist := origin.distance_to(closest)
+				if dist < best_dist:
+					best_dist = dist
+	if best_dist < INF:
+		return best_dist * 0.5  # midpoint
+	return 0.0
 
 
 ## Returns true if `point` lies inside a bridge road corridor with margin.
@@ -4663,104 +4764,189 @@ func _apply_road_result(result: Dictionary) -> void:
 
 	if is_bridge:
 		if on_deck:
-			# Way sits on a man_made=bridge deck platform — render as a FLAT road
-			# on top of the deck at deck_height + height_offset. No ramp, no bridge
-			# barriers, no pillars (those come from the deck mesh itself).
-			# Footways get sidewalk elevation (0.23) on top of deck.
-			# Worker thread doesn't generate vertices for bridge ways, so we build
-			# the road strip here from smoothed_points.
 			var is_footway_on_deck: bool = highway_type in ["footway", "path"]
-			var on_deck_offset: float = height_offset
-			if is_footway_on_deck:
-				on_deck_offset = 0.23  # sidewalk height above deck
-			var deck_h: float = BRIDGE_DECK_HEIGHT + on_deck_offset
-			var pts: PackedVector2Array = smoothed_points
-			if pts.size() >= 2:
-				var half_w: float = width * 0.5
-				var perps: Array[Vector2] = _compute_averaged_perpendiculars(pts)
-				var verts := PackedVector3Array()
-				var uv_arr := PackedVector2Array()
-				var norm_arr := PackedVector3Array()
-				var idx_arr := PackedInt32Array()
-				var acc := 0.0
-				for k in range(pts.size()):
-					var p: Vector2 = pts[k]
-					var perp: Vector2 = perps[k]
-					verts.append(Vector3(p.x - perp.x * half_w, deck_h, p.y - perp.y * half_w))
-					verts.append(Vector3(p.x + perp.x * half_w, deck_h, p.y + perp.y * half_w))
-					uv_arr.append(Vector2(0.0, acc * 0.1))
-					uv_arr.append(Vector2(1.0, acc * 0.1))
-					norm_arr.append(Vector3.UP)
-					norm_arr.append(Vector3.UP)
-					if k < pts.size() - 1:
-						acc += pts[k].distance_to(pts[k + 1])
-				for k in range(pts.size() - 1):
-					var bi: int = k * 2
-					idx_arr.append(bi); idx_arr.append(bi + 2); idx_arr.append(bi + 1)
-					idx_arr.append(bi + 1); idx_arr.append(bi + 2); idx_arr.append(bi + 3)
-				if verts.size() >= 4:
-					if not _road_batch_data.has(chunk_key):
-						_road_batch_data[chunk_key] = {}
-					if not _road_batch_data[chunk_key].has(texture_key):
-						_road_batch_data[chunk_key][texture_key] = {
-							"vertices": PackedVector3Array(),
-							"uvs": PackedVector2Array(),
-							"normals": PackedVector3Array(),
-							"indices": PackedInt32Array(),
-							"parent": parent
-						}
-					var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
-					var vertex_offset: int = batch["vertices"].size()
-					batch["vertices"].append_array(verts)
-					batch["uvs"].append_array(uv_arr)
-					batch["normals"].append_array(norm_arr)
-					if vertex_offset > 0:
-						var offset_indices := PackedInt32Array()
-						offset_indices.resize(idx_arr.size())
-						for oi in range(idx_arr.size()):
-							offset_indices[oi] = idx_arr[oi] + vertex_offset
-						batch["indices"].append_array(offset_indices)
-					else:
-						batch["indices"].append_array(idx_arr)
-				# Curb along footway edges on deck (22cm vertical step)
-				if is_footway_on_deck and pts.size() >= 2:
-					var curb_h: float = 0.22  # road-to-sidewalk step
-					var road_y: float = BRIDGE_DECK_HEIGHT + 0.01  # road surface (primary offset)
-					var curb_st := SurfaceTool.new()
-					curb_st.begin(Mesh.PRIMITIVE_TRIANGLES)
-					var curb_mat := StandardMaterial3D.new()
-					curb_mat.albedo_color = Color(0.65, 0.63, 0.60)
-					curb_mat.roughness = 0.9
-					curb_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-					curb_st.set_material(curb_mat)
-					var curb_half_w: float = width * 0.5
-					for side in [-1, 1]:
-						for k in range(pts.size() - 1):
-							var cp1: Vector2 = pts[k]
-							var cp2: Vector2 = pts[k + 1]
-							var cdir: Vector2 = (cp2 - cp1).normalized()
-							var cperp: Vector2 = Vector2(-cdir.y, cdir.x)
-							var e1: Vector2 = cp1 + cperp * curb_half_w * side
-							var e2: Vector2 = cp2 + cperp * curb_half_w * side
-							var cn: Vector3 = Vector3(cperp.x * side, 0, cperp.y * side)
-							var cv1 := Vector3(e1.x, road_y, e1.y)
-							var cv2 := Vector3(e2.x, road_y, e2.y)
-							var cv3 := Vector3(e2.x, road_y + curb_h, e2.y)
-							var cv4 := Vector3(e1.x, road_y + curb_h, e1.y)
-							curb_st.set_normal(cn); curb_st.add_vertex(cv1)
-							curb_st.set_normal(cn); curb_st.add_vertex(cv2)
-							curb_st.set_normal(cn); curb_st.add_vertex(cv3)
-							curb_st.set_normal(cn); curb_st.add_vertex(cv1)
-							curb_st.set_normal(cn); curb_st.add_vertex(cv3)
-							curb_st.set_normal(cn); curb_st.add_vertex(cv4)
-					var curb_committed := curb_st.commit()
-					if curb_committed and curb_committed.get_surface_count() > 0:
-						var curb_mi := MeshInstance3D.new()
-						curb_mi.name = "BridgeSidewalkCurb"
-						curb_mi.mesh = curb_committed
-						curb_mi.material_override = curb_mat
-						curb_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-						parent.add_child(curb_mi)
+			if not is_footway_on_deck:
+				# Vehicle road on deck: deck polygon IS the road surface.
+				# Render only lane marking strips on top.
+				_create_on_deck_lane_markings(smoothed_points, width, result.get("tags", {}), parent)
+			else:
+				# Footway on deck: sidewalk strip at deck height + 0.23
+				# Apply zigzag removal (normally done in footway deferred path
+				# but on-deck footways bypass it via the bridge code path).
+				var pts: PackedVector2Array = _remove_polyline_zigzag(smoothed_points)
+				if pts.size() >= 2:
+					var half_w: float = width * 0.5
+					var perps: Array[Vector2] = _compute_averaged_perpendiculars(pts)
+					# Expand toward deck edge only. Determine which side is
+					# "toward deck edge" (exits deck sooner) vs "toward road"
+					# (stays on deck). Only expand the deck-edge side.
+					# Sample at midpoint to determine consistently.
+					var hw_lefts := PackedFloat64Array()
+					var hw_rights := PackedFloat64Array()
+					hw_lefts.resize(pts.size())
+					hw_rights.resize(pts.size())
+					var max_expand: float = half_w + 3.0
+
+					# Determine deck-edge side at midpoint
+					var mid_k: int = clampi(pts.size() / 2, 0, pts.size() - 1)
+					var mid_p: Vector2 = pts[mid_k]
+					var mid_perp: Vector2 = perps[mid_k]
+					var left_deck_dist: float = 0.0
+					var right_deck_dist: float = 0.0
+					for ds in range(1, 30):
+						var d: float = float(ds) * 0.5
+						if left_deck_dist == 0.0 and not _is_point_on_bridge_deck(mid_p - mid_perp * d):
+							left_deck_dist = d
+						if right_deck_dist == 0.0 and not _is_point_on_bridge_deck(mid_p + mid_perp * d):
+							right_deck_dist = d
+						if left_deck_dist > 0 and right_deck_dist > 0:
+							break
+					# The side with SHORTER deck distance = deck edge → expand there
+					var expand_left: bool = left_deck_dist > 0 and (right_deck_dist == 0 or left_deck_dist < right_deck_dist)
+					var expand_right: bool = right_deck_dist > 0 and (left_deck_dist == 0 or right_deck_dist < left_deck_dist)
+
+					for k in range(pts.size()):
+						var p: Vector2 = pts[k]
+						var perp: Vector2 = perps[k]
+						var hwl: float = half_w
+						var hwr: float = half_w
+						if expand_left:
+							for dist_step in range(1, 16):
+								var dist: float = half_w + float(dist_step) * 0.2
+								if dist > max_expand: break
+								if not _is_point_on_bridge_deck(p - perp * dist):
+									hwl = dist + 0.3; break
+								hwl = dist
+						else:
+							# Non-expanding left side: clamp to not overlap vehicle road
+							if _is_point_on_vehicle_road(p - perp * hwl, 0.0, chunk_key):
+								for clamp_s in range(1, int(hwl / 0.1) + 1):
+									var td: float = hwl - float(clamp_s) * 0.1
+									if td < 0.2:
+										hwl = 0.2; break
+									if not _is_point_on_vehicle_road(p - perp * td, 0.0, chunk_key):
+										hwl = td; break
+						if expand_right:
+							for dist_step in range(1, 16):
+								var dist: float = half_w + float(dist_step) * 0.2
+								if dist > max_expand: break
+								if not _is_point_on_bridge_deck(p + perp * dist):
+									hwr = dist + 0.3; break
+								hwr = dist
+						else:
+							# Non-expanding right side: clamp to not overlap vehicle road
+							if _is_point_on_vehicle_road(p + perp * hwr, 0.0, chunk_key):
+								for clamp_s in range(1, int(hwr / 0.1) + 1):
+									var td: float = hwr - float(clamp_s) * 0.1
+									if td < 0.2:
+										hwr = 0.2; break
+									if not _is_point_on_vehicle_road(p + perp * td, 0.0, chunk_key):
+										hwr = td; break
+						hw_lefts[k] = hwl
+						hw_rights[k] = hwr
+
+					# Smooth (3-point moving average) to remove notches
+					if pts.size() >= 3:
+						var sl := hw_lefts.duplicate()
+						var sr := hw_rights.duplicate()
+						for k in range(1, pts.size() - 1):
+							hw_lefts[k] = (sl[k - 1] + sl[k] + sl[k + 1]) / 3.0
+							hw_rights[k] = (sr[k - 1] + sr[k] + sr[k + 1]) / 3.0
+
+					# Phase 3: build vertices
+					var verts := PackedVector3Array()
+					var uv_arr := PackedVector2Array()
+					var norm_arr := PackedVector3Array()
+					var idx_arr := PackedInt32Array()
+					var acc := 0.0
+					for k in range(pts.size()):
+						var p: Vector2 = pts[k]
+						var perp: Vector2 = perps[k]
+						var deck_y_here: float = BRIDGE_DECK_HEIGHT + 0.23
+						verts.append(Vector3(p.x - perp.x * hw_lefts[k], deck_y_here, p.y - perp.y * hw_lefts[k]))
+						verts.append(Vector3(p.x + perp.x * hw_rights[k], deck_y_here, p.y + perp.y * hw_rights[k]))
+						uv_arr.append(Vector2(0.0, acc * 0.1))
+						uv_arr.append(Vector2(1.0, acc * 0.1))
+						norm_arr.append(Vector3.UP)
+						norm_arr.append(Vector3.UP)
+						if k < pts.size() - 1:
+							acc += pts[k].distance_to(pts[k + 1])
+					for k in range(pts.size() - 1):
+						var bi: int = k * 2
+						idx_arr.append(bi); idx_arr.append(bi + 2); idx_arr.append(bi + 1)
+						idx_arr.append(bi + 1); idx_arr.append(bi + 2); idx_arr.append(bi + 3)
+					if verts.size() >= 4:
+						if not _road_batch_data.has(chunk_key):
+							_road_batch_data[chunk_key] = {}
+						var fw_tex := "path"
+						if not _road_batch_data[chunk_key].has(fw_tex):
+							_road_batch_data[chunk_key][fw_tex] = {
+								"vertices": PackedVector3Array(),
+								"uvs": PackedVector2Array(),
+								"normals": PackedVector3Array(),
+								"indices": PackedInt32Array(),
+								"parent": parent
+							}
+						var batch: Dictionary = _road_batch_data[chunk_key][fw_tex]
+						var vertex_offset: int = batch["vertices"].size()
+						batch["vertices"].append_array(verts)
+						batch["uvs"].append_array(uv_arr)
+						batch["normals"].append_array(norm_arr)
+						if vertex_offset > 0:
+							var offset_indices := PackedInt32Array()
+							offset_indices.resize(idx_arr.size())
+							for oi in range(idx_arr.size()):
+								offset_indices[oi] = idx_arr[oi] + vertex_offset
+							batch["indices"].append_array(offset_indices)
+						else:
+							batch["indices"].append_array(idx_arr)
+					# Curb along footway inner edge
+					if pts.size() >= 2:
+						var curb_h: float = 0.22
+						var curb_st := SurfaceTool.new()
+						curb_st.begin(Mesh.PRIMITIVE_TRIANGLES)
+						var curb_mat := StandardMaterial3D.new()
+						curb_mat.albedo_color = Color(0.65, 0.63, 0.60)
+						curb_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+						curb_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+						curb_st.set_material(curb_mat)
+						for side in [-1, 1]:
+							for k in range(pts.size() - 1):
+								var cp1: Vector2 = pts[k]
+								var cp2: Vector2 = pts[k + 1]
+								var cdir: Vector2 = (cp2 - cp1).normalized()
+								var cperp: Vector2 = Vector2(-cdir.y, cdir.x)
+								# Use clamped per-vertex hw: side=-1 → left, side=1 → right
+								var chw1: float = hw_lefts[k] if side == -1 else hw_rights[k]
+								var chw2: float = hw_lefts[k + 1] if side == -1 else hw_rights[k + 1]
+								var e1: Vector2 = cp1 + cperp * chw1 * side
+								var e2: Vector2 = cp2 + cperp * chw2 * side
+								var dy1: float = BRIDGE_DECK_HEIGHT + 0.01
+								var dy2: float = BRIDGE_DECK_HEIGHT + 0.01
+								var cv1 := Vector3(e1.x, dy1, e1.y)
+								var cv2 := Vector3(e2.x, dy2, e2.y)
+								var cv3 := Vector3(e2.x, dy2 + curb_h, e2.y)
+								var cv4 := Vector3(e1.x, dy1 + curb_h, e1.y)
+								var face_n := (cv2 - cv1).cross(cv4 - cv1).normalized()
+								var edge_center := (cv1 + cv2) * 0.5
+								var center_3d := Vector3(cp1.x, edge_center.y, cp1.y)
+								var dot_test := face_n.dot(edge_center - center_3d)
+								if dot_test < 0:
+									face_n = -face_n
+								curb_st.set_normal(face_n); curb_st.add_vertex(cv1)
+								curb_st.set_normal(face_n); curb_st.add_vertex(cv2)
+								curb_st.set_normal(face_n); curb_st.add_vertex(cv3)
+								curb_st.set_normal(face_n); curb_st.add_vertex(cv1)
+								curb_st.set_normal(face_n); curb_st.add_vertex(cv3)
+								curb_st.set_normal(face_n); curb_st.add_vertex(cv4)
+						var curb_committed := curb_st.commit()
+						if curb_committed and curb_committed.get_surface_count() > 0:
+							var curb_mi := MeshInstance3D.new()
+							curb_mi.name = "BridgeSidewalkCurb"
+							curb_mi.mesh = curb_committed
+							curb_mi.material_override = curb_mat
+							curb_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+							parent.add_child(curb_mi)
 		else:
 			# Standalone bridge (no man_made=bridge deck) — own mesh with ramps
 			_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent, result.get("way_id", 0))
@@ -7327,7 +7513,53 @@ func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_k
 ## elevated platform at BRIDGE_DECK_HEIGHT. Roads and footways with bridge=yes
 ## render ON TOP of this surface at their normal height_offset (which adds to
 ## deck height). The deck itself is a concrete-textured triangulated mesh.
-func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, parent: Node3D) -> void:
+## Subdivides polygon edges so no edge is longer than max_len meters.
+## Needed for smooth ramp on deck — coarse triangulation creates flat jumps.
+static func _subdivide_polygon_edges(poly: PackedVector2Array, max_len: float) -> PackedVector2Array:
+	var result := PackedVector2Array()
+	var n := poly.size()
+	for i in range(n):
+		var a := poly[i]
+		var b := poly[(i + 1) % n]
+		result.append(a)
+		var seg_len := a.distance_to(b)
+		if seg_len > max_len:
+			var subdivs := int(ceil(seg_len / max_len))
+			for j in range(1, subdivs):
+				var t := float(j) / float(subdivs)
+				result.append(a.lerp(b, t))
+	return result
+
+
+## Computes the minimum distance from a 2D point to any edge of a polygon.
+## Used for bridge deck ramp: vertices near the polygon boundary are at y=0,
+## vertices deep inside are at full BRIDGE_DECK_HEIGHT.
+static func _distance_to_polygon_boundary(point: Vector2, polygon: PackedVector2Array) -> float:
+	var min_dist := INF
+	var n := polygon.size()
+	for i in range(n):
+		var a := polygon[i]
+		var b := polygon[(i + 1) % n]
+		var closest := Geometry2D.get_closest_point_to_segment(point, a, b)
+		var dist := point.distance_to(closest)
+		if dist < min_dist:
+			min_dist = dist
+	return min_dist
+
+
+## Computes deck surface Y at a given 2D point, accounting for ramp from
+## polygon edges. Points near the FULL (unclipped) polygon boundary ramp
+## from y=0 to y=BRIDGE_DECK_HEIGHT over BRIDGE_RAMP_LENGTH meters.
+func _deck_surface_y_at(point: Vector2, full_polygon: PackedVector2Array, layer: int = 1) -> float:
+	var max_h: float = BRIDGE_DECK_HEIGHT + maxf(0, layer - 1) * LAYER_HEIGHT
+	if full_polygon.size() < 3:
+		return max_h
+	var dist := _distance_to_polygon_boundary(point, full_polygon)
+	var t := clampf(dist / BRIDGE_RAMP_LENGTH, 0.0, 1.0)
+	return _smooth_step(t) * max_h
+
+
+func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, parent: Node3D, full_polygon: PackedVector2Array = PackedVector2Array()) -> void:
 	if points.size() < 3:
 		return
 
@@ -7360,14 +7592,15 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 	var arr_mesh := ArrayMesh.new()
 	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
-	# Concrete-like material for the deck surface
+	# Asphalt material for the deck surface — roads add lane markings on top,
+	# gaps between roads appear as plain asphalt (realistic for real bridges).
 	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.55, 0.53, 0.50)  # Grey concrete
-	material.roughness = 0.85
+	material.albedo_color = Color(0.7, 0.7, 0.7)
+	material.roughness = 0.9
 	material.metallic = 0.0
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	if _ground_textures.has("sidewalk"):
-		material.albedo_texture = _ground_textures["sidewalk"]
+	if _cached_road_albedo:
+		material.albedo_texture = _cached_road_albedo
 		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 
 	var mesh_inst := MeshInstance3D.new()
@@ -7396,6 +7629,114 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 
 	# Fence-style railing along the deck perimeter (110 cm, metal look)
 	_create_deck_railing(points, deck_y, parent)
+
+
+## Renders lane markings on the bridge deck surface for an on-deck vehicle road.
+## Instead of a full road mesh, only thin white strips are drawn:
+##   - Edge lines (solid) at ± half_road_width from centerline
+##   - Lane dividers (dashed) between lanes
+## The deck polygon IS the road surface; markings are just paint on top.
+func _create_on_deck_lane_markings(pts: PackedVector2Array, road_width: float, tags: Dictionary, parent: Node3D) -> void:
+	if pts.size() < 2:
+		return
+
+	var lanes_str: String = str(tags.get("lanes", "2"))
+	var lane_count: int = int(lanes_str) if lanes_str.is_valid_int() else 2
+	lane_count = clampi(lane_count, 1, 6)
+	var half_w: float = road_width * 0.5
+	var way_id: int = int(tags.get("id", 0))
+	print("[DECK_MARKING] way=%s hw=%s pts=%d lanes=%d width=%.1f parent=%s" % [
+		tags.get("highway", "?"), tags.get("ref", str(way_id)), pts.size(), lane_count, road_width, parent.name])
+	var perps: Array[Vector2] = _compute_averaged_perpendiculars(pts)
+
+	const LINE_WIDTH := 0.15     # 15 cm white line
+	const DASH_LENGTH := 3.0     # 3m dash
+	const DASH_GAP := 3.0        # 3m gap
+	const MARKING_Y_OFFSET := 0.003  # just above deck surface
+
+	var marking_mat := StandardMaterial3D.new()
+	marking_mat.albedo_color = Color(1.0, 1.0, 1.0)
+	marking_mat.roughness = 0.6
+	marking_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	marking_mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_material(marking_mat)
+
+	# Compute accumulated length for dash pattern
+	var acc_lengths := PackedFloat64Array()
+	acc_lengths.resize(pts.size())
+	acc_lengths[0] = 0.0
+	for i in range(1, pts.size()):
+		acc_lengths[i] = acc_lengths[i - 1] + pts[i - 1].distance_to(pts[i])
+
+	# Helper: add a line strip segment between two 2D points at a given offset
+	var add_line_segment := func(p1: Vector2, p2: Vector2, perp1: Vector2, perp2: Vector2,
+			offset: float, lw: float) -> void:
+		var o1 := p1 + perp1 * offset
+		var o2 := p2 + perp2 * offset
+		var y1: float = BRIDGE_DECK_HEIGHT + MARKING_Y_OFFSET
+		var y2: float = BRIDGE_DECK_HEIGHT + MARKING_Y_OFFSET
+		var hw := lw * 0.5
+		# Quad vertices using perp for width
+		var v1 := Vector3(o1.x - perp1.x * hw, y1, o1.y - perp1.y * hw)
+		var v2 := Vector3(o1.x + perp1.x * hw, y1, o1.y + perp1.y * hw)
+		var v3 := Vector3(o2.x + perp2.x * hw, y2, o2.y + perp2.y * hw)
+		var v4 := Vector3(o2.x - perp2.x * hw, y2, o2.y - perp2.y * hw)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(v1); st.set_normal(Vector3.UP)
+		st.add_vertex(v2); st.set_normal(Vector3.UP)
+		st.add_vertex(v3)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(v1); st.set_normal(Vector3.UP)
+		st.add_vertex(v3); st.set_normal(Vector3.UP)
+		st.add_vertex(v4)
+
+	# NO edge lines — outer edge is defined by sidewalk curb,
+	# inner edge by center divider between carriageways.
+	# Only draw lane dividers (dashed) between lanes.
+	if lane_count > 1:
+		var lane_w: float = road_width / float(lane_count)
+		for lane_i in range(1, lane_count):
+			var offset: float = -half_w + lane_w * float(lane_i)
+			# Subdivide long segments for proper dash pattern
+			for seg_i in range(pts.size() - 1):
+				var sp1 := pts[seg_i]
+				var sp2 := pts[seg_i + 1]
+				var seg_len := sp1.distance_to(sp2)
+				var seg_acc := acc_lengths[seg_i]
+				var cycle := DASH_LENGTH + DASH_GAP
+				# Walk along segment creating dash sub-segments
+				var pos := 0.0
+				while pos < seg_len:
+					var abs_pos := seg_acc + pos
+					var in_cycle := fmod(abs_pos, cycle)
+					if in_cycle < DASH_LENGTH:
+						# Currently in a dash — draw until dash end or segment end
+						var dash_remaining := DASH_LENGTH - in_cycle
+						var draw_len := minf(dash_remaining, seg_len - pos)
+						var t1 := pos / seg_len
+						var t2 := (pos + draw_len) / seg_len
+						var dp1 := sp1.lerp(sp2, t1)
+						var dp2 := sp1.lerp(sp2, t2)
+						var dperp1 := perps[seg_i].lerp(perps[seg_i + 1], t1)
+						var dperp2 := perps[seg_i].lerp(perps[seg_i + 1], t2)
+						add_line_segment.call(dp1, dp2, dperp1, dperp2, offset, LINE_WIDTH)
+						pos += draw_len
+					else:
+						# In a gap — skip to next dash
+						var gap_remaining := cycle - in_cycle
+						pos += gap_remaining
+
+	var committed := st.commit()
+	if committed and committed.get_surface_count() > 0:
+		var mesh_inst := MeshInstance3D.new()
+		mesh_inst.name = "BridgeLaneMarkings"
+		mesh_inst.mesh = committed
+		mesh_inst.material_override = marking_mat
+		mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		parent.add_child(mesh_inst)
 
 
 ## Creates a railing of vertical bars along the bridge deck perimeter.
@@ -7452,6 +7793,11 @@ func _create_deck_railing(poly: PackedVector2Array, deck_y: float, parent: Node3
 		if seg_len < 0.3:
 			continue
 
+		# Skip railing edges where a vehicle road enters/exits the deck
+		var edge_mid := (p1 + p2) * 0.5
+		if _is_point_on_vehicle_road(edge_mid, 0.0, ""):
+			continue
+
 		var dir := (p2 - p1).normalized()
 		var outward := Vector2(-dir.y, dir.x)
 		var perp3 := Vector3(outward.x, 0, outward.y)
@@ -7494,8 +7840,10 @@ func _create_deck_railing(poly: PackedVector2Array, deck_y: float, parent: Node3
 				st.add_vertex(v4)
 
 		# Horizontal top rail (thin flat bar connecting all verticals)
-		var tp1 := Vector3(p1.x + outward.x * 0.05, deck_y + RAILING_HEIGHT, p1.y + outward.y * 0.05)
-		var tp2 := Vector3(p2.x + outward.x * 0.05, deck_y + RAILING_HEIGHT, p2.y + outward.y * 0.05)
+		var rail_y1: float = deck_y + RAILING_HEIGHT
+		var rail_y2: float = deck_y + RAILING_HEIGHT
+		var tp1 := Vector3(p1.x + outward.x * 0.05, rail_y1, p1.y + outward.y * 0.05)
+		var tp2 := Vector3(p2.x + outward.x * 0.05, rail_y2, p2.y + outward.y * 0.05)
 		var th := TOP_RAIL_THICKNESS
 		# Top face
 		st.set_normal(Vector3.UP)
@@ -7559,12 +7907,13 @@ func _create_deck_railing(poly: PackedVector2Array, deck_y: float, parent: Node3
 			if absf(p1.y - rz2) < edge_tol and absf(p2.y - rz2) < edge_tol:
 				continue
 		var mid_pt := (p1 + p2) * 0.5
+		var coll_deck_y: float = deck_y
 		var coll_shape := CollisionShape3D.new()
 		var box := BoxShape3D.new()
 		box.size = Vector3(seg_len, RAILING_HEIGHT, 0.1)
 		coll_shape.shape = box
 		var angle := atan2(p2.y - p1.y, p2.x - p1.x)
-		coll_shape.position = Vector3(mid_pt.x, deck_y + RAILING_HEIGHT * 0.5, mid_pt.y)
+		coll_shape.position = Vector3(mid_pt.x, coll_deck_y + RAILING_HEIGHT * 0.5, mid_pt.y)
 		coll_shape.rotation.y = -angle
 		coll_body.add_child(coll_shape)
 	parent.add_child(coll_body)
@@ -17949,35 +18298,74 @@ func _clip_polyline_to_rect(points: PackedVector2Array, min_x: float, max_x: flo
 
 
 func _clip_segment_to_rect_segment(a: Vector2, b: Vector2, min_x: float, max_x: float, min_z: float, max_z: float) -> PackedVector2Array:
+	# Liang-Barsky line clipping. NOTE: can NOT use lambdas here because
+	# GDScript captures local variables by VALUE, not by reference — a lambda
+	# writing to t0/t1 would NOT update the outer scope.
 	var dx := b.x - a.x
 	var dy := b.y - a.y
 	var t0 := 0.0
 	var t1 := 1.0
 
-	var clip_test := func(p: float, q: float) -> bool:
-		if absf(p) < 0.000001:
-			return q >= 0.0
+	# Clip test 1: left edge
+	var p := -dx
+	var q := a.x - min_x
+	if absf(p) < 0.000001:
+		if q < 0.0:
+			return PackedVector2Array()
+	else:
 		var r := q / p
 		if p < 0.0:
-			if r > t1:
-				return false
-			if r > t0:
-				t0 = r
+			if r > t1: return PackedVector2Array()
+			if r > t0: t0 = r
 		else:
-			if r < t0:
-				return false
-			if r < t1:
-				t1 = r
-		return true
+			if r < t0: return PackedVector2Array()
+			if r < t1: t1 = r
 
-	if not clip_test.call(-dx, a.x - min_x):
-		return PackedVector2Array()
-	if not clip_test.call(dx, max_x - a.x):
-		return PackedVector2Array()
-	if not clip_test.call(-dy, a.y - min_z):
-		return PackedVector2Array()
-	if not clip_test.call(dy, max_z - a.y):
-		return PackedVector2Array()
+	# Clip test 2: right edge
+	p = dx
+	q = max_x - a.x
+	if absf(p) < 0.000001:
+		if q < 0.0:
+			return PackedVector2Array()
+	else:
+		var r := q / p
+		if p < 0.0:
+			if r > t1: return PackedVector2Array()
+			if r > t0: t0 = r
+		else:
+			if r < t0: return PackedVector2Array()
+			if r < t1: t1 = r
+
+	# Clip test 3: bottom edge
+	p = -dy
+	q = a.y - min_z
+	if absf(p) < 0.000001:
+		if q < 0.0:
+			return PackedVector2Array()
+	else:
+		var r := q / p
+		if p < 0.0:
+			if r > t1: return PackedVector2Array()
+			if r > t0: t0 = r
+		else:
+			if r < t0: return PackedVector2Array()
+			if r < t1: t1 = r
+
+	# Clip test 4: top edge
+	p = dy
+	q = max_z - a.y
+	if absf(p) < 0.000001:
+		if q < 0.0:
+			return PackedVector2Array()
+	else:
+		var r := q / p
+		if p < 0.0:
+			if r > t1: return PackedVector2Array()
+			if r > t0: t0 = r
+		else:
+			if r < t0: return PackedVector2Array()
+			if r < t1: t1 = r
+
 	if t1 < t0:
 		return PackedVector2Array()
 
