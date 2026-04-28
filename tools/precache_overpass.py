@@ -42,7 +42,8 @@ REMOTE_SERVERS = [
     "https://z.overpass-api.de/api/interpreter",
     "https://lz4.overpass-api.de/api/interpreter",
 ]
-LOCAL_SERVER = "http://localhost:12346/api/interpreter"
+LOCAL_PORT = 12346
+LOCAL_SERVER = f"http://localhost:{LOCAL_PORT}/api/interpreter"
 
 # Defaults for remote mode (overridden for --local)
 MAX_CONCURRENT = 4
@@ -421,18 +422,21 @@ def main():
     group.add_argument("--radius-km", type=float,
                        help="Radius around start point in km")
     parser.add_argument("--local", action="store_true",
-                        help="Use local Docker Overpass at localhost:12346 (fast, no rate limits)")
+                        help="Use local Docker Overpass (fast, no rate limits)")
+    parser.add_argument("--port", type=int, default=0,
+                        help="Local Overpass port (default: 12346)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Only show what would be fetched")
     args = parser.parse_args()
 
     # Configure servers
     if args.local:
-        OVERPASS_SERVERS = [LOCAL_SERVER]
+        port = args.port if args.port else LOCAL_PORT
+        OVERPASS_SERVERS = [f"http://localhost:{port}/api/interpreter"]
         MAX_CONCURRENT = 8       # Local server can handle more
         PER_SERVER_INTERVAL = 0  # No rate limit needed
         HTTP_TIMEOUT = 30
-        print("Mode: LOCAL Overpass (Docker)")
+        print(f"Mode: LOCAL Overpass (Docker, port {port})")
     else:
         OVERPASS_SERVERS = REMOTE_SERVERS
         print("Mode: REMOTE Overpass servers")
