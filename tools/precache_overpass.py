@@ -32,8 +32,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # === Game constants (must match osm_terrain_generator.gd / osm_loader.gd) ===
 START_LAT = 59.149886  # from main.tscn
 START_LON = 37.949370
-CHUNK_SIZE = 200.0     # from main.tscn
-QUERY_RADIUS = 300     # maxf(200, 150) + 200/2 = 300
+CHUNK_SIZE = 210.0     # from main.tscn
+QUERY_RADIUS = 315     # maxf(210, 150) + 210/2 = 315
 CACHE_VERSION = 6
 
 REMOTE_SERVERS = [
