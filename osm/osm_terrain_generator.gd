@@ -4395,6 +4395,8 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		var full_validated: PackedVector2Array = _validate_road_direction(full_smoothed_points)
 		if full_validated.size() >= 2 and highway_type not in ["cycleway", "track", "steps", "tram_rails"]:
 			var corridor_delta: float = half_w + 0.1  # 10cm buffer over mesh width
+			# Subdivide centerline at grid crossings so corridor shape matches road mesh on slopes
+			var full_subdivided: PackedVector2Array = _subdivide_for_elevation(full_validated)
 			var clip_rect := PackedVector2Array()
 			if chunk_key != "initial" and chunk_key != "":
 				var ck_parts_c: PackedStringArray = chunk_key.split(",")
@@ -4408,7 +4410,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 					Vector2(ch_x0, ch_z0), Vector2(ch_x1, ch_z0),
 					Vector2(ch_x1, ch_z1), Vector2(ch_x0, ch_z1),
 				])
-			terrain_corridors.append_array(_build_terrain_corridors_for_polyline(full_validated, corridor_delta, clip_rect))
+			terrain_corridors.append_array(_build_terrain_corridors_for_polyline(full_subdivided, corridor_delta, clip_rect))
 
 		# Clip polyline to chunk with margin (for mesh vertices)
 		var points: PackedVector2Array = validated
@@ -4424,6 +4426,11 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 
 		# Insert centerline points where road edges cross chunk boundary
 		points = _insert_chunk_edge_points(points, half_w, chunk_min_x, chunk_max_x, chunk_min_z, chunk_max_z)
+
+		# Subdivide at grid crossings so road mesh follows bilinear elevation accurately.
+		# Without this, long straight segments have only 2 vertices and the flat quad
+		# diverges from the terrain surface on slopes.
+		points = _subdivide_for_elevation(points)
 
 		if _debug_way:
 			print("ROAD_DEBUG way=%d validated=%d clipped=%d chunk=%s margin=%.1f" % [_debug_way_id, validated.size(), points.size(), chunk_key, half_w + 1.0])
