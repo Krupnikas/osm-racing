@@ -9,8 +9,10 @@ signal elevation_failed(chunk_key: String, error: String)
 
 const API_URL := "https://api.opentopodata.org/v1/srtm30m"
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 3
-const GRID_RES := 7  # 7x7 = 49 points per chunk at ~33m spacing (matches SRTM30m)
+const CACHE_VERSION := 4
+const GRID_RES := 10  # 10×10 = 100 points, fits in 1 API request
+const GRID_STEP := 30.0  # Native SRTM30m resolution in meters
+const GRID_PADDING := GRID_STEP  # 30m overlap beyond chunk boundary each side
 
 # Global rate limiting — 1 request per second (API returns 429 otherwise)
 static var _request_queue: Array[ElevationLoader] = []
@@ -188,18 +190,18 @@ func _send_request_immediate() -> void:
 		elevation_failed.emit(chunk_key, "HTTP request error: %d" % error)
 
 
-## Build pipe-separated lat,lon pairs for the grid
+## Build pipe-separated lat,lon pairs for the padded 10×10 grid
 func _build_locations_string() -> String:
-	var grid_step := chunk_size / (GRID_RES - 1)
+	var base_x := float(chunk_x) * chunk_size - GRID_PADDING
+	var base_z := float(chunk_z) * chunk_size - GRID_PADDING
 	var parts := PackedStringArray()
 
 	for iz in GRID_RES:
 		for ix in GRID_RES:
-			var world_x: float = chunk_x * chunk_size + ix * grid_step
-			var world_z: float = chunk_z * chunk_size + iz * grid_step
-			# Inverse of _latlon_to_local: world → lat/lon
-			var lat: float = start_lat - world_z / 111000.0
-			var lon: float = start_lon + world_x / _lon_scale
+			var world_x := base_x + float(ix) * GRID_STEP
+			var world_z := base_z + float(iz) * GRID_STEP
+			var lat := start_lat - world_z / 111000.0
+			var lon := start_lon + world_x / _lon_scale
 			parts.append("%.6f,%.6f" % [lat, lon])
 
 	return "|".join(parts)
@@ -259,9 +261,9 @@ func _on_request_completed(result: int, response_code: int,
 		"version": CACHE_VERSION,
 		"grid_res": GRID_RES,
 		"grid": grid,
-		"base_x": float(chunk_x) * chunk_size,
-		"base_z": float(chunk_z) * chunk_size,
-		"grid_step": chunk_size / (GRID_RES - 1),
+		"base_x": float(chunk_x) * chunk_size - GRID_PADDING,
+		"base_z": float(chunk_z) * chunk_size - GRID_PADDING,
+		"grid_step": GRID_STEP,
 	}
 
 	# Log elevation range

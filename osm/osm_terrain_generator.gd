@@ -60,7 +60,7 @@ var _manhole_opacity: Texture2D
 @export var start_lat := 59.150066
 @export var start_lon := 37.949370
 var _lon_scale := 0.0  # Cached cos(deg_to_rad(start_lat)) * 111000.0
-@export var chunk_size := 100.0  # Размер чанка в метрах
+@export var chunk_size := 210.0  # Размер чанка в метрах (270м сетка - 2×30м паддинг)
 @export var load_distance := 500.0  # Дистанция подгрузки чанков
 @export var unload_distance := 700.0  # Дистанция выгрузки чанков
 @export var render_distance := 400.0  # Дальность прорисовки (и начало тумана)
@@ -4328,7 +4328,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	# Smoothing (thread-safe: pure math) — skip for tram (straight tracks, smoothing creates wobble)
 	var smoothed_points: PackedVector2Array
 	if highway_type in ["tram", "tram_rails"]:
-		smoothed_points = _subdivide_for_elevation(local_points, 15.0)
+		smoothed_points = _subdivide_for_elevation(local_points)
 	else:
 		smoothed_points = _smooth_road_corners(local_points)
 
@@ -5291,21 +5291,49 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 	if _profiler:
 		_profiler.end_measure("road_generation", prof_start)
 
-## Subdivide road segments longer than max_seg meters so roads follow terrain elevation.
-## Without this, straight roads with sparse vertices skip over terrain undulations.
-func _subdivide_for_elevation(points: PackedVector2Array, max_seg: float = 25.0) -> PackedVector2Array:
+## Subdivide road segments at elevation grid line crossings (every grid_step meters).
+## Inserts vertices where the polyline crosses X or Z lines of the fixed grid,
+## so roads follow the bilinear elevation surface accurately regardless of angle.
+func _subdivide_for_elevation(points: PackedVector2Array, grid_step: float = 10.0) -> PackedVector2Array:
 	if not enable_elevation or points.size() < 2:
 		return points
 	var result := PackedVector2Array()
 	result.append(points[0])
 	for i in range(1, points.size()):
-		var seg_len := points[i - 1].distance_to(points[i])
-		if seg_len > max_seg:
-			var n_sub := int(ceil(seg_len / max_seg))
-			for j in range(1, n_sub):
-				var t := float(j) / float(n_sub)
-				result.append(points[i - 1].lerp(points[i], t))
-		result.append(points[i])
+		var p0 := points[i - 1]
+		var p1 := points[i]
+		var dx := p1.x - p0.x
+		var dy := p1.y - p0.y  # y in Vector2 = world Z
+		# Collect t-values where segment crosses grid lines
+		var t_vals: Array[float] = []
+		# X-axis grid crossings
+		if absf(dx) > 0.001:
+			var x_min := minf(p0.x, p1.x)
+			var x_max := maxf(p0.x, p1.x)
+			var x := ceilf(x_min / grid_step) * grid_step
+			while x < x_max:
+				var t := (x - p0.x) / dx
+				if t > 0.001 and t < 0.999:
+					t_vals.append(t)
+				x += grid_step
+		# Z-axis grid crossings
+		if absf(dy) > 0.001:
+			var z_min := minf(p0.y, p1.y)
+			var z_max := maxf(p0.y, p1.y)
+			var z := ceilf(z_min / grid_step) * grid_step
+			while z < z_max:
+				var t := (z - p0.y) / dy
+				if t > 0.001 and t < 0.999:
+					t_vals.append(t)
+				z += grid_step
+		# Sort and insert vertices at crossings
+		t_vals.sort()
+		var prev_t := -1.0
+		for t in t_vals:
+			if t - prev_t > 0.001:
+				result.append(p0.lerp(p1, t))
+				prev_t = t
+		result.append(p1)
 	return result
 
 
@@ -5961,13 +5989,17 @@ func _add_path_polys_to_batch(filtered: Array[PackedVector2Array], validated: Pa
 	var z_offset: float = hash_val * 0.000005
 	var uv_scale: float = 1.0 / width
 
+	# Split polygons into grid cells so flat triangles track bilinear elevation
+	var grid_polys: Array[PackedVector2Array] = []
 	for poly in filtered:
-		var subdiv := _subdivide_polygon_edges(poly, 10.0)
-		var indices := Geometry2D.triangulate_polygon(subdiv)
+		grid_polys.append_array(_split_polygon_by_grid(poly, 10.0))
+
+	for poly in grid_polys:
+		var indices := Geometry2D.triangulate_polygon(poly)
 		if indices.size() < 3:
 			continue
 		var base_idx: int = batch["vertices"].size()
-		for p in subdiv:
+		for p in poly:
 			var h: float = _sample_elevation(p.x, p.y) + height_offset + z_offset
 			batch["vertices"].append(Vector3(p.x, h, p.y))
 			batch["uvs"].append(Vector2(p.x * uv_scale, p.y * uv_scale))
@@ -7197,12 +7229,8 @@ func _find_parking_sign_position(parking_points: PackedVector2Array) -> Dictiona
 
 func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void:
 	"""Создаёт асфальтовую поверхность парковки"""
-	# Subdivide long edges to follow elevation profile
-	points = _subdivide_polygon_edges(points, 10.0)
-	# Триангулируем полигон
-	var indices := Geometry2D.triangulate_polygon(points)
-	if indices.is_empty():
-		return
+	# Split into grid cells so parking follows terrain slope accurately
+	var grid_polys := _split_polygon_by_grid(points, 10.0)
 
 	var mesh := MeshInstance3D.new()
 	mesh.name = "ParkingSurface"
@@ -7230,16 +7258,18 @@ func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void
 
 	# Добавляем вершины треугольников
 	var uv_ws := 1.0 / 6.0  # World-space UV (совпадает с дорогами и перекрёстками)
-	for i in range(0, indices.size(), 3):
-		for j in range(3):
-			var idx = indices[i + j]
-			var p = points[idx]
-			var h = _sample_elevation(p.x, p.y) + height_offset
-
-			# UV координаты — world-space для seamless стыка с дорогами
-			st.set_uv(Vector2(p.x * uv_ws, p.y * uv_ws))
-			st.set_normal(Vector3.UP)
-			st.add_vertex(Vector3(p.x, h, p.y))
+	for cell_poly in grid_polys:
+		var indices := Geometry2D.triangulate_polygon(cell_poly)
+		if indices.size() < 3:
+			continue
+		for i in range(0, indices.size(), 3):
+			for j in range(3):
+				var idx = indices[i + j]
+				var p = cell_poly[idx]
+				var h = _sample_elevation(p.x, p.y) + height_offset
+				st.set_uv(Vector2(p.x * uv_ws, p.y * uv_ws))
+				st.set_normal(Vector3.UP)
+				st.add_vertex(Vector3(p.x, h, p.y))
 
 	mesh.mesh = st.commit()
 
@@ -7275,10 +7305,8 @@ func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_k
 	"""Создаёт пешеходную площадь с материалом тротуара"""
 	if not enable_roads:
 		return
-	points = _subdivide_polygon_edges(points, 10.0)
-	var indices := Geometry2D.triangulate_polygon(points)
-	if indices.is_empty():
-		return
+	# Split into grid cells so area follows terrain slope accurately
+	var grid_polys := _split_polygon_by_grid(points, 10.0)
 
 	var mesh := MeshInstance3D.new()
 	mesh.name = "PedestrianArea"
@@ -7303,13 +7331,17 @@ func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_k
 	var height_offset := 0.23  # Same as footway (1cm above grass terrain at 0.22)
 	var uv_ws := 1.0 / 4.0
 
-	for i in range(0, indices.size(), 3):
-		for j in range(3):
-			var idx = indices[i + j]
-			var p = points[idx]
-			st.set_uv(Vector2(p.x * uv_ws, p.y * uv_ws))
-			st.set_normal(Vector3.UP)
-			st.add_vertex(Vector3(p.x, _sample_elevation(p.x, p.y) + height_offset, p.y))
+	for cell_poly in grid_polys:
+		var indices := Geometry2D.triangulate_polygon(cell_poly)
+		if indices.size() < 3:
+			continue
+		for i in range(0, indices.size(), 3):
+			for j in range(3):
+				var idx = indices[i + j]
+				var p = cell_poly[idx]
+				st.set_uv(Vector2(p.x * uv_ws, p.y * uv_ws))
+				st.set_normal(Vector3.UP)
+				st.add_vertex(Vector3(p.x, _sample_elevation(p.x, p.y) + height_offset, p.y))
 
 	mesh.mesh = st.commit()
 	parent.add_child(mesh)
@@ -12398,10 +12430,8 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 	if points.size() < 3:
 		return
 
-	# Триангуляция
-	var indices := Geometry2D.triangulate_polygon(points)
-	if indices.size() < 3:
-		return
+	# Split into grid cells for accurate elevation following on slopes
+	var grid_polys := _split_polygon_by_grid(points, 10.0)
 
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -12413,15 +12443,18 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 
 	var uv_scale := 0.25  # Масштаб UV для земли (20м = 1 повтор текстуры)
 
-	# Добавляем вершины
-	for p in points:
-		var h := _sample_elevation(p.x, p.y) + height_offset
-		vertices.append(Vector3(p.x, h, p.y))
-		uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
-		normals.append(Vector3.UP)
-
-	# Просто используем все треугольники — дороги рендерятся поверх (height_offset=-0.02)
-	tri_indices = indices
+	for cell_poly in grid_polys:
+		var indices := Geometry2D.triangulate_polygon(cell_poly)
+		if indices.size() < 3:
+			continue
+		var base_idx: int = vertices.size()
+		for p in cell_poly:
+			var h := _sample_elevation(p.x, p.y) + height_offset
+			vertices.append(Vector3(p.x, h, p.y))
+			uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
+			normals.append(Vector3.UP)
+		for idx in indices:
+			tri_indices.append(base_idx + idx)
 
 	if tri_indices.is_empty():
 		return
@@ -12548,14 +12581,23 @@ func get_spawn_elevation() -> float:
 	if not enable_elevation:
 		return 0.0
 	# Cache key includes lat/lon to be location-aware
-	var cache_key := "elev_v2_%.4f_%.4f_0,0.json" % [start_lat, start_lon]
+	# Try current version first, then fall back to in-memory data
+	var cache_key := "elev_v%d_%.4f_%.4f_0,0.json" % [ElevationLoader.CACHE_VERSION, start_lat, start_lon]
 	var cache_path := ProjectSettings.globalize_path("user://osm_cache/" + cache_key)
 	var file := FileAccess.open(cache_path, FileAccess.READ)
 	if not file:
-		cache_key = "elev_v2_%.4f_%.4f_-1,-1.json" % [start_lat, start_lon]
+		cache_key = "elev_v%d_%.4f_%.4f_-1,-1.json" % [ElevationLoader.CACHE_VERSION, start_lat, start_lon]
 		cache_path = ProjectSettings.globalize_path("user://osm_cache/" + cache_key)
 		file = FileAccess.open(cache_path, FileAccess.READ)
 		if not file:
+			# Try in-memory elevation data
+			var grid_data: Dictionary = _chunk_elevation_data.get("0,0", _chunk_elevation_data.get("-1,-1", {}))
+			if not grid_data.is_empty():
+				var grid: Array = grid_data.get("grid", [])
+				var res: int = grid_data.get("grid_res", 5)
+				var center := res / 2
+				if grid.size() > center and grid[center].size() > center:
+					return float(grid[center][center])
 			return 0.0
 	var json_string := file.get_as_text()
 	file.close()
@@ -14933,6 +14975,14 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 		curb_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, curb_arrays)
 		_rs_add_mesh(chunk_key, curb_mesh, _curb_material)
 
+	# Split terrain polygons into grid cells for accurate elevation following.
+	# Without this, large flat triangles interpolate linearly and diverge from the
+	# bilinear elevation surface that roads/trams follow, causing terrain to poke
+	# through roads or sidewalks to sink under grass.
+	var grid_polys: Array[PackedVector2Array] = []
+	for poly in terrain_polys:
+		grid_polys.append_array(_split_polygon_by_grid(poly, 10.0))
+
 	# Триангулируем полигоны
 	var all_vertices := PackedVector3Array()
 	var all_uvs := PackedVector2Array()
@@ -14941,13 +14991,12 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	var uv_scale := 0.25
 	var total_tris := 0
 
-	for poly in terrain_polys:
-		var subdiv := _subdivide_polygon_edges(poly, 10.0)
-		var indices := Geometry2D.triangulate_polygon(subdiv)
+	for poly in grid_polys:
+		var indices := Geometry2D.triangulate_polygon(poly)
 		if indices.size() < 3:
 			continue
 		var base_idx: int = all_vertices.size()
-		for p in subdiv:
+		for p in poly:
 			var h := sidewalk_height + _sample_elevation(p.x, p.y)
 			all_vertices.append(Vector3(p.x, h, p.y))
 			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
@@ -18212,6 +18261,52 @@ func _polygon_area(poly: PackedVector2Array) -> float:
 
 ## Subdivide polygon edges so no edge is longer than max_len.
 ## Ensures mesh vertices are dense enough to follow elevation profile.
+## Split a polygon into grid-cell-sized sub-polygons for accurate elevation following.
+## Each resulting polygon covers at most one grid cell (grid_step x grid_step), so
+## linear triangle interpolation closely matches the bilinear elevation surface.
+func _split_polygon_by_grid(poly: PackedVector2Array, grid_step: float) -> Array[PackedVector2Array]:
+	var result: Array[PackedVector2Array] = []
+	if poly.size() < 3:
+		return result
+	# Find AABB
+	var p_min_x := poly[0].x
+	var p_max_x := poly[0].x
+	var p_min_y := poly[0].y
+	var p_max_y := poly[0].y
+	for i in range(1, poly.size()):
+		p_min_x = minf(p_min_x, poly[i].x)
+		p_max_x = maxf(p_max_x, poly[i].x)
+		p_min_y = minf(p_min_y, poly[i].y)
+		p_max_y = maxf(p_max_y, poly[i].y)
+	# If polygon fits in ~1.5 cells, no splitting needed
+	if (p_max_x - p_min_x) <= grid_step * 1.5 and (p_max_y - p_min_y) <= grid_step * 1.5:
+		result.append(poly)
+		return result
+	# Snap AABB to grid
+	var gx0 := floorf(p_min_x / grid_step) * grid_step
+	var gy0 := floorf(p_min_y / grid_step) * grid_step
+	# Intersect polygon with each grid cell
+	var y := gy0
+	while y < p_max_y:
+		var x := gx0
+		while x < p_max_x:
+			var cell := PackedVector2Array([
+				Vector2(x, y),
+				Vector2(x + grid_step, y),
+				Vector2(x + grid_step, y + grid_step),
+				Vector2(x, y + grid_step),
+			])
+			var clipped: Array[PackedVector2Array] = Geometry2D.intersect_polygons(poly, cell)
+			for cp in clipped:
+				if cp.size() >= 3 and absf(_polygon_area(cp)) >= 0.5:
+					result.append(cp)
+			x += grid_step
+		y += grid_step
+	if result.is_empty():
+		result.append(poly)
+	return result
+
+
 static func _subdivide_polygon_edges(poly: PackedVector2Array, max_len: float) -> PackedVector2Array:
 	var result := PackedVector2Array()
 	var n := poly.size()
