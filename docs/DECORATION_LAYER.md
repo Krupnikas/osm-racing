@@ -162,6 +162,7 @@ func _generate_chunk_async(...):
 func _finalize_billboard_batch_for_chunk(chunk_key: String):
     var billboards = _decoration_layer.get_billboards_in_chunk(chunk_min, chunk_max)
     for billboard in billboards:
+        # Elevation sampled from SRTM30m grid via _sample_elevation()
         var mesh = _decoration_layer.create_billboard_mesh(billboard, elevation)
         parent.add_child(mesh)
 ```
