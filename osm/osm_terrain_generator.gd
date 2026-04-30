@@ -19251,20 +19251,20 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 	var indices := PackedInt32Array()
 
 	for poly in polys_to_render:
-		# Grid-based triangulation so patch follows terrain slope on hills
-		var grid_result := _triangulate_polygon_with_grid(poly, 3.0)
-		var tri_verts: PackedVector2Array = grid_result.vertices
-		var tri_idx: PackedInt32Array = grid_result.indices
-		if tri_idx.is_empty():
-			continue
-		var base_idx := vertices.size()
-		for p2 in tri_verts:
-			var h := _sample_elevation(p2.x, p2.y) + height_offset + z_off
-			vertices.append(Vector3(p2.x, h, p2.y))
-			uvs.append(Vector2(p2.x * uv_ws, p2.y * uv_ws))
-			normals.append(Vector3.UP)
-		for ti in tri_idx:
-			indices.append(base_idx + ti)
+		# Split by 10m grid so each cell follows bilinear elevation
+		var grid_cells := _split_polygon_by_grid(poly, 10.0)
+		for cell_poly in grid_cells:
+			var tri_idx := Geometry2D.triangulate_polygon(cell_poly)
+			if tri_idx.is_empty():
+				continue
+			var base_idx := vertices.size()
+			for p2 in cell_poly:
+				var h := _sample_elevation(p2.x, p2.y) + height_offset + z_off
+				vertices.append(Vector3(p2.x, h, p2.y))
+				uvs.append(Vector2(p2.x * uv_ws, p2.y * uv_ws))
+				normals.append(Vector3.UP)
+			for ti in tri_idx:
+				indices.append(base_idx + ti)
 
 	if vertices.is_empty():
 		return
