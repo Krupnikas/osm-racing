@@ -214,12 +214,13 @@ func _award_career_prize(player_position: int) -> void:
 	"""Начислить приз за карьерную гонку и показать на экране результатов"""
 	if not RaceState.is_career_race:
 		return
-	if not RaceState.selected_track:
+	var track = _race_manager.current_track if _race_manager else null
+	if not track:
 		return
 	if CareerState.active_profile == "":
 		return
 
-	var track_id: String = RaceState.selected_track.track_id
+	var track_id: String = track.track_id
 	var prize := CareerState.award_race_prize(track_id, player_position)
 
 	# Показываем приз на экране результатов

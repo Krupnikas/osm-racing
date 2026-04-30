@@ -140,6 +140,7 @@ var _initial_chunks_loaded: int = 0  # Количество загруженны
 var _initial_chunks_completed: Dictionary = {}  # Чанки завершившие phase3 (для отслеживания прогресса даже после unload)
 var _loading_paused := false  # Загрузка НЕ на паузе - автоматический старт
 var _load_generation := 0  # Инкрементируется при reset для игнорирования старых callback'ов
+var _initial_load_debug_timer := 0.0
 # _entrance_nodes/_poi_nodes removed — now passed as local params to avoid data race during frame budgeting
 var _parking_polygons: Array[PackedVector2Array] = []  # Полигоны парковок для исключения фонарей
 var _parking_bounds: Array = []  # Cached {center: Vector2, radius: float} per parking polygon
@@ -513,13 +514,13 @@ func _snap_origin_to_grid() -> void:
 	# Snap so that chunk centers fall on n * lat_step (matching precache script).
 	# Chunk center = start_lat - lat_step/2, so start_lat must be (n+0.5)*lat_step.
 	var lat_n := roundi(start_lat / lat_step - 0.5)
-	var new_lat := snapped(float(lat_n) * lat_step + lat_step * 0.5, 0.0001)
+	var new_lat: float = snapped(float(lat_n) * lat_step + lat_step * 0.5, 0.0001)
 
 	# Recompute _lon_scale with snapped lat (must match precache: cos of snapped lat)
 	_lon_scale = cos(deg_to_rad(new_lat)) * 111000.0
 	var lon_step := chunk_size / _lon_scale
 	var lon_n := roundi(start_lon / lon_step - 0.5)
-	var new_lon := snapped(float(lon_n) * lon_step + lon_step * 0.5, 0.0001)
+	var new_lon: float = snapped(float(lon_n) * lon_step + lon_step * 0.5, 0.0001)
 
 	if absf(new_lat - start_lat) > 0.00001 or absf(new_lon - start_lon) > 0.00001:
 		print("OSM: Grid-snapped origin: lat %.6f→%.6f  lon %.6f→%.6f (Δ%.1fm, %.1fm)" % [
@@ -1724,7 +1725,7 @@ func _process(delta: float) -> void:
 	# Определяем позицию для загрузки чанков
 	# Всегда используем позицию машины — камера может быть далеко (fly mode, cinematic)
 	var player_pos := Vector3.ZERO
-	if _car:
+	if _car and is_instance_valid(_car):
 		player_pos = _car.global_position
 	else:
 		var viewport := get_viewport()
@@ -1736,7 +1737,7 @@ func _process(delta: float) -> void:
 	# Проверяем нужны ли новые чанки (с предиктивной загрузкой по направлению)
 	var _uc_t0 := Time.get_ticks_usec()
 	var velocity := Vector3.ZERO
-	if _car and _car is RigidBody3D:
+	if _car and is_instance_valid(_car) and _car is RigidBody3D:
 		velocity = _car.linear_velocity
 	elif delta > 0.001:
 		velocity = (player_pos - _last_player_pos) / delta
@@ -1830,11 +1831,11 @@ func start_loading() -> void:
 	# Определяем какие чанки нужны для старта
 	# Используем позицию машины если она есть, иначе Vector3.ZERO
 	var spawn_pos := Vector3.ZERO
-	if _car:
+	if _car and is_instance_valid(_car):
 		spawn_pos = _car.global_position
 		print("OSM: Loading chunks around car position (%.1f, %.1f, %.1f)" % [spawn_pos.x, spawn_pos.y, spawn_pos.z])
 	else:
-		print("OSM: Loading chunks around spawn point (0, 0, 0)")
+		print("OSM: Loading chunks around spawn point (0, 0, 0) [_car is null or freed]")
 
 	_initial_chunks_needed = _get_initial_chunks(spawn_pos)
 	# Сортируем начальные чанки: ближайшие к камере первыми
@@ -1946,6 +1947,12 @@ func _check_initial_load_complete() -> void:
 	var total_progress: float = chunk_progress * 0.6 + (1.0 - float(total_queued) / float(max(1, total_queued + 100))) * 0.4
 	total_progress = clampf(total_progress, 0.0, 1.0)
 
+	_initial_load_debug_timer += get_process_delta_time()
+	if _initial_load_debug_timer >= 2.0:
+		_initial_load_debug_timer = 0.0
+		print("OSM LOAD DEBUG: %d/%d chunks, queued=%d, progress=%.1f%% phase3=%d loading=%s" % [
+			loaded_count, total_chunks, total_queued, total_progress * 100.0,
+			_phase3_queue.size(), str(_loading_chunks.keys())])
 	initial_load_progress.emit(total_progress, status)
 
 	# Все начальные чанки загружены?

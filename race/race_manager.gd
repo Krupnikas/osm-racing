@@ -180,11 +180,13 @@ func _on_race_ready() -> void:
 	await get_tree().physics_frame
 
 	# Проверяем что машина на правильной высоте (защита от багов)
-	if _car and _car.global_position.y > 10.0:
-		print("RaceManager: WARNING - Car at height %.1f, correcting to 1.5" % _car.global_position.y)
-		var pos := _car.global_position
-		pos.y = 1.0
-		_car.global_position = pos
+	if _car:
+		var expected_y := _get_ground_y(_car.global_position.x, _car.global_position.z) + 1.0
+		if absf(_car.global_position.y - expected_y) > 50.0:
+			print("RaceManager: WARNING - Car at height %.1f, correcting to %.1f" % [_car.global_position.y, expected_y])
+			var pos := _car.global_position
+			pos.y = expected_y
+			_car.global_position = pos
 
 	# Создаём финишную линию
 	_create_finish_line()
@@ -289,6 +291,7 @@ func _spawn_car_at_start() -> void:
 	var finish_pos := _latlon_to_local(current_track.finish_lat, current_track.finish_lon)
 
 	# Ищем ближайшую дорогу через TrafficManager
+	var found_road := false
 	var traffic_manager = get_tree().current_scene.find_child("TrafficManager", true, false)
 	if traffic_manager and traffic_manager.has_method("get_road_network"):
 		var road_network = traffic_manager.get_road_network()
@@ -296,10 +299,13 @@ func _spawn_car_at_start() -> void:
 			var nearest_wp = road_network.get_nearest_waypoint(start_pos)
 			if nearest_wp:
 				start_pos = nearest_wp.position
+				start_pos.y += 1.0
+				found_road = true
 				print("RaceManager: Found road waypoint near start at Y=%.1f" % nearest_wp.position.y)
 
-	# Поднимаем машину над дорогой
-	start_pos.y = 1.0
+	# Если дороги нет — используем raycast/рельеф
+	if not found_road:
+		start_pos.y = _get_ground_y(start_pos.x, start_pos.z) + 1.0
 
 	# Сбрасываем физику машины перед спавном
 	if _car_rigidbody:
@@ -612,8 +618,12 @@ func _create_finish_line() -> void:
 		pole.position = Vector3(side * 6.5, 2.0, 0)  # Столбы от земли вверх
 		_finish_line.add_child(pole)
 
-	# Позиция и ориентация - используем высоту дороги
+	# Высота финиша через raycast
+	var gy := _get_ground_y(finish_pos.x, finish_pos.z)
+	print("RaceManager: Finish ground_y=%.2f (raycast) at world(%.1f, %.1f)" % [gy, finish_pos.x, finish_pos.z])
+	finish_pos.y = gy
 	_finish_line.global_position = finish_pos
+	add_child(_finish_line)
 
 	# Поворачиваем перпендикулярно направлению движения
 	var dir := finish_pos - start_pos
@@ -624,9 +634,6 @@ func _create_finish_line() -> void:
 
 	# Подключаем сигнал
 	_finish_line.body_entered.connect(_on_finish_line_entered)
-
-	# Добавляем в сцену
-	add_child(_finish_line)
 
 	print("RaceManager: Finish line created at (%.1f, %.1f, %.1f)" % [
 		finish_pos.x, finish_pos.y, finish_pos.z
@@ -835,6 +842,30 @@ func _reset_vehicle_physics_state() -> void:
 	print("RaceManager: Reset GEVP physics state for %d wheels" % wheels.size())
 
 
+func _get_ground_y(x: float, z: float) -> float:
+	"""Найти высоту земли через physics raycast (точнее чем elevation grid)"""
+	# Raycast сверху вниз - находит реальную поверхность дороги/terrain
+	var world_3d := get_viewport().find_world_3d()
+	if world_3d:
+		var space_state := world_3d.direct_space_state
+		if space_state:
+			var from := Vector3(x, 1000.0, z)
+			var to := Vector3(x, -100.0, z)
+			var query := PhysicsRayQueryParameters3D.create(from, to)
+			var result := space_state.intersect_ray(query)
+			if not result.is_empty():
+				return result.position.y
+	# Fallback: elevation grid
+	if _terrain_generator and _terrain_generator.has_method("_sample_elevation"):
+		var elev: float = _terrain_generator._sample_elevation(x, z)
+		if elev != 0.0:
+			return elev
+	# Fallback: car level
+	if _car and is_instance_valid(_car):
+		return _car.global_position.y - 1.0
+	return 0.0
+
+
 func _latlon_to_local(lat: float, lon: float) -> Vector3:
 	"""Конвертировать GPS координаты в локальные (используем terrain_generator)"""
 	if _terrain_generator and _terrain_generator.has_method("_latlon_to_local"):
@@ -892,7 +923,7 @@ func _create_checkpoints() -> void:
 		# Визуализация - жёлтая разметка
 		_create_checkpoint_visuals(area)
 
-		# Позиция
+		cp_pos.y = _get_ground_y(cp_pos.x, cp_pos.z)
 		area.global_position = cp_pos
 
 		# Ориентация - к следующему чекпоинту или финишу
@@ -984,7 +1015,7 @@ func _create_barriers() -> void:
 	var local_points: Array = []
 	for latlon in current_track.route_points:
 		var pos := _latlon_to_local(latlon.x, latlon.y)
-		pos.y = 0.5  # Немного над землёй
+		pos.y = _get_ground_y(pos.x, pos.z) + 0.5
 		local_points.append(pos)
 
 	_barriers.build_barriers(local_points)

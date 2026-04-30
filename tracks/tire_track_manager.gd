@@ -56,6 +56,8 @@ func _process(_delta: float) -> void:
 	while _track_points.size() > 0 and (now - _track_points[0].time) > TRACK_LIFETIME:
 		_track_points.pop_front()
 
+	if not is_instance_valid(_car):
+		return
 	# Обновляем origin (центрируем на машине)
 	var car_pos: Vector3 = _car.global_position
 	_origin = Vector2(car_pos.x - WORLD_SIZE * 0.5, car_pos.z - WORLD_SIZE * 0.5)
