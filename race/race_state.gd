@@ -18,6 +18,9 @@ var spawn_heading_yaw: float = NAN
 # Тестовая трасса (без OSM)
 var test_track_id: String = ""  # "test_flat" или "test_suspension"
 
+# Карьера — если true, после гонки начисляется приз
+var is_career_race: bool = false
+
 # (Legacy) Трасса для автозапуска после перезагрузки сцены
 var pending_track = null
 

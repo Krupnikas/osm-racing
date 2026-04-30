@@ -87,6 +87,11 @@ static func _update_car_references(scene_root: Node3D, new_car: Node3D) -> void:
 		if race_mgr.get("_car_rigidbody") != null:
 			race_mgr._car_rigidbody = new_car if new_car is RigidBody3D else null
 
+	# OSMTerrain — закешированная ссылка _car
+	var terrain := scene_root.get_node_or_null("OSMTerrain")
+	if terrain and terrain.get("_car") != null:
+		terrain._car = new_car
+
 
 static func spawn_car_at(parent: Node, position: Vector3, rotation_y: float = 0.0) -> Node3D:
 	## Создаёт выбранную машину в указанной позиции

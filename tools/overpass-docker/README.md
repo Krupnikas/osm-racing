@@ -1,94 +1,85 @@
-# Pre-cache OSM data for the game
+# Local Overpass API for OSM Racing
 
-Pre-caches all Overpass API data for a city so chunks load instantly from disk instead of waiting for remote servers.
+Pre-caches Overpass API data so chunks load instantly from disk.
 
-## Quick start (Cherepovets, ~15 min)
-
-### 1. Prerequisites
+## Prerequisites
 
 - Docker Desktop running
-- `osmium-tool` installed: `brew install osmium-tool`
+- `osmium-tool`: `brew install osmium-tool`
 
-### 2. Download and prepare OSM data
+## Quick start — all cities at once
 
 ```bash
 cd tools/overpass-docker
 
-# Download Northwestern Federal District PBF (~600MB)
-curl -L -o northwestern-fed-district.osm.pbf \
-  "https://download.geofabrik.de/russia/northwestern-fed-district-latest.osm.pbf"
+# Download OSM data, extract cities, init Docker containers
+./setup_cities.sh
 
-# Extract Cherepovets (~2.5MB)
-osmium extract --bbox 37.67,59.06,38.05,59.19 \
-  northwestern-fed-district.osm.pbf -o cherepovets.osm.bz2
-
-# Copy to source dir
-mkdir -p source
-cp cherepovets.osm.bz2 source/
+# Precache all cities
+./precache_all.sh
 ```
 
-### 3. Initialize local Overpass
+This sets up 4 containers:
 
-First run — builds the database (takes ~30 seconds for Cherepovets):
+| City | Port | Geofabrik region |
+|------|------|-----------------|
+| Cherepovets | 12346 | Northwestern Federal District |
+| Moscow | 12347 | Central Federal District |
+| Tbilisi | 12348 | Georgia |
+| Dubai | 12349 | GCC States |
+
+## Setup a single city
 
 ```bash
-# Start init mode
-docker-compose -f docker-compose.init.yml up
+cd tools/overpass-docker
 
-# Wait until you see "Overpass container initialization complete. Exiting."
-# Then Ctrl+C
+# Only Moscow
+./setup_cities.sh moscow
+
+# Then precache
+cd ../..
+python3 tools/precache_overpass.py --city Moscow --local --port 12347
 ```
 
-### 4. Run Overpass API
+## Precache commands
 
 ```bash
-docker-compose up -d
-
-# Wait ~10 seconds, then fix permissions and verify
-docker exec overpass-cherepovets chmod 755 /db/ /db/db/
-curl -s -d 'data=[out:json];node(59.14,37.94,59.15,37.95);out 1;' \
-  http://localhost:12346/api/interpreter | python3 -c "import json,sys; json.load(sys.stdin); print('API OK')"
-```
-
-### 5. Pre-cache the city
-
-```bash
-cd ../..  # back to project root
-
-# Cache entire Cherepovets (~7000 chunks, ~12 min)
+# Cherepovets (port 12346, default)
 python3 tools/precache_overpass.py --city Cherepovets --local
 
-# Stop Docker when done
-docker stop overpass-cherepovets
+# Moscow (port 12347)
+python3 tools/precache_overpass.py --city Moscow --local --port 12347
+
+# Tbilisi (port 12348)
+python3 tools/precache_overpass.py --city Tbilisi --local --port 12348
+
+# Dubai (port 12349)
+python3 tools/precache_overpass.py --city Dubai --local --port 12349
+
+# Dry run (show chunk count without fetching)
+python3 tools/precache_overpass.py --city Dubai --local --port 12349 --dry-run
 ```
 
-That's it! The game will now load all Cherepovets chunks from cache.
-
-## Verify it works
-
-Launch the game and check the console output:
-- `OSM: CACHE HIT: ...` — loaded from cache (good)
-- `OSM: CACHE MISS: ...` — fetching from Overpass (should be 0 for cached cities)
-
-## Other cities
+## Managing containers
 
 ```bash
-# Any city by name (auto-fetches bbox from Nominatim):
-python3 tools/precache_overpass.py --city Moscow --local
+# Stop all
+docker stop overpass-cherepovets overpass-moscow overpass-tbilisi overpass-dubai
 
-# Or explicit bbox:
-python3 tools/precache_overpass.py --bbox 55.55,37.35,55.95,37.85 --local
+# Start all
+docker start overpass-cherepovets overpass-moscow overpass-tbilisi overpass-dubai
 
-# Radius around spawn point:
-python3 tools/precache_overpass.py --radius-km 3.0 --local
+# Remove all (keeps data volumes)
+docker rm overpass-cherepovets overpass-moscow overpass-tbilisi overpass-dubai
 
-# Without Docker (slow, uses public Overpass servers):
-python3 tools/precache_overpass.py --city Cherepovets
+# Remove data volumes too
+docker volume rm overpass_db_cherepovets overpass_db_moscow overpass_db_tbilisi overpass_db_dubai
 ```
 
 ## Notes
 
 - Cache dir: `~/Library/Application Support/Godot/app_userdata/OSM Racing/osm_cache/`
-- The script skips already cached chunks, so you can safely re-run it
-- Add `--dry-run` to see what would be fetched without making requests
-- The game uses a global coordinate grid so the cache works regardless of spawn position
+- The script skips already cached chunks — safe to re-run
+- Add `--dry-run` to see what would be fetched
+- PBF downloads are large (600MB–1.3GB) but only needed once
+- City extracts are small (2–30MB), init takes 30s–2min each

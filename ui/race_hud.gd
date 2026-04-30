@@ -171,6 +171,13 @@ func _show_results_screen() -> void:
 	# Проверяем режим: checkpoint или sprint
 	var is_checkpoint: bool = _race_manager != null and _race_manager.is_checkpoint_mode()
 
+	# Определяем позицию игрока
+	var player_position := 1
+	for result in _last_race_results:
+		if result.is_player:
+			player_position = result.position
+			break
+
 	if is_checkpoint or _last_race_results.is_empty():
 		# Checkpoint mode: показываем только своё время
 		$ResultPanel/VBox/FinishLabel.text = "РЕЗУЛЬТАТЫ"
@@ -184,13 +191,69 @@ func _show_results_screen() -> void:
 		$ResultPanel/VBox/TimeLabel.text = time_str
 	else:
 		# Sprint mode: показываем таблицу результатов
-		$ResultPanel/VBox/FinishLabel.text = "1 МЕСТО!"
-		$ResultPanel/VBox/FinishLabel.modulate = Color(1, 0.85, 0)  # Золотой
+		$ResultPanel/VBox/FinishLabel.text = "%d МЕСТО!" % player_position
+		if player_position == 1:
+			$ResultPanel/VBox/FinishLabel.modulate = Color(1, 0.85, 0)  # Золотой
+		elif player_position == 2:
+			$ResultPanel/VBox/FinishLabel.modulate = Color(0.8, 0.8, 0.8)  # Серебро
+		elif player_position == 3:
+			$ResultPanel/VBox/FinishLabel.modulate = Color(0.8, 0.5, 0.2)  # Бронза
+		else:
+			$ResultPanel/VBox/FinishLabel.modulate = Color(0.6, 0.6, 0.6)
 		$ResultPanel/VBox/TimeTitle.visible = false
 		$ResultPanel/VBox/TimeLabel.visible = false
 
 		# Создаём таблицу результатов
 		_create_standings()
+
+	# Начисляем приз за карьерную гонку
+	_award_career_prize(player_position)
+
+
+func _award_career_prize(player_position: int) -> void:
+	"""Начислить приз за карьерную гонку и показать на экране результатов"""
+	if not RaceState.is_career_race:
+		return
+	var track = _race_manager.current_track if _race_manager else null
+	if not track:
+		return
+	if CareerState.active_profile == "":
+		return
+
+	var track_id: String = track.track_id
+	var prize := CareerState.award_race_prize(track_id, player_position)
+
+	# Показываем приз на экране результатов
+	var vbox := get_node_or_null("ResultPanel/VBox")
+	if not vbox:
+		return
+
+	# Удаляем предыдущий лейбл приза (если есть)
+	var old_prize := vbox.get_node_or_null("PrizeLabel")
+	if old_prize:
+		old_prize.queue_free()
+
+	var prize_label := Label.new()
+	prize_label.name = "PrizeLabel"
+	prize_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	prize_label.add_theme_font_size_override("font_size", 32)
+
+	if prize > 0:
+		prize_label.text = "+ %s" % CareerState.format_money(prize)
+		prize_label.add_theme_color_override("font_color", Color(0.2, 1, 0.2))
+	else:
+		prize_label.text = "Без приза"
+		prize_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+
+	# Вставляем после FinishLabel
+	var finish_idx := 0
+	var finish_label := vbox.get_node_or_null("FinishLabel")
+	if finish_label:
+		finish_idx = finish_label.get_index() + 1
+	vbox.add_child(prize_label)
+	vbox.move_child(prize_label, finish_idx)
+
+	RaceState.is_career_race = false
 
 
 func _format_time(time: float) -> String:
