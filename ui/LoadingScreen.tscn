@@ -1,0 +1,223 @@
+[gd_scene load_steps=12 format=3 uid="uid://loading_screen_001"]
+
+[ext_resource type="Script"      path="res://ui/LoadingScreen.gd"               id="1_loader"]
+[ext_resource type="PackedScene" path="res://ui/MenuBackdrop.tscn"              id="2_bg"]
+[ext_resource type="Script"      path="res://ui/components/corner_chrome.gd"    id="3_chrome"]
+[ext_resource type="Shader"      path="res://ui/italic_skew.gdshader"           id="4_italic"]
+[ext_resource type="Shader"      path="res://ui/gauss_blur.gdshader"            id="5_blur"]
+
+[sub_resource type="ShaderMaterial" id="TitleItalic"]
+shader = ExtResource("4_italic")
+shader_parameter/shear = 0.213
+shader_parameter/ref_height = 132.0
+
+[sub_resource type="ShaderMaterial" id="HaloBlurH"]
+shader = ExtResource("5_blur")
+shader_parameter/blur_radius = 32.0
+shader_parameter/intensity = 1.0
+shader_parameter/axis = Vector2(1, 0)
+
+[sub_resource type="ShaderMaterial" id="HaloBlurV"]
+shader = ExtResource("5_blur")
+shader_parameter/blur_radius = 32.0
+shader_parameter/intensity = 1.6
+shader_parameter/axis = Vector2(0, 1)
+
+[sub_resource type="ViewportTexture" id="HaloSrcTex"]
+viewport_path = NodePath("HaloSrc")
+
+[sub_resource type="ViewportTexture" id="HaloHTex"]
+viewport_path = NodePath("HaloBlurH")
+
+[node name="LoadingScreen" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1_loader")
+
+[node name="HaloSrc" type="SubViewport" parent="."]
+disable_3d = true
+transparent_bg = true
+size = Vector2i(1400, 280)
+render_target_update_mode = 4
+
+[node name="HaloLabel" type="Label" parent="HaloSrc"]
+text = "ЗАГРУЗКА"
+theme_type_variation = &"DisplayLabel"
+offset_right = 1400.0
+offset_bottom = 280.0
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_font_sizes/font_size = 132
+theme_override_colors/font_color = Color(0, 0, 0, 0)
+theme_override_colors/font_outline_color = Color(0, 0.906, 1, 1)
+theme_override_constants/outline_size = 6
+
+[node name="HaloBlurH" type="SubViewport" parent="."]
+disable_3d = true
+transparent_bg = true
+size = Vector2i(1400, 280)
+render_target_update_mode = 4
+
+[node name="Pass1" type="TextureRect" parent="HaloBlurH"]
+offset_right = 1400.0
+offset_bottom = 280.0
+texture = SubResource("HaloSrcTex")
+expand_mode = 1
+stretch_mode = 6
+texture_filter = 2
+material = SubResource("HaloBlurH")
+
+[node name="Backdrop" parent="." instance=ExtResource("2_bg")]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="Center" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -700.0
+offset_top = -240.0
+offset_right = 700.0
+offset_bottom = 240.0
+alignment = 1
+theme_override_constants/separation = 6
+
+[node name="Kicker" type="Label" parent="Center"]
+text = "// LOADING · ЗАГРУЗКА"
+theme_type_variation = &"MonoLabel"
+horizontal_alignment = 1
+modulate = Color(1, 0.168, 0.815, 1)
+theme_override_font_sizes/font_size = 14
+
+[node name="TitleStack" type="Control" parent="Center"]
+custom_minimum_size = Vector2(1400, 200)
+layout_mode = 2
+mouse_filter = 2
+
+[node name="HaloDisplay" type="TextureRect" parent="Center/TitleStack"]
+layout_mode = 1
+anchors_preset = 15
+anchor_left = 0.0
+anchor_top = 0.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 0.0
+offset_top = -40.0
+offset_right = 0.0
+offset_bottom = 40.0
+mouse_filter = 2
+texture = SubResource("HaloHTex")
+expand_mode = 1
+stretch_mode = 6
+texture_filter = 2
+material = SubResource("HaloBlurV")
+
+[node name="Title" type="Label" parent="Center/TitleStack"]
+text = "ЗАГРУЗКА"
+theme_type_variation = &"DisplayLabel"
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_font_sizes/font_size = 132
+theme_override_colors/font_color = Color(0, 0, 0, 0)
+theme_override_colors/font_outline_color = Color(0, 0.906, 1, 1)
+theme_override_constants/outline_size = 4
+
+[node name="Subtitle" type="Label" parent="Center"]
+text = "STAND BY · ПОДГОТОВКА ТРАССЫ"
+theme_type_variation = &"MonoLabel"
+horizontal_alignment = 1
+modulate = Color(0.353, 0.392, 0.471, 1)
+theme_override_font_sizes/font_size = 14
+
+[node name="ProgressGap" type="Control" parent="Center"]
+custom_minimum_size = Vector2(0, 28)
+layout_mode = 2
+mouse_filter = 2
+
+[node name="BarHolder" type="HBoxContainer" parent="Center"]
+layout_mode = 2
+alignment = 1
+
+[node name="Bar" type="HBoxContainer" parent="Center/BarHolder"]
+custom_minimum_size = Vector2(800, 22)
+layout_mode = 2
+size_flags_horizontal = 4
+theme_override_constants/separation = 4
+
+[node name="PercentRowHolder" type="HBoxContainer" parent="Center"]
+layout_mode = 2
+alignment = 1
+
+[node name="PercentRow" type="Control" parent="Center/PercentRowHolder"]
+custom_minimum_size = Vector2(800, 32)
+layout_mode = 2
+size_flags_horizontal = 4
+mouse_filter = 2
+
+[node name="SegLabel" type="Label" parent="Center/PercentRowHolder/PercentRow"]
+text = "// 0 / 40"
+theme_type_variation = &"MonoLabel"
+layout_mode = 1
+anchors_preset = 9
+anchor_bottom = 1.0
+offset_left = -3.0
+offset_right = 400.0
+modulate = Color(0.353, 0.392, 0.471, 1)
+theme_override_font_sizes/font_size = 12
+vertical_alignment = 1
+
+[node name="PercentRich" type="RichTextLabel" parent="Center/PercentRowHolder/PercentRow"]
+layout_mode = 1
+anchors_preset = 11
+anchor_left = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -200.0
+bbcode_enabled = true
+fit_content = true
+scroll_active = false
+text = "[right][font_size=22][color=#00e7ff]0[/color][/font_size][font_size=12][color=#5a6478]%[/color][/font_size][/right]"
+
+[node name="DotsHolder" type="HBoxContainer" parent="Center"]
+layout_mode = 2
+alignment = 1
+
+[node name="Dots" type="HBoxContainer" parent="Center/DotsHolder"]
+layout_mode = 2
+size_flags_horizontal = 4
+theme_override_constants/separation = -4
+
+[node name="CornerChrome" type="Control" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("3_chrome")
+
+[node name="VersionLabel" type="Label" parent="."]
+layout_mode = 1
+anchors_preset = 0
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 56.0
+offset_top = -56.0
+offset_right = 600.0
+offset_bottom = -32.0
+grow_vertical = 0
+text = "// V0.1 ALPHA · BUILD 2026.04 · LOADING"
+theme_type_variation = &"MonoLabel"
+modulate = Color(0.353, 0.392, 0.471, 1)
+theme_override_font_sizes/font_size = 12

@@ -1,11 +1,31 @@
-[gd_scene load_steps=7 format=3 uid="uid://dxqmenu001"]
+[gd_scene load_steps=13 format=3 uid="uid://dxqmenu001"]
 
-[ext_resource type="Script" path="res://ui/standalone_main_menu.gd" id="1_script"]
-[ext_resource type="Texture2D" path="res://ui/assets/zhazhda-speed.png" id="2_bg"]
+[ext_resource type="Script"      path="res://ui/standalone_main_menu.gd"          id="1_script"]
 [ext_resource type="PackedScene" uid="uid://car_selection_001" path="res://ui/car_selection.tscn" id="3_car_selection"]
-[ext_resource type="Theme" path="res://ui/racing_theme.tres" id="4_theme"]
-[ext_resource type="Script" path="res://ui/track_display.gd" id="5_track_display"]
-[ext_resource type="Script" path="res://ui/career_menu.gd" id="6_career_menu"]
+[ext_resource type="Script"      path="res://ui/track_display.gd"                 id="5_track_display"]
+[ext_resource type="Script"      path="res://ui/career_menu.gd"                   id="6_career_menu"]
+[ext_resource type="PackedScene" uid="uid://menu_backdrop_001" path="res://ui/MenuBackdrop.tscn" id="7_backdrop"]
+[ext_resource type="PackedScene" uid="uid://brand_mark_001"   path="res://ui/components/brand_mark.tscn" id="8_brand"]
+[ext_resource type="Script"      path="res://ui/components/corner_chrome.gd"      id="9_chrome"]
+[ext_resource type="Shader"      path="res://ui/gauss_blur.gdshader"              id="10_blur"]
+
+[sub_resource type="ShaderMaterial" id="GlowBlurH"]
+shader = ExtResource("10_blur")
+shader_parameter/blur_radius = 24.0
+shader_parameter/intensity = 1.0
+shader_parameter/axis = Vector2(1, 0)
+
+[sub_resource type="ShaderMaterial" id="GlowBlurV"]
+shader = ExtResource("10_blur")
+shader_parameter/blur_radius = 24.0
+shader_parameter/intensity = 1.4
+shader_parameter/axis = Vector2(0, 1)
+
+[sub_resource type="ViewportTexture" id="GlowSrcTex"]
+viewport_path = NodePath("GlowSrcVP")
+
+[sub_resource type="ViewportTexture" id="GlowHTex"]
+viewport_path = NodePath("GlowBlurH")
 
 [node name="StandaloneMainMenu" type="Control"]
 process_mode = 3
@@ -16,105 +36,418 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
-theme = ExtResource("4_theme")
 script = ExtResource("1_script")
 
-[node name="Background" type="TextureRect" parent="."]
-layout_mode = 1
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
-mouse_filter = 2
-texture = ExtResource("2_bg")
+[node name="GlowSrcVP" type="SubViewport" parent="."]
+disable_3d = true
+transparent_bg = true
+size = Vector2i(720, 90)
+render_target_update_mode = 4
+
+[node name="GlowSrcLabel" type="Label" parent="GlowSrcVP"]
+offset_left = 32.0
+offset_right = 720.0
+offset_bottom = 90.0
+text = ""
+theme_type_variation = &"DisplayLabel"
+theme_override_font_sizes/font_size = 56
+theme_override_colors/font_color = Color(0, 0, 0, 0)
+theme_override_colors/font_outline_color = Color(0, 0.906, 1, 1)
+theme_override_constants/outline_size = 6
+horizontal_alignment = 0
+vertical_alignment = 1
+
+[node name="GlowBlurH" type="SubViewport" parent="."]
+disable_3d = true
+transparent_bg = true
+size = Vector2i(720, 90)
+render_target_update_mode = 4
+
+[node name="Pass1" type="TextureRect" parent="GlowBlurH"]
+offset_right = 720.0
+offset_bottom = 90.0
+texture = SubResource("GlowSrcTex")
 expand_mode = 1
 stretch_mode = 6
+texture_filter = 2
+material = SubResource("GlowBlurH")
 
-[node name="Overlay" type="ColorRect" parent="Background"]
+[node name="Backdrop" parent="." instance=ExtResource("7_backdrop")]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
+
+[node name="GlowDisplay" type="TextureRect" parent="."]
+visible = false
+layout_mode = 0
 mouse_filter = 2
-color = Color(0, 0, 0, 0.15)
+texture = SubResource("GlowHTex")
+expand_mode = 1
+stretch_mode = 6
+texture_filter = 2
+material = SubResource("GlowBlurV")
+
+[node name="BrandBlock" type="VBoxContainer" parent="."]
+layout_mode = 1
+offset_left = 90.0
+offset_top = 90.0
+offset_right = 600.0
+offset_bottom = 360.0
+mouse_filter = 2
+theme_override_constants/separation = 36
+
+[node name="BrandMark" parent="BrandBlock" instance=ExtResource("8_brand")]
+layout_mode = 2
+scale = Vector2(1.4, 1.4)
+pivot_offset = Vector2(0, 0)
+
+[node name="Kicker" type="Label" parent="BrandBlock"]
+layout_mode = 2
+text = "// V0.1 ALPHA · BUILD 2026.04"
+theme_type_variation = &"MonoLabel"
+theme_override_font_sizes/font_size = 12
+modulate = Color(0, 0.906, 1, 1)
+
+[node name="Status" type="Label" parent="BrandBlock"]
+layout_mode = 2
+text = "УЛИЧНЫЕ ГОНКИ · 2:14 AM
+ТЕМПЕРАТУРА АСФАЛЬТА: 18°C
+ДОЖДЬ: НЕТ · ВИДИМОСТЬ: ХОРОШО"
+theme_type_variation = &"MonoLabel"
+theme_override_font_sizes/font_size = 13
+theme_override_constants/line_spacing = 6
+modulate = Color(0.353, 0.392, 0.471, 1)
+
+[node name="MenuHeader" type="HBoxContainer" parent="."]
+layout_mode = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -840.0
+offset_top = 220.0
+offset_right = -120.0
+offset_bottom = 248.0
+mouse_filter = 2
+theme_override_constants/separation = 18
+
+[node name="Bar" type="ColorRect" parent="MenuHeader"]
+custom_minimum_size = Vector2(5, 28)
+layout_mode = 2
+mouse_filter = 2
+color = Color(0, 0.906, 1, 1)
+
+[node name="HeaderKicker" type="Label" parent="MenuHeader"]
+layout_mode = 2
+size_flags_vertical = 4
+text = "// ГЛАВНОЕ МЕНЮ · MAIN MENU"
+theme_type_variation = &"MonoLabel"
+theme_override_font_sizes/font_size = 12
+modulate = Color(0, 0.906, 1, 1)
 
 [node name="VBox" type="VBoxContainer" parent="."]
 layout_mode = 1
-anchors_preset = 7
-anchor_left = 0.5
-anchor_top = 1.0
-anchor_right = 0.5
+anchor_left = 1.0
+anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = -200.0
-offset_top = -400.0
-offset_right = 200.0
-offset_bottom = -50.0
-grow_horizontal = 2
+offset_left = -840.0
+offset_top = 290.0
+offset_right = -120.0
+offset_bottom = -120.0
+mouse_filter = 2
+theme_override_constants/separation = 4
+
+[node name="StartRow" type="HBoxContainer" parent="VBox"]
+custom_minimum_size = Vector2(0, 70)
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 24
+
+[node name="StartButton" type="Button" parent="VBox/StartRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_type_variation = &"MenuRow"
+text = "ВЫЕХАТЬ В ГОРОД"
+alignment = 0
+
+[node name="StartKickerStack" type="VBoxContainer" parent="VBox/StartRow"]
+custom_minimum_size = Vector2(180, 0)
+layout_mode = 2
+size_flags_vertical = 8
+mouse_filter = 2
+theme_override_constants/separation = 4
+
+[node name="StartKicker" type="Label" parent="VBox/StartRow/StartKickerStack"]
+layout_mode = 2
+text = "01 / FREE ROAM"
+theme_type_variation = &"MonoTight"
+theme_override_font_sizes/font_size = 11
+modulate = Color(0.353, 0.392, 0.471, 1)
+horizontal_alignment = 2
+
+[node name="StartHint" type="Label" parent="VBox/StartRow/StartKickerStack"]
+layout_mode = 2
+text = "Drive the open city"
+theme_type_variation = &"MonoTight"
+theme_override_font_sizes/font_size = 10
+modulate = Color(0.353, 0.392, 0.471, 0.75)
+horizontal_alignment = 2
+
+[node name="RacesRow" type="HBoxContainer" parent="VBox"]
+custom_minimum_size = Vector2(0, 70)
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 24
+
+[node name="RacesButton" type="Button" parent="VBox/RacesRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_type_variation = &"MenuRow"
+text = "БЫСТРЫЙ ЗАЕЗД"
+alignment = 0
+
+[node name="RacesKickerStack" type="VBoxContainer" parent="VBox/RacesRow"]
+custom_minimum_size = Vector2(180, 0)
+layout_mode = 2
+size_flags_vertical = 8
+mouse_filter = 2
+theme_override_constants/separation = 4
+
+[node name="RacesKicker" type="Label" parent="VBox/RacesRow/RacesKickerStack"]
+layout_mode = 2
+text = "02 / QUICK RACE"
+theme_type_variation = &"MonoTight"
+theme_override_font_sizes/font_size = 11
+modulate = Color(0.353, 0.392, 0.471, 1)
+horizontal_alignment = 2
+
+[node name="RacesHint" type="Label" parent="VBox/RacesRow/RacesKickerStack"]
+layout_mode = 2
+text = "Sprint or checkpoint"
+theme_type_variation = &"MonoTight"
+theme_override_font_sizes/font_size = 10
+modulate = Color(0.353, 0.392, 0.471, 0.75)
+horizontal_alignment = 2
+
+[node name="CarSelectionRow" type="HBoxContainer" parent="VBox"]
+custom_minimum_size = Vector2(0, 70)
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 24
+
+[node name="CarSelectionButton" type="Button" parent="VBox/CarSelectionRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_type_variation = &"MenuRow"
+text = "АВТОСАЛОН"
+alignment = 0
+
+[node name="CarSelectionKickerStack" type="VBoxContainer" parent="VBox/CarSelectionRow"]
+custom_minimum_size = Vector2(180, 0)
+layout_mode = 2
+size_flags_vertical = 8
+mouse_filter = 2
+theme_override_constants/separation = 4
+
+[node name="CarSelectionKicker" type="Label" parent="VBox/CarSelectionRow/CarSelectionKickerStack"]
+layout_mode = 2
+text = "03 / GARAGE"
+theme_type_variation = &"MonoTight"
+theme_override_font_sizes/font_size = 11
+modulate = Color(0.353, 0.392, 0.471, 1)
+horizontal_alignment = 2
+
+[node name="CarSelectionHint" type="Label" parent="VBox/CarSelectionRow/CarSelectionKickerStack"]
+layout_mode = 2
+text = "Browse & buy cars"
+theme_type_variation = &"MonoTight"
+theme_override_font_sizes/font_size = 10
+modulate = Color(0.353, 0.392, 0.471, 0.75)
+horizontal_alignment = 2
+
+[node name="CareerRow" type="HBoxContainer" parent="VBox"]
+custom_minimum_size = Vector2(0, 70)
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 24
+
+[node name="CareerButton" type="Button" parent="VBox/CareerRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_type_variation = &"MenuRow"
+text = "КАРЬЕРА"
+alignment = 0
+
+[node name="CareerKickerStack" type="VBoxContainer" parent="VBox/CareerRow"]
+custom_minimum_size = Vector2(180, 0)
+layout_mode = 2
+size_flags_vertical = 8
+mouse_filter = 2
+theme_override_constants/separation = 4
+
+[node name="CareerKicker" type="Label" parent="VBox/CareerRow/CareerKickerStack"]
+layout_mode = 2
+text = "04 / CAREER"
+theme_type_variation = &"MonoTight"
+theme_override_font_sizes/font_size = 11
+modulate = Color(0.353, 0.392, 0.471, 1)
+horizontal_alignment = 2
+
+[node name="CareerHint" type="Label" parent="VBox/CareerRow/CareerKickerStack"]
+layout_mode = 2
+text = "Underground progression"
+theme_type_variation = &"MonoTight"
+theme_override_font_sizes/font_size = 10
+modulate = Color(0.353, 0.392, 0.471, 0.75)
+horizontal_alignment = 2
+
+[node name="SettingsRow" type="HBoxContainer" parent="VBox"]
+custom_minimum_size = Vector2(0, 70)
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 24
+
+[node name="SettingsButton" type="Button" parent="VBox/SettingsRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_type_variation = &"MenuRow"
+text = "НАСТРОЙКИ"
+alignment = 0
+
+[node name="SettingsKickerStack" type="VBoxContainer" parent="VBox/SettingsRow"]
+custom_minimum_size = Vector2(180, 0)
+layout_mode = 2
+size_flags_vertical = 8
+mouse_filter = 2
+theme_override_constants/separation = 4
+
+[node name="SettingsKicker" type="Label" parent="VBox/SettingsRow/SettingsKickerStack"]
+layout_mode = 2
+text = "05 / SETTINGS"
+theme_type_variation = &"MonoTight"
+theme_override_font_sizes/font_size = 11
+modulate = Color(0.353, 0.392, 0.471, 1)
+horizontal_alignment = 2
+
+[node name="SettingsHint" type="Label" parent="VBox/SettingsRow/SettingsKickerStack"]
+layout_mode = 2
+text = "Audio · video · controls"
+theme_type_variation = &"MonoTight"
+theme_override_font_sizes/font_size = 10
+modulate = Color(0.353, 0.392, 0.471, 0.75)
+horizontal_alignment = 2
+
+[node name="QuitRow" type="HBoxContainer" parent="VBox"]
+custom_minimum_size = Vector2(0, 70)
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = 24
+
+[node name="QuitButton" type="Button" parent="VBox/QuitRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_type_variation = &"MenuRow"
+text = "ВЫХОД"
+alignment = 0
+
+[node name="QuitKickerStack" type="VBoxContainer" parent="VBox/QuitRow"]
+custom_minimum_size = Vector2(180, 0)
+layout_mode = 2
+size_flags_vertical = 8
+mouse_filter = 2
+theme_override_constants/separation = 4
+
+[node name="QuitKicker" type="Label" parent="VBox/QuitRow/QuitKickerStack"]
+layout_mode = 2
+text = "06 / QUIT"
+theme_type_variation = &"MonoTight"
+theme_override_font_sizes/font_size = 11
+modulate = Color(0.353, 0.392, 0.471, 1)
+horizontal_alignment = 2
+
+[node name="QuitHint" type="Label" parent="VBox/QuitRow/QuitKickerStack"]
+layout_mode = 2
+text = "Exit to desktop"
+theme_type_variation = &"MonoTight"
+theme_override_font_sizes/font_size = 10
+modulate = Color(0.353, 0.392, 0.471, 0.75)
+horizontal_alignment = 2
+
+[node name="Footer" type="HBoxContainer" parent="."]
+layout_mode = 1
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 90.0
+offset_top = -86.0
+offset_right = 800.0
+offset_bottom = -56.0
 grow_vertical = 0
 mouse_filter = 2
+theme_override_constants/separation = 36
 
-[node name="Spacer" type="Control" parent="VBox"]
+[node name="Hint1" type="HBoxContainer" parent="Footer"]
 layout_mode = 2
-size_flags_vertical = 3
 mouse_filter = 2
+theme_override_constants/separation = 6
 
-[node name="StartButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(400, 80)
+[node name="Symbol" type="Label" parent="Footer/Hint1"]
 layout_mode = 2
-theme_override_colors/font_color = Color(1, 1, 1, 1)
-theme_override_colors/font_hover_color = Color(1, 1, 0.5, 1)
-theme_override_colors/font_pressed_color = Color(0.8, 0.8, 0.8, 1)
-theme_override_font_sizes/font_size = 42
-text = "▶ ВЫЕХАТЬ В ГОРОД"
+text = "↑↓"
+theme_type_variation = &"MonoLabel"
+theme_override_font_sizes/font_size = 12
+modulate = Color(0, 0.906, 1, 1)
 
-[node name="RacesButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(400, 70)
+[node name="Word" type="Label" parent="Footer/Hint1"]
 layout_mode = 2
-theme_override_colors/font_color = Color(1, 1, 1, 1)
-theme_override_colors/font_hover_color = Color(1, 0.5, 0.5, 1)
-theme_override_font_sizes/font_size = 36
-text = "🏁 БЫСТРЫЙ ЗАЕЗД"
+text = "НАВИГАЦИЯ"
+theme_type_variation = &"MonoLabel"
+theme_override_font_sizes/font_size = 12
+modulate = Color(0.353, 0.392, 0.471, 1)
 
-[node name="CarSelectionButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(400, 70)
+[node name="Hint2" type="HBoxContainer" parent="Footer"]
 layout_mode = 2
-theme_override_colors/font_color = Color(1, 1, 1, 1)
-theme_override_colors/font_hover_color = Color(0.5, 0.8, 1, 1)
-theme_override_font_sizes/font_size = 36
-text = "🚗 ВЫБОР МАШИНЫ"
+mouse_filter = 2
+theme_override_constants/separation = 6
 
-[node name="CareerButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(400, 70)
+[node name="Symbol" type="Label" parent="Footer/Hint2"]
 layout_mode = 2
-theme_override_colors/font_color = Color(1, 1, 1, 1)
-theme_override_colors/font_hover_color = Color(1, 0.8, 0.2, 1)
-theme_override_font_sizes/font_size = 36
-text = "🏆 КАРЬЕРА"
+text = "↵"
+theme_type_variation = &"MonoLabel"
+theme_override_font_sizes/font_size = 12
+modulate = Color(0, 0.906, 1, 1)
 
-[node name="ControlsButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(400, 70)
+[node name="Word" type="Label" parent="Footer/Hint2"]
 layout_mode = 2
-theme_override_colors/font_color = Color(1, 1, 1, 1)
-theme_override_colors/font_hover_color = Color(1, 1, 0.5, 1)
-theme_override_font_sizes/font_size = 36
-text = "⚙ УПРАВЛЕНИЕ"
+text = "ВЫБОР"
+theme_type_variation = &"MonoLabel"
+theme_override_font_sizes/font_size = 12
+modulate = Color(0.353, 0.392, 0.471, 1)
 
-[node name="SettingsButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(350, 70)
+[node name="Hint3" type="HBoxContainer" parent="Footer"]
 layout_mode = 2
-theme_override_font_sizes/font_size = 36
-text = "Настройки"
+mouse_filter = 2
+theme_override_constants/separation = 6
 
-[node name="QuitButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(400, 70)
+[node name="Symbol" type="Label" parent="Footer/Hint3"]
 layout_mode = 2
-theme_override_colors/font_color = Color(1, 1, 1, 1)
-theme_override_colors/font_hover_color = Color(1, 1, 0.5, 1)
-theme_override_font_sizes/font_size = 36
-text = "✕ ВЫХОД"
+text = "ESC"
+theme_type_variation = &"MonoLabel"
+theme_override_font_sizes/font_size = 12
+modulate = Color(1, 0.168, 0.815, 1)
+
+[node name="Word" type="Label" parent="Footer/Hint3"]
+layout_mode = 2
+text = "ВЫЙТИ"
+theme_type_variation = &"MonoLabel"
+theme_override_font_sizes/font_size = 12
+modulate = Color(0.353, 0.392, 0.471, 1)
+
+[node name="CornerChrome" type="Control" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("9_chrome")
 
 [node name="LocationPanel" type="Panel" parent="."]
 visible = false
@@ -265,71 +598,6 @@ layout_mode = 2
 custom_minimum_size = Vector2(0, 50)
 layout_mode = 2
 theme_override_font_sizes/font_size = 20
-text = "Назад"
-
-[node name="ControlsPanel" type="Panel" parent="."]
-visible = false
-layout_mode = 1
-anchors_preset = 8
-anchor_left = 0.5
-anchor_top = 0.5
-anchor_right = 0.5
-anchor_bottom = 0.5
-offset_left = -350.0
-offset_top = -300.0
-offset_right = 350.0
-offset_bottom = 300.0
-grow_horizontal = 2
-grow_vertical = 2
-
-[node name="VBox" type="VBoxContainer" parent="ControlsPanel"]
-layout_mode = 1
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-offset_left = 30.0
-offset_top = 30.0
-offset_right = -30.0
-offset_bottom = -30.0
-grow_horizontal = 2
-grow_vertical = 2
-
-[node name="Title" type="Label" parent="ControlsPanel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 36
-text = "Управление"
-horizontal_alignment = 1
-
-[node name="Spacer" type="Control" parent="ControlsPanel/VBox"]
-custom_minimum_size = Vector2(0, 20)
-layout_mode = 2
-
-[node name="Controls" type="Label" parent="ControlsPanel/VBox"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 24
-text = "W/S или стрелки - Газ/Тормоз
-A/D или стрелки - Поворот
-Пробел - Ручной тормоз
-
-C - Переключение камеры
-ПКМ + мышь - Вращение камеры
-Колёсико - Зум
-
-N - Ночной режим
-R - Дождь
-G - Неон под машиной
-M - Следующий трек
-
-Escape - Меню паузы"
-
-[node name="Spacer2" type="Control" parent="ControlsPanel/VBox"]
-layout_mode = 2
-size_flags_vertical = 3
-
-[node name="BackButton" type="Button" parent="ControlsPanel/VBox"]
-custom_minimum_size = Vector2(0, 60)
-layout_mode = 2
-theme_override_font_sizes/font_size = 28
 text = "Назад"
 
 [node name="SettingsPanel" type="Panel" parent="."]
@@ -497,32 +765,17 @@ script = ExtResource("6_career_menu")
 [node name="TrackDisplay" type="CanvasLayer" parent="."]
 script = ExtResource("5_track_display")
 
-[node name="Version" type="Label" parent="."]
-layout_mode = 1
-anchors_preset = 2
-anchor_top = 1.0
-anchor_bottom = 1.0
-offset_left = 10.0
-offset_top = -30.0
-offset_right = 200.0
-grow_vertical = 0
-theme_override_font_sizes/font_size = 16
-theme_override_colors/font_color = Color(0.5, 0.5, 0.5, 1)
-text = "v0.1 alpha"
-
-[connection signal="pressed" from="VBox/StartButton" to="." method="_on_start_pressed"]
-[connection signal="pressed" from="VBox/RacesButton" to="." method="_on_races_pressed"]
-[connection signal="pressed" from="VBox/CarSelectionButton" to="." method="_on_car_selection_pressed"]
-[connection signal="pressed" from="VBox/CareerButton" to="." method="_on_career_pressed"]
-[connection signal="pressed" from="VBox/ControlsButton" to="." method="_on_controls_pressed"]
-[connection signal="pressed" from="VBox/SettingsButton" to="." method="_on_settings_pressed"]
-[connection signal="pressed" from="VBox/QuitButton" to="." method="_on_quit_pressed"]
+[connection signal="pressed" from="VBox/StartRow/StartButton" to="." method="_on_start_pressed"]
+[connection signal="pressed" from="VBox/RacesRow/RacesButton" to="." method="_on_races_pressed"]
+[connection signal="pressed" from="VBox/CarSelectionRow/CarSelectionButton" to="." method="_on_car_selection_pressed"]
+[connection signal="pressed" from="VBox/CareerRow/CareerButton" to="." method="_on_career_pressed"]
+[connection signal="pressed" from="VBox/SettingsRow/SettingsButton" to="." method="_on_settings_pressed"]
+[connection signal="pressed" from="VBox/QuitRow/QuitButton" to="." method="_on_quit_pressed"]
 [connection signal="pressed" from="LocationPanel/VBox/BackButton" to="." method="_on_location_back_pressed"]
 [connection signal="pressed" from="ModesPanel/VBox/SprintButton" to="." method="_on_sprint_pressed"]
 [connection signal="pressed" from="ModesPanel/VBox/CheckpointButton" to="." method="_on_checkpoint_pressed"]
 [connection signal="pressed" from="ModesPanel/VBox/BackButton" to="." method="_on_modes_back_pressed"]
 [connection signal="pressed" from="TracksPanel/VBox/BackButton" to="." method="_on_tracks_back_pressed"]
-[connection signal="pressed" from="ControlsPanel/VBox/BackButton" to="." method="_on_controls_back_pressed"]
 [connection signal="value_changed" from="SettingsPanel/VBox/MusicVolBox/MusicVolSlider" to="." method="_on_music_vol_changed"]
 [connection signal="value_changed" from="SettingsPanel/VBox/SFXVolBox/SFXVolSlider" to="." method="_on_sfx_vol_changed"]
 [connection signal="pressed" from="SettingsPanel/VBox/BackButton" to="." method="_on_settings_back_pressed"]

@@ -1,0 +1,66 @@
+[gd_scene load_steps=4 format=3 uid="uid://brand_mark_001"]
+
+[ext_resource type="Script" path="res://ui/components/brand_badge.gd" id="1_badge"]
+[ext_resource type="FontFile" path="res://ui/fonts/FiraSansCondensed-BoldItalic.ttf" id="2_fira_bold"]
+
+[sub_resource type="FontVariation" id="FiraTight"]
+base_font = ExtResource("2_fira_bold")
+spacing_glyph = 0
+
+[node name="BrandMark" type="HBoxContainer"]
+mouse_filter = 2
+theme_override_constants/separation = 14
+
+[node name="Badge" type="Control" parent="."]
+custom_minimum_size = Vector2(56, 56)
+layout_mode = 2
+size_flags_vertical = 4
+mouse_filter = 2
+script = ExtResource("1_badge")
+
+[node name="Letters" type="Label" parent="Badge"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 4.0
+offset_top = 2.0
+offset_right = -4.0
+offset_bottom = -8.0
+mouse_filter = 2
+text = "ЖС"
+theme_override_fonts/font = SubResource("FiraTight")
+theme_override_font_sizes/font_size = 32
+modulate = Color(0, 0.906, 1, 1)
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="TextStack" type="VBoxContainer" parent="."]
+layout_mode = 2
+size_flags_vertical = 4
+mouse_filter = 2
+theme_override_constants/separation = -2
+
+[node name="BrandLines" type="VBoxContainer" parent="TextStack"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_constants/separation = -10
+
+[node name="BrandTop" type="Label" parent="TextStack/BrandLines"]
+layout_mode = 2
+text = "ЖАЖДА"
+theme_override_fonts/font = SubResource("FiraTight")
+theme_override_font_sizes/font_size = 27
+
+[node name="BrandBottom" type="Label" parent="TextStack/BrandLines"]
+layout_mode = 2
+text = "СКОРОСТИ"
+theme_override_fonts/font = SubResource("FiraTight")
+theme_override_font_sizes/font_size = 27
+
+[node name="Tagline" type="Label" parent="TextStack"]
+layout_mode = 2
+text = "// ПОД ЗЕМЛЁЙ"
+theme_type_variation = &"MonoLabel"
+theme_override_font_sizes/font_size = 10
+modulate = Color(1, 0.168, 0.815, 1)

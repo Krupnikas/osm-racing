@@ -1,0 +1,193 @@
+[gd_resource type="Theme" load_steps=23 format=3]
+
+[ext_resource type="FontFile" path="res://ui/fonts/BarlowCondensed-BlackItalic.ttf" id="1_barlow"]
+[ext_resource type="FontFile" path="res://ui/fonts/Oswald-VariableFont_wght.ttf" id="2_oswald"]
+[ext_resource type="FontFile" path="res://ui/fonts/JetBrainsMono-VariableFont_wght.ttf" id="3_jbmono"]
+[ext_resource type="FontFile" path="res://ui/fonts/FiraSansCondensed-BlackItalic.ttf" id="6_fira"]
+[ext_resource type="FontFile" path="res://ui/fonts/FiraSansCondensed-BoldItalic.ttf" id="7_fira_bold"]
+
+[sub_resource type="FontVariation" id="OswaldSemi"]
+base_font = ExtResource("2_oswald")
+variation_opentype = {"wght": 600}
+
+[sub_resource type="FontVariation" id="OswaldBold"]
+base_font = ExtResource("2_oswald")
+variation_opentype = {"wght": 700}
+
+[sub_resource type="FontVariation" id="JBMonoBold"]
+base_font = ExtResource("3_jbmono")
+variation_opentype = {"wght": 700}
+spacing_glyph = 3
+
+[sub_resource type="FontVariation" id="OswaldHeavyItalic"]
+base_font = ExtResource("2_oswald")
+variation_opentype = {"wght": 700}
+
+[sub_resource type="FontVariation" id="OswaldSubItalic"]
+base_font = ExtResource("2_oswald")
+variation_opentype = {"wght": 600}
+
+[sub_resource type="FontVariation" id="FiraTracked"]
+base_font = ExtResource("7_fira_bold")
+spacing_glyph = 6
+
+[sub_resource type="FontVariation" id="JBMonoTight"]
+base_font = ExtResource("3_jbmono")
+variation_opentype = {"wght": 700}
+
+[sub_resource type="StyleBoxFlat" id="BtnNormal"]
+bg_color = Color(0.066, 0.082, 0.113, 1)
+border_width_left = 1
+border_width_right = 1
+border_width_top = 1
+border_width_bottom = 1
+border_color = Color(0.227, 0.267, 0.337, 1)
+content_margin_left = 32.0
+content_margin_right = 32.0
+content_margin_top = 14.0
+content_margin_bottom = 14.0
+skew = Vector2(-0.21, 0.0)
+
+[sub_resource type="StyleBoxFlat" id="BtnHover"]
+bg_color = Color(0.0, 0.906, 1.0, 0.10)
+border_width_left = 1
+border_width_right = 1
+border_width_top = 1
+border_width_bottom = 1
+border_color = Color(0.0, 0.906, 1.0, 1)
+content_margin_left = 32.0
+content_margin_right = 32.0
+content_margin_top = 14.0
+content_margin_bottom = 14.0
+skew = Vector2(-0.21, 0.0)
+shadow_color = Color(0.0, 0.906, 1.0, 0.55)
+shadow_size = 16
+
+[sub_resource type="StyleBoxFlat" id="BtnPressed"]
+bg_color = Color(0.0, 0.906, 1.0, 1)
+border_color = Color(0.0, 0.906, 1.0, 1)
+border_width_left = 1
+border_width_right = 1
+border_width_top = 1
+border_width_bottom = 1
+content_margin_left = 32.0
+content_margin_right = 32.0
+content_margin_top = 14.0
+content_margin_bottom = 14.0
+skew = Vector2(-0.21, 0.0)
+shadow_color = Color(0.0, 0.906, 1.0, 0.7)
+shadow_size = 24
+
+[sub_resource type="StyleBoxFlat" id="BtnFocus"]
+draw_center = false
+border_width_left = 2
+border_width_right = 2
+border_width_top = 2
+border_width_bottom = 2
+border_color = Color(1, 0.168, 0.815, 1)
+skew = Vector2(-0.21, 0.0)
+
+[sub_resource type="StyleBoxFlat" id="PanelNormal"]
+bg_color = Color(0.043, 0.055, 0.078, 0.92)
+border_width_left = 1
+border_width_right = 1
+border_width_top = 1
+border_width_bottom = 1
+border_color = Color(0.137, 0.165, 0.224, 1)
+content_margin_left = 22.0
+content_margin_right = 22.0
+content_margin_top = 22.0
+content_margin_bottom = 22.0
+
+[sub_resource type="StyleBoxEmpty" id="EmptyStyle"]
+
+[sub_resource type="Gradient" id="MenuRowGradient"]
+offsets = PackedFloat32Array(0, 0.00195, 0.00195, 0.8, 1)
+colors = PackedColorArray(0, 0.906, 1, 1, 0, 0.906, 1, 1, 0, 0.906, 1, 0.05, 0, 0.906, 1, 0, 0, 0.906, 1, 0)
+
+[sub_resource type="GradientTexture2D" id="MenuRowGradientTex"]
+gradient = SubResource("MenuRowGradient")
+width = 2048
+height = 4
+use_hdr = true
+fill_from = Vector2(0, 0)
+fill_to = Vector2(1, 0)
+
+[sub_resource type="StyleBoxFlat" id="MenuRowNormal"]
+bg_color = Color(0, 0, 0, 0)
+border_width_left = 4
+border_color = Color(0, 0, 0, 0)
+content_margin_left = 28.0
+content_margin_right = 28.0
+content_margin_top = 14.0
+content_margin_bottom = 14.0
+
+[sub_resource type="StyleBoxTexture" id="MenuRowFocus"]
+texture = SubResource("MenuRowGradientTex")
+texture_margin_left = 4.0
+texture_margin_right = 0.0
+texture_margin_top = 0.0
+texture_margin_bottom = 0.0
+content_margin_left = 28.0
+content_margin_right = 28.0
+content_margin_top = 14.0
+content_margin_bottom = 14.0
+axis_stretch_horizontal = 0
+axis_stretch_vertical = 0
+
+[sub_resource type="StyleBoxFlat" id="PanelFocus"]
+bg_color = Color(0.0, 0.906, 1.0, 0.06)
+border_width_left = 4
+border_width_right = 1
+border_width_top = 1
+border_width_bottom = 1
+border_color = Color(0.0, 0.906, 1.0, 1)
+content_margin_left = 22.0
+content_margin_right = 22.0
+content_margin_top = 22.0
+content_margin_bottom = 22.0
+shadow_color = Color(0.0, 0.906, 1.0, 0.4)
+shadow_size = 24
+
+[resource]
+default_font = SubResource("OswaldSemi")
+default_font_size = 22
+Button/colors/font_color = Color(0.91, 0.925, 0.953, 1)
+Button/colors/font_hover_color = Color(0.0, 0.906, 1.0, 1)
+Button/colors/font_pressed_color = Color(0.024, 0.031, 0.047, 1)
+Button/font_sizes/font_size = 22
+Button/fonts/font = SubResource("OswaldBold")
+Button/styles/normal = SubResource("BtnNormal")
+Button/styles/hover = SubResource("BtnHover")
+Button/styles/pressed = SubResource("BtnPressed")
+Button/styles/focus = SubResource("BtnFocus")
+Label/colors/font_color = Color(0.91, 0.925, 0.953, 1)
+Label/font_sizes/font_size = 22
+Panel/styles/panel = SubResource("PanelNormal")
+DisplayLabel/colors/font_color = Color(0.91, 0.925, 0.953, 1)
+DisplayLabel/font_sizes/font_size = 56
+DisplayLabel/fonts/font = SubResource("FiraTracked")
+TitleLabel/colors/font_color = Color(0.91, 0.925, 0.953, 1)
+TitleLabel/font_sizes/font_size = 64
+TitleLabel/fonts/font = SubResource("FiraTracked")
+SubtitleLabel/colors/font_color = Color(0.91, 0.925, 0.953, 1)
+SubtitleLabel/font_sizes/font_size = 32
+SubtitleLabel/fonts/font = SubResource("OswaldSubItalic")
+MonoLabel/colors/font_color = Color(0.643, 0.678, 0.745, 1)
+MonoLabel/font_sizes/font_size = 11
+MonoLabel/fonts/font = SubResource("JBMonoBold")
+MonoTight/colors/font_color = Color(0.643, 0.678, 0.745, 1)
+MonoTight/font_sizes/font_size = 11
+MonoTight/fonts/font = SubResource("JBMonoTight")
+FocusPanel/styles/panel = SubResource("PanelFocus")
+MenuRow/styles/normal = SubResource("MenuRowNormal")
+MenuRow/styles/hover = SubResource("MenuRowFocus")
+MenuRow/styles/pressed = SubResource("MenuRowFocus")
+MenuRow/styles/focus = SubResource("MenuRowFocus")
+MenuRow/styles/disabled = SubResource("MenuRowNormal")
+MenuRow/colors/font_color = Color(0.91, 0.925, 0.953, 1)
+MenuRow/colors/font_hover_color = Color(0.0, 0.906, 1.0, 1)
+MenuRow/colors/font_pressed_color = Color(1, 0.168, 0.815, 1)
+MenuRow/colors/font_focus_color = Color(0.0, 0.906, 1.0, 1)
+MenuRow/font_sizes/font_size = 56
+MenuRow/fonts/font = SubResource("FiraTracked")

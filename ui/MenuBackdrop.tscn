@@ -1,0 +1,22 @@
+[gd_scene load_steps=3 format=3 uid="uid://menu_backdrop_001"]
+
+[ext_resource type="Script"    path="res://ui/MenuBackdrop.gd" id="1_bg"]
+[ext_resource type="Texture2D" path="res://ui/assets/menu_backdrop.png" id="2_atmos"]
+
+[node name="MenuBackdrop" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+script = ExtResource("1_bg")
+
+[node name="Atmosphere" type="TextureRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+texture = ExtResource("2_atmos")
+expand_mode = 1
+stretch_mode = 6

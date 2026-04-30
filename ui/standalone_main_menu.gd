@@ -28,8 +28,23 @@ var _map_selected_lat: float = 0.0
 var _map_selected_lon: float = 0.0
 
 
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_2:
+			_on_test_tracks_pressed()
+			get_viewport().set_input_as_handled()
+
+
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
+	# Refresh BrandBlock status time every minute (24h)
+	_refresh_brand_status()
+	var t := Timer.new()
+	t.wait_time = 30.0
+	t.autostart = true
+	t.timeout.connect(_refresh_brand_status)
+	add_child(t)
 
 	# Применяем сохранённые настройки громкости
 	var config := ConfigFile.new()
@@ -49,9 +64,16 @@ func _ready() -> void:
 	_populate_locations()
 	_populate_tracks()
 
-	# Добавляем кнопку "Выбрать на карте" и "Тестовые трассы" в главное меню
+	# Добавляем кнопку "Выбрать на карте" в главное меню
+	# (Тестовые трассы — скрытая фича, по клавише 2)
 	_add_map_button()
-	_add_test_tracks_button()
+
+	# Подсветка активного ряда + автофокус
+	_wire_menu_focus()
+	await get_tree().process_frame
+	var first_btn := get_node_or_null("VBox/StartRow/StartButton") as Button
+	if first_btn:
+		first_btn.grab_focus()
 
 	# Автостарт через командную строку: --autostart [location_index] [--lat X --lon Y]
 	var args := OS.get_cmdline_user_args()
@@ -112,56 +134,154 @@ func _populate_tracks(mode: String = "") -> void:
 		container.add_child(btn)
 
 
-func _add_map_button() -> void:
-	"""Добавить кнопку 'Выбрать на карте' в главное меню"""
-	var vbox = get_node_or_null("VBox")
+func _refresh_brand_status() -> void:
+	var status := get_node_or_null("BrandBlock/Status") as Label
+	if not status:
+		return
+	var t := Time.get_time_dict_from_system()
+	var hh: String = "%02d" % int(t.hour)
+	var mm: String = "%02d" % int(t.minute)
+	status.text = (
+		"УЛИЧНЫЕ ГОНКИ · %s:%s\n" % [hh, mm]
+		+ "ТЕМПЕРАТУРА АСФАЛЬТА: 18°C\n"
+		+ "ДОЖДЬ: НЕТ · ВИДИМОСТЬ: ХОРОШО"
+	)
+
+
+func _wire_menu_focus() -> void:
+	"""For every existing menu row, connect Button focus/mouse signals so the
+	sibling kicker label tints magenta when active."""
+	var vbox := get_node_or_null("VBox") as VBoxContainer
 	if not vbox:
 		return
-	var start_button = vbox.get_node_or_null("StartButton")
-	if not start_button:
+	for row in vbox.get_children():
+		if not (row is HBoxContainer):
+			continue
+		var btn: Button = null
+		var kicker: Label = null
+		for child in row.get_children():
+			if child is Button and btn == null:
+				btn = child
+			elif child is VBoxContainer and kicker == null:
+				# Kicker stack: first Label inside is the cyan/magenta kicker
+				for sub in child.get_children():
+					if sub is Label:
+						kicker = sub
+						break
+			elif child is Label and kicker == null:
+				kicker = child
+		if btn and kicker:
+			_connect_row_focus(btn, kicker)
+
+
+func _connect_row_focus(btn: Button, kicker: Label) -> void:
+	# Single source of truth = keyboard focus. Mouse hover just moves focus,
+	# so visual state is always exactly one row.
+	btn.focus_entered.connect(func():
+		kicker.modulate = UI.NEON_MAGENTA
+		_set_glow_for(btn))
+	btn.focus_exited.connect(func():
+		kicker.modulate = UI.INK_500)
+	btn.mouse_entered.connect(func(): btn.grab_focus())
+
+
+func _set_glow_for(btn: Button) -> void:
+	"""Position the soft-blur glow overlay over the focused button's text."""
+	var glow_label := get_node_or_null("GlowSrcVP/GlowSrcLabel") as Label
+	var glow_disp  := get_node_or_null("GlowDisplay") as TextureRect
+	if not glow_label or not glow_disp:
 		return
+	glow_label.text = btn.text
+	# Place GlowDisplay over the row that contains btn. The row is the HBox
+	# parent; its global rect aligns with the button + kicker visually.
+	var row := btn.get_parent() as Control
+	if row == null:
+		return
+	var origin: Vector2 = row.global_position - global_position
+	glow_disp.position = origin
+	glow_disp.size = Vector2(720, 90)
+	glow_disp.visible = true
+
+
+func _build_menu_row(btn_name: String, label_text: String, kicker_text: String, hint_text: String = "") -> HBoxContainer:
+	"""Build one menu row: HBox with [Button (MenuRow style) + KickerStack(kicker + hint) right]."""
+	var row := HBoxContainer.new()
+	row.name = btn_name + "Row"
+	row.custom_minimum_size = Vector2(0, 70)
+	row.add_theme_constant_override("separation", 24)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	var btn := Button.new()
-	btn.name = "MapButton"
-	btn.text = "🗺 ВЫБРАТЬ НА КАРТЕ"
-	btn.custom_minimum_size = Vector2(400, 70)
-	btn.add_theme_color_override("font_color", Color(1, 1, 1, 1))
-	btn.add_theme_color_override("font_hover_color", Color(0.5, 1, 0.5, 1))
-	btn.add_theme_font_size_override("font_size", 36)
-	btn.pressed.connect(_on_map_pressed)
+	btn.name = btn_name
+	btn.text = label_text
+	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn.theme_type_variation = "MenuRow"
+	btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	row.add_child(btn)
 
-	var start_index := start_button.get_index()
-	vbox.add_child(btn)
-	vbox.move_child(btn, start_index + 1)
+	var stack := VBoxContainer.new()
+	stack.name = btn_name + "KickerStack"
+	stack.custom_minimum_size = Vector2(180, 0)
+	stack.size_flags_vertical = Control.SIZE_SHRINK_END
+	stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stack.add_theme_constant_override("separation", 4)
+	row.add_child(stack)
+
+	var kicker := Label.new()
+	kicker.name = btn_name + "Kicker"
+	kicker.text = kicker_text
+	kicker.theme_type_variation = "MonoLabel"
+	kicker.add_theme_font_size_override("font_size", 11)
+	kicker.modulate = UI.INK_500
+	kicker.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	stack.add_child(kicker)
+
+	var hint := Label.new()
+	hint.name = btn_name + "Hint"
+	hint.text = hint_text
+	hint.theme_type_variation = "MonoLabel"
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.modulate = Color(UI.INK_500.r, UI.INK_500.g, UI.INK_500.b, 0.75)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	stack.add_child(hint)
+
+	return row
+
+
+func _add_map_button() -> void:
+	"""Добавить кнопку 'Выбрать на карте' в главное меню"""
+	var vbox: VBoxContainer = get_node_or_null("VBox")
+	if not vbox:
+		return
+	var start_row := vbox.get_node_or_null("StartRow")
+	if not start_row:
+		return
+
+	var row := _build_menu_row("MapButton", "ВЫБРАТЬ НА КАРТЕ", "07 / WORLD MAP", "Pick any spot on Earth")
+	var btn := row.get_node("MapButton") as Button
+	btn.pressed.connect(_on_map_pressed)
+	_connect_row_focus(btn, row.get_node("MapButtonKickerStack/MapButtonKicker") as Label)
+	vbox.add_child(row)
+	vbox.move_child(row, start_row.get_index() + 1)
 
 
 func _add_test_tracks_button() -> void:
 	"""Добавить кнопку Тестовые трассы в главное меню"""
-	var vbox = get_node_or_null("VBox")
+	var vbox: VBoxContainer = get_node_or_null("VBox")
 	if not vbox:
 		push_error("VBox not found!")
 		return
-
-	# Найдём StartButton чтобы вставить кнопку после неё
-	var start_button = vbox.get_node_or_null("StartButton")
-	if not start_button:
-		push_error("StartButton not found!")
+	var start_row := vbox.get_node_or_null("StartRow")
+	if not start_row:
+		push_error("StartRow not found!")
 		return
 
-	# Создаём кнопку
-	var btn := Button.new()
-	btn.name = "TestTracksButton"
-	btn.text = "🔧 ТЕСТОВЫЕ ТРАССЫ"
-	btn.custom_minimum_size = Vector2(400, 70)
-	btn.add_theme_color_override("font_color", Color(1, 1, 1, 1))
-	btn.add_theme_color_override("font_hover_color", Color(0.5, 0.8, 1, 1))
-	btn.add_theme_font_size_override("font_size", 36)
+	var row := _build_menu_row("TestTracksButton", "ТЕСТОВЫЕ ТРАССЫ", "08 / TEST TRACKS", "Procedural tracks")
+	var btn := row.get_node("TestTracksButton") as Button
 	btn.pressed.connect(_on_test_tracks_pressed)
-
-	# Вставляем после StartButton
-	var start_index = start_button.get_index()
-	vbox.add_child(btn)
-	vbox.move_child(btn, start_index + 1)
+	_connect_row_focus(btn, row.get_node("TestTracksButtonKickerStack/TestTracksButtonKicker") as Label)
+	vbox.add_child(row)
+	vbox.move_child(row, start_row.get_index() + 1)
 
 
 # === Главное меню ===

@@ -29,6 +29,10 @@ MusicManager="*res://audio/music_manager.gd"
 RaceState="*res://race/race_state.gd"
 CarSettings="*res://settings/car_settings.gd"
 CareerState="*res://career/career_state.gd"
+UI="*res://ui/ui_constants.gd"
+MCPScreenshot="*res://addons/godot_mcp/mcp_screenshot_service.gd"
+MCPInputService="*res://addons/godot_mcp/mcp_input_service.gd"
+MCPGameInspector="*res://addons/godot_mcp/mcp_game_inspector_service.gd"
 
 [display]
 
@@ -40,6 +44,10 @@ window/stretch/mode="viewport"
 [editor_plugins]
 
 enabled=PackedStringArray("res://addons/godot_mcp/plugin.cfg")
+
+[gui]
+
+theme/custom="res://ui/zhazhda_theme.tres"
 
 [input]
 
@@ -122,6 +130,8 @@ ToggleWheels={
 
 [rendering]
 
+viewport/hdr_2d=true
+anti_aliasing/quality/msaa_2d=2
 anti_aliasing/quality/msaa_3d=2
 
 [shader_globals]
