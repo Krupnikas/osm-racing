@@ -182,6 +182,10 @@ func apply_car_stats(car: Node3D, car_id: String = "") -> void:
 		car.frontal_area = stats["frontal_area"]
 		print("CarSettings: Set frontal_area = ", stats["frontal_area"])
 
+	# Применяем тюнинг из карьеры (если есть активный профиль)
+	if CareerState and CareerState.active_profile != "":
+		_apply_tuning(car, car_id)
+
 	# ВАЖНО: Пересчитываем max_clutch_torque после изменения max_torque
 	# Иначе сцепление ограничивает передачу мощности
 	if car.get("max_clutch_torque") != null and car.get("max_torque") != null:
@@ -190,3 +194,41 @@ func apply_car_stats(car: Node3D, car_id: String = "") -> void:
 			ratio = car.max_clutch_torque_ratio
 		car.max_clutch_torque = car.max_torque * ratio
 		print("CarSettings: Recalculated max_clutch_torque = ", car.max_clutch_torque)
+
+
+func _apply_tuning(car: Node3D, car_id: String) -> void:
+	"""Применить бонусы тюнинга из карьеры"""
+	var engine_lvl := CareerState.get_tuning_level(car_id, "engine")
+	var suspension_lvl := CareerState.get_tuning_level(car_id, "suspension")
+	var transmission_lvl := CareerState.get_tuning_level(car_id, "transmission")
+	var brakes_lvl := CareerState.get_tuning_level(car_id, "brakes")
+
+	if engine_lvl > 0:
+		# Двигатель: +10%/+20%/+30% к крутящему моменту, +500/+1000/+1500 об/мин
+		if car.get("max_torque") != null:
+			car.max_torque *= (1.0 + engine_lvl * 0.10)
+		if car.get("max_rpm") != null:
+			car.max_rpm += engine_lvl * 500.0
+		print("CarSettings: Tuning engine lvl %d applied" % engine_lvl)
+
+	if suspension_lvl > 0:
+		# Подвеска: +0.25/+0.5/+0.75 к скорости руля, +2/+4/+6 градусов к углу
+		if car.get("steering_speed") != null:
+			car.steering_speed += suspension_lvl * 0.25
+		if car.get("max_steering_angle") != null:
+			car.max_steering_angle += deg_to_rad(suspension_lvl * 2.0)
+		print("CarSettings: Tuning suspension lvl %d applied" % suspension_lvl)
+
+	if transmission_lvl > 0:
+		# Коробка: -0.15/-0.3/-0.45 к главной передаче (выше макс. скорость)
+		if car.get("final_drive") != null:
+			car.final_drive -= transmission_lvl * 0.15
+		print("CarSettings: Tuning transmission lvl %d applied" % transmission_lvl)
+
+	if brakes_lvl > 0:
+		# Тормоза: -0.02/-0.04/-0.06 к коэфф. сопротивления, -0.1/-0.2/-0.3 к лоб. площади
+		if car.get("coefficient_of_drag") != null:
+			car.coefficient_of_drag -= brakes_lvl * 0.02
+		if car.get("frontal_area") != null:
+			car.frontal_area -= brakes_lvl * 0.1
+		print("CarSettings: Tuning brakes lvl %d applied" % brakes_lvl)

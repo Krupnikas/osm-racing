@@ -9,7 +9,7 @@ signal elevation_failed(chunk_key: String, error: String)
 
 const API_URL := "https://api.opentopodata.org/v1/srtm30m"
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 4
+const CACHE_VERSION := 5  # v5: cache key uses chunk center lat/lon (grid-independent)
 const GRID_RES := 10  # 10×10 = 100 points, fits in 1 API request
 const GRID_STEP := 30.0  # Native SRTM30m resolution in meters
 const GRID_PADDING := GRID_STEP  # 30m overlap beyond chunk boundary each side
@@ -107,7 +107,12 @@ func _ensure_cache_dir() -> void:
 
 
 func _get_cache_key() -> String:
-	return "elev_v%d_%.4f_%.4f_%s.json" % [CACHE_VERSION, start_lat, start_lon, chunk_key]
+	# Use chunk center lat/lon so cache hits regardless of start position
+	var center_x := float(chunk_x) * chunk_size + chunk_size * 0.5
+	var center_z := float(chunk_z) * chunk_size + chunk_size * 0.5
+	var center_lat := start_lat - center_z / 111000.0
+	var center_lon := start_lon + center_x / _lon_scale
+	return "elev_v%d_%.4f_%.4f.json" % [CACHE_VERSION, center_lat, center_lon]
 
 
 func _get_cache_path() -> String:

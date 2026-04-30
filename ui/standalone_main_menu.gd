@@ -173,6 +173,16 @@ func _on_races_pressed() -> void:
 	$ModesPanel.visible = true
 
 
+func _on_career_pressed() -> void:
+	"""Карьера - выбор профиля и хаб"""
+	$VBox.visible = false
+	$CareerMenu.show_menu()
+
+
+func _on_career_back() -> void:
+	$VBox.visible = true
+
+
 func _on_car_selection_pressed() -> void:
 	"""Выбор машины"""
 	$VBox.visible = false

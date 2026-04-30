@@ -505,9 +505,35 @@ const BRIDGE_PILLAR_SPACING := 20.0     # Расстояние между опо
 const BRIDGE_PILLAR_RADIUS := 0.5       # Радиус опоры моста
 const BRIDGE_PILLAR_COLOR := Color(0.55, 0.53, 0.5)  # Цвет бетонных опор
 
+## Snap start_lat/start_lon to global grid so chunk boundaries are identical
+## regardless of the exact start position. Nearby starts (same city) snap to the
+## same origin, giving full cache reuse between free-roam and race sessions.
+func _snap_origin_to_grid() -> void:
+	var lat_step := chunk_size / 111000.0
+	# Snap so that chunk centers fall on n * lat_step (matching precache script).
+	# Chunk center = start_lat - lat_step/2, so start_lat must be (n+0.5)*lat_step.
+	var lat_n := roundi(start_lat / lat_step - 0.5)
+	var new_lat := snapped(float(lat_n) * lat_step + lat_step * 0.5, 0.0001)
+
+	# Recompute _lon_scale with snapped lat (must match precache: cos of snapped lat)
+	_lon_scale = cos(deg_to_rad(new_lat)) * 111000.0
+	var lon_step := chunk_size / _lon_scale
+	var lon_n := roundi(start_lon / lon_step - 0.5)
+	var new_lon := snapped(float(lon_n) * lon_step + lon_step * 0.5, 0.0001)
+
+	if absf(new_lat - start_lat) > 0.00001 or absf(new_lon - start_lon) > 0.00001:
+		print("OSM: Grid-snapped origin: lat %.6f→%.6f  lon %.6f→%.6f (Δ%.1fm, %.1fm)" % [
+			start_lat, new_lat, start_lon, new_lon,
+			absf(new_lat - start_lat) * 111000.0,
+			absf(new_lon - start_lon) * _lon_scale])
+	start_lat = new_lat
+	start_lon = new_lon
+
+
 func _ready() -> void:
 	# Cache cosine for _latlon_to_local (avoids cos() every call)
 	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
+	_snap_origin_to_grid()
 	_open_runtime_debug_log()
 
 	# Добавляем в группу для поиска из MiniMap
@@ -2856,6 +2882,7 @@ func reset_terrain() -> void:
 	])
 	# Recalculate cached cosine (start_lat may have changed)
 	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
+	_snap_origin_to_grid()
 	# Инкрементируем generation чтобы игнорировать callback'и от старых загрузок
 	_load_generation += 1
 	print("OSM: Load generation incremented to %d" % _load_generation)
