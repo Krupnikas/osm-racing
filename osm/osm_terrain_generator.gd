@@ -160,6 +160,7 @@ var _bridge_node_ways: Dictionary = {}
 # at y = BRIDGE_DECK_HEIGHT + height_offset, with no ramps/barriers/pillars
 # (those come from the deck mesh itself).
 var _bridge_deck_polygons: Array[PackedVector2Array] = []
+var _deck_entry_edges_cache: Dictionary = {}
 
 # Per-chunk spatial hashes (independent, include overlap data — used by vegetation threads)
 var _chunk_road_hashes: Dictionary = {}  # chunk_key → Dictionary (Vector2i → Array of seg)
@@ -2793,6 +2794,7 @@ func reset_terrain() -> void:
 	_chunk_state.clear()
 	_bridge_node_ways.clear()
 	_bridge_deck_polygons.clear()
+	_deck_entry_edges_cache.clear()
 	for ph_key in _loading_placeholders.keys():
 		_remove_loading_placeholder(ph_key)
 	_initial_loading = false
@@ -4862,7 +4864,7 @@ func _apply_road_result(result: Dictionary) -> void:
 					for k in range(pts.size()):
 						var p: Vector2 = pts[k]
 						var perp: Vector2 = perps[k]
-						var deck_y_here: float = BRIDGE_DECK_HEIGHT + 0.23
+						var deck_y_here: float = _deck_surface_y_at_cached(p) + 0.23
 						verts.append(Vector3(p.x - perp.x * hw_lefts[k], deck_y_here, p.y - perp.y * hw_lefts[k]))
 						verts.append(Vector3(p.x + perp.x * hw_rights[k], deck_y_here, p.y + perp.y * hw_rights[k]))
 						uv_arr.append(Vector2(0.0, acc * 0.1))
@@ -4921,8 +4923,8 @@ func _apply_road_result(result: Dictionary) -> void:
 								var chw2: float = hw_lefts[k + 1] if side == -1 else hw_rights[k + 1]
 								var e1: Vector2 = cp1 + cperp * chw1 * side
 								var e2: Vector2 = cp2 + cperp * chw2 * side
-								var dy1: float = BRIDGE_DECK_HEIGHT + 0.01
-								var dy2: float = BRIDGE_DECK_HEIGHT + 0.01
+								var dy1: float = _deck_surface_y_at_cached(cp1) + 0.01
+								var dy2: float = _deck_surface_y_at_cached(cp2) + 0.01
 								var cv1 := Vector3(e1.x, dy1, e1.y)
 								var cv2 := Vector3(e2.x, dy2, e2.y)
 								var cv3 := Vector3(e2.x, dy2 + curb_h, e2.y)
@@ -7554,9 +7556,112 @@ func _deck_surface_y_at(point: Vector2, full_polygon: PackedVector2Array, layer:
 	var max_h: float = BRIDGE_DECK_HEIGHT + maxf(0, layer - 1) * LAYER_HEIGHT
 	if full_polygon.size() < 3:
 		return max_h
-	var dist := _distance_to_polygon_boundary(point, full_polygon)
-	var t := clampf(dist / BRIDGE_RAMP_LENGTH, 0.0, 1.0)
+	var ramp_info: Dictionary = _get_deck_ramp_axis(full_polygon)
+	var proj: float = (point - ramp_info.origin).dot(ramp_info.axis)
+	var dist_from_start: float = proj - ramp_info.min_proj
+	var dist_from_end: float = ramp_info.max_proj - proj
+	var min_end_dist: float = minf(dist_from_start, dist_from_end)
+	var t := clampf(min_end_dist / BRIDGE_RAMP_LENGTH, 0.0, 1.0)
 	return _smooth_step(t) * max_h
+
+
+func _get_deck_ramp_axis(poly: PackedVector2Array) -> Dictionary:
+	var poly_idx := -1
+	for i in range(_bridge_deck_polygons.size()):
+		if _bridge_deck_polygons[i] == poly:
+			poly_idx = i
+			break
+	if poly_idx >= 0 and _deck_entry_edges_cache.has(poly_idx):
+		return _deck_entry_edges_cache[poly_idx]
+	var max_dist_sq := 0.0
+	var end_a := poly[0]
+	var end_b := poly[1] if poly.size() > 1 else poly[0]
+	for i in range(poly.size()):
+		for j in range(i + 1, poly.size()):
+			var d: float = poly[i].distance_squared_to(poly[j])
+			if d > max_dist_sq:
+				max_dist_sq = d
+				end_a = poly[i]
+				end_b = poly[j]
+	var axis: Vector2 = (end_b - end_a).normalized()
+	var min_proj := INF
+	var max_proj := -INF
+	for p in poly:
+		var proj: float = (p - end_a).dot(axis)
+		min_proj = minf(min_proj, proj)
+		max_proj = maxf(max_proj, proj)
+	var result := {"origin": end_a, "axis": axis, "min_proj": min_proj, "max_proj": max_proj}
+	if poly_idx >= 0:
+		_deck_entry_edges_cache[poly_idx] = result
+	return result
+
+
+func _subdivide_ramp_tris(verts: PackedVector3Array, idxs: PackedInt32Array,
+		full_polygon: PackedVector2Array, layer: int, uv_scale: float) -> Dictionary:
+	const MAX_EDGE := 3.0
+	const MAX_ITER := 4
+	var v := Array()
+	for vi in range(verts.size()):
+		v.append(verts[vi])
+	var tris := Array()
+	for ii in range(idxs.size()):
+		tris.append(idxs[ii])
+	var deck_y: float = BRIDGE_DECK_HEIGHT + maxf(0, layer - 1) * LAYER_HEIGHT
+	for _iter in range(MAX_ITER):
+		var new_tris := PackedInt32Array()
+		var changed := false
+		var mid_cache := {}
+		for ti in range(0, tris.size(), 3):
+			var i0: int = tris[ti]
+			var i1: int = tris[ti + 1]
+			var i2: int = tris[ti + 2]
+			var v0: Vector3 = v[i0]
+			var v1: Vector3 = v[i1]
+			var v2: Vector3 = v[i2]
+			var in_ramp: bool = v0.y < deck_y - 0.01 or v1.y < deck_y - 0.01 or v2.y < deck_y - 0.01
+			if not in_ramp:
+				new_tris.append(i0); new_tris.append(i1); new_tris.append(i2)
+				continue
+			var d01: float = v0.distance_to(v1)
+			var d12: float = v1.distance_to(v2)
+			var d20: float = v2.distance_to(v0)
+			if d01 <= MAX_EDGE and d12 <= MAX_EDGE and d20 <= MAX_EDGE:
+				new_tris.append(i0); new_tris.append(i1); new_tris.append(i2)
+				continue
+			changed = true
+			var m01: int = _get_or_create_midpoint(v, mid_cache, i0, i1, full_polygon, layer)
+			var m12: int = _get_or_create_midpoint(v, mid_cache, i1, i2, full_polygon, layer)
+			var m20: int = _get_or_create_midpoint(v, mid_cache, i2, i0, full_polygon, layer)
+			new_tris.append(i0); new_tris.append(m01); new_tris.append(m20)
+			new_tris.append(m01); new_tris.append(i1); new_tris.append(m12)
+			new_tris.append(m20); new_tris.append(m12); new_tris.append(i2)
+			new_tris.append(m01); new_tris.append(m12); new_tris.append(m20)
+		tris = Array(new_tris)
+		if not changed:
+			break
+	var out_v := PackedVector3Array()
+	var out_uv := PackedVector2Array()
+	var out_n := PackedVector3Array()
+	for vi2 in range(v.size()):
+		out_v.append(v[vi2])
+		out_uv.append(Vector2(v[vi2].x * uv_scale, v[vi2].z * uv_scale))
+		out_n.append(Vector3.UP)
+	return {"vertices": out_v, "indices": PackedInt32Array(tris), "uvs": out_uv, "normals": out_n}
+
+
+func _get_or_create_midpoint(v: Array, cache: Dictionary, i_a: int, i_b: int,
+		full_polygon: PackedVector2Array, layer: int) -> int:
+	var key: int = mini(i_a, i_b) * 100000 + maxi(i_a, i_b)
+	if cache.has(key):
+		return cache[key]
+	var va: Vector3 = v[i_a]
+	var vb: Vector3 = v[i_b]
+	var mid_2d := Vector2((va.x + vb.x) * 0.5, (va.z + vb.z) * 0.5)
+	var mid_y: float = _deck_surface_y_at(mid_2d, full_polygon, layer)
+	var idx: int = v.size()
+	v.append(Vector3(mid_2d.x, mid_y, mid_2d.y))
+	cache[key] = idx
+	return idx
 
 
 func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, parent: Node3D, full_polygon: PackedVector2Array = PackedVector2Array()) -> void:
@@ -7576,11 +7681,19 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 	var tri_indices := PackedInt32Array()
 	var uv_scale := 0.1  # 10m per UV repeat
 
+	var use_ramp: bool = full_polygon.size() >= 3
 	for p in points:
-		vertices.append(Vector3(p.x, deck_y, p.y))
+		var y_here: float = _deck_surface_y_at(p, full_polygon, layer) if use_ramp else deck_y
+		vertices.append(Vector3(p.x, y_here, p.y))
 		uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
 		normals.append(Vector3.UP)
 	tri_indices = indices
+	if use_ramp:
+		var sub_result: Dictionary = _subdivide_ramp_tris(vertices, tri_indices, full_polygon, layer, uv_scale)
+		vertices = sub_result.vertices
+		tri_indices = sub_result.indices
+		uvs = sub_result.uvs
+		normals = sub_result.normals
 
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -7644,9 +7757,6 @@ func _create_on_deck_lane_markings(pts: PackedVector2Array, road_width: float, t
 	var lane_count: int = int(lanes_str) if lanes_str.is_valid_int() else 2
 	lane_count = clampi(lane_count, 1, 6)
 	var half_w: float = road_width * 0.5
-	var way_id: int = int(tags.get("id", 0))
-	print("[DECK_MARKING] way=%s hw=%s pts=%d lanes=%d width=%.1f parent=%s" % [
-		tags.get("highway", "?"), tags.get("ref", str(way_id)), pts.size(), lane_count, road_width, parent.name])
 	var perps: Array[Vector2] = _compute_averaged_perpendiculars(pts)
 
 	const LINE_WIDTH := 0.15     # 15 cm white line
@@ -7676,8 +7786,8 @@ func _create_on_deck_lane_markings(pts: PackedVector2Array, road_width: float, t
 			offset: float, lw: float) -> void:
 		var o1 := p1 + perp1 * offset
 		var o2 := p2 + perp2 * offset
-		var y1: float = BRIDGE_DECK_HEIGHT + MARKING_Y_OFFSET
-		var y2: float = BRIDGE_DECK_HEIGHT + MARKING_Y_OFFSET
+		var y1: float = _deck_surface_y_at_cached(p1) + MARKING_Y_OFFSET
+		var y2: float = _deck_surface_y_at_cached(p2) + MARKING_Y_OFFSET
 		var hw := lw * 0.5
 		# Quad vertices using perp for width
 		var v1 := Vector3(o1.x - perp1.x * hw, y1, o1.y - perp1.y * hw)
@@ -7810,7 +7920,7 @@ func _create_deck_railing(poly: PackedVector2Array, deck_y: float, parent: Node3
 			var bp := p1.lerp(p2, t)
 			var cx := bp.x + outward.x * 0.05
 			var cz := bp.y + outward.y * 0.05
-			var base := Vector3(cx, deck_y, cz)
+			var base := Vector3(cx, _deck_surface_y_at_cached(bp), cz)
 			# Each bar = thin box (4 faces)
 			var hw := BAR_RADIUS
 			for face in range(4):
@@ -7840,8 +7950,8 @@ func _create_deck_railing(poly: PackedVector2Array, deck_y: float, parent: Node3
 				st.add_vertex(v4)
 
 		# Horizontal top rail (thin flat bar connecting all verticals)
-		var rail_y1: float = deck_y + RAILING_HEIGHT
-		var rail_y2: float = deck_y + RAILING_HEIGHT
+		var rail_y1: float = _deck_surface_y_at_cached(p1) + RAILING_HEIGHT
+		var rail_y2: float = _deck_surface_y_at_cached(p2) + RAILING_HEIGHT
 		var tp1 := Vector3(p1.x + outward.x * 0.05, rail_y1, p1.y + outward.y * 0.05)
 		var tp2 := Vector3(p2.x + outward.x * 0.05, rail_y2, p2.y + outward.y * 0.05)
 		var th := TOP_RAIL_THICKNESS
@@ -7907,7 +8017,9 @@ func _create_deck_railing(poly: PackedVector2Array, deck_y: float, parent: Node3
 			if absf(p1.y - rz2) < edge_tol and absf(p2.y - rz2) < edge_tol:
 				continue
 		var mid_pt := (p1 + p2) * 0.5
-		var coll_deck_y: float = deck_y
+		if _is_point_on_vehicle_road(mid_pt, 1.0, ""):
+			continue
+		var coll_deck_y: float = _deck_surface_y_at_cached(mid_pt)
 		var coll_shape := CollisionShape3D.new()
 		var box := BoxShape3D.new()
 		box.size = Vector3(seg_len, RAILING_HEIGHT, 0.1)
