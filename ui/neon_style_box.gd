@@ -22,16 +22,20 @@ func _draw(to_canvas_item: RID, rect: Rect2) -> void:
 	var dx := h * tan(deg_to_rad(shear_deg))
 
 	var pts : PackedVector2Array
+	# Indices of edges (pts[i] -> pts[i+1]) that are the diagonal slash
+	# itself — those edges get no outline drawn, only the straight ones.
+	var skip_outline_segments: Array = []
 	if slashed:
+		# Only the top-right corner is cut. The diagonal slash edge does
+		# not get an outline.
 		pts = PackedVector2Array([
 			Vector2(x - dx,                  y),
 			Vector2(x + w - dx - slash_size, y),
 			Vector2(x + w - dx,              y + slash_size),
-			Vector2(x + w,                   y + h - slash_size),
-			Vector2(x + w - slash_size,      y + h),
-			Vector2(x + slash_size,          y + h),
+			Vector2(x + w,                   y + h),
 			Vector2(x,                       y + h),
 		])
+		skip_outline_segments = [1]  # edge from pts[1] to pts[2]
 	else:
 		pts = PackedVector2Array([
 			Vector2(x - dx,     y),
@@ -51,7 +55,9 @@ func _draw(to_canvas_item: RID, rect: Rect2) -> void:
 	var loop := pts.duplicate()
 	loop.append(pts[0])
 	for i in range(loop.size() - 1):
-		RenderingServer.canvas_item_add_line(ci, loop[i], loop[i+1], outline_color, outline_width, true)
+		if i in skip_outline_segments:
+			continue
+		RenderingServer.canvas_item_add_line(ci, loop[i], loop[i+1], outline_color, outline_width, false)
 
 
 func _inflate(poly: PackedVector2Array, by: float) -> PackedVector2Array:
