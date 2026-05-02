@@ -59,6 +59,7 @@ var _show_checkpoints := false
 var _route_points_local: Array = []  # Array[Vector2] - точки маршрута в локальных координатах (x, z)
 var _route_segments: Dictionary = {}  # {segment_key: true} - сегменты на маршруте
 const ROUTE_COLOR := Color(0.3, 0.7, 1.0, 0.95)  # Голубой
+const ROUTE_LINE_WIDTH := 4.0  # Ширина линии маршрута
 const ROUTE_MATCH_DISTANCE := 10.0  # Метры - максимальное расстояние от отрезка маршрута
 
 # Маркеры режима работы (такси)
@@ -118,6 +119,10 @@ func _draw() -> void:
 
 	# 2. Рисуем дороги (с вращением и clipping)
 	_draw_roads(player_pos, player_rotation)
+
+	# 2.5. Рисуем маршрут поверх дорог (полилиния)
+	if not _route_points_local.is_empty():
+		_draw_route_line(player_pos, player_rotation)
 
 	# 3. Рисуем чекпоинты и финиш (если checkpoint mode)
 	if _show_checkpoints:
@@ -272,6 +277,47 @@ func _draw_roads(player_pos: Vector3, player_rotation: float) -> void:
 				var clip1 := _clip_to_circle(MAP_CENTER, screen1)
 				var clip2 := _clip_to_circle(MAP_CENTER, screen2)
 				draw_line(clip1, clip2, style.color, style.width, true)
+
+
+func _draw_route_line(player_pos: Vector3, player_rotation: float) -> void:
+	"""Рисует маршрут как полилинию поверх дорог"""
+	if _route_points_local.size() < 2:
+		return
+
+	var scale := MAP_RADIUS / WORLD_RADIUS
+	var angle := player_rotation
+	var player_pos_2d := Vector2(player_pos.x, player_pos.z)
+
+	# Трансформируем все точки маршрута в экранные
+	var screen_pts: Array[Vector2] = []
+	for pt in _route_points_local:
+		var rel: Vector2 = pt - player_pos_2d
+		var rot: Vector2 = rel.rotated(angle)
+		screen_pts.append(MAP_CENTER + rot * scale)
+
+	# Рисуем сегменты с клиппингом по кругу
+	for i in range(screen_pts.size() - 1):
+		var s1: Vector2 = screen_pts[i]
+		var s2: Vector2 = screen_pts[i + 1]
+
+		var d1: float = (s1 - MAP_CENTER).length()
+		var d2: float = (s2 - MAP_CENTER).length()
+		var in1: bool = d1 <= MAP_RADIUS
+		var in2: bool = d2 <= MAP_RADIUS
+
+		if in1 and in2:
+			draw_line(s1, s2, ROUTE_COLOR, ROUTE_LINE_WIDTH, true)
+		elif in1:
+			draw_line(s1, _clip_to_circle(s1, s2), ROUTE_COLOR, ROUTE_LINE_WIDTH, true)
+		elif in2:
+			draw_line(_clip_to_circle(s2, s1), s2, ROUTE_COLOR, ROUTE_LINE_WIDTH, true)
+		else:
+			# Обе снаружи — проверяем пересечение через центр
+			var mid := (s1 + s2) / 2.0
+			if (mid - MAP_CENTER).length() <= MAP_RADIUS:
+				var c1 := _clip_to_circle(MAP_CENTER, s1)
+				var c2 := _clip_to_circle(MAP_CENTER, s2)
+				draw_line(c1, c2, ROUTE_COLOR, ROUTE_LINE_WIDTH, true)
 
 
 func _clip_to_circle(inside_point: Vector2, outside_point: Vector2) -> Vector2:

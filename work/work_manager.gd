@@ -33,6 +33,10 @@ const OFF_ROAD_PENALTY_RATE := 0.05  # Потеря бонуса в секунд
 const NUM_AVAILABLE_ORDERS := 3    # Одновременно видимых заказов
 const MAX_PICKUP_DISTANCE := 500.0 # Обновлять далёкие пикапы
 const REFRESH_INTERVAL := 5.0     # Секунды между проверками далёких заказов
+const ROUTE_UPDATE_INTERVAL := 1.0   # Перестроение маршрута (сек)
+const PATHFIND_QUERY_RADIUS := 150.0 # Радиус запроса сегментов
+const PATHFIND_QUERY_STEP := 120.0   # Шаг вдоль коридора
+const PATHFIND_MAX_ITER := 3000      # Лимит итераций A*
 
 const CLIENT_PHRASES_GOOD: Array[String] = [
 	"Спасибо, отличная поездка!",
@@ -77,6 +81,7 @@ var _prev_velocity := Vector3.ZERO  # Для детекции столкнове
 
 var _initial_load_done: bool = false
 var _refresh_timer: float = 0.0
+var _route_update_timer: float = 0.0
 
 # 3D маркеры
 var _person_nodes: Array[Node3D] = []
@@ -146,6 +151,12 @@ func _process_driving(delta: float) -> void:
 
 	# Проверяем безопасное вождение
 	_update_safe_driving(delta)
+
+	# Перестраиваем маршрут по дорогам
+	_route_update_timer -= delta
+	if _route_update_timer <= 0.0:
+		_route_update_timer = ROUTE_UPDATE_INTERVAL
+		_update_route_to(_dropoff_pos)
 
 	# Проверяем прибытие (2D — не зависит от высоты)
 	var dist := _dist_2d(_car.global_position, _dropoff_pos)
@@ -363,6 +374,7 @@ func accept_order() -> void:
 		if _minimap.has_method("set_work_dropoff"):
 			_minimap.set_work_dropoff(_dropoff_pos)
 
+	_route_update_timer = ROUTE_UPDATE_INTERVAL
 	_update_route_to(_dropoff_pos)
 	_spawn_dropoff_marker(_dropoff_pos)
 
@@ -490,16 +502,153 @@ func _find_minimap() -> Control:
 func _update_route_to(target: Vector3) -> void:
 	if not _minimap or not _minimap.has_method("set_route_points"):
 		return
-	var car_pos := _car.global_position
-	var start := Vector2(car_pos.x, car_pos.z)
-	var end := Vector2(target.x, target.z)
-	var points: Array = []
-	var steps := int(start.distance_to(end) / 20.0)
-	steps = clampi(steps, 5, 200)
+	var path := _find_road_path(_car.global_position, target)
+	_minimap.set_route_points(path)
+
+
+# === PATHFINDING ПО ДОРОГАМ (A*) ===
+
+func _find_road_path(from_pos: Vector3, to_pos: Vector3) -> Array:
+	"""A* по дорожному графу. Возвращает Array[Vector2] точек маршрута."""
+	if not _terrain_generator or not _terrain_generator.has_method("get_road_segments_in_radius"):
+		return _straight_line_fallback(from_pos, to_pos)
+
+	var start := Vector2(from_pos.x, from_pos.z)
+	var end := Vector2(to_pos.x, to_pos.z)
+
+	# 1. Собираем сегменты вдоль коридора
+	var segments := _collect_corridor_segments(start, end)
+	if segments.is_empty():
+		return _straight_line_fallback(from_pos, to_pos)
+
+	# 2. Строим граф
+	# graph: Dictionary[Vector2i] → Array of {to: Vector2i, cost: float}
+	var graph := {}
+	for seg in segments:
+		var k1 := Vector2i(roundi(seg.p1.x), roundi(seg.p1.y))
+		var k2 := Vector2i(roundi(seg.p2.x), roundi(seg.p2.y))
+		if k1 == k2:
+			continue
+		var cost: float = seg.p1.distance_to(seg.p2)
+		if not graph.has(k1):
+			graph[k1] = []
+		if not graph.has(k2):
+			graph[k2] = []
+		graph[k1].append({"to": k2, "cost": cost})
+		graph[k2].append({"to": k1, "cost": cost})
+
+	if graph.is_empty():
+		return _straight_line_fallback(from_pos, to_pos)
+
+	# 3. Ближайшие ноды к старту и финишу
+	var start_node := _nearest_graph_node(graph, start)
+	var end_node := _nearest_graph_node(graph, end)
+	if start_node == end_node:
+		return [start, end]
+
+	# 4. A*
+	var path := _astar(graph, start_node, end_node)
+	if path.is_empty():
+		return _straight_line_fallback(from_pos, to_pos)
+
+	# 5. Конвертируем Vector2i → Vector2, добавляем start/end
+	var result: Array = [start]
+	for node in path:
+		result.append(Vector2(node.x, node.y))
+	result.append(end)
+	return result
+
+
+func _collect_corridor_segments(start: Vector2, end: Vector2) -> Array:
+	var segments: Array = []
+	var seen := {}
+	var dist := start.distance_to(end)
+	var steps := maxi(int(dist / PATHFIND_QUERY_STEP), 1)
 	for i in range(steps + 1):
 		var t := float(i) / float(steps)
-		points.append(start.lerp(end, t))
-	_minimap.set_route_points(points)
+		var center := start.lerp(end, t)
+		var center_3d := Vector3(center.x, 0, center.y)
+		var segs: Array = _terrain_generator.get_road_segments_in_radius(center_3d, PATHFIND_QUERY_RADIUS)
+		for seg in segs:
+			var key := "%d_%d_%d_%d" % [roundi(seg.p1.x), roundi(seg.p1.y), roundi(seg.p2.x), roundi(seg.p2.y)]
+			if not seen.has(key):
+				seen[key] = true
+				segments.append(seg)
+	return segments
+
+
+func _nearest_graph_node(graph: Dictionary, pos: Vector2) -> Vector2i:
+	var best := Vector2i.ZERO
+	var best_dist := INF
+	for key: Vector2i in graph:
+		var d := pos.distance_squared_to(Vector2(key.x, key.y))
+		if d < best_dist:
+			best_dist = d
+			best = key
+	return best
+
+
+func _astar(graph: Dictionary, start: Vector2i, end: Vector2i) -> Array:
+	if not graph.has(start) or not graph.has(end):
+		return []
+	var end_f := Vector2(end.x, end.y)
+	# open: Array of [f_score, g_score, node]
+	var open: Array = [[start.distance_to(end), 0.0, start]]
+	var g_score := {start: 0.0}
+	var came_from := {}
+	var closed := {}
+	var iterations := 0
+
+	while not open.is_empty() and iterations < PATHFIND_MAX_ITER:
+		iterations += 1
+		# Находим минимум f
+		var best_idx := 0
+		for i in range(1, open.size()):
+			if open[i][0] < open[best_idx][0]:
+				best_idx = i
+		var current: Array = open[best_idx]
+		open.remove_at(best_idx)
+		var node: Vector2i = current[2]
+		var g: float = current[1]
+
+		if node == end:
+			# Реконструируем путь
+			var path: Array = [end]
+			var n := end
+			while came_from.has(n):
+				n = came_from[n]
+				path.insert(0, n)
+			return path
+
+		if closed.has(node):
+			continue
+		closed[node] = true
+
+		if not graph.has(node):
+			continue
+
+		for edge in graph[node]:
+			var to: Vector2i = edge.to
+			if closed.has(to):
+				continue
+			var new_g: float = g + edge.cost
+			if new_g < g_score.get(to, INF):
+				g_score[to] = new_g
+				came_from[to] = node
+				var h := Vector2(to.x, to.y).distance_to(end_f)
+				open.append([new_g + h, new_g, to])
+
+	return []
+
+
+func _straight_line_fallback(from_pos: Vector3, to_pos: Vector3) -> Array:
+	var start := Vector2(from_pos.x, from_pos.z)
+	var end := Vector2(to_pos.x, to_pos.z)
+	var points: Array = []
+	var steps := clampi(int(start.distance_to(end) / 20.0), 5, 200)
+	for i in range(steps + 1):
+		points.append(start.lerp(end, float(i) / float(steps)))
+	return points
 
 
 func _update_minimap_pickups() -> void:

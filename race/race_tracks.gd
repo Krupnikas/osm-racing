@@ -58,6 +58,8 @@ static func _create_pionerskaya() -> Resource:
 		Vector2(59.144, 37.945),         # Промежуточная 3
 		Vector2(59.142110, 37.943897)   # Финиш
 	]
+	# Route points для миникарты (прямая по waypoints)
+	track.route_points = track.waypoints.duplicate()
 	return track
 
 
