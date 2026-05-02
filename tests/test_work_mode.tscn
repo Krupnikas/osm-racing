@@ -1,0 +1,88 @@
+[gd_scene load_steps=10 format=3]
+
+[ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="car"]
+[ext_resource type="Script" path="res://tests/test_work_mode.gd" id="test_script"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/vehicle_input.gd" id="vehicle_input"]
+[ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="osm"]
+[ext_resource type="Script" path="res://traffic/traffic_manager.gd" id="traffic"]
+[ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="night"]
+[ext_resource type="Script" path="res://settings/graphics_settings.gd" id="graphics"]
+[ext_resource type="PackedScene" uid="uid://hud123" path="res://ui/hud.tscn" id="hud"]
+
+[sub_resource type="ProceduralSkyMaterial" id="sky_mat"]
+sky_top_color = Color(0.4, 0.6, 0.9, 1)
+sky_horizon_color = Color(0.7, 0.8, 0.9, 1)
+ground_bottom_color = Color(0.2, 0.2, 0.2, 1)
+ground_horizon_color = Color(0.5, 0.5, 0.5, 1)
+
+[sub_resource type="Sky" id="sky"]
+sky_material = SubResource("sky_mat")
+
+[sub_resource type="Environment" id="env"]
+background_mode = 2
+sky = SubResource("sky")
+ambient_light_source = 2
+ambient_light_color = Color(0.5, 0.5, 0.5, 1)
+tonemap_mode = 2
+ssao_enabled = true
+fog_enabled = true
+fog_light_color = Color(0.75, 0.8, 0.9, 1)
+fog_density = 0.0003
+
+[sub_resource type="WorldBoundaryShape3D" id="ground_shape"]
+
+[node name="WorkModeTest" type="Node3D"]
+script = ExtResource("test_script")
+test_location = Vector2(59.150406, 37.948805)
+max_orders = 3
+auto_drive = true
+
+[node name="FallbackGround" type="StaticBody3D" parent="." groups=["Grass"]]
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="FallbackGround"]
+shape = SubResource("ground_shape")
+
+[node name="OSMTerrain" type="Node3D" parent="." groups=["osm_terrain"]]
+script = ExtResource("osm")
+start_lat = 59.150406
+start_lon = 37.948805
+chunk_size = 210.0
+load_distance = 500.0
+unload_distance = 700.0
+car_path = NodePath("../Car")
+
+[node name="Car" parent="." groups=["car", "player"] instance=ExtResource("car")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)
+
+[node name="VehicleInput" type="Node" parent="Car" node_paths=PackedStringArray("vehicle_node")]
+script = ExtResource("vehicle_input")
+vehicle_node = NodePath("..")
+
+[node name="TrafficManager" type="Node" parent="."]
+script = ExtResource("traffic")
+car_path = NodePath("../Car")
+osm_terrain_path = NodePath("../OSMTerrain")
+
+[node name="NightModeManager" type="Node" parent="." groups=["night_mode_manager"]]
+script = ExtResource("night")
+is_night = false
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.5, 0.866025, 0, -0.866025, 0.5, 0, 10, 0)
+light_energy = 0.8
+shadow_enabled = true
+directional_shadow_max_distance = 500.0
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("env")
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="HUD" parent="UI" instance=ExtResource("hud")]
+car_path = NodePath("../../Car")
+terrain_generator_path = NodePath("../../OSMTerrain")
+
+[node name="GraphicsSettings" type="Node" parent="."]
+script = ExtResource("graphics")

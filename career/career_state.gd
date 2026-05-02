@@ -52,6 +52,8 @@ var selected_car: String = ""
 var races_won: int = 0
 var total_races: int = 0
 var car_tuning: Dictionary = {}  # {car_id: {category: level}}
+var orders_completed: int = 0
+var total_orders: int = 0
 
 
 func get_profile_names() -> Array[String]:
@@ -72,6 +74,8 @@ func create_profile(profile_name: String) -> void:
 	races_won = 0
 	total_races = 0
 	car_tuning = {}
+	orders_completed = 0
+	total_orders = 0
 	save_profile()
 
 
@@ -92,6 +96,8 @@ func load_profile(profile_name: String) -> bool:
 	races_won = config.get_value(profile_name, "races_won", 0)
 	total_races = config.get_value(profile_name, "total_races", 0)
 	car_tuning = config.get_value(profile_name, "car_tuning", {})
+	orders_completed = config.get_value(profile_name, "orders_completed", 0)
+	total_orders = config.get_value(profile_name, "total_orders", 0)
 
 	# Применяем выбранную машину
 	if CarSettings:
@@ -112,6 +118,8 @@ func save_profile() -> void:
 	config.set_value(active_profile, "races_won", races_won)
 	config.set_value(active_profile, "total_races", total_races)
 	config.set_value(active_profile, "car_tuning", car_tuning)
+	config.set_value(active_profile, "orders_completed", orders_completed)
+	config.set_value(active_profile, "total_orders", total_orders)
 	config.save(SAVE_PATH)
 
 
@@ -243,6 +251,17 @@ func award_race_prize(track_id: String, position: int) -> int:
 		balance += prize
 	save_profile()
 	return prize
+
+
+# === Работа (такси/доставка) ===
+
+func complete_order(payout: int) -> void:
+	"""Начислить оплату за выполненный заказ"""
+	total_orders += 1
+	orders_completed += 1
+	if payout > 0:
+		balance += payout
+	save_profile()
 
 
 func format_money(amount: int) -> String:

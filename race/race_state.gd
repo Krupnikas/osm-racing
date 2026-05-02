@@ -17,6 +17,9 @@ var test_track_id: String = ""  # "test_flat" или "test_suspension"
 # Карьера — если true, после гонки начисляется приз
 var is_career_race: bool = false
 
+# Режим работы (такси/доставка)
+var is_work_mode: bool = false
+
 # (Legacy) Трасса для автозапуска после перезагрузки сцены
 var pending_track = null
 

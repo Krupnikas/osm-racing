@@ -44,10 +44,6 @@ func _ready() -> void:
 	_populate_locations()
 	_populate_tracks()
 
-	# Добавляем кнопку "Выбрать на карте" и "Тестовые трассы" в главное меню
-	_add_map_button()
-	_add_test_tracks_button()
-
 	# Автостарт через командную строку: --autostart [location_index] [--lat X --lon Y]
 	var args := OS.get_cmdline_user_args()
 	var cmd_lat := 0.0
@@ -202,6 +198,16 @@ func _on_settings_pressed() -> void:
 	_sync_audio_sliders()
 
 
+func _on_other_pressed() -> void:
+	"""Другое — показать подменю"""
+	$VBox.visible = false
+	var panel = get_node_or_null("OtherPanel")
+	if not panel:
+		_create_other_panel()
+		panel = $OtherPanel
+	panel.visible = true
+
+
 func _on_quit_pressed() -> void:
 	"""Выход из игры"""
 	get_tree().quit()
@@ -260,6 +266,7 @@ func _start_free_roam(location_name: String) -> void:
 	RaceState.free_roam_lat = coords[0]
 	RaceState.free_roam_lon = coords[1]
 	RaceState.selected_track = null  # Не гонка
+	RaceState.is_work_mode = false
 
 	# Переключаем музыку
 	if MusicManager:
@@ -475,6 +482,79 @@ func _on_test_track_selected(track: Dictionary) -> void:
 	# Загружаем сцену (кастомную или стандартную тестовую)
 	var scene_path: String = track.get("scene_path", "res://race/test_track_scene.tscn")
 	get_tree().change_scene_to_file(scene_path)
+
+
+# === Панель «Другое» ===
+
+func _create_other_panel() -> void:
+	"""Создаёт подменю с доп. опциями: машины, карта, тесты, управление, настройки"""
+	var panel := Panel.new()
+	panel.name = "OtherPanel"
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.offset_left = -250
+	panel.offset_right = 250
+	panel.offset_top = -300
+	panel.offset_bottom = 300
+	panel.visible = true
+	add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	vbox.offset_left = 30
+	vbox.offset_top = 30
+	vbox.offset_right = -30
+	vbox.offset_bottom = -30
+	panel.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "ДРУГОЕ"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 36)
+	vbox.add_child(title)
+
+	var spacer := Control.new()
+	spacer.custom_minimum_size = Vector2(0, 15)
+	vbox.add_child(spacer)
+
+	var buttons_data := [
+		["🚗 ВЫБОР МАШИНЫ", _on_car_selection_pressed],
+		["🗺 КАРТА МИРА", _on_map_pressed],
+		["🔧 ТЕСТОВЫЕ ТРАССЫ", _on_test_tracks_pressed],
+		["⚙ УПРАВЛЕНИЕ", _on_controls_pressed],
+		["🔊 НАСТРОЙКИ", _on_settings_pressed],
+	]
+	for data in buttons_data:
+		var btn := Button.new()
+		btn.text = data[0]
+		btn.custom_minimum_size = Vector2(0, 55)
+		btn.add_theme_font_size_override("font_size", 26)
+		btn.pressed.connect(_on_other_item.bind(data[1]))
+		vbox.add_child(btn)
+
+	var spacer2 := Control.new()
+	spacer2.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vbox.add_child(spacer2)
+
+	var back_btn := Button.new()
+	back_btn.text = "Назад"
+	back_btn.custom_minimum_size = Vector2(0, 55)
+	back_btn.add_theme_font_size_override("font_size", 28)
+	back_btn.pressed.connect(_on_other_back_pressed)
+	vbox.add_child(back_btn)
+
+
+func _on_other_item(handler: Callable) -> void:
+	var panel = get_node_or_null("OtherPanel")
+	if panel:
+		panel.visible = false
+	handler.call()
+
+
+func _on_other_back_pressed() -> void:
+	var panel = get_node_or_null("OtherPanel")
+	if panel:
+		panel.visible = false
+	$VBox.visible = true
 
 
 # === Карта мира ===

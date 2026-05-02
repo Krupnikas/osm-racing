@@ -18912,6 +18912,11 @@ func get_road_segments_in_radius(center: Vector3, radius: float) -> Array:
 	return result
 
 
+## Публичный API: проверяет, находится ли точка на дороге
+func is_point_on_road(pos: Vector2, margin: float = 0.5) -> bool:
+	return _is_point_on_road(pos, margin)
+
+
 ## Проверяет, находится ли точка на дороге
 func _is_point_on_road(pos: Vector2, margin: float = 0.5) -> bool:
 	# Используем spatial hash для быстрого поиска ближайших сегментов

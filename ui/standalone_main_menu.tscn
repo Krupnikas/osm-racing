@@ -61,14 +61,14 @@ layout_mode = 2
 size_flags_vertical = 3
 mouse_filter = 2
 
-[node name="StartButton" type="Button" parent="VBox"]
+[node name="CareerButton" type="Button" parent="VBox"]
 custom_minimum_size = Vector2(400, 80)
 layout_mode = 2
 theme_override_colors/font_color = Color(1, 1, 1, 1)
-theme_override_colors/font_hover_color = Color(1, 1, 0.5, 1)
+theme_override_colors/font_hover_color = Color(1, 0.8, 0.2, 1)
 theme_override_colors/font_pressed_color = Color(0.8, 0.8, 0.8, 1)
 theme_override_font_sizes/font_size = 42
-text = "▶ ВЫЕХАТЬ В ГОРОД"
+text = "🏆 КАРЬЕРА"
 
 [node name="RacesButton" type="Button" parent="VBox"]
 custom_minimum_size = Vector2(400, 70)
@@ -78,35 +78,21 @@ theme_override_colors/font_hover_color = Color(1, 0.5, 0.5, 1)
 theme_override_font_sizes/font_size = 36
 text = "🏁 БЫСТРЫЙ ЗАЕЗД"
 
-[node name="CarSelectionButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(400, 70)
-layout_mode = 2
-theme_override_colors/font_color = Color(1, 1, 1, 1)
-theme_override_colors/font_hover_color = Color(0.5, 0.8, 1, 1)
-theme_override_font_sizes/font_size = 36
-text = "🚗 ВЫБОР МАШИНЫ"
-
-[node name="CareerButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(400, 70)
-layout_mode = 2
-theme_override_colors/font_color = Color(1, 1, 1, 1)
-theme_override_colors/font_hover_color = Color(1, 0.8, 0.2, 1)
-theme_override_font_sizes/font_size = 36
-text = "🏆 КАРЬЕРА"
-
-[node name="ControlsButton" type="Button" parent="VBox"]
+[node name="StartButton" type="Button" parent="VBox"]
 custom_minimum_size = Vector2(400, 70)
 layout_mode = 2
 theme_override_colors/font_color = Color(1, 1, 1, 1)
 theme_override_colors/font_hover_color = Color(1, 1, 0.5, 1)
 theme_override_font_sizes/font_size = 36
-text = "⚙ УПРАВЛЕНИЕ"
+text = "▶ ВЫЕХАТЬ В ГОРОД"
 
-[node name="SettingsButton" type="Button" parent="VBox"]
-custom_minimum_size = Vector2(350, 70)
+[node name="OtherButton" type="Button" parent="VBox"]
+custom_minimum_size = Vector2(400, 70)
 layout_mode = 2
+theme_override_colors/font_color = Color(0.8, 0.8, 0.8, 1)
+theme_override_colors/font_hover_color = Color(1, 1, 0.5, 1)
 theme_override_font_sizes/font_size = 36
-text = "Настройки"
+text = "ДРУГОЕ"
 
 [node name="QuitButton" type="Button" parent="VBox"]
 custom_minimum_size = Vector2(400, 70)
@@ -510,12 +496,10 @@ theme_override_font_sizes/font_size = 16
 theme_override_colors/font_color = Color(0.5, 0.5, 0.5, 1)
 text = "v0.1 alpha"
 
-[connection signal="pressed" from="VBox/StartButton" to="." method="_on_start_pressed"]
-[connection signal="pressed" from="VBox/RacesButton" to="." method="_on_races_pressed"]
-[connection signal="pressed" from="VBox/CarSelectionButton" to="." method="_on_car_selection_pressed"]
 [connection signal="pressed" from="VBox/CareerButton" to="." method="_on_career_pressed"]
-[connection signal="pressed" from="VBox/ControlsButton" to="." method="_on_controls_pressed"]
-[connection signal="pressed" from="VBox/SettingsButton" to="." method="_on_settings_pressed"]
+[connection signal="pressed" from="VBox/RacesButton" to="." method="_on_races_pressed"]
+[connection signal="pressed" from="VBox/StartButton" to="." method="_on_start_pressed"]
+[connection signal="pressed" from="VBox/OtherButton" to="." method="_on_other_pressed"]
 [connection signal="pressed" from="VBox/QuitButton" to="." method="_on_quit_pressed"]
 [connection signal="pressed" from="LocationPanel/VBox/BackButton" to="." method="_on_location_back_pressed"]
 [connection signal="pressed" from="ModesPanel/VBox/SprintButton" to="." method="_on_sprint_pressed"]

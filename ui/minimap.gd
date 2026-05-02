@@ -5,8 +5,8 @@ extends Control
 ## Карта вращается под игрока (направление движения всегда вверх)
 
 # Константы отрисовки
-const MAP_RADIUS := 100.0        # Радиус карты в пикселях
-const MAP_CENTER := Vector2(110, 110)  # Центр карты (с отступом от края)
+const MAP_RADIUS := 200.0        # Радиус карты в пикселях (2x)
+const MAP_CENTER := Vector2(210, 210)  # Центр карты (с отступом от края)
 const WORLD_RADIUS := 150.0      # Радиус видимости в мировых метрах
 const CACHE_EXTRA_RADIUS := 100.0  # Дополнительный радиус кэширования (впереди и сзади)
 
@@ -14,22 +14,21 @@ const CACHE_EXTRA_RADIUS := 100.0  # Дополнительный радиус �
 const BG_COLOR := Color(0.12, 0.12, 0.15, 0.85)    # Тёмный фон
 const ROAD_COLOR_BASE := Color(0.65, 0.65, 0.65)   # Базовый серый для дорог
 const BORDER_COLOR := Color(0.35, 0.4, 0.5, 1.0)   # Серая рамка
-const BORDER_WIDTH := 3.0
+const BORDER_WIDTH := 4.0
 
 # Цвета маркеров
 const PLAYER_COLOR := Color(0.2, 0.9, 0.3, 1.0)    # Зелёная стрелка
 const OPPONENT_COLOR := Color(1.0, 0.35, 0.2, 1.0) # Красные/оранжевые точки
 const CHECKPOINT_COLOR := Color(1.0, 0.85, 0.0, 1.0)  # Жёлтые чекпоинты
-const PLAYER_SIZE := 10.0        # Размер стрелки игрока
-const OPPONENT_SIZE := 6.0       # Размер точек соперников
-const CHECKPOINT_SIZE := 8.0     # Размер чекпоинтов
-const FINISH_SIZE := 10.0        # Размер финиша
+const PLAYER_SIZE := 14.0        # Размер стрелки игрока
+const OPPONENT_SIZE := 8.0       # Размер точек соперников
+const CHECKPOINT_SIZE := 11.0    # Размер чекпоинтов
+const FINISH_SIZE := 14.0        # Размер финиша
 
-# Ширина линий дорог в пикселях (зависит от ширины дороги в метрах)
-# motorway=16, trunk=14, primary=12, secondary=10, tertiary=8, residential=6, service=4
-const ROAD_LINE_WIDTH_MAJOR := 3.5    # ширина >= 12м (motorway, trunk, primary)
-const ROAD_LINE_WIDTH_MEDIUM := 2.5   # ширина 8-11м (secondary, tertiary)
-const ROAD_LINE_WIDTH_MINOR := 1.5    # ширина < 8м (residential, service)
+# Ширина линий дорог в пикселях
+const ROAD_LINE_WIDTH_MAJOR := 5.0    # ширина >= 12м (motorway, trunk, primary)
+const ROAD_LINE_WIDTH_MEDIUM := 3.5   # ширина 8-11м (secondary, tertiary)
+const ROAD_LINE_WIDTH_MINOR := 2.5    # ширина < 8м (residential, service)
 
 # Прозрачность дорог (чем меньше дорога, тем прозрачнее)
 const ROAD_ALPHA_MAJOR := 0.95
@@ -62,9 +61,18 @@ var _route_segments: Dictionary = {}  # {segment_key: true} - сегменты �
 const ROUTE_COLOR := Color(0.3, 0.7, 1.0, 0.95)  # Голубой
 const ROUTE_MATCH_DISTANCE := 10.0  # Метры - максимальное расстояние от отрезка маршрута
 
+# Маркеры режима работы (такси)
+var _work_pickup_positions: Array = []  # Array[Vector3] — несколько пикапов одновременно
+var _work_dropoff_pos := Vector3.ZERO
+var _show_work_dropoff := false
+const WORK_PICKUP_COLOR := Color(0.2, 0.8, 1.0, 1.0)   # Голубой (клиент)
+const WORK_DROPOFF_COLOR := Color(1.0, 0.5, 0.1, 1.0)   # Оранжевый (назначение)
+const WORK_MARKER_SIZE := 12.0
+const WORK_EDGE_MARKER_SIZE := 10.0  # Размер маркера на краю
+
 
 func _ready() -> void:
-	custom_minimum_size = Vector2(220, 220)
+	custom_minimum_size = Vector2(420, 420)
 
 	# Ждём один кадр чтобы сцена полностью загрузилась
 	await get_tree().process_frame
@@ -115,6 +123,12 @@ func _draw() -> void:
 	if _show_checkpoints:
 		_draw_checkpoints(player_pos, player_rotation)
 		_draw_finish_marker(player_pos, player_rotation)
+
+	# 3.5. Рисуем маркеры работы (такси) с edge clamping
+	for pickup_pos in _work_pickup_positions:
+		_draw_work_marker(pickup_pos, player_pos, player_rotation, WORK_PICKUP_COLOR)
+	if _show_work_dropoff:
+		_draw_work_marker(_work_dropoff_pos, player_pos, player_rotation, WORK_DROPOFF_COLOR)
 
 	# 4. Рисуем соперников (если режим гонки)
 	if _show_opponents:
@@ -557,3 +571,57 @@ func _draw_finish_marker(player_pos: Vector3, player_rotation: float) -> void:
 
 	# Белая обводка
 	draw_arc(screen_pos, FINISH_SIZE, 0, TAU, 24, Color.WHITE, 2.0)
+
+
+# ===== WORK MODE MARKERS (с edge clamping — цветные кружки) =====
+
+func _draw_work_marker(marker_pos: Vector3, player_pos: Vector3, player_rotation: float,
+		color: Color) -> void:
+	"""Рисует маркер работы. Если за пределами миникарты — цветной кружок на краю."""
+	var scale := MAP_RADIUS / WORLD_RADIUS
+	var angle := player_rotation
+
+	var relative := Vector2(marker_pos.x - player_pos.x, marker_pos.z - player_pos.z)
+	var rotated := relative.rotated(angle)
+	var screen_pos := MAP_CENTER + rotated * scale
+	var from_center := screen_pos - MAP_CENTER
+	var dist_from_center := from_center.length()
+
+	if dist_from_center <= MAP_RADIUS - WORK_MARKER_SIZE:
+		# Внутри карты — цветной кружок с белой обводкой
+		draw_circle(screen_pos, WORK_MARKER_SIZE, color)
+		draw_arc(screen_pos, WORK_MARKER_SIZE, 0, TAU, 16, Color.WHITE, 2.0)
+	else:
+		# Edge clamping — цветной кружок на краю
+		var edge_pos := MAP_CENTER + from_center.normalized() * (MAP_RADIUS - WORK_EDGE_MARKER_SIZE - 3)
+		draw_circle(edge_pos, WORK_EDGE_MARKER_SIZE, color)
+		draw_arc(edge_pos, WORK_EDGE_MARKER_SIZE, 0, TAU, 12, Color.WHITE, 1.5)
+
+
+# ===== WORK MODE PUBLIC API =====
+
+func set_work_pickups(positions: Array) -> void:
+	_work_pickup_positions = positions
+	queue_redraw()
+
+
+func clear_work_pickups() -> void:
+	_work_pickup_positions.clear()
+	queue_redraw()
+
+
+func set_work_dropoff(pos: Vector3) -> void:
+	_work_dropoff_pos = pos
+	_show_work_dropoff = true
+	queue_redraw()
+
+
+func clear_work_dropoff() -> void:
+	_show_work_dropoff = false
+	queue_redraw()
+
+
+func clear_work_markers() -> void:
+	_work_pickup_positions.clear()
+	_show_work_dropoff = false
+	queue_redraw()
