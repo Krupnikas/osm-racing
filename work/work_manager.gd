@@ -6,6 +6,9 @@ extends Node
 ## Несколько заказов видны одновременно на миникарте.
 ## Игрок подъезжает к любому — видит попап — принимает/отклоняет.
 
+const WorkPersonScript = preload("res://work/work_person.gd")
+const WorkDropoffMarkerScript = preload("res://work/work_dropoff_marker.gd")
+
 enum State { SEARCHING, AT_PICKUP, DRIVING, AT_DROPOFF }
 
 signal order_spawned(pickup_pos: Vector3)
@@ -28,7 +31,7 @@ const BONUS_SAFE_PCT := 0.2        # 20% за безопасную езду
 const TARGET_AVG_SPEED := 45.0     # км/ч — целевая скорость
 const OFF_ROAD_PENALTY_RATE := 0.05  # Потеря бонуса в секунду при езде вне дороги
 const NUM_AVAILABLE_ORDERS := 3    # Одновременно видимых заказов
-const MAX_PICKUP_DISTANCE := 800.0 # Обновлять далёкие пикапы
+const MAX_PICKUP_DISTANCE := 500.0 # Обновлять далёкие пикапы
 const REFRESH_INTERVAL := 5.0     # Секунды между проверками далёких заказов
 
 const CLIENT_PHRASES_GOOD: Array[String] = [
@@ -74,6 +77,10 @@ var _prev_velocity := Vector3.ZERO  # Для детекции столкнове
 
 var _initial_load_done: bool = false
 var _refresh_timer: float = 0.0
+
+# 3D маркеры
+var _person_nodes: Array[Node3D] = []
+var _dropoff_marker_node: Node3D = null
 
 # Названия улиц (генерируемые)
 const STREET_NAMES: Array[String] = [
@@ -169,6 +176,7 @@ func _spawn_orders() -> void:
 		if not order.is_empty():
 			_available_orders.append(order)
 	_update_minimap_pickups()
+	_rebuild_persons()
 	if not _available_orders.is_empty():
 		print("WorkManager: Spawned %d orders" % _available_orders.size())
 		order_spawned.emit(_available_orders[0].pickup)
@@ -220,6 +228,7 @@ func _refresh_stale_orders() -> void:
 
 	if changed:
 		_update_minimap_pickups()
+		_rebuild_persons()
 
 
 func _generate_pickup_position() -> Vector3:
@@ -340,6 +349,9 @@ func accept_order() -> void:
 	_safe_driving_pct = 1.0
 	_had_collision = false
 
+	# Убираем людей на пикапах
+	_clear_persons()
+
 	# Убираем все маркеры пикапов
 	_available_orders.clear()
 	_current_order_idx = -1
@@ -352,6 +364,7 @@ func accept_order() -> void:
 			_minimap.set_work_dropoff(_dropoff_pos)
 
 	_update_route_to(_dropoff_pos)
+	_spawn_dropoff_marker(_dropoff_pos)
 
 	order_accepted.emit(_fare, _destination_name)
 	print("WorkManager: Order accepted, fare=%d, dest=%s" % [_fare, _destination_name])
@@ -370,6 +383,7 @@ func decline_order() -> void:
 	if not new_order.is_empty():
 		_available_orders.append(new_order)
 	_update_minimap_pickups()
+	_rebuild_persons()
 	print("WorkManager: Order declined, %d orders available" % _available_orders.size())
 
 
@@ -499,6 +513,8 @@ func _update_minimap_pickups() -> void:
 
 
 func _clear_markers() -> void:
+	_clear_persons()
+	_remove_dropoff_marker()
 	if _minimap:
 		if _minimap.has_method("clear_work_markers"):
 			_minimap.clear_work_markers()
@@ -551,3 +567,40 @@ func get_available_pickups() -> Array:
 	for order in _available_orders:
 		positions.append(order.pickup)
 	return positions
+
+
+# === 3D МАРКЕРЫ ===
+
+func _rebuild_persons() -> void:
+	_clear_persons()
+	var scene_root := get_tree().current_scene
+	for i in range(_available_orders.size()):
+		var order: Dictionary = _available_orders[i]
+		var person := Node3D.new()
+		person.set_script(WorkPersonScript)
+		person.global_position = order.pickup
+		scene_root.add_child(person)
+		_person_nodes.append(person)
+		print("WorkManager: Person %d spawned at %s (Y=%.1f)" % [i, order.pickup, order.pickup.y])
+
+
+func _clear_persons() -> void:
+	for p in _person_nodes:
+		if is_instance_valid(p):
+			p.queue_free()
+	_person_nodes.clear()
+
+
+func _spawn_dropoff_marker(pos: Vector3) -> void:
+	_remove_dropoff_marker()
+	var marker := Node3D.new()
+	marker.set_script(WorkDropoffMarkerScript)
+	marker.global_position = pos
+	get_tree().current_scene.add_child(marker)
+	_dropoff_marker_node = marker
+
+
+func _remove_dropoff_marker() -> void:
+	if _dropoff_marker_node and is_instance_valid(_dropoff_marker_node):
+		_dropoff_marker_node.queue_free()
+		_dropoff_marker_node = null
