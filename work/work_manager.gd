@@ -19,13 +19,13 @@ signal bonus_updated(speed_pct: float, safe_pct: float)
 
 const PICKUP_RADIUS := 500.0       # Радиус появления заказа от машины
 const DROPOFF_MIN_DIST := 300.0    # Мин. расстояние до dropoff
-const DROPOFF_MAX_DIST := 2000.0   # Макс. расстояние до dropoff
+const DROPOFF_MAX_DIST := 4000.0   # Макс. расстояние до dropoff (4 км)
 const PICKUP_ARRIVE_DIST := 15.0   # Расстояние до точки подбора для срабатывания
 const DROPOFF_ARRIVE_DIST := 15.0
-const MIN_FARE := 500
+const MIN_FARE := 150
 const MAX_FARE := 2000
-const FARE_BASE := 200.0
-const FARE_PER_KM := 300.0
+const FARE_BASE := 100.0
+const FARE_PER_KM := 450.0
 const BONUS_SPEED_PCT := 0.2       # 20% чаевые за скорость
 const BONUS_SAFE_PCT := 0.2        # 20% за безопасную езду
 const TARGET_AVG_SPEED := 45.0     # км/ч — целевая скорость
@@ -347,14 +347,17 @@ func _show_order_popup(order_idx: int) -> void:
 	_estimated_time = order.est_time
 	_trip_distance = order.trip_dist
 
+	_freeze_car()
+
 	# Показываем popup через HUD
 	if _hud and _hud.has_method("show_order_popup"):
-		_hud.show_order_popup(_destination_name, _fare, _estimated_time)
+		_hud.show_order_popup(_destination_name, _fare, _estimated_time, _trip_distance)
 	print("WorkManager: Showing order: %s, %d руб" % [_destination_name, _fare])
 
 
 func accept_order() -> void:
 	"""Вызывается из HUD когда игрок принимает заказ"""
+	_unfreeze_car()
 	_state = State.DRIVING
 	_trip_start_time = Time.get_ticks_msec() / 1000.0
 	_safe_driving_pct = 1.0
@@ -384,6 +387,7 @@ func accept_order() -> void:
 
 func decline_order() -> void:
 	"""Вызывается из HUD когда игрок отклоняет заказ"""
+	_unfreeze_car()
 	# Удаляем отклонённый заказ
 	if _current_order_idx >= 0 and _current_order_idx < _available_orders.size():
 		_available_orders.remove_at(_current_order_idx)
@@ -400,6 +404,8 @@ func decline_order() -> void:
 
 
 func _complete_order() -> void:
+	_freeze_car()
+
 	var elapsed := Time.get_ticks_msec() / 1000.0 - _trip_start_time
 	var speed_bonus_pct := _get_speed_bonus_pct()
 	var safe_bonus_pct := _safe_driving_pct
@@ -416,6 +422,9 @@ func _complete_order() -> void:
 	else:
 		phrase = CLIENT_PHRASES_BAD[randi() % CLIENT_PHRASES_BAD.size()]
 
+	# Оценка в звёздах (1-5)
+	var stars := clampi(int(overall_quality * 4.0) + 1, 1, 5)
+
 	# Начисляем деньги
 	if CareerState:
 		CareerState.complete_order(total)
@@ -431,6 +440,7 @@ func _complete_order() -> void:
 		"estimated": _estimated_time,
 		"speed_pct": speed_bonus_pct,
 		"safe_pct": safe_bonus_pct,
+		"stars": stars,
 	}
 
 	_state = State.AT_DROPOFF
@@ -448,6 +458,7 @@ func _complete_order() -> void:
 
 func finish_result_screen() -> void:
 	"""Вызывается из HUD когда игрок закрывает экран результата"""
+	_unfreeze_car()
 	_state = State.SEARCHING
 	_refresh_timer = 0.0
 	_spawn_orders()
@@ -753,3 +764,15 @@ func _remove_dropoff_marker() -> void:
 	if _dropoff_marker_node and is_instance_valid(_dropoff_marker_node):
 		_dropoff_marker_node.queue_free()
 		_dropoff_marker_node = null
+
+
+func _freeze_car() -> void:
+	if _car and _car is RigidBody3D:
+		(_car as RigidBody3D).linear_velocity = Vector3.ZERO
+		(_car as RigidBody3D).angular_velocity = Vector3.ZERO
+		_car.freeze = true
+
+
+func _unfreeze_car() -> void:
+	if _car and _car is RigidBody3D:
+		_car.freeze = false

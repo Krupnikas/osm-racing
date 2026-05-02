@@ -17,6 +17,7 @@ var _decline_btn: Button
 var _result_panel: PanelContainer
 var _result_labels: Array[Label] = []
 var _result_phrase_label: Label
+var _result_stars_label: Label
 var _result_ok_btn: Button
 
 var _status_label: Label  # Статус во время поездки (расстояние, бонусы)
@@ -178,6 +179,13 @@ func _build_result_popup() -> void:
 	title.add_theme_color_override("font_color", Color(0.3, 1.0, 0.3))
 	vbox.add_child(title)
 
+	# Звёзды
+	_result_stars_label = Label.new()
+	_result_stars_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_result_stars_label.add_theme_font_size_override("font_size", 36)
+	_result_stars_label.add_theme_color_override("font_color", Color(1.0, 0.85, 0.0))
+	vbox.add_child(_result_stars_label)
+
 	# Фраза клиента
 	_result_phrase_label = Label.new()
 	_result_phrase_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -256,12 +264,13 @@ func _update_balance() -> void:
 
 # === Попап заказа ===
 
-func show_order_popup(destination: String, fare: int, estimated_time: float) -> void:
+func show_order_popup(destination: String, fare: int, estimated_time: float, trip_dist: float = 0.0) -> void:
 	_order_dest_label.text = destination
 	_order_fare_label.text = CareerState.format_money(fare) if CareerState else "%d руб." % fare
 	var minutes := int(estimated_time / 60.0)
 	var seconds := int(fmod(estimated_time, 60.0))
-	_order_time_label.text = "Ожидаемое время: %d:%02d" % [minutes, seconds]
+	var dist_km := trip_dist / 1000.0
+	_order_time_label.text = "~%.1f км | %d:%02d" % [dist_km, minutes, seconds]
 	_order_panel.visible = true
 	_status_label.visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
@@ -270,7 +279,7 @@ func show_order_popup(destination: String, fare: int, estimated_time: float) -> 
 
 func _on_accept_pressed() -> void:
 	_order_panel.visible = false
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	if _work_manager:
 		_work_manager.accept_order()
 
@@ -278,7 +287,7 @@ func _on_accept_pressed() -> void:
 func _on_decline_pressed() -> void:
 	_order_panel.visible = false
 	_status_label.visible = false
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	if _work_manager:
 		_work_manager.decline_order()
 
@@ -286,6 +295,10 @@ func _on_decline_pressed() -> void:
 # === Результат заказа ===
 
 func show_order_result(result: Dictionary) -> void:
+	# Звёзды
+	var stars: int = result.get("stars", 3)
+	_result_stars_label.text = "★".repeat(stars) + "☆".repeat(5 - stars)
+
 	_result_phrase_label.text = "\"%s\"" % result.phrase
 	_result_labels[0].text = "Стоимость поездки: %s" % (CareerState.format_money(result.fare) if CareerState else "%d руб." % result.fare)
 
@@ -318,7 +331,7 @@ func show_order_result(result: Dictionary) -> void:
 
 func _on_result_ok_pressed() -> void:
 	_result_panel.visible = false
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	if _work_manager:
 		_work_manager.finish_result_screen()
 
