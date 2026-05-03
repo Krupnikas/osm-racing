@@ -14,6 +14,7 @@ const PULSE_PERIOD : float = 1.2
 @onready var _percent_rich : RichTextLabel = $Center/PercentRowHolder/PercentRow/PercentRich
 @onready var _segLabel     : Label         = $Center/PercentRowHolder/PercentRow/SegLabel
 @onready var _dots         : HBoxContainer = $Center/DotsHolder/Dots
+@onready var _subtitle     : Label         = $Center/Subtitle
 
 var _segs      : Array[Control] = []
 var _dot_slots : Array[Control] = []
@@ -73,6 +74,15 @@ func _set_progress(v: float) -> void:
 
 func set_progress(v: float) -> void:
 	_set_progress(v)
+
+
+func set_status(text: String) -> void:
+	# Updates the status subtitle line under the title (e.g. "Загрузка
+	# чанков OSM…", "Генерация зданий…").
+	if not is_node_ready():
+		await ready
+	if _subtitle:
+		_subtitle.text = text.to_upper()
 
 
 func _apply_progress() -> void:

@@ -2,6 +2,7 @@
 
 [ext_resource type="Script"      path="res://ui/standalone_main_menu.gd"          id="1_script"]
 [ext_resource type="PackedScene" uid="uid://car_selection_001" path="res://ui/car_selection.tscn" id="3_car_selection"]
+[ext_resource type="PackedScene" uid="uid://location_select_001" path="res://ui/location_select.tscn" id="4_loc_select"]
 [ext_resource type="Script"      path="res://ui/track_display.gd"                 id="5_track_display"]
 [ext_resource type="Script"      path="res://ui/career_menu.gd"                   id="6_career_menu"]
 [ext_resource type="PackedScene" uid="uid://menu_backdrop_001" path="res://ui/MenuBackdrop.tscn" id="7_backdrop"]
@@ -87,6 +88,12 @@ expand_mode = 1
 stretch_mode = 6
 texture_filter = 2
 material = SubResource("GlowBlurV")
+
+[node name="FocusBar" type="ColorRect" parent="."]
+visible = false
+layout_mode = 0
+mouse_filter = 2
+color = Color(0, 0.906, 1, 1)
 
 [node name="BrandBlock" type="VBoxContainer" parent="."]
 layout_mode = 1
@@ -608,10 +615,10 @@ anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -300.0
-offset_top = -200.0
-offset_right = 300.0
-offset_bottom = 200.0
+offset_left = -340.0
+offset_top = -340.0
+offset_right = 340.0
+offset_bottom = 340.0
 grow_horizontal = 2
 grow_vertical = 2
 
@@ -695,6 +702,36 @@ text = "Графические настройки доступны
 во время игры (ESC → Настройки)"
 horizontal_alignment = 1
 
+[node name="ControlsSpacer" type="Control" parent="SettingsPanel/VBox"]
+custom_minimum_size = Vector2(0, 18)
+layout_mode = 2
+
+[node name="ControlsLabel" type="Label" parent="SettingsPanel/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "Управление"
+horizontal_alignment = 1
+
+[node name="ControlsText" type="Label" parent="SettingsPanel/VBox"]
+layout_mode = 2
+text = "W/S или ↑↓ — газ/тормоз
+A/D или ←→ — поворот
+Пробел — ручной тормоз
+
+C — переключение камеры
+ПКМ + мышь — вращение камеры
+Колёсико — зум
+
+N — ночной режим · R — дождь
+G — неон под машиной · M — следующий трек
+
+Escape — меню паузы"
+theme_type_variation = &"MonoLabel"
+theme_override_font_sizes/font_size = 13
+theme_override_constants/line_spacing = 4
+modulate = Color(0.643, 0.678, 0.745, 1)
+horizontal_alignment = 0
+
 [node name="Spacer2" type="Control" parent="SettingsPanel/VBox"]
 layout_mode = 2
 size_flags_vertical = 3
@@ -751,6 +788,8 @@ text = "Загрузка карты..."
 horizontal_alignment = 1
 
 [node name="CarSelection" parent="." instance=ExtResource("3_car_selection")]
+
+[node name="LocationSelect" parent="." instance=ExtResource("4_loc_select")]
 
 [node name="CareerMenu" type="Control" parent="."]
 layout_mode = 1

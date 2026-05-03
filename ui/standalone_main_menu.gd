@@ -303,9 +303,41 @@ func _add_test_tracks_button() -> void:
 # === Главное меню ===
 
 func _on_start_pressed() -> void:
-	"""Свободная езда - показать выбор локации"""
+	"""Свободная езда - показать новый экран выбора локации (ВЫБЕРИТЕ ЛОКАЦИЮ)"""
 	$VBox.visible = false
-	$LocationPanel.visible = true
+	$BrandBlock.visible = false
+	$MenuHeader.visible = false
+	$Footer.visible = false
+	$CarSelection.visible = false
+	if not $LocationSelect.location_chosen.is_connected(_on_location_chosen):
+		$LocationSelect.location_chosen.connect(_on_location_chosen)
+	if not $LocationSelect.back_requested.is_connected(_on_location_select_back):
+		$LocationSelect.back_requested.connect(_on_location_select_back)
+	$LocationSelect.show_screen()
+
+
+func _on_location_chosen(loc: Dictionary) -> void:
+	$LocationSelect.visible = false
+	_start_free_roam_at(loc)
+
+
+func _on_location_select_back() -> void:
+	$LocationSelect.visible = false
+	$VBox.visible = true
+	$BrandBlock.visible = true
+	$MenuHeader.visible = true
+	$Footer.visible = true
+
+
+func _start_free_roam_at(loc: Dictionary) -> void:
+	print("MainMenu: Starting free roam in ", loc.get("ru", ""))
+	RaceState.free_roam_location = String(loc.get("ru", ""))
+	RaceState.free_roam_lat = float(loc.get("lat", 0.0))
+	RaceState.free_roam_lon = float(loc.get("lon", 0.0))
+	RaceState.selected_track = null
+	if MusicManager:
+		MusicManager.play_next_track()
+	get_tree().change_scene_to_file.call_deferred("res://main.tscn")
 
 
 func _on_races_pressed() -> void:

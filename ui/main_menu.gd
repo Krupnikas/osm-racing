@@ -211,9 +211,9 @@ func _start_loading() -> void:
 
 	# Скрываем панель выбора, показываем экран загрузки
 	$LocationPanel.visible = false
-	$LoadingPanel.visible = true
-	$LoadingPanel/VBox/ProgressBar.value = 0
-	$LoadingPanel/VBox/StatusLabel.text = "Подготовка..."
+	$LoadingScreen.visible = true
+	$LoadingScreen.set_progress(0.0)
+	$LoadingScreen.set_status("Подготовка...")
 
 	# Если игра уже была запущена - сбрасываем террейн
 	if _game_started and _terrain_generator:
@@ -264,9 +264,9 @@ func _start_loading_for_race() -> void:
 	# Скрываем меню полностью
 	$VBox.visible = false
 	$LocationPanel.visible = false
-	$LoadingPanel.visible = true
-	$LoadingPanel/VBox/ProgressBar.value = 0
-	$LoadingPanel/VBox/StatusLabel.text = "Перезагрузка трассы..."
+	$LoadingScreen.visible = true
+	$LoadingScreen.set_progress(0.0)
+	$LoadingScreen.set_status("Перезагрузка трассы...")
 
 	# Сбрасываем машину
 	if _car_rigidbody and _car_rigidbody is RigidBody3D:
@@ -299,16 +299,16 @@ func _start_loading_for_race() -> void:
 
 func _on_load_started() -> void:
 	print("MainMenu: _on_load_started() called!")
-	$LoadingPanel/VBox/ProgressBar.value = 0
-	$LoadingPanel/VBox/StatusLabel.text = "Загрузка карты..."
+	$LoadingScreen.set_progress(0.0)
+	$LoadingScreen.set_status("Загрузка карты...")
 
 func _on_load_progress(progress: float, status: String) -> void:
-	$LoadingPanel/VBox/ProgressBar.value = progress * 100.0
-	$LoadingPanel/VBox/StatusLabel.text = status
+	$LoadingScreen.set_progress(progress )
+	$LoadingScreen.set_status(status)
 
 func _on_load_complete() -> void:
-	$LoadingPanel/VBox/ProgressBar.value = 100
-	$LoadingPanel/VBox/StatusLabel.text = "Готово!"
+	$LoadingScreen.set_progress(1.0)
+	$LoadingScreen.set_status("Готово!")
 
 	# Небольшая задержка для отображения 100%
 	await get_tree().create_timer(0.3).timeout
@@ -539,7 +539,7 @@ func _input(event: InputEvent) -> void:
 func show_menu() -> void:
 	visible = true
 	$VBox.visible = true
-	$LoadingPanel.visible = false
+	$LoadingScreen.visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	get_tree().paused = true
 	if _hud:
@@ -591,9 +591,9 @@ func _on_apply_settings_pressed() -> void:
 
 		# Скрываем панель настроек, показываем экран загрузки
 		$SettingsPanel.visible = false
-		$LoadingPanel.visible = true
-		$LoadingPanel/VBox/ProgressBar.value = 0
-		$LoadingPanel/VBox/StatusLabel.text = "Применение настроек..."
+		$LoadingScreen.visible = true
+		$LoadingScreen.set_progress(0.0)
+		$LoadingScreen.set_status("Применение настроек...")
 
 		# Прячем HUD
 		if _hud:
