@@ -1665,6 +1665,9 @@ func _build_shop_row(car_id: String, number: int, focused: bool) -> Control:
 	num_lbl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	hbox.add_child(num_lbl)
 
+	# Car thumbnail with bordered frame + corner ticks.
+	hbox.add_child(_build_car_thumb(car_id, focused))
+
 	# Name + spec
 	var name_box := VBoxContainer.new()
 	name_box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
@@ -1773,6 +1776,64 @@ func _build_shop_row(car_id: String, number: int, focused: bool) -> Control:
 		action_box.add_child(buy_btn)
 
 	return row
+
+
+func _build_car_thumb(car_id: String, focused: bool) -> Control:
+	# 180x88 framed thumbnail. Vertical hairline borders left+right, four
+	# 8px corner ticks. Texture loaded lazily so a missing thumb file
+	# silently shows the empty frame.
+	var frame := Control.new()
+	frame.custom_minimum_size = Vector2(180, 88)
+	frame.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var line_color := UI.NEON_CYAN if focused else UI.INK_300
+	var tick_color := UI.NEON_CYAN if focused else UI.INK_400
+
+	var left := ColorRect.new()
+	left.color = line_color
+	left.set_anchors_preset(Control.PRESET_LEFT_WIDE)
+	left.offset_right = 1.0
+	left.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	frame.add_child(left)
+
+	var right := ColorRect.new()
+	right.color = line_color
+	right.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
+	right.offset_left = -1.0
+	right.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	frame.add_child(right)
+
+	var ticks := [
+		[Control.PRESET_TOP_LEFT,    Vector2(-1, 0),  Vector2(8, 1)],
+		[Control.PRESET_TOP_RIGHT,   Vector2(-7, 0),  Vector2(8, 1)],
+		[Control.PRESET_BOTTOM_LEFT, Vector2(-1, -1), Vector2(8, 1)],
+		[Control.PRESET_BOTTOM_RIGHT,Vector2(-7, -1), Vector2(8, 1)],
+	]
+	for t in ticks:
+		var r := ColorRect.new()
+		r.color = tick_color
+		r.set_anchors_preset(t[0])
+		r.position = t[1]
+		r.size = t[2]
+		r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		frame.add_child(r)
+
+	var tex_path := "res://ui/assets/car_thumbs/%s-thumb.png" % car_id
+	if ResourceLoader.exists(tex_path):
+		var thumb := TextureRect.new()
+		thumb.texture = load(tex_path)
+		thumb.set_anchors_preset(Control.PRESET_FULL_RECT)
+		thumb.offset_left = 8.0
+		thumb.offset_right = -8.0
+		thumb.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		thumb.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		thumb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		if not focused:
+			thumb.modulate.a = 0.85
+		frame.add_child(thumb)
+
+	return frame
 
 
 func _build_micro_stat(label_text: String, value: int) -> Control:
