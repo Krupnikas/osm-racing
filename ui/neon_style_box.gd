@@ -10,8 +10,9 @@ class_name NeonStyleBox
 @export var shear_deg       : float = -12.0
 @export var glow_color      : Color = Color(0.0, 0.91, 1.0, 0.55)
 @export var glow_size       : int   = 18
-@export var slashed         : bool  = false
+@export var slashed         : bool  = false   # TR corner cut (no outline on slash)
 @export var slash_size      : float = 18.0
+@export var right_slant     : float = 0.0     # BR corner pulled left by N px (whole right edge slants)
 
 func _draw(to_canvas_item: RID, rect: Rect2) -> void:
 	var ci := to_canvas_item
@@ -36,6 +37,16 @@ func _draw(to_canvas_item: RID, rect: Rect2) -> void:
 			Vector2(x,                       y + h),
 		])
 		skip_outline_segments = [1]  # edge from pts[1] to pts[2]
+	elif right_slant > 0.0:
+		# Right edge slants inward at the bottom. The slanted edge itself is
+		# created by clip-path in CSS — it has no border drawn on it.
+		pts = PackedVector2Array([
+			Vector2(x - dx,              y),
+			Vector2(x + w - dx,          y),
+			Vector2(x + w - right_slant, y + h),
+			Vector2(x,                   y + h),
+		])
+		skip_outline_segments = [1]  # TR -> (w - right_slant, h) edge
 	else:
 		pts = PackedVector2Array([
 			Vector2(x - dx,     y),

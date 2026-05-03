@@ -26,6 +26,7 @@ const OKTYABRSKY_PYLON_LON := 37.9035627
 var _current_mode: String = "sprint"  # "sprint" или "checkpoint"
 var _map_selected_lat: float = 0.0
 var _map_selected_lon: float = 0.0
+var _bar_pulse_tween: Tween
 
 
 func _input(event: InputEvent) -> void:
@@ -202,6 +203,21 @@ func _set_glow_for(btn: Button) -> void:
 	glow_disp.size = Vector2(720, 90)
 	glow_disp.visible = true
 
+	# Pulsing cyan bar (NFSU-style) anchored to the focused row's left edge
+	var bar := get_node_or_null("FocusBar") as ColorRect
+	if bar:
+		bar.position = origin
+		bar.size = Vector2(4, row.size.y)
+		bar.visible = true
+		if _bar_pulse_tween and _bar_pulse_tween.is_valid():
+			_bar_pulse_tween.kill()
+		bar.modulate.a = 1.0
+		_bar_pulse_tween = create_tween().set_loops()
+		_bar_pulse_tween.tween_property(bar, "modulate:a", 0.35, 0.55) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+		_bar_pulse_tween.tween_property(bar, "modulate:a", 1.0, 0.55) \
+			.set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+
 
 func _build_menu_row(btn_name: String, label_text: String, kicker_text: String, hint_text: String = "") -> HBoxContainer:
 	"""Build one menu row: HBox with [Button (MenuRow style) + KickerStack(kicker + hint) right]."""
@@ -301,11 +317,17 @@ func _on_races_pressed() -> void:
 func _on_career_pressed() -> void:
 	"""Карьера - выбор профиля и хаб"""
 	$VBox.visible = false
+	$BrandBlock.visible = false
+	$MenuHeader.visible = false
+	$Footer.visible = false
 	$CareerMenu.show_menu()
 
 
 func _on_career_back() -> void:
 	$VBox.visible = true
+	$BrandBlock.visible = true
+	$MenuHeader.visible = true
+	$Footer.visible = true
 
 
 func _on_car_selection_pressed() -> void:

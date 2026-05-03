@@ -16,6 +16,8 @@ const MenuBackdropScene = preload("res://ui/MenuBackdrop.tscn")
 const CornerChromeScript = preload("res://ui/components/corner_chrome.gd")
 const NeonStyleBoxScript = preload("res://ui/neon_style_box.gd")
 const DashedBorderScript = preload("res://ui/dashed_border.gd")
+const ScreenBgScript = preload("res://ui/screen_bg.gd")
+const ScrollFadeShader = preload("res://ui/scroll_fade.gdshader")
 const FiraBoldItalicFont = preload("res://ui/fonts/FiraSansCondensed-BoldItalic.ttf")
 const PROFILE_SAVE_PATH := "user://career_profiles.cfg"
 
@@ -43,7 +45,7 @@ signal back_to_main_menu
 var _profile_panel: Control
 var _hub_panel: Panel
 var _garage_panel: Panel
-var _shop_panel: Panel
+var _shop_panel: Control
 var _create_panel: Panel
 var _delete_confirm_panel: Panel
 var _location_panel: Panel
@@ -56,6 +58,7 @@ var _tuning_car_id: String = ""
 
 var _focused_sidebar: ColorRect = null
 var _focused_sidebar_tween: Tween = null
+var _shop_scroll: ScrollContainer = null
 
 # Прямые ссылки на контейнеры
 var _profiles_container: VBoxContainer
@@ -743,43 +746,204 @@ func _build_garage_panel() -> void:
 
 
 func _build_shop_panel() -> void:
-	_shop_panel = _create_centered_panel("ShopPanel", Vector2(600, 550))
+	# Full-rect АВТО САЛОН screen per design spec 03-garage.
+	_shop_panel = Control.new()
+	_shop_panel.name = "ShopScreen"
+	_shop_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_shop_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_shop_panel.visible = false
 	add_child(_shop_panel)
 
-	var vbox := _create_inner_vbox(_shop_panel)
+	# (No backdrop here — the standalone main menu's own MenuBackdrop is
+	# already drawn behind us; adding another one stacks two copies and
+	# brightens the screen.)
 
-	var title_row := HBoxContainer.new()
-	vbox.add_child(title_row)
+	# Brand mark top-left
+	var brand := BrandMarkScene.instantiate() as Control
+	brand.scale = Vector2(0.85, 0.85)
+	brand.position = Vector2(90, 80)
+	brand.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_shop_panel.add_child(brand)
 
-	var title := Label.new()
-	title.text = "АВТОСАЛОН"
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 36)
-	title.add_theme_color_override("font_color", Color(1, 0.8, 0.2))
-	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	title_row.add_child(title)
+	# Title block (kicker + АВТО / САЛОН)
+	var title_box := VBoxContainer.new()
+	title_box.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	title_box.offset_left = -1100.0
+	title_box.offset_right = -90.0
+	title_box.offset_top = 80.0
+	title_box.offset_bottom = 360.0
+	title_box.alignment = BoxContainer.ALIGNMENT_BEGIN
+	title_box.add_theme_constant_override("separation", 8)
+	title_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_shop_panel.add_child(title_box)
 
-	_shop_balance_label = Label.new()
-	_shop_balance_label.add_theme_font_size_override("font_size", 22)
-	_shop_balance_label.add_theme_color_override("font_color", Color(0.2, 1, 0.2))
-	title_row.add_child(_shop_balance_label)
+	var t_kicker := Label.new()
+	t_kicker.text = "// 03 / DEALERSHIP · АВТОСАЛОН"
+	t_kicker.theme_type_variation = "MonoLabel"
+	t_kicker.add_theme_font_size_override("font_size", 12)
+	t_kicker.add_theme_color_override("font_color", UI.NEON_CYAN)
+	t_kicker.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	title_box.add_child(t_kicker)
 
-	_add_spacer(vbox, 10)
+	var h2_stack := VBoxContainer.new()
+	h2_stack.add_theme_constant_override("separation", -54)
+	h2_stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	title_box.add_child(h2_stack)
 
+	var t1 := Label.new()
+	t1.text = "АВТО"
+	t1.theme_type_variation = "DisplayLabel"
+	t1.add_theme_font_size_override("font_size", 96)
+	t1.add_theme_color_override("font_color", UI.INK_900)
+	t1.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	h2_stack.add_child(t1)
+
+	var t2 := Label.new()
+	t2.text = "САЛОН"
+	t2.theme_type_variation = "DisplayLabel"
+	t2.add_theme_font_size_override("font_size", 96)
+	t2.add_theme_color_override("font_color", Color(0, 0, 0, 0))
+	t2.add_theme_color_override("font_outline_color", UI.NEON_MAGENTA)
+	t2.add_theme_constant_override("outline_size", 2)
+	t2.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	h2_stack.add_child(t2)
+
+	# Balance pill (parallelogram-cut, lime border)
+	_build_balance_pill()
+
+	# Scrollable car list. Top edge clips clean; bottom edge fades into the
+	# background via a gradient overlay so the back button doesn't fight the
+	# list visually.
+	const LIST_BOTTOM_FADE := 96.0
 	var scroll := ScrollContainer.new()
-	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	scroll.custom_minimum_size = Vector2(0, 350)
-	vbox.add_child(scroll)
+	scroll.set_anchors_preset(Control.PRESET_FULL_RECT)
+	scroll.offset_left = 120.0
+	scroll.offset_right = -120.0
+	scroll.offset_top = 360.0
+	scroll.offset_bottom = -120.0
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	scroll.follow_focus = true
+	scroll.mouse_filter = Control.MOUSE_FILTER_PASS
+	_shop_panel.add_child(scroll)
+	_shop_scroll = scroll
 
 	_shop_cars_container = VBoxContainer.new()
 	_shop_cars_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_shop_cars_container.add_theme_constant_override("separation", 10)
+	_shop_cars_container.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	scroll.add_child(_shop_cars_container)
 
-	_add_spacer(vbox, 10)
+	# Bottom fade overlay: simple vertical gradient from transparent (top)
+	# to bg-black (bottom). A TextureRect with a GradientTexture2D — no
+	# shader, no risk of rendering as a flat opaque rectangle.
+	var grad := Gradient.new()
+	grad.offsets = PackedFloat32Array([0.0, 1.0])
+	grad.colors = PackedColorArray([Color(0.024, 0.031, 0.047, 0.0),
+									 Color(0.024, 0.031, 0.047, 1.0)])
+	var grad_tex := GradientTexture2D.new()
+	grad_tex.gradient = grad
+	grad_tex.width = 4
+	grad_tex.height = 256
+	grad_tex.fill_from = Vector2(0, 0)
+	grad_tex.fill_to = Vector2(0, 1)
+	var fade := TextureRect.new()
+	fade.name = "ListBottomFade"
+	fade.texture = grad_tex
+	fade.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	fade.stretch_mode = TextureRect.STRETCH_SCALE
+	fade.set_anchors_preset(Control.PRESET_FULL_RECT)
+	fade.offset_left = 120.0
+	fade.offset_right = -120.0
+	fade.offset_top = -120.0 - LIST_BOTTOM_FADE
+	fade.offset_bottom = -120.0
+	fade.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_shop_panel.add_child(fade)
 
-	var back_btn := _create_back_button()
+	# Back button bottom-left
+	var back_btn := Button.new()
+	back_btn.text = "← НАЗАД"
+	back_btn.theme_type_variation = "MenuRow"
+	back_btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	back_btn.add_theme_font_size_override("font_size", 24)
+	back_btn.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	back_btn.offset_left = 120.0
+	back_btn.offset_top = -110.0
+	back_btn.offset_right = 280.0
+	back_btn.offset_bottom = -70.0
 	back_btn.pressed.connect(_on_shop_back)
-	vbox.add_child(back_btn)
+	_shop_panel.add_child(back_btn)
+
+	# Corner chrome on top
+	var chrome := Control.new()
+	chrome.set_script(CornerChromeScript)
+	chrome.set_anchors_preset(Control.PRESET_FULL_RECT)
+	chrome.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_shop_panel.add_child(chrome)
+
+
+func _format_ruble(amount: int) -> String:
+	# 65250 -> "65 250 ₽"
+	var s := str(int(abs(amount)))
+	var grouped := ""
+	var i := s.length()
+	while i > 0:
+		var start: int = max(0, i - 3)
+		var chunk := s.substr(start, i - start)
+		grouped = chunk + ((" " + grouped) if grouped != "" else "")
+		i = start
+	if amount < 0:
+		grouped = "-" + grouped
+	return grouped + " ₽"
+
+
+func _build_balance_pill() -> void:
+	# Parallelogram pill at the right side under the title (screen 03 spec).
+	# JSX: bg=ink-100, border=lime, clip-path with right-slant. The slanted
+	# edge has no outline (clipped away), per CSS clip-path semantics.
+	var pill := Panel.new()
+	pill.name = "BalancePill"
+	pill.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	pill.offset_left = -380.0
+	pill.offset_right = -110.0
+	pill.offset_top = 270.0
+	pill.offset_bottom = 322.0
+	pill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var psb: NeonStyleBox = NeonStyleBoxScript.new()
+	psb.fill_color = UI.INK_100
+	psb.outline_color = UI.NEON_LIME
+	psb.outline_width = 1.0
+	psb.shear_deg = 0.0
+	psb.glow_size = 0
+	psb.right_slant = 16.0
+	pill.add_theme_stylebox_override("panel", psb)
+	_shop_panel.add_child(pill)
+
+	var hbox := HBoxContainer.new()
+	hbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hbox.offset_left = 22.0
+	hbox.offset_right = -32.0
+	hbox.offset_top = 0.0
+	hbox.offset_bottom = 0.0
+	hbox.add_theme_constant_override("separation", 16)
+	hbox.alignment = BoxContainer.ALIGNMENT_BEGIN
+	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	pill.add_child(hbox)
+
+	var lbl := Label.new()
+	lbl.text = "БАЛАНС"
+	lbl.theme_type_variation = "MonoLabel"
+	lbl.add_theme_font_size_override("font_size", 11)
+	lbl.add_theme_color_override("font_color", UI.INK_500)
+	lbl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hbox.add_child(lbl)
+
+	_shop_balance_label = Label.new()
+	_shop_balance_label.theme_type_variation = "MonoLabel"
+	_shop_balance_label.add_theme_font_size_override("font_size", 22)
+	_shop_balance_label.add_theme_color_override("font_color", UI.NEON_LIME)
+	_shop_balance_label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hbox.add_child(_shop_balance_label)
 
 
 func _build_tuning_panel() -> void:
@@ -1384,86 +1548,276 @@ func _on_tuning_back() -> void:
 
 # === Магазин ===
 
+const CAR_SPEC_LINES := {
+	"matiz":      "1998 · 0.8L · 51 HP · FWD",
+	"logan":      "2004 · 1.4L · 75 HP · FWD",
+	"nexia":      "1995 · 1.5L · 80 HP · FWD",
+	"polo":       "2009 · 1.6L · 105 HP · FWD",
+	"beetle":     "1968 · 1.5L · 53 HP · RWD",
+	"bmw_m3_gtr": "2001 · 3.2L · 380 HP · RWD",
+}
+
+
 func _populate_shop() -> void:
-	_shop_balance_label.text = CareerState.format_money(CareerState.balance)
+	# Stop the previous focus pulse before tearing rows down.
+	if _focused_sidebar_tween and _focused_sidebar_tween.is_valid():
+		_focused_sidebar_tween.kill()
+	_focused_sidebar = null
+
+	_shop_balance_label.text = _format_ruble(CareerState.balance)
+
+	# Snap scroll to the top before tearing down rows so a stale focus on
+	# a soon-to-be-freed row can't trigger a follow-focus mid-rebuild.
+	if _shop_scroll:
+		_shop_scroll.scroll_vertical = 0
 
 	for child in _shop_cars_container.get_children():
 		child.queue_free()
 
-	# Сортируем по цене
-	var car_ids := CarSettings.get_car_ids()
 	var sorted_ids: Array[String] = []
-	for cid in car_ids:
+	for cid in CarSettings.get_car_ids():
 		sorted_ids.append(cid)
 	sorted_ids.sort_custom(func(a: String, b: String) -> bool:
 		return CareerState.get_car_price(a) < CareerState.get_car_price(b)
 	)
 
-	for car_id in sorted_ids:
-		var price := CareerState.get_car_price(car_id)
-		if price <= 0:
-			continue
-		var owned := car_id in CareerState.owned_cars
-		var can_afford := CareerState.can_afford(car_id)
-		var car_name := CarSettings.get_car_name(car_id)
+	# Always focus the first (cheapest) car on open so the list shows at
+	# the top. Arrow keys then walk down through the list.
+	var first_row: Control = null
+	for i in range(sorted_ids.size()):
+		var cid := sorted_ids[i]
+		var focused := i == 0
+		var row := _build_shop_row(cid, i + 1, focused)
+		_shop_cars_container.add_child(row)
+		if focused:
+			first_row = row
 
-		var panel := PanelContainer.new()
-		panel.custom_minimum_size = Vector2(0, 80)
-		_shop_cars_container.add_child(panel)
+	# Bottom spacer so the last car row can scroll past under the fade
+	# overlay without being clipped before reaching it.
+	var tail := Control.new()
+	tail.custom_minimum_size = Vector2(0, 96)
+	tail.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_shop_cars_container.add_child(tail)
 
-		var hbox := HBoxContainer.new()
-		hbox.add_theme_constant_override("separation", 15)
-		panel.add_child(hbox)
+	if _focused_sidebar:
+		_start_sidebar_pulse(_focused_sidebar)
+	if first_row:
+		first_row.call_deferred("grab_focus")
+	# Re-snap scroll to top after the deferred focus grab settles, in case
+	# follow_focus moved it.
+	if _shop_scroll:
+		_shop_scroll.set_deferred("scroll_vertical", 0)
 
-		var info_vbox := VBoxContainer.new()
-		info_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		hbox.add_child(info_vbox)
 
-		var name_label := Label.new()
-		name_label.text = car_name
-		name_label.add_theme_font_size_override("font_size", 24)
-		info_vbox.add_child(name_label)
+func _build_shop_row(car_id: String, number: int, focused: bool) -> Control:
+	var price := CareerState.get_car_price(car_id)
+	var owned: bool = car_id in CareerState.owned_cars
+	var can_afford: bool = CareerState.can_afford(car_id)
+	var car_name: String = CarSettings.get_car_name(car_id)
+	var stats: Dictionary = CarSettings.DISPLAY_STATS.get(car_id, {})
+	var spec_line: String = CAR_SPEC_LINES.get(car_id, "")
 
-		var stats: Dictionary = CarSettings.DISPLAY_STATS.get(car_id, {})
-		if not stats.is_empty():
-			var stats_text := "Разгон: %.0f  Скорость: %.0f  Управление: %.0f" % [
-				stats.get("accel", 0.5) * 10,
-				stats.get("speed", 0.5) * 10,
-				stats.get("handling", 0.5) * 10
-			]
-			var stats_label := Label.new()
-			stats_label.text = stats_text
-			stats_label.add_theme_font_size_override("font_size", 16)
-			stats_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
-			info_vbox.add_child(stats_label)
+	var row := Panel.new()
+	row.name = "Row_" + car_id
+	row.custom_minimum_size = Vector2(0, 110)
+	var sb: NeonStyleBox = NeonStyleBoxScript.new()
+	sb.fill_color = UI.INK_100
+	sb.outline_color = UI.NEON_CYAN if focused else UI.INK_300
+	sb.outline_width = 1.0
+	sb.shear_deg = 0.0
+	sb.right_slant = 18.0
+	sb.glow_size = 0
+	row.add_theme_stylebox_override("panel", sb)
+	row.mouse_filter = Control.MOUSE_FILTER_PASS
+	row.focus_mode = Control.FOCUS_ALL
+	row.gui_input.connect(_on_shop_row_gui_input.bind(car_id))
 
-		var right_vbox := VBoxContainer.new()
-		right_vbox.alignment = BoxContainer.ALIGNMENT_CENTER
-		hbox.add_child(right_vbox)
+	# Side bar — full height.
+	var bar := ColorRect.new()
+	bar.color = UI.NEON_CYAN if focused else UI.INK_400
+	bar.set_anchors_preset(Control.PRESET_LEFT_WIDE)
+	bar.offset_left = 0.0
+	bar.offset_top = 0.0
+	bar.offset_right = 5.0
+	bar.offset_bottom = 0.0
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(bar)
+	if focused:
+		_focused_sidebar = bar
 
-		if owned:
-			var owned_label := Label.new()
-			owned_label.text = "В гараже"
-			owned_label.add_theme_font_size_override("font_size", 20)
-			owned_label.add_theme_color_override("font_color", Color(0.2, 1, 0.2))
-			right_vbox.add_child(owned_label)
-		else:
-			var price_label := Label.new()
-			price_label.text = CareerState.format_money(price)
-			price_label.add_theme_font_size_override("font_size", 18)
-			if can_afford:
-				price_label.add_theme_color_override("font_color", Color(1, 1, 1))
-			else:
-				price_label.add_theme_color_override("font_color", Color(1, 0.3, 0.3))
-			right_vbox.add_child(price_label)
+	# Content
+	var hbox := HBoxContainer.new()
+	hbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hbox.offset_left = 28.0
+	hbox.offset_right = -36.0  # leave room for the right slant
+	hbox.add_theme_constant_override("separation", 24)
+	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(hbox)
 
-			var buy_btn := Button.new()
-			buy_btn.text = "Купить"
-			buy_btn.custom_minimum_size = Vector2(120, 40)
-			buy_btn.add_theme_font_size_override("font_size", 20)
-			buy_btn.disabled = not can_afford
-			buy_btn.pressed.connect(_on_shop_buy.bind(car_id))
-			right_vbox.add_child(buy_btn)
+	# Number column
+	var num_lbl := Label.new()
+	num_lbl.text = "%02d" % number
+	num_lbl.theme_type_variation = "MonoLabel"
+	num_lbl.add_theme_font_size_override("font_size", 22)
+	num_lbl.add_theme_color_override("font_color",
+		UI.NEON_CYAN if focused else UI.INK_500)
+	num_lbl.custom_minimum_size = Vector2(56, 0)
+	num_lbl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hbox.add_child(num_lbl)
+
+	# Name + spec
+	var name_box := VBoxContainer.new()
+	name_box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	name_box.custom_minimum_size = Vector2(280, 0)
+	name_box.add_theme_constant_override("separation", 6)
+	hbox.add_child(name_box)
+
+	var name_label := Label.new()
+	name_label.text = car_name.to_upper()
+	name_label.theme_type_variation = "DisplayLabel"
+	name_label.add_theme_font_override("font", _get_fira_tight())
+	name_label.add_theme_font_size_override("font_size", 32)
+	name_label.add_theme_color_override("font_color", UI.NEON_CYAN if focused else UI.INK_900)
+	name_box.add_child(name_label)
+
+	var spec_lbl := Label.new()
+	spec_lbl.text = spec_line.to_upper()
+	spec_lbl.theme_type_variation = "MonoLabel"
+	spec_lbl.add_theme_font_size_override("font_size", 12)
+	spec_lbl.add_theme_color_override("font_color", UI.INK_700)
+	name_box.add_child(spec_lbl)
+
+	# Stat bars
+	var stats_row := HBoxContainer.new()
+	stats_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	stats_row.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	stats_row.add_theme_constant_override("separation", 28)
+	hbox.add_child(stats_row)
+	stats_row.add_child(_build_micro_stat("РАЗГОН", int(round(float(stats.get("accel", 0.5)) * 10.0))))
+	stats_row.add_child(_build_micro_stat("СКОРОСТЬ", int(round(float(stats.get("speed", 0.5)) * 10.0))))
+	stats_row.add_child(_build_micro_stat("УПРАВЛЕНИЕ", int(round(float(stats.get("handling", 0.5)) * 10.0))))
+
+	# Price column
+	var price_box := VBoxContainer.new()
+	price_box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	price_box.custom_minimum_size = Vector2(180, 0)
+	price_box.add_theme_constant_override("separation", 4)
+	hbox.add_child(price_box)
+
+	var price_kicker := Label.new()
+	price_kicker.text = "ЦЕНА"
+	price_kicker.theme_type_variation = "MonoLabel"
+	price_kicker.add_theme_font_size_override("font_size", 11)
+	price_kicker.add_theme_color_override("font_color", UI.INK_700)
+	price_kicker.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	price_box.add_child(price_kicker)
+
+	var price_lbl := Label.new()
+	price_lbl.text = _format_ruble(price)
+	price_lbl.theme_type_variation = "MonoLabel"
+	price_lbl.add_theme_font_size_override("font_size", 22)
+	price_lbl.add_theme_color_override("font_color",
+		UI.NEON_LIME if (owned or can_afford) else UI.INK_500)
+	price_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	price_box.add_child(price_lbl)
+
+	# Action column
+	var action_box := Control.new()
+	action_box.custom_minimum_size = Vector2(180, 0)
+	action_box.size_flags_vertical = Control.SIZE_FILL
+	action_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hbox.add_child(action_box)
+
+	if owned:
+		var owned_lbl := Label.new()
+		owned_lbl.text = "В ГАРАЖЕ"
+		owned_lbl.theme_type_variation = "DisplayLabel"
+		owned_lbl.add_theme_font_override("font", _get_fira_tight())
+		owned_lbl.add_theme_font_size_override("font_size", 22)
+		owned_lbl.add_theme_color_override("font_color", UI.NEON_LIME)
+		owned_lbl.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
+		owned_lbl.offset_left = -180.0
+		owned_lbl.offset_right = 0.0
+		owned_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		owned_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		action_box.add_child(owned_lbl)
+	else:
+		var buy_btn := Button.new()
+		buy_btn.text = "КУПИТЬ"
+		buy_btn.add_theme_font_size_override("font_size", 14)
+		buy_btn.disabled = not can_afford
+		buy_btn.pressed.connect(_on_shop_buy.bind(car_id))
+		buy_btn.set_anchors_preset(Control.PRESET_CENTER_RIGHT)
+		buy_btn.offset_left = -130.0
+		buy_btn.offset_right = -10.0
+		buy_btn.offset_top = -22.0
+		buy_btn.offset_bottom = 22.0
+		# Highlight magenta when this row is focused.
+		if focused:
+			var hl := StyleBoxFlat.new()
+			hl.bg_color = UI.NEON_MAGENTA
+			hl.border_color = UI.NEON_MAGENTA
+			hl.border_width_left = 1
+			hl.border_width_right = 1
+			hl.border_width_top = 1
+			hl.border_width_bottom = 1
+			hl.skew = Vector2(-0.21, 0.0)
+			hl.content_margin_left = 18
+			hl.content_margin_right = 18
+			hl.content_margin_top = 8
+			hl.content_margin_bottom = 8
+			buy_btn.add_theme_stylebox_override("normal", hl)
+			buy_btn.add_theme_stylebox_override("hover", hl)
+			buy_btn.add_theme_stylebox_override("pressed", hl)
+			buy_btn.add_theme_color_override("font_color", UI.INK_000)
+		action_box.add_child(buy_btn)
+
+	return row
+
+
+func _build_micro_stat(label_text: String, value: int) -> Control:
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 6)
+	box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var lbl := Label.new()
+	lbl.text = label_text
+	lbl.theme_type_variation = "MonoLabel"
+	lbl.add_theme_font_size_override("font_size", 11)
+	lbl.add_theme_color_override("font_color", UI.INK_700)
+	box.add_child(lbl)
+
+	var seg_row := HBoxContainer.new()
+	seg_row.add_theme_constant_override("separation", 2)
+	seg_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	box.add_child(seg_row)
+
+	for i in range(10):
+		var seg := ColorRect.new()
+		seg.custom_minimum_size = Vector2(10, 10)
+		seg.color = UI.NEON_LIME if i < value else UI.INK_300
+		seg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		seg_row.add_child(seg)
+
+	return box
+
+
+func _on_shop_row_gui_input(event: InputEvent, car_id: String) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+		_select_shop_row(car_id)
+	elif event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER or event.keycode == KEY_SPACE:
+			_select_shop_row(car_id)
+
+
+func _select_shop_row(car_id: String) -> void:
+	# Enter on a row: buy if not owned and affordable; equip if owned.
+	if car_id in CareerState.owned_cars:
+		CareerState.select_car(car_id)
+		_on_shop_back()
+	elif CareerState.can_afford(car_id):
+		_on_shop_buy(car_id)
 
 
 func _on_shop_buy(car_id: String) -> void:
