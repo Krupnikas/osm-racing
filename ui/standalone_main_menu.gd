@@ -320,6 +320,7 @@ func _on_career_pressed() -> void:
 	$BrandBlock.visible = false
 	$MenuHeader.visible = false
 	$Footer.visible = false
+	$CarSelection.visible = false  # belt-and-suspenders: never let the main menu's CarSelection peek through
 	$CareerMenu.show_menu()
 
 
@@ -333,7 +334,27 @@ func _on_career_back() -> void:
 func _on_car_selection_pressed() -> void:
 	"""Выбор машины"""
 	$VBox.visible = false
-	$CarSelection.show_selection()
+	$BrandBlock.visible = false
+	$MenuHeader.visible = false
+	$Footer.visible = false
+	if not $CarSelection.selection_done.is_connected(_on_car_selection_chosen):
+		$CarSelection.selection_done.connect(_on_car_selection_chosen)
+	if not $CarSelection.back_requested.is_connected(_on_car_selection_back):
+		$CarSelection.back_requested.connect(_on_car_selection_back)
+	$CarSelection.show_selection(false)
+
+
+func _on_car_selection_chosen(car_id: String) -> void:
+	CarSettings.selected_car_id = car_id
+	CarSettings.save_settings()
+	_on_car_selection_back()
+
+
+func _on_car_selection_back() -> void:
+	$VBox.visible = true
+	$BrandBlock.visible = true
+	$MenuHeader.visible = true
+	$Footer.visible = true
 
 
 func _on_controls_pressed() -> void:

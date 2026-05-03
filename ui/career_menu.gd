@@ -19,6 +19,7 @@ const DashedBorderScript = preload("res://ui/dashed_border.gd")
 const ScreenBgScript = preload("res://ui/screen_bg.gd")
 const ScrollFadeShader = preload("res://ui/scroll_fade.gdshader")
 const FiraBoldItalicFont = preload("res://ui/fonts/FiraSansCondensed-BoldItalic.ttf")
+const CarSelectionScene = preload("res://ui/car_selection.tscn")
 const PROFILE_SAVE_PATH := "user://career_profiles.cfg"
 
 # Profile-row name font without the wide title tracking.
@@ -45,6 +46,7 @@ signal back_to_main_menu
 var _profile_panel: Control
 var _hub_panel: Panel
 var _garage_panel: Panel
+var _garage_carsel: Control = null
 var _shop_panel: Control
 var _create_panel: Panel
 var _delete_confirm_panel: Panel
@@ -1045,6 +1047,8 @@ func _hide_all() -> void:
 	_challenges_panel.visible = false
 	_tuning_panel.visible = false
 	_sell_confirm_panel.visible = false
+	if _garage_carsel:
+		_garage_carsel.visible = false
 
 
 func _show_profile_screen() -> void:
@@ -1061,8 +1065,23 @@ func _show_hub() -> void:
 
 func _show_garage() -> void:
 	_hide_all()
-	_garage_panel.visible = true
-	_populate_garage()
+	# Lazy: instantiate the CarSelection screen once, parented under us so
+	# it sits above any career hub panels.
+	if _garage_carsel == null:
+		_garage_carsel = CarSelectionScene.instantiate()
+		add_child(_garage_carsel)
+		_garage_carsel.selection_done.connect(_on_garage_carsel_chosen)
+		_garage_carsel.back_requested.connect(_on_garage_carsel_back)
+	_garage_carsel.show_selection(true, CareerState.selected_car)
+
+
+func _on_garage_carsel_chosen(car_id: String) -> void:
+	CareerState.select_car(car_id)
+	_show_hub()
+
+
+func _on_garage_carsel_back() -> void:
+	_show_hub()
 
 
 func _show_shop() -> void:
