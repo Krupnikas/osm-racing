@@ -3,6 +3,7 @@
 [ext_resource type="Script"      path="res://ui/standalone_main_menu.gd"          id="1_script"]
 [ext_resource type="PackedScene" uid="uid://car_selection_001" path="res://ui/car_selection.tscn" id="3_car_selection"]
 [ext_resource type="PackedScene" uid="uid://location_select_001" path="res://ui/location_select.tscn" id="4_loc_select"]
+[ext_resource type="PackedScene" uid="uid://race_select_001" path="res://ui/race_select.tscn" id="11_race_select"]
 [ext_resource type="Script"      path="res://ui/track_display.gd"                 id="5_track_display"]
 [ext_resource type="Script"      path="res://ui/career_menu.gd"                   id="6_career_menu"]
 [ext_resource type="PackedScene" uid="uid://menu_backdrop_001" path="res://ui/MenuBackdrop.tscn" id="7_backdrop"]
@@ -790,6 +791,8 @@ horizontal_alignment = 1
 [node name="CarSelection" parent="." instance=ExtResource("3_car_selection")]
 
 [node name="LocationSelect" parent="." instance=ExtResource("4_loc_select")]
+
+[node name="RaceSelect" parent="." instance=ExtResource("11_race_select")]
 
 [node name="CareerMenu" type="Control" parent="."]
 layout_mode = 1

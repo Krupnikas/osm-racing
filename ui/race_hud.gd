@@ -54,7 +54,7 @@ func show_hud() -> void:
 	$TimerLabel.visible = false
 	$CheckpointTimer.visible = false
 	$ResultPanel.visible = false
-	$LoadingPanel.visible = false
+	$LoadingScreen.visible = false
 
 
 func hide_hud() -> void:
@@ -65,25 +65,25 @@ func hide_hud() -> void:
 	$CheckpointTimer.visible = false
 	$FinishBanner.visible = false
 	$ResultPanel.visible = false
-	$LoadingPanel.visible = false
+	$LoadingScreen.visible = false
 	_clear_standings()
 
 
 func _on_loading_started() -> void:
 	print("RaceHUD._on_loading_started() - SIGNAL RECEIVED!")
 	show_hud()
-	$LoadingPanel.visible = true
-	$LoadingPanel/VBox/ProgressBar.value = 0
-	$LoadingPanel/VBox/StatusLabel.text = "Загрузка трассы..."
+	$LoadingScreen.visible = true
+	$LoadingScreen.set_progress(0.0)
+	$LoadingScreen.set_status("Загрузка трассы...")
 
 
 func _on_loading_progress(progress: float, status: String) -> void:
-	$LoadingPanel/VBox/ProgressBar.value = progress * 100.0
-	$LoadingPanel/VBox/StatusLabel.text = status
+	$LoadingScreen.set_progress(progress )
+	$LoadingScreen.set_status(status)
 
 
 func _on_race_ready() -> void:
-	$LoadingPanel.visible = false
+	$LoadingScreen.visible = false
 
 
 func _on_countdown_tick(number: int) -> void:

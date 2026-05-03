@@ -341,9 +341,36 @@ func _start_free_roam_at(loc: Dictionary) -> void:
 
 
 func _on_races_pressed() -> void:
-	"""Гонки - показать выбор режима"""
+	"""Гонки - открыть новый экран ВЫЗОВЫ."""
 	$VBox.visible = false
-	$ModesPanel.visible = true
+	$BrandBlock.visible = false
+	$MenuHeader.visible = false
+	$Footer.visible = false
+	$CarSelection.visible = false
+	if not $RaceSelect.race_chosen.is_connected(_on_race_chosen):
+		$RaceSelect.race_chosen.connect(_on_race_chosen)
+	if not $RaceSelect.back_requested.is_connected(_on_race_select_back):
+		$RaceSelect.back_requested.connect(_on_race_select_back)
+	$RaceSelect.show_screen()
+
+
+func _on_race_chosen(track) -> void:
+	$RaceSelect.visible = false
+	print("MainMenu: Race chosen: ", track.track_name)
+	RaceState.selected_track = track
+	RaceState.free_roam_location = ""
+	RaceState.is_career_race = false
+	if MusicManager:
+		MusicManager.play_next_track()
+	get_tree().change_scene_to_file.call_deferred("res://race/race_scene.tscn")
+
+
+func _on_race_select_back() -> void:
+	$RaceSelect.visible = false
+	$VBox.visible = true
+	$BrandBlock.visible = true
+	$MenuHeader.visible = true
+	$Footer.visible = true
 
 
 func _on_career_pressed() -> void:
