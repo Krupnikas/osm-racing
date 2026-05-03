@@ -607,18 +607,18 @@ func _build_hub_panel() -> void:
 
 	_add_spacer(vbox, 15)
 
-	# Выехать в город
+	# Работать (такси/доставка)
 	_hub_freeroam_btn = Button.new()
-	_hub_freeroam_btn.text = "ВЫЕХАТЬ В ГОРОД"
+	_hub_freeroam_btn.text = "РАБОТАТЬ"
 	_hub_freeroam_btn.custom_minimum_size = Vector2(0, 65)
 	_hub_freeroam_btn.add_theme_font_size_override("font_size", 30)
 	_hub_freeroam_btn.add_theme_color_override("font_color", Color(1, 1, 0.5))
-	_hub_freeroam_btn.pressed.connect(_on_freeroam_pressed)
+	_hub_freeroam_btn.pressed.connect(_on_work_pressed)
 	vbox.add_child(_hub_freeroam_btn)
 
-	# Вызовы
+	# Гонки
 	_hub_challenges_btn = Button.new()
-	_hub_challenges_btn.text = "ВЫЗОВЫ"
+	_hub_challenges_btn.text = "ГОНЯТЬСЯ"
 	_hub_challenges_btn.custom_minimum_size = Vector2(0, 65)
 	_hub_challenges_btn.add_theme_font_size_override("font_size", 30)
 	_hub_challenges_btn.add_theme_color_override("font_color", Color(1, 0.5, 0.5))
@@ -1190,7 +1190,8 @@ func _on_profile_back() -> void:
 func _update_hub() -> void:
 	_hub_profile_label.text = CareerState.active_profile
 	_hub_balance_label.text = CareerState.format_money(CareerState.balance)
-	_hub_stats_label.text = "Побед: %d / Гонок: %d" % [CareerState.races_won, CareerState.total_races]
+	_hub_stats_label.text = "Побед: %d / Гонок: %d | Заказов: %d" % [
+		CareerState.races_won, CareerState.total_races, CareerState.orders_completed]
 
 	var has_car := _has_car()
 	if has_car:
@@ -1205,7 +1206,7 @@ func _update_hub() -> void:
 	_hub_challenges_btn.disabled = not has_car
 
 
-func _on_freeroam_pressed() -> void:
+func _on_work_pressed() -> void:
 	if not _has_car():
 		return
 	_hide_all()
@@ -1246,6 +1247,7 @@ func _on_location_selected(location_name: String) -> void:
 	RaceState.free_roam_lon = coords[1]
 	RaceState.selected_track = null
 	RaceState.is_career_race = false
+	RaceState.is_work_mode = true
 	if MusicManager:
 		MusicManager.play_next_track()
 	get_tree().change_scene_to_file("res://main.tscn")
@@ -1337,6 +1339,7 @@ func _on_challenge_selected(track) -> void:
 	RaceState.selected_track = track
 	RaceState.free_roam_location = ""
 	RaceState.is_career_race = true
+	RaceState.is_work_mode = false
 	if MusicManager:
 		MusicManager.play_next_track()
 	get_tree().change_scene_to_file("res://race/race_scene.tscn")

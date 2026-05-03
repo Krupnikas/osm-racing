@@ -2584,19 +2584,6 @@ func _on_elevation_loaded(chunk_key: String, grid_data: Dictionary, gen: int, lo
 	if gen != _load_generation:
 		return  # Stale
 	_chunk_elevation_data[chunk_key] = grid_data
-	# Log elevation grid for debugging
-	if grid_data.is_empty():
-		print("ELEV: chunk %s — empty grid data (flat fallback)" % chunk_key)
-	elif grid_data.has("grid"):
-		var grid: Array = grid_data.grid
-		var all_h: PackedStringArray = []
-		for row in grid:
-			for h in row:
-				if h == null:
-					all_h.append("null")
-				else:
-					all_h.append("%.0f" % float(h))
-		print("ELEV: chunk %s loaded, heights = [%s]" % [chunk_key, ",".join(all_h)])
 
 
 var _elevation_retries: Dictionary = {}  # chunk_key -> retry count
@@ -18910,6 +18897,11 @@ func get_road_segments_in_radius(center: Vector3, radius: float) -> Array:
 						result.append(seg)
 
 	return result
+
+
+## Публичный API: проверяет, находится ли точка на дороге
+func is_point_on_road(pos: Vector2, margin: float = 0.5) -> bool:
+	return _is_point_on_road(pos, margin)
 
 
 ## Проверяет, находится ли точка на дороге
