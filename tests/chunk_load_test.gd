@@ -300,11 +300,14 @@ func _process(delta: float) -> void:
 
 	# Move camera south
 	camera.global_position.z += fly_speed * delta
-	camera.global_position.y = fly_height
+	var ground_y := 0.0
+	if osm_terrain and osm_terrain.has_method("_sample_elevation"):
+		ground_y = osm_terrain._sample_elevation(camera.global_position.x, camera.global_position.z)
+	camera.global_position.y = ground_y + fly_height
 
 	# Sync car position for NPC spawning
 	if car:
-		car.global_position = Vector3(camera.global_position.x, 0.5, camera.global_position.z)
+		car.global_position = Vector3(camera.global_position.x, ground_y + 0.5, camera.global_position.z)
 
 	# Track chunk count
 	if osm_terrain and "_loaded_chunks" in osm_terrain:

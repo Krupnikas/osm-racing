@@ -6,6 +6,7 @@ signal load_failed(error: String)
 
 # Список серверов Overpass API (fallback)
 const OVERPASS_SERVERS := [
+	"http://mc.skrup.ru:12346/api/interpreter",
 	"https://overpass.kumi.systems/api/interpreter",
 	"https://overpass-api.de/api/interpreter",
 	"https://maps.mail.ru/osm/tools/overpass/api/interpreter",
@@ -13,13 +14,13 @@ const OVERPASS_SERVERS := [
 
 # Глобальная ротация серверов и rate limit (shared между всеми инстансами)
 static var _next_server_index := 0  # Round-robin: каждый новый запрос → следующий сервер
-static var _server_cooldown_until: Array[int] = [0, 0, 0]  # msec timestamp до которого сервер заблокирован
+static var _server_cooldown_until: Array[int] = [0, 0, 0, 0]  # msec timestamp до которого сервер заблокирован
 static var _request_queue: Array[OSMLoader] = []  # Глобальная очередь запросов
 static var _active_requests: int = 0  # Сколько HTTP запросов сейчас в полёте
 const MAX_ACTIVE_REQUESTS := 6  # Макс одновременных HTTP запросов (2 на сервер)
 const REQUEST_INTERVAL_MS := 500  # Минимальный интервал между запросами к одному серверу
 const RATE_LIMIT_COOLDOWN_MS := 10000  # Cooldown сервера после 429/ошибки
-static var _last_request_time: Array[int] = [0, 0, 0]  # Время последнего запроса к каждому серверу
+static var _last_request_time: Array[int] = [0, 0, 0, 0]  # Время последнего запроса к каждому серверу
 static var _queue_processor: OSMLoader = null  # Один инстанс обрабатывает очередь
 
 # Кеширование
@@ -117,18 +118,19 @@ func _process_global_queue() -> void:
 	loader._send_request_immediate()
 
 
-## Выбирает сервер с учётом cooldown и минимального интервала
+## Выбирает сервер: приоритет у первого (свой), остальные — fallback с round-robin
 static func _pick_available_server(now: int) -> int:
+	# Приоритет: свой сервер (index 0) — без интервала, если не на cooldown
+	if now >= _server_cooldown_until[0]:
+		return 0
+	# Fallback: остальные серверы с интервалом
 	var best_idx := -1
 	var best_wait := 999999
-	for i in OVERPASS_SERVERS.size():
-		# Сервер на cooldown (rate limited)
+	for i in range(1, OVERPASS_SERVERS.size()):
 		if now < _server_cooldown_until[i]:
 			continue
-		# Проверяем минимальный интервал
 		var elapsed := now - _last_request_time[i]
 		if elapsed >= REQUEST_INTERVAL_MS:
-			# Сервер свободен — берём с наименьшим временем ожидания
 			if elapsed > best_wait or best_idx < 0:
 				best_idx = i
 				best_wait = elapsed
@@ -342,7 +344,7 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 		return
 
 	if response_code != 200:
-		_try_next_server("HTTP error: " + str(response_code))
+		_try_next_server("HTTP %d from %s" % [response_code, OVERPASS_SERVERS[current_server_index].split("/")[2]])
 		return
 
 	var json_string := body.get_string_from_utf8()

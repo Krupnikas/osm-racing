@@ -89,6 +89,7 @@ start_lon = 37.955805
 chunk_size = 210.0
 load_distance = 500.0
 unload_distance = 700.0
+enable_elevation = true
 car_path = NodePath("../Car")
 
 [node name="Car" parent="." groups=["car", "player"] instance=ExtResource("car")]

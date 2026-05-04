@@ -37,6 +37,7 @@ QUERY_RADIUS = 315     # maxf(210, 150) + 210/2 = 315
 CACHE_VERSION = 6
 
 REMOTE_SERVERS = [
+    "http://mc.skrup.ru:12346/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
     "https://z.overpass-api.de/api/interpreter",
