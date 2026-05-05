@@ -168,7 +168,7 @@ func process_forces(opposite_compression : float, braking : bool, delta : float)
 				current_tire_stiffness = 1000000.0 + 8000000.0 * tire_stiffnesses[surface_type]
 	else:
 		last_collider = null
-	
+
 	var compression := process_suspension(opposite_compression, delta)
 	
 	if is_colliding() and last_collider:
