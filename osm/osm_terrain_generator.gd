@@ -377,6 +377,11 @@ var _deck_entry_edges_cache: Dictionary = {}
 # elevation for the whole span, not per-vertex terrain noise. Indexed by
 # poly index in _bridge_deck_polygons.
 var _deck_polygon_ref_elev: Dictionary = {}
+# Bridge deck mesh + collision + railing nodes per polygon index. They live
+# directly under `self` (not under the spawning chunk), so the camera-
+# direction culler can't hide them when the player is still on the bridge.
+# Cleared in reset_terrain to free per-location decks.
+var _bridge_deck_nodes: Dictionary = {}  # poly_idx -> Array[Node3D]
 
 # FPS статистика для отображения на экране
 var _fps_samples: Array[float] = []
@@ -3021,6 +3026,14 @@ func reset_terrain() -> void:
 	_bridge_node_ways.clear()
 	_bridge_deck_polygons.clear()
 	_deck_entry_edges_cache.clear()
+	_deck_polygon_ref_elev.clear()
+	# Free deck nodes parented to `self` (they're not under any chunk so the
+	# chunk-unload pass won't sweep them up).
+	for poly_idx in _bridge_deck_nodes:
+		for n in _bridge_deck_nodes[poly_idx]:
+			if is_instance_valid(n):
+				n.queue_free()
+	_bridge_deck_nodes.clear()
 	_deferred_terrain_chunks.clear()
 
 	# Reset draw call stats (prevent stale stats across location changes)
@@ -3826,6 +3839,11 @@ func _process_phase3_queue() -> bool:
 					pass  # Не фильтруем — каждый чанк рисует свой клипнутый кусок
 				elif tags.get("amenity") == "parking":
 					pass  # Не фильтруем — _create_parking клипает через intersect_polygons
+				elif tags.get("natural") == "water" or tags.get("landuse") in ["reservoir", "basin"]:
+					# Big water bodies (rivers, reservoirs) have centroids far
+					# from any one chunk; clip per-chunk inside
+					# _create_natural_immediate / _create_landuse_immediate.
+					pass
 				elif tags.has("building") or tags.has("amenity"):
 					var center := _get_way_center(nodes)
 					if not (center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z):
@@ -3877,8 +3895,24 @@ func _process_phase3_queue() -> bool:
 			elif tags.has("amenity") and not tags.has("building"):
 				_create_amenity_building(nodes, tags, target, null, true)  # skip_spatial_hash
 			elif tags.has("natural"):
+				# Pre-register water polygons synchronously so the tree /
+				# lamp / lookup checks in the upcoming "points" phase see
+				# them. The mesh + shore are still built lazily from the
+				# terrain queue.
+				if tags.get("natural") == "water" and enable_water and nodes.size() >= 3:
+					var wpts := PackedVector2Array()
+					for n in nodes:
+						wpts.append(_latlon_to_local(n.lat, n.lon))
+					for clipped in _clip_polygon_to_chunk(wpts, chunk_key):
+						_register_water_polygon(clipped, target)
 				_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
 			elif tags.has("landuse"):
+				if tags.get("landuse") in ["reservoir", "basin"] and enable_water and nodes.size() >= 3:
+					var lpts := PackedVector2Array()
+					for n in nodes:
+						lpts.append(_latlon_to_local(n.lat, n.lon))
+					for clipped in _clip_polygon_to_chunk(lpts, chunk_key):
+						_register_water_polygon(clipped, target)
 				_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 			elif tags.has("leisure"):
 				_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
@@ -4172,8 +4206,21 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 		elif tags.has("amenity") and not tags.has("building"):
 			_create_amenity_building(nodes, tags, target, null)
 		elif tags.has("natural"):
+			# Pre-register water polygons synchronously (see threaded path).
+			if tags.get("natural") == "water" and enable_water and nodes.size() >= 3:
+				var wpts := PackedVector2Array()
+				for n in nodes:
+					wpts.append(_latlon_to_local(n.lat, n.lon))
+				for clipped in _clip_polygon_to_chunk(wpts, chunk_key):
+					_register_water_polygon(clipped, target)
 			_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
 		elif tags.has("landuse"):
+			if tags.get("landuse") in ["reservoir", "basin"] and enable_water and nodes.size() >= 3:
+				var lpts := PackedVector2Array()
+				for n in nodes:
+					lpts.append(_latlon_to_local(n.lat, n.lon))
+				for clipped in _clip_polygon_to_chunk(lpts, chunk_key):
+					_register_water_polygon(clipped, target)
 			_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 		elif tags.has("leisure"):
 			_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
@@ -5791,7 +5838,10 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 	body.add_child(shape)
 	parent.add_child(body)
 
-	_create_deck_railing(points, ref_elev, parent)
+	var railing_nodes: Array = _create_deck_railing(points, ref_elev, parent)
+	var all_nodes: Array = [mesh_inst, body]
+	all_nodes.append_array(railing_nodes)
+	_bridge_deck_nodes[poly_idx] = all_nodes
 
 
 # Renders thin white lane-divider strips on top of the deck for an on-deck
@@ -6101,9 +6151,10 @@ func _create_on_deck_footway(smoothed_points: PackedVector2Array, width: float, 
 # `ref_elev` is the polygon's reference elevation — the railing Y is queried
 # via the same `_deck_surface_y_at(p, poly, 1, ref_elev)` so it matches the
 # deck mesh exactly, no per-vertex elevation noise.
-func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Node3D) -> void:
+func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Node3D) -> Array:
+	var created: Array = []
 	if poly.size() < 3:
-		return
+		return created
 
 	const RAILING_HEIGHT := 1.1
 	const BAR_SPACING := 0.12
@@ -6227,7 +6278,7 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 
 	var committed := st.commit()
 	if committed == null or committed.get_surface_count() == 0:
-		return
+		return created
 
 	var mesh_inst := MeshInstance3D.new()
 	mesh_inst.name = "BridgeDeckRailing"
@@ -6235,6 +6286,7 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 	mesh_inst.material_override = material
 	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	parent.add_child(mesh_inst)
+	created.append(mesh_inst)
 
 	var coll_body := StaticBody3D.new()
 	coll_body.name = "DeckRailingCollision"
@@ -6271,6 +6323,8 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 		coll_shape_node.rotation.y = -angle
 		coll_body.add_child(coll_shape_node)
 	parent.add_child(coll_body)
+	created.append(coll_body)
+	return created
 
 # === End restored bridge deck section =======================================
 
@@ -9063,11 +9117,19 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -
 	var clipped_polys := _clip_polygon_to_chunk(points, chunk_key)
 	for clipped in clipped_polys:
 		if is_water and enable_water:
-			_register_water_polygon(clipped, parent)
+			# Spatial hash already pre-registered during the "ways" phase
+			# (so trees/lamps know to avoid water before the mesh exists).
+			# Just build the mesh + shore here.
 			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
 			_create_shore_mesh(clipped, parent)
 		elif texture_key != "grass" and not is_water and enable_vegetation:
-			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
+			# Skip land polygons (forest, etc.) whose centroid sits inside a
+			# registered water polygon — OSM occasionally has natural=wood
+			# overlapping rivers/reservoirs, and the green forest mesh at
+			# Y=elev-0.02 would otherwise hide the water at Y=elev+WATER_Y.
+			var clipped_center := _get_polygon_center(clipped)
+			if not _is_point_in_water(clipped_center, chunk_key):
+				_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
 		# Генерируем густые деревья внутри лесных полигонов
 		if natural_type in ["wood", "tree_row"]:
 			_generate_trees_in_polygon(clipped, parent, true)
@@ -9133,11 +9195,13 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 		if has_tree_override:
 			_generate_trees_in_polygon(clipped, parent, dense_override)
 		if is_water and enable_water:
-			_register_water_polygon(clipped, parent)
+			# Spatial hash already pre-registered in "ways" phase.
 			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
 			_create_shore_mesh(clipped, parent)
 		elif texture_key != "grass" and not is_water and enable_vegetation:
-			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
+			var clipped_center := _get_polygon_center(clipped)
+			if not _is_point_in_water(clipped_center, chunk_key):
+				_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
 		if landuse_type == "forest":
 			_generate_trees_in_polygon(clipped, parent, true)
 
@@ -9886,7 +9950,10 @@ func _create_waterway(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	for clipped in clipped_polys:
 		_register_water_polygon(clipped, parent)
 		_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
-		_create_shore_mesh(clipped, parent)
+		# No shore for waterway=* lines: rivers/canals/streams are typically
+		# inside a larger natural=water polygon (which has its own shore), or
+		# they are too narrow to want banks of their own. Drawing shore here
+		# put two brown stripes through the middle of every big river.
 
 func _create_3d_building(points: PackedVector2Array, color: Color, building_height: float, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
 	# Минимум 4 точки для нормального здания (3 - треугольник, плохо)
@@ -11936,11 +12003,13 @@ func _process_terrain_objects_queue() -> void:
 
 		var item: Dictionary = _terrain_objects_queue.pop_front()
 
-		# Проверяем что parent ещё существует
-		if not is_instance_valid(item.get("parent")):
-			continue
-
 		var obj_type: String = item.get("type", "")
+		# Bridge decks parent themselves to `self`, not to chunks; the
+		# chunk that originally queued them may already have unloaded but
+		# the deck must still build (it's per-relation, not per-chunk).
+		# Other types still require their owning chunk to be alive.
+		if obj_type != "bridge_deck" and not is_instance_valid(item.get("parent")):
+			continue
 		var t0 := Time.get_ticks_usec()
 
 		match obj_type:
@@ -11966,7 +12035,14 @@ func _process_terrain_objects_queue() -> void:
 				if is_nan(ref_elev):
 					deferred.append(item)
 					continue
-				_create_bridge_deck_mesh(poly, item.get("tags", {}), item.parent, poly)
+				# Parent the deck to self, not to the chunk that happened to
+				# spawn it: a 1 km bridge mesh otherwise gets hidden the
+				# moment its owner chunk falls behind the camera-direction
+				# culler (~315 m behind), even though the player is still
+				# driving on top of it. reset_terrain() frees orphan deck
+				# nodes via _bridge_deck_nodes.
+				var deck_parent: Node3D = self
+				_create_bridge_deck_mesh(poly, item.get("tags", {}), deck_parent, poly)
 				_record_perf("terrain_bridge_deck", Time.get_ticks_usec() - t0)
 
 		processed += 1
@@ -16792,47 +16868,28 @@ func _is_point_in_any_parking(point: Vector2, ck: String = "") -> bool:
 
 ## Проверяет, находится ли точка внутри водного полигона (main thread)
 func _is_point_in_water(point: Vector2, ck: String = "") -> bool:
-	var cell_x := int(floor(point.x / WATER_CELL_SIZE))
-	var cell_y := int(floor(point.y / WATER_CELL_SIZE))
+	# Edge spatial hash gives us a fast hit for points within
+	# WATER_CELL_SIZE of a polygon edge. For points deep inside a large
+	# polygon (rivers wider than 30 m, reservoirs) no edge-cell hits the
+	# 3×3 neighbourhood and the hash answer is "no water" — wrong. Hit
+	# the per-chunk polygon list directly as a fallback.
 	var chunks_to_check: Array = [ck] if ck != "" else _chunk_water_hashes.keys()
 	for c in chunks_to_check:
-		if not _chunk_water_hashes.has(c):
-			continue
-		var data: Dictionary = _chunk_water_hashes[c]
-		var h: Dictionary = data.get("hash", {})
-		var polys: Array = data.get("polys", [])
-		for dx in range(-1, 2):
-			for dy in range(-1, 2):
-				var key := Vector2i(cell_x + dx, cell_y + dy)
-				if not h.has(key):
-					continue
-				for entry in h[key]:
-					var widx: int = entry.idx
-					if widx < polys.size():
-						var wp: PackedVector2Array = polys[widx]
-						if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
-							return true
+		var polys: Array = _chunk_water_polygons.get(c, [])
+		for wp in polys:
+			if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
+				return true
 	return false
 
 
 ## Проверяет, находится ли точка внутри водного полигона (thread-safe)
 static func _is_point_in_water_threadsafe(point: Vector2, water_hash: Dictionary, water_polys: Array) -> bool:
-	var cell_x := int(floor(point.x / WATER_CELL_SIZE))
-	var cell_y := int(floor(point.y / WATER_CELL_SIZE))
-	var checked: Dictionary = {}
-	for dx in range(-1, 2):
-		for dy in range(-1, 2):
-			var key := Vector2i(cell_x + dx, cell_y + dy)
-			if not water_hash.has(key):
-				continue
-			for entry in water_hash[key]:
-				var widx: int = entry.idx
-				if not checked.has(widx):
-					checked[widx] = true
-					if widx < water_polys.size():
-						var wp: PackedVector2Array = water_polys[widx]
-						if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
-							return true
+	# Same fallback as _is_point_in_water — edge hash misses interior of
+	# large water bodies. Iterate water_polys directly; the chunk list is
+	# small (one polygon per natural=water relation per chunk).
+	for wp in water_polys:
+		if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
+			return true
 	return false
 
 
