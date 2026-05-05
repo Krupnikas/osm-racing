@@ -5,8 +5,8 @@ extends Control
 ## Карта вращается под игрока (направление движения всегда вверх)
 
 # Константы отрисовки
-const MAP_RADIUS := 200.0        # Радиус карты в пикселях (2x)
-const MAP_CENTER := Vector2(210, 210)  # Центр карты (с отступом от края)
+const MAP_RADIUS := 130.0        # Радиус карты в пикселях
+const MAP_CENTER := Vector2(140, 140)  # Центр карты (с отступом от края)
 const WORLD_RADIUS := 150.0      # Радиус видимости в мировых метрах
 const CACHE_EXTRA_RADIUS := 100.0  # Дополнительный радиус кэширования (впереди и сзади)
 
@@ -73,7 +73,7 @@ const WORK_EDGE_MARKER_SIZE := 10.0  # Размер маркера на краю
 
 
 func _ready() -> void:
-	custom_minimum_size = Vector2(420, 420)
+	custom_minimum_size = Vector2(280, 280)
 
 	# Ждём один кадр чтобы сцена полностью загрузилась
 	await get_tree().process_frame

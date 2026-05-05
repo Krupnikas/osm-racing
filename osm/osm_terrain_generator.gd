@@ -230,6 +230,15 @@ var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batc
 var _chunk_terrain_roads: Dictionary = {}  # chunk_key → Array[{points: PackedVector2Array, width: float}] — для отложенного выреза террейна
 var _deferred_path_polys: Dictionary = {}  # chunk_key → Array[{polys, raw_points, width, height_offset, parent}] — footpath polygons waiting for road clipping at finalization
 var _chunk_water_polygons: Dictionary = {}  # chunk_key → Array[PackedVector2Array] — водоёмы для выреза террейна + берег
+# Global, dedup'd water polygons (full, un-clipped). Per-chunk water entries
+# only see their own slice; chunks deep inside a huge reservoir (Рыбинское,
+# 11×16 km) have no polygon nodes in their bbox and never register one
+# locally. Iterating this list with an AABB pre-filter lets every chunk's
+# terrain cutout / point-in-water lookup see the full polygon. Keyed by
+# polygon hash so a relation joined in one chunk's data is stored once.
+var _global_water_polygons: Array[PackedVector2Array] = []
+var _global_water_polygon_bboxes: Array[Rect2] = []
+var _global_water_polygon_hashes: Dictionary = {}  # hash → idx
 var _deferred_terrain_chunks: Array[String] = []  # Чанки ожидающие terrain clipping (ждут соседей)
 
 var _chunk_pending_deferred: Dictionary = {}  # chunk_key → int — счётчик pending deferred items (lamps, footway, manholes, billboard, traffic)
@@ -1844,6 +1853,9 @@ func start_loading() -> void:
 	_road_batch_data.clear()  # Очищаем road batch data
 	_chunk_terrain_roads.clear()
 	_chunk_water_polygons.clear()
+	_global_water_polygons.clear()
+	_global_water_polygon_bboxes.clear()
+	_global_water_polygon_hashes.clear()
 	_deferred_terrain_chunks.clear()
 	# Clear threaded terrain gen results
 	_terrain_thread_mutex.lock()
@@ -3022,6 +3034,9 @@ func reset_terrain() -> void:
 	_road_batch_data.clear()
 	_chunk_terrain_roads.clear()
 	_chunk_water_polygons.clear()
+	_global_water_polygons.clear()
+	_global_water_polygon_bboxes.clear()
+	_global_water_polygon_hashes.clear()
 	_deferred_path_polys.clear()
 	_bridge_node_ways.clear()
 	_bridge_deck_polygons.clear()
@@ -3840,10 +3855,14 @@ func _process_phase3_queue() -> bool:
 				elif tags.get("amenity") == "parking":
 					pass  # Не фильтруем — _create_parking клипает через intersect_polygons
 				elif tags.get("natural") == "water" or tags.get("landuse") in ["reservoir", "basin"]:
-					# Big water bodies (rivers, reservoirs) have centroids far
-					# from any one chunk; clip per-chunk inside
-					# _create_natural_immediate / _create_landuse_immediate.
-					pass
+					# Huge water polygons (rivers, reservoirs) cannot be center-
+					# filtered — the centre is far from any single chunk. Use
+					# bbox-overlap instead: any chunk whose bbox the polygon
+					# touches gets to process it (and clips per-chunk inside
+					# _create_natural_immediate). Restored from 53b0537.
+					var w_bbox := _get_way_local_bbox(nodes)
+					if w_bbox.position.x > chunk_max_x or w_bbox.end.x < chunk_min_x or w_bbox.position.y > chunk_max_z or w_bbox.end.y < chunk_min_z:
+						continue
 				elif tags.has("building") or tags.has("amenity"):
 					var center := _get_way_center(nodes)
 					if not (center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z):
@@ -3903,14 +3922,22 @@ func _process_phase3_queue() -> bool:
 					var wpts := PackedVector2Array()
 					for n in nodes:
 						wpts.append(_latlon_to_local(n.lat, n.lon))
+					_register_global_water_polygon(wpts)
 					for clipped in _clip_polygon_to_chunk(wpts, chunk_key):
 						_register_water_polygon(clipped, target)
-				_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+				# Large water polygons (reservoirs, lakes) must be processed
+				# first so that narrower water strips contained inside them
+				# can skip redundant shore edges facing open water (53b0537).
+				if tags.get("natural", "") == "water" and nodes.size() > 200:
+					_terrain_objects_queue.push_front({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+				else:
+					_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
 			elif tags.has("landuse"):
 				if tags.get("landuse") in ["reservoir", "basin"] and enable_water and nodes.size() >= 3:
 					var lpts := PackedVector2Array()
 					for n in nodes:
 						lpts.append(_latlon_to_local(n.lat, n.lon))
+					_register_global_water_polygon(lpts)
 					for clipped in _clip_polygon_to_chunk(lpts, chunk_key):
 						_register_water_polygon(clipped, target)
 				_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
@@ -4211,14 +4238,19 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 				var wpts := PackedVector2Array()
 				for n in nodes:
 					wpts.append(_latlon_to_local(n.lat, n.lon))
+				_register_global_water_polygon(wpts)
 				for clipped in _clip_polygon_to_chunk(wpts, chunk_key):
 					_register_water_polygon(clipped, target)
-			_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+			if tags.get("natural", "") == "water" and nodes.size() > 200:
+				_terrain_objects_queue.push_front({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+			else:
+				_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
 		elif tags.has("landuse"):
 			if tags.get("landuse") in ["reservoir", "basin"] and enable_water and nodes.size() >= 3:
 				var lpts := PackedVector2Array()
 				for n in nodes:
 					lpts.append(_latlon_to_local(n.lat, n.lon))
+				_register_global_water_polygon(lpts)
 				for clipped in _clip_polygon_to_chunk(lpts, chunk_key):
 					_register_water_polygon(clipped, target)
 			_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
@@ -7440,32 +7472,59 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 				if in_chunk:
 					relevant_parking.append(parking_poly)
 
-	# Собираем водные полигоны из 3x3 соседей, расширенные на SHORE_WIDTH для выреза
+	# Собираем водные полигоны из глобального реестра — каждый full polygon
+	# зарегистрирован один раз, чанки находят его по AABB пересечению. Это
+	# покрывает чанки внутри огромных полигонов (Рыбинское вдхр), которые
+	# не получили way в своих OSM-данных.
 	var relevant_water_shore: Array[PackedVector2Array] = []
+	# Per-chunk water polygons we'll render mesh + shore for.
+	var per_chunk_water: Array[PackedVector2Array] = []
 	if enable_water:
-		for dx2 in range(-1, 2):
-			for dz2 in range(-1, 2):
-				var nk := "%d,%d" % [ck_x + dx2, ck_z + dz2]
-				if _chunk_water_polygons.has(nk):
-					for water_poly in _chunk_water_polygons[nk]:
-						if water_poly.size() < 3:
-							continue
-						# Проверяем пересечение с чанком (грубая проверка по AABB)
-						var in_chunk := false
-						for wp in water_poly:
-							if wp.x >= ch_min_x - SHORE_WIDTH - 5.0 and wp.x <= ch_max_x + SHORE_WIDTH + 5.0 and wp.y >= ch_min_z - SHORE_WIDTH - 5.0 and wp.y <= ch_max_z + SHORE_WIDTH + 5.0:
-								in_chunk = true
-								break
-						if in_chunk:
-							# Расширяем полигон на SHORE_WIDTH для выреза из террейна
-							# offset_polygon: positive delta расширяет CCW, сужает CW
-							var delta := SHORE_WIDTH
-							if not _is_polygon_ccw(water_poly):
-								delta = -delta
-							var expanded := Geometry2D.offset_polygon(water_poly, delta)
-							for ep in expanded:
-								if ep.size() >= 3:
-									relevant_water_shore.append(ep)
+		var inflated := Rect2(
+			ch_min_x - SHORE_WIDTH - 5.0,
+			ch_min_z - SHORE_WIDTH - 5.0,
+			(ch_max_x - ch_min_x) + 2 * (SHORE_WIDTH + 5.0),
+			(ch_max_z - ch_min_z) + 2 * (SHORE_WIDTH + 5.0)
+		)
+		var chunk_rect_clip := PackedVector2Array([
+			Vector2(ch_min_x, ch_min_z),
+			Vector2(ch_max_x, ch_min_z),
+			Vector2(ch_max_x, ch_max_z),
+			Vector2(ch_min_x, ch_max_z),
+		])
+		for i in _global_water_polygons.size():
+			var bbox: Rect2 = _global_water_polygon_bboxes[i]
+			if not bbox.intersects(inflated):
+				continue
+			var water_poly: PackedVector2Array = _global_water_polygons[i]
+			if water_poly.size() < 3:
+				continue
+			# Clip polygon to chunk rect for water mesh + per-chunk
+			# polygon list (used by shore "facing open water" check).
+			for clipped_w in Geometry2D.intersect_polygons(water_poly, chunk_rect_clip):
+				if clipped_w.size() >= 3:
+					per_chunk_water.append(clipped_w)
+			# Расширяем полигон на SHORE_WIDTH для выреза из террейна
+			var delta := SHORE_WIDTH
+			if not _is_polygon_ccw(water_poly):
+				delta = -delta
+			var expanded := Geometry2D.offset_polygon(water_poly, delta)
+			for ep in expanded:
+				if ep.size() >= 3:
+					relevant_water_shore.append(ep)
+	# Render water mesh + shore for this chunk's slices of global polygons.
+	# Without this the terrain hole has no water filling it (chunk falls
+	# into empty void below the road / bridge).
+	if not per_chunk_water.is_empty():
+		# Update per-chunk water hash so other queries (point-in-water,
+		# tree placement) see this chunk's water — even though the way
+		# wasn't in this chunk's OSM data.
+		if not _chunk_water_polygons.has(chunk_key):
+			_chunk_water_polygons[chunk_key] = []
+		for cw in per_chunk_water:
+			_chunk_water_polygons[chunk_key].append(cw)
+			_create_polygon_mesh_with_texture(cw, "water", WATER_Y, parent_node, true)
+			call_deferred("_create_shore_mesh", cw, parent_node)
 
 	# Отправляем клиппинг в worker thread (тяжёлая операция O(n²))
 	var chunk_rect := PackedVector2Array([
@@ -9117,11 +9176,11 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -
 	var clipped_polys := _clip_polygon_to_chunk(points, chunk_key)
 	for clipped in clipped_polys:
 		if is_water and enable_water:
-			# Spatial hash already pre-registered during the "ways" phase
-			# (so trees/lamps know to avoid water before the mesh exists).
-			# Just build the mesh + shore here.
-			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
-			_create_shore_mesh(clipped, parent)
+			# Water mesh + shore are now rendered globally per chunk in
+			# _create_deferred_terrain — that handles chunks deep inside a
+			# huge polygon (whose data didn't return the way at all) the
+			# same as chunks holding boundary nodes. Just register it.
+			pass
 		elif texture_key != "grass" and not is_water and enable_vegetation:
 			# Skip land polygons (forest, etc.) whose centroid sits inside a
 			# registered water polygon — OSM occasionally has natural=wood
@@ -9195,9 +9254,9 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 		if has_tree_override:
 			_generate_trees_in_polygon(clipped, parent, dense_override)
 		if is_water and enable_water:
-			# Spatial hash already pre-registered in "ways" phase.
-			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
-			_create_shore_mesh(clipped, parent)
+			# See _create_natural_immediate: water mesh + shore is rendered
+			# globally in _create_deferred_terrain, not per-immediate-poly.
+			pass
 		elif texture_key != "grass" and not is_water and enable_vegetation:
 			var clipped_center := _get_polygon_center(clipped)
 			if not _is_point_in_water(clipped_center, chunk_key):
@@ -9719,6 +9778,35 @@ func _waterway_to_polygon(points: PackedVector2Array, width: float) -> PackedVec
 	return result
 
 
+## Registers a water polygon globally (deduped by hash) so every chunk's
+## terrain cutout / lookup can see it, even if its OSM data didn't return
+## the way (huge polygons appear only in chunks holding a boundary node).
+func _register_global_water_polygon(full_points: PackedVector2Array) -> void:
+	if full_points.size() < 3:
+		return
+	# Cheap hash: first 3 points (32-bit fixed-point) — stable across chunks
+	# that all derive coords from the same start_lat/start_lon.
+	var h: int = 0
+	for i in range(mini(3, full_points.size())):
+		h = (h * 1000003) ^ int(full_points[i].x * 1000.0)
+		h = (h * 1000003) ^ int(full_points[i].y * 1000.0)
+	if _global_water_polygon_hashes.has(h):
+		return
+	_global_water_polygon_hashes[h] = _global_water_polygons.size()
+	_global_water_polygons.append(full_points)
+	# Compute AABB for fast polygon-skip in lookups.
+	var min_x := full_points[0].x
+	var max_x := min_x
+	var min_y := full_points[0].y
+	var max_y := min_y
+	for p in full_points:
+		min_x = minf(min_x, p.x)
+		max_x = maxf(max_x, p.x)
+		min_y = minf(min_y, p.y)
+		max_y = maxf(max_y, p.y)
+	_global_water_polygon_bboxes.append(Rect2(min_x, min_y, max_x - min_x, max_y - min_y))
+
+
 ## Регистрирует водный полигон в _chunk_water_polygons для terrain clipping и per-chunk spatial hash
 func _register_water_polygon(points: PackedVector2Array, parent: Node3D) -> void:
 	var ck := _get_chunk_key_from_node(parent)
@@ -9815,6 +9903,16 @@ func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 	# Chunk boundary tolerance for edge detection
 	var edge_tol := 0.5  # meters
 
+	# Other water polygons in this chunk — used to skip shore edges that face
+	# open water (e.g. narrow river strip embedded inside the reservoir).
+	# Restored from 53b0537 — depends on call_deferred so larger polygon was
+	# registered earlier this frame.
+	var other_water_polys: Array = []
+	if not shore_ck.is_empty():
+		for ex: PackedVector2Array in _chunk_water_polygons.get(shore_ck, []):
+			if ex.size() >= 3 and ex != poly:
+				other_water_polys.append(ex)
+
 	for ei in range(pn):
 		var i0 := ei
 		var i1 := (ei + 1) % pn
@@ -9844,6 +9942,18 @@ func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 		var in1 := poly[i1]
 		var out0 := outer[i0]
 		var out1 := outer[i1]
+
+		# Skip shore edge if its outer-top midpoint is inside another water
+		# polygon (this edge is not a real shoreline — it's facing open water).
+		if not other_water_polys.is_empty():
+			var mid := (out0 + out1) * 0.5
+			var in_other := false
+			for ow: PackedVector2Array in other_water_polys:
+				if Geometry2D.is_point_in_polygon(mid, ow):
+					in_other = true
+					break
+			if in_other:
+				continue
 		# Нормаль наклонной поверхности (примерно 45° наружу-вверх)
 		var edge_dir := (in1 - in0).normalized()
 		var outward_2d := Vector2(edge_dir.y, -edge_dir.x) * out_sign
@@ -12159,7 +12269,10 @@ func _process_vegetation_queue() -> void:
 		var ck_parking_polys: Array = ck_parking_data.get("polys", [])
 		var ck_water_data: Dictionary = _chunk_water_hashes.get(chunk_key, {})
 		var ck_water_hash: Dictionary = ck_water_data.get("hash", {})
-		var ck_water_polys: Array = ck_water_data.get("polys", [])
+		# Pass GLOBAL water polygons to the vegetation worker so trees scattered
+		# inside a forest polygon that overlaps a huge water polygon (whose
+		# nodes aren't in this chunk's OSM data) still detect "in water".
+		var ck_water_polys: Array = _global_water_polygons.duplicate()
 
 		var elev_grid: Dictionary = _chunk_elevation_data.get(chunk_key, {})
 		var base_elev: float = 0.0
@@ -14040,6 +14153,25 @@ func _get_way_center(nodes: Array) -> Vector2:
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		center += local
 	return center / nodes.size()
+
+
+## Returns axis-aligned bounding box of a way's nodes in local coordinates.
+## Used to filter huge water polygons by bbox-overlap instead of centroid
+## (centroid of a 11-km-long reservoir lies nowhere near any single chunk).
+func _get_way_local_bbox(nodes: Array) -> Rect2:
+	if nodes.size() == 0:
+		return Rect2()
+	var first: Vector2 = _latlon_to_local(nodes[0].lat, nodes[0].lon)
+	var min_pt := first
+	var max_pt := first
+	for i in range(1, nodes.size()):
+		var p: Vector2 = _latlon_to_local(nodes[i].lat, nodes[i].lon)
+		min_pt.x = minf(min_pt.x, p.x)
+		min_pt.y = minf(min_pt.y, p.y)
+		max_pt.x = maxf(max_pt.x, p.x)
+		max_pt.y = maxf(max_pt.y, p.y)
+	return Rect2(min_pt, max_pt - min_pt)
+
 
 ## Get chunk key from parent node name (e.g. "Chunk_1_2" -> "1,2")
 func _get_chunk_key_from_node(node: Node3D) -> String:
@@ -16867,26 +16999,26 @@ func _is_point_in_any_parking(point: Vector2, ck: String = "") -> bool:
 
 
 ## Проверяет, находится ли точка внутри водного полигона (main thread)
-func _is_point_in_water(point: Vector2, ck: String = "") -> bool:
-	# Edge spatial hash gives us a fast hit for points within
-	# WATER_CELL_SIZE of a polygon edge. For points deep inside a large
-	# polygon (rivers wider than 30 m, reservoirs) no edge-cell hits the
-	# 3×3 neighbourhood and the hash answer is "no water" — wrong. Hit
-	# the per-chunk polygon list directly as a fallback.
-	var chunks_to_check: Array = [ck] if ck != "" else _chunk_water_hashes.keys()
-	for c in chunks_to_check:
-		var polys: Array = _chunk_water_polygons.get(c, [])
-		for wp in polys:
-			if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
-				return true
+func _is_point_in_water(point: Vector2, _ck: String = "") -> bool:
+	# Use the global polygon list — it contains every water polygon
+	# registered by ANY chunk (deduped by hash) and so works for chunks
+	# whose own OSM data didn't return the relation. AABB pre-check
+	# skips polygons not near the point in O(1).
+	for i in _global_water_polygons.size():
+		var bbox: Rect2 = _global_water_polygon_bboxes[i]
+		if not bbox.has_point(point):
+			continue
+		var wp: PackedVector2Array = _global_water_polygons[i]
+		if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
+			return true
 	return false
 
 
 ## Проверяет, находится ли точка внутри водного полигона (thread-safe)
-static func _is_point_in_water_threadsafe(point: Vector2, water_hash: Dictionary, water_polys: Array) -> bool:
-	# Same fallback as _is_point_in_water — edge hash misses interior of
-	# large water bodies. Iterate water_polys directly; the chunk list is
-	# small (one polygon per natural=water relation per chunk).
+## water_polys here is the GLOBAL list (full polygons), passed by snapshot
+## to worker threads via task_data. AABB pre-check is folded into the
+## main-thread version; here we just iterate (workers tolerate latency).
+static func _is_point_in_water_threadsafe(point: Vector2, _water_hash: Dictionary, water_polys: Array) -> bool:
 	for wp in water_polys:
 		if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
 			return true
