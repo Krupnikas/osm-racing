@@ -24,6 +24,15 @@ const CAR_SPEC_LINES := {
 	"bmw_m3_gtr": "2001 · 3.2L · 380 HP · RWD · 1350 KG",
 }
 
+# — Tunnel car-select (NFS Underground style) feature flag —
+const USE_TUNNEL_SELECT := true
+const _TUNNEL_STRIP_N := 14
+const _TUNNEL_SPACING := 4.0
+const _TUNNEL_LEN: float = _TUNNEL_STRIP_N * _TUNNEL_SPACING
+const _TUNNEL_SPEED := 10.0
+const _TUNNEL_HW := 4.5
+const _CAR_Y_ANGLE := 0.0
+
 static var _fira_tight: FontVariation = null
 static func _get_fira_tight() -> FontVariation:
 	if _fira_tight == null:
@@ -49,19 +58,34 @@ var _speed_segments: Array[ColorRect] = []
 var _handle_segments: Array[ColorRect] = []
 var _select_btn: Button
 
+# Tunnel mode state
+var _tunnel_pairs: Array[Node3D] = []
+var _transition_tween: Tween = null
+var _is_transitioning := false
+var _orbit_yaw := 0.0
+var _orbit_pitch := 0.35
+var _dragging := false
+var _wheel_nodes: Array[Node3D] = []
+
 
 func _ready() -> void:
 	_car_ids = CarSettings.get_car_ids()
 	_initial_car_id = CarSettings.selected_car_id
 	_current_index = max(0, _car_ids.find(CarSettings.selected_car_id))
 	_build_ui()
+	if USE_TUNNEL_SELECT:
+		_build_tunnel()
 	# Preview is loaded lazily on show_selection() — otherwise the default
 	# car would briefly stack underneath whatever the host actually wants
 	# to display (e.g. Garage focuses an owned car).
 
 
 func _process(delta: float) -> void:
-	if _preview_car and visible:
+	if not visible:
+		return
+	if USE_TUNNEL_SELECT:
+		_scroll_tunnel(delta)
+	elif _preview_car:
 		_preview_car.rotate_y(delta * 0.5)
 
 
@@ -74,6 +98,10 @@ func _notification(what: int) -> void:
 	if visible:
 		vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	else:
+		if _transition_tween and _transition_tween.is_valid():
+			_transition_tween.kill()
+		_is_transitioning = false
+		_wheel_nodes.clear()
 		# Drop the car AND stop rendering so no stale frame can leak from
 		# a hidden CarSelection's render target into a sibling instance.
 		var container := get_node_or_null("PreviewViewport/SubViewport/CarPreviewContainer")
@@ -87,6 +115,8 @@ func _notification(what: int) -> void:
 func _input(event: InputEvent) -> void:
 	if not visible:
 		return
+	if USE_TUNNEL_SELECT and _is_transitioning:
+		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_LEFT, KEY_A:
@@ -95,6 +125,17 @@ func _input(event: InputEvent) -> void:
 				_on_next_pressed()
 			KEY_ESCAPE:
 				_on_back_pressed()
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if not visible or not USE_TUNNEL_SELECT:
+		return
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		_dragging = event.pressed
+	if event is InputEventMouseMotion and _dragging:
+		_orbit_yaw -= event.relative.x * 0.005
+		_orbit_pitch = clampf(_orbit_pitch + event.relative.y * 0.003, -0.1, 0.6)
+		_update_orbit_camera()
 
 
 # === UI build ===
@@ -433,9 +474,231 @@ func _make_p_button(text_value: String, primary: bool) -> Button:
 	return btn
 
 
+# === Tunnel (NFS Underground style) ===
+
+func _build_tunnel() -> void:
+	var vp: SubViewport = $PreviewViewport/SubViewport
+	vp.transparent_bg = false
+
+	# Camera: rear-right 3/4 view
+	var cam: Camera3D = vp.get_node("Camera3D")
+	cam.transform = Transform3D.IDENTITY
+	cam.position = Vector3(3.0, 1.8, 3.0)
+	cam.look_at(Vector3(0, 0.3, -6.0), Vector3.UP)
+	cam.fov = 50.0
+
+	# Dim existing lights — neon does the work
+	vp.get_node("DirectionalLight3D").light_energy = 0.3
+	vp.get_node("AmbientLight").light_energy = 0.15
+
+	# Environment: dark bg + glow bloom on emissive neon + depth fog
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color(0.01, 0.01, 0.02)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.02, 0.02, 0.04)
+	env.glow_enabled = true
+	env.glow_intensity = 0.8
+	env.glow_bloom = 0.15
+	env.fog_enabled = true
+	env.fog_light_color = Color(0.01, 0.01, 0.02)
+	env.fog_density = 0.015
+	env.ssr_enabled = true
+	env.ssr_max_steps = 64
+	env.ssr_fade_in = 0.15
+	env.ssr_fade_out = 2.0
+	env.ssr_depth_tolerance = 0.2
+	var we := WorldEnvironment.new()
+	we.environment = env
+	vp.add_child(we)
+
+	# ---- materials ----
+	var floor_mat := StandardMaterial3D.new()
+	floor_mat.albedo_color = Color(0.02, 0.02, 0.04)
+	floor_mat.metallic = 0.95
+	floor_mat.roughness = 0.1
+
+	var cyan_mat := StandardMaterial3D.new()
+	cyan_mat.albedo_color = Color.BLACK
+	cyan_mat.emission_enabled = true
+	cyan_mat.emission = Color(0.0, 0.85, 1.0)
+	cyan_mat.emission_energy_multiplier = 4.0
+
+	var magenta_mat := StandardMaterial3D.new()
+	magenta_mat.albedo_color = Color.BLACK
+	magenta_mat.emission_enabled = true
+	magenta_mat.emission = Color(1.0, 0.05, 0.55)
+	magenta_mat.emission_energy_multiplier = 4.0
+
+	var dim_mat := StandardMaterial3D.new()
+	dim_mat.albedo_color = Color.BLACK
+	dim_mat.emission_enabled = true
+	dim_mat.emission = Color(0.35, 0.35, 0.45)
+	dim_mat.emission_energy_multiplier = 1.5
+
+	# ---- geometry ----
+	# Floor: dark, wet-look reflective
+	var floor_mi := MeshInstance3D.new()
+	var floor_pm := PlaneMesh.new()
+	floor_pm.size = Vector2(_TUNNEL_HW * 3, _TUNNEL_LEN * 4)
+	floor_mi.mesh = floor_pm
+	floor_mi.position = Vector3(0, -0.01, 0)
+	floor_mi.material_override = floor_mat
+	vp.add_child(floor_mi)
+
+	# Continuous neon base-strips (static, define corridor edges)
+	var base_mesh := BoxMesh.new()
+	base_mesh.size = Vector3(0.04, 0.06, _TUNNEL_LEN * 3)
+	for side in [-1.0, 1.0]:
+		var strip := MeshInstance3D.new()
+		strip.mesh = base_mesh
+		strip.material_override = cyan_mat if side < 0 else magenta_mat
+		strip.position = Vector3(side * _TUNNEL_HW, 0.03, -_TUNNEL_LEN * 0.5)
+		vp.add_child(strip)
+
+	# Scrolling strip pairs (vertical posts + floor markers)
+	var post_mesh := BoxMesh.new()
+	post_mesh.size = Vector3(0.06, 1.8, 0.06)
+	var marker_mesh := BoxMesh.new()
+	marker_mesh.size = Vector3(0.12, 0.02, 1.6)
+
+	for i in _TUNNEL_STRIP_N:
+		var pair := Node3D.new()
+		pair.position.z = -float(i) * _TUNNEL_SPACING + _TUNNEL_LEN * 0.3
+
+		var left := MeshInstance3D.new()
+		left.mesh = post_mesh
+		left.material_override = cyan_mat
+		left.position = Vector3(-_TUNNEL_HW, 0.9, 0)
+		pair.add_child(left)
+
+		var right := MeshInstance3D.new()
+		right.mesh = post_mesh
+		right.material_override = magenta_mat
+		right.position = Vector3(_TUNNEL_HW, 0.9, 0)
+		pair.add_child(right)
+
+		var fm := MeshInstance3D.new()
+		fm.mesh = marker_mesh
+		fm.material_override = dim_mat
+		fm.position = Vector3(0, 0.01, 0)
+		pair.add_child(fm)
+
+		# Small omni lights on each pair — move with the posts
+		var ol_l := OmniLight3D.new()
+		ol_l.light_color = Color(0.0, 0.85, 1.0)
+		ol_l.light_energy = 0.6
+		ol_l.omni_range = 4.0
+		ol_l.omni_attenuation = 1.5
+		ol_l.position = Vector3(-_TUNNEL_HW, 0.5, 0)
+		pair.add_child(ol_l)
+
+		var ol_r := OmniLight3D.new()
+		ol_r.light_color = Color(1.0, 0.05, 0.55)
+		ol_r.light_energy = 0.6
+		ol_r.omni_range = 4.0
+		ol_r.omni_attenuation = 1.5
+		ol_r.position = Vector3(_TUNNEL_HW, 0.5, 0)
+		pair.add_child(ol_r)
+
+		vp.add_child(pair)
+		_tunnel_pairs.append(pair)
+
+
+func _scroll_tunnel(delta: float) -> void:
+	# Scroll neon strip pairs toward camera, wrap when past
+	var move := _TUNNEL_SPEED * delta
+	var wrap_z: float = _TUNNEL_SPACING * 3
+	for pair in _tunnel_pairs:
+		pair.position.z += move
+		if pair.position.z > wrap_z:
+			pair.position.z -= _TUNNEL_LEN
+	# Spin wheel meshes to simulate driving
+	for w in _wheel_nodes:
+		if is_instance_valid(w):
+			w.rotate_x(-delta * 12.0)
+
+
+func _update_orbit_camera() -> void:
+	var cam: Camera3D = $PreviewViewport/SubViewport/Camera3D
+	var radius := 7.0
+	var cx := sin(_orbit_yaw) * radius * cos(_orbit_pitch)
+	var cy := 1.2 + sin(_orbit_pitch) * radius * 0.6
+	var cz := cos(_orbit_yaw) * radius * cos(_orbit_pitch)
+	cam.position = Vector3(cx, cy, cz)
+	cam.look_at(Vector3(0, 0.5, 0), Vector3.UP)
+
+
+func _collect_wheel_nodes(root: Node) -> void:
+	_wheel_nodes.clear()
+	for child in root.get_children():
+		if child is Wheel:
+			var w: Wheel = child as Wheel
+			if w.wheel_node:
+				_wheel_nodes.append(w.wheel_node)
+
+
+func _update_3d_tunnel(car_id: String, direction: int) -> void:
+	var container: Node3D = $PreviewViewport/SubViewport/CarPreviewContainer
+
+	if _transition_tween and _transition_tween.is_valid():
+		_transition_tween.kill()
+
+	var old_car := _preview_car
+
+	# Instantiate new car
+	var scene_path: String = CarSettings.CARS[car_id]["scene"]
+	var new_car := (load(scene_path) as PackedScene).instantiate()
+	new_car.scale = Vector3(1.5, 1.5, 1.5)
+	new_car.rotation.y = _CAR_Y_ANGLE
+	if new_car is RigidBody3D:
+		new_car.freeze = true
+	elif new_car is VehicleBody3D:
+		new_car.set_physics_process(false)
+
+	if direction == 0:
+		# Initial load — no animation
+		new_car.position = Vector3.ZERO
+		container.add_child(new_car)
+		if old_car:
+			old_car.queue_free()
+		_preview_car = new_car
+		_collect_wheel_nodes(new_car)
+		# Reset orbit camera to default angle
+		_orbit_yaw = 0.0
+		_orbit_pitch = 0.35
+		_update_orbit_camera()
+		return
+
+	# Animated swap: old car exits, new car enters
+	_is_transitioning = true
+	var exit_z: float = -20.0 if direction > 0 else 16.0
+	var enter_z: float = 16.0 if direction > 0 else -20.0
+
+	new_car.position = Vector3(0, 0, enter_z)
+	container.add_child(new_car)
+
+	_transition_tween = create_tween().set_parallel()
+	if old_car:
+		_transition_tween.tween_property(old_car, "position:z", exit_z, 0.4) \
+			.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	_transition_tween.tween_property(new_car, "position:z", 0.0, 0.5) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT).set_delay(0.08)
+
+	var ref := old_car
+	_transition_tween.chain().tween_callback(func() -> void:
+		if ref != null and is_instance_valid(ref):
+			ref.queue_free()
+		_is_transitioning = false
+	)
+	_preview_car = new_car
+	_collect_wheel_nodes(new_car)
+	# Camera stays at current orbit — no reset on car change
+
+
 # === Updates ===
 
-func _update_preview() -> void:
+func _update_preview(direction: int = 0) -> void:
 	var car_id: String = _car_ids[_current_index]
 	var full_name: String = CarSettings.get_car_name(car_id).to_upper()
 	var split := full_name.split(" ", false, 1)
@@ -445,7 +708,10 @@ func _update_preview() -> void:
 	_counter_label.text = "%02d / %02d" % [_current_index + 1, _car_ids.size()]
 	_update_chevrons()
 	_update_stat_segments(car_id)
-	_update_3d_preview(car_id)
+	if USE_TUNNEL_SELECT:
+		_update_3d_tunnel(car_id, direction)
+	else:
+		_update_3d_preview(car_id)
 
 
 func _update_chevrons() -> void:
@@ -494,13 +760,17 @@ func _update_3d_preview(car_id: String) -> void:
 # === Actions ===
 
 func _on_prev_pressed() -> void:
+	if USE_TUNNEL_SELECT and _is_transitioning:
+		return
 	_current_index = (_current_index - 1 + _car_ids.size()) % _car_ids.size()
-	_update_preview()
+	_update_preview(-1)
 
 
 func _on_next_pressed() -> void:
+	if USE_TUNNEL_SELECT and _is_transitioning:
+		return
 	_current_index = (_current_index + 1) % _car_ids.size()
-	_update_preview()
+	_update_preview(1)
 
 
 func _on_select_pressed() -> void:
