@@ -392,6 +392,12 @@ var _deck_polygon_ref_elev: Dictionary = {}
 # Cleared in reset_terrain to free per-location decks.
 var _bridge_deck_nodes: Dictionary = {}  # poly_idx -> Array[Node3D]
 
+# Stage 1 bridge approach ramp detection (read-only, debug overlay).
+# Detector is instantiated lazily on first chunk load; never modifies
+# bridge rendering. See docs/bridge_ramp_design.md and
+# osm/bridge_ramp_detector.gd.
+var _ramp_detector: Node = null
+
 # FPS статистика для отображения на экране
 var _fps_samples: Array[float] = []
 var _fps_update_timer := 0.0
@@ -3204,6 +3210,15 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 				var cxz: Vector2i = deck_chunks[ck]
 				_request_elevation(ck, cxz.x, cxz.y)
 
+	# Stage 1+2 bridge ramp detection: notify the detector on every chunk
+	# load so it can accumulate the road-graph view across chunks and
+	# rebuild the ramp spatial index BEFORE this chunk's Phase 3 road
+	# meshing samples vertex Y. Synchronous (not call_deferred) so the
+	# index is current when sample_road_y is called.
+	_ensure_ramp_detector()
+	if _ramp_detector != null:
+		_ramp_detector.notify_chunk_loaded(osm_data, self)
+
 	if chunk_key == "":
 		# Initial load (no chunk key) — run synchronously on main thread
 		_generate_terrain_sync(osm_data, parent, chunk_key)
@@ -4514,6 +4529,12 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	# the parent road mesh, causing z-fighting when textures differ.
 	# By moving raw[0] along the link direction by parent_half_width, the link starts at the
 	# parent edge, and smoothing creates a curve from there — preserving roundings, no overlap.
+	#
+	# EXCEPTION (Stage 2A.3 root-cause fix, verified by visual debug overlay):
+	# when the parent at the junction is a bridge=yes way, there is NO parent road mesh —
+	# on-deck bridge=yes ways render as deck-painted markings, not road meshes. The shift
+	# is unnecessary and creates the visible 2.7 m gap between road approach and bridge
+	# polygon outline. The polygon outline IS a vertex of the road's node[0] in OSM data.
 	if highway_type.ends_with("_link") and local_points.size() >= 2:
 		var parent_hw: float = 6.0
 		if highway_type in ["motorway_link", "trunk_link"]:
@@ -4524,15 +4545,19 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			parent_hw = 5.0
 		else:
 			parent_hw = 4.0
-		# Shift start point
-		var dir_start: Vector2 = (local_points[1] - local_points[0]).normalized()
-		var shift_dist_start: float = minf(parent_hw, local_points[0].distance_to(local_points[1]) * 0.5)
-		local_points[0] = local_points[0] + dir_start * shift_dist_start
-		# Shift end point
-		var last_idx: int = local_points.size() - 1
-		var dir_end: Vector2 = (local_points[last_idx - 1] - local_points[last_idx]).normalized()
-		var shift_dist_end: float = minf(parent_hw, local_points[last_idx].distance_to(local_points[last_idx - 1]) * 0.5)
-		local_points[last_idx] = local_points[last_idx] + dir_end * shift_dist_end
+		var first_node: Dictionary = nodes[0]
+		var last_node: Dictionary = nodes[nodes.size() - 1]
+		# Shift start unless the start junction is shared with a bridge=yes way.
+		if not _bridge_endpoint_touches_any(first_node.lat, first_node.lon):
+			var dir_start: Vector2 = (local_points[1] - local_points[0]).normalized()
+			var shift_dist_start: float = minf(parent_hw, local_points[0].distance_to(local_points[1]) * 0.5)
+			local_points[0] = local_points[0] + dir_start * shift_dist_start
+		# Shift end unless the end junction is shared with a bridge=yes way.
+		if not _bridge_endpoint_touches_any(last_node.lat, last_node.lon):
+			var last_idx: int = local_points.size() - 1
+			var dir_end: Vector2 = (local_points[last_idx - 1] - local_points[last_idx]).normalized()
+			var shift_dist_end: float = minf(parent_hw, local_points[last_idx].distance_to(local_points[last_idx - 1]) * 0.5)
+			local_points[last_idx] = local_points[last_idx] + dir_end * shift_dist_end
 
 	# Smoothing (thread-safe: pure math) — skip for tram (straight tracks, smoothing creates wobble)
 	var smoothed_points: PackedVector2Array
@@ -4621,8 +4646,9 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				])
 			terrain_corridors.append_array(_build_terrain_corridors_for_polyline(full_subdivided, corridor_delta, clip_rect))
 
-		# Clip polyline to chunk with margin (for mesh vertices)
 		var points: PackedVector2Array = validated
+
+		# Clip polyline to chunk with margin (for mesh vertices)
 		if chunk_key != "initial" and chunk_key != "":
 			var ck_parts: PackedStringArray = chunk_key.split(",")
 			var ck_x := int(ck_parts[0])
@@ -4640,6 +4666,30 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		# Without this, long straight segments have only 2 vertices and the flat quad
 		# diverges from the terrain surface on slopes.
 		points = _subdivide_for_elevation(points)
+
+		# Diagnostic: for ramp-owning ways, log + record the FIRST/LAST
+		# vertex after ALL processing so the detector overlay can draw
+		# them as 3D markers (visualise the gap to the bridge polygon).
+		if _ramp_detector != null \
+				and _ramp_detector.way_owns_ramp(_debug_way_id) \
+				and points.size() >= 2:
+			# Send to detector for overlay (deferred = main-thread safe).
+			_ramp_detector.call_deferred("record_road_endpoints",
+					_debug_way_id, chunk_key,
+					points[0], points[points.size() - 1])
+			if OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG"):
+				var pidx_log: Array = _ramp_detector.get_polygon_indices_for_way(_debug_way_id)
+				for pi in pidx_log:
+					if int(pi) < 0 or int(pi) >= _bridge_deck_polygons.size(): continue
+					var poly_log: PackedVector2Array = _bridge_deck_polygons[int(pi)]
+					var d_first: float = _min_dist_to_polygon_outline(points[0], poly_log)
+					var d_last: float = _min_dist_to_polygon_outline(points[points.size() - 1], poly_log)
+					print("[BridgeRamp] FINAL way=%d chunk=%s n=%d first=(%.2f,%.2f) d=%.2f last=(%.2f,%.2f) d=%.2f"
+							% [_debug_way_id, chunk_key, points.size(),
+								points[0].x, points[0].y, d_first,
+								points[points.size() - 1].x, points[points.size() - 1].y, d_last])
+
+
 
 		if _debug_way:
 			print("ROAD_DEBUG way=%d validated=%d clipped=%d chunk=%s margin=%.1f" % [_debug_way_id, validated.size(), points.size(), chunk_key, half_w + 1.0])
@@ -4697,6 +4747,52 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				right_pts.append(Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w))
 				accum_lens.append(accum_len)
 
+			# Bridge-endpoint perp override (Attempt #12, see docs/bridge_debug.md):
+			# At a ramp-owning way's first/last vertex coinciding with a polygon
+			# vertex, override perpendiculars[0]/[n-1] with the polygon outline
+			# tangent at that vertex (averaged direction prev→next). This makes
+			# l[0]/r[0] (computed as p[0] ± perp * half_w) lie ON the polygon
+			# outline by construction — no Z-offset, no angular mismatch at the
+			# abutment seam. Road keeps its standard 7 m carriageway width;
+			# polygon mesh covers the deck-only lateral wedge between road edge
+			# and polygon outline corner (v15 east, v18 west). Width override
+			# (Attempt #13) was tried and reverted: snapping l[0]/r[0] directly
+			# to v15/v18 (12 m wide) deformed lane-marking textures (UV stretch
+			# across trapezoidal quad) and caused l[0] to extend beyond the
+			# chunk boundary, overlapping the neighbouring chunk's road mesh.
+			# Sign of the polygon tangent is flipped if it would invert the
+			# perpendicular relative to the road's natural left/right side
+			# (otherwise the first quad twists into an X and the mesh
+			# degenerates).
+			if _ramp_detector != null and _ramp_detector.way_owns_ramp(_debug_way_id) and n_points >= 2:
+				var first_n: Dictionary = nodes[0]
+				if _bridge_endpoint_touches_any(first_n.lat, first_n.lon):
+					var first_local := Vector2(
+							(first_n.lon - t_start_lon) * t_lon_scale,
+							-(first_n.lat - t_start_lat) * 111000.0)
+					if points[0].distance_to(first_local) < 0.5:
+						var d_first := _polygon_abutment_dir_at_local(first_local)
+						if d_first != Vector2.ZERO:
+							if d_first.dot(perpendiculars[0]) < 0.0:
+								d_first = -d_first
+							var p0: Vector2 = points[0]
+							left_pts[0] = Vector2(p0.x - d_first.x * half_w, p0.y - d_first.y * half_w)
+							right_pts[0] = Vector2(p0.x + d_first.x * half_w, p0.y + d_first.y * half_w)
+				var last_n: Dictionary = nodes[nodes.size() - 1]
+				if _bridge_endpoint_touches_any(last_n.lat, last_n.lon):
+					var last_local := Vector2(
+							(last_n.lon - t_start_lon) * t_lon_scale,
+							-(last_n.lat - t_start_lat) * 111000.0)
+					var li: int = n_points - 1
+					if points[li].distance_to(last_local) < 0.5:
+						var d_last := _polygon_abutment_dir_at_local(last_local)
+						if d_last != Vector2.ZERO:
+							if d_last.dot(perpendiculars[li]) < 0.0:
+								d_last = -d_last
+							var pn: Vector2 = points[li]
+							left_pts[li] = Vector2(pn.x - d_last.x * half_w, pn.y - d_last.y * half_w)
+							right_pts[li] = Vector2(pn.x + d_last.x * half_w, pn.y + d_last.y * half_w)
+
 			# Chunk rect for 2D intersection
 			var mesh_clip_rect := PackedVector2Array()
 			if chunk_min_x != -INF:
@@ -4728,14 +4824,19 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 							break
 
 				if not need_clip:
-					# Fast path: quad fully inside chunk — two triangles
+					# Fast path: quad fully inside chunk — two triangles.
+					# Stage 2A: edge vertices share the centerline distance
+					# of the seg index that produced them, so all four call
+					# sites pass accum_lens[seg] or accum_lens[seg+1].
 					var base_idx := vertices.size()
 					var uv_y0: float = accum_lens[seg] * uv_scale
 					var uv_y1: float = accum_lens[seg + 1] * uv_scale
-					var h_l0: float = _sample_elevation(l0.x, l0.y) + height_offset + z_offset
-					var h_r0: float = _sample_elevation(r0.x, r0.y) + height_offset + z_offset
-					var h_l1: float = _sample_elevation(l1.x, l1.y) + height_offset + z_offset
-					var h_r1: float = _sample_elevation(r1.x, r1.y) + height_offset + z_offset
+					var cl_d_seg: float = accum_lens[seg]
+					var cl_d_next: float = accum_lens[seg + 1]
+					var h_l0: float = _road_sample_y_for_way(_debug_way_id, l0, cl_d_seg, height_offset + z_offset)
+					var h_r0: float = _road_sample_y_for_way(_debug_way_id, r0, cl_d_seg, height_offset + z_offset)
+					var h_l1: float = _road_sample_y_for_way(_debug_way_id, l1, cl_d_next, height_offset + z_offset)
+					var h_r1: float = _road_sample_y_for_way(_debug_way_id, r1, cl_d_next, height_offset + z_offset)
 					vertices.append(Vector3(l0.x, h_l0, l0.y))
 					uvs.append(Vector2(0.0, uv_y0))
 					normals.append(Vector3.UP)
@@ -4768,6 +4869,12 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 						if tri_idx.is_empty():
 							continue
 						var base_idx := vertices.size()
+						# Stage 2A clipped path: kept as terrain fallback —
+						# applying way-aware ramp here projects v2 onto the
+						# centerline and creates a vertical "patch" at chunk
+						# seams where part of the quad is on-ramp and part is
+						# off-ramp. Documented as known limitation; revisit
+						# in Stage 2B with proper polygon-edge stitching.
 						for v2 in clip_poly:
 							var h: float = _sample_elevation(v2.x, v2.y) + height_offset + z_offset
 							vertices.append(Vector3(v2.x, h, v2.y))
@@ -4912,7 +5019,8 @@ func _apply_road_result(result: Dictionary) -> void:
 			"curb_height": curb_height,
 			"parent": parent,
 			"is_bridge": is_bridge,
-			"bridge_info": elevation_info
+			"bridge_info": elevation_info,
+			"way_id": int(result.get("way_id", 0)),  # Stage 2B: thread through to curb sampler
 		})
 
 	# Lamps (major roads only) - clip to chunk rect, deferred
@@ -5419,6 +5527,52 @@ func _bridge_endpoint_touches_any(lat: float, lon: float) -> bool:
 	return _bridge_node_ways.has(k)
 
 
+# Returns the polygon outline direction at a vertex coinciding with `local_pos`.
+# When a road approach (e.g. cutting=yes ramp) ends at a man_made=bridge polygon
+# vertex, the road's transverse leading edge must lie ON the polygon abutment
+# line — not perpendicular to the road tangent (which generally differs by a
+# few degrees and produces a sub-meter lateral seam). The abutment direction
+# is `(poly[i+1] - poly[i-1]).normalized()`: average of the two edges meeting
+# at the vertex, which is exactly the tangent of the polygon outline there.
+# Returns Vector2.ZERO if no polygon vertex is found within 0.5 m of local_pos.
+# See docs/bridge_debug.md (Attempt #12) for the geometry derivation.
+func _polygon_abutment_dir_at_local(local_pos: Vector2) -> Vector2:
+	for poly in _bridge_deck_polygons:
+		var n: int = poly.size()
+		if n < 3:
+			continue
+		for i in range(n):
+			if poly[i].distance_to(local_pos) < 0.5:
+				var prev_v: Vector2 = poly[(i - 1 + n) % n]
+				var next_v: Vector2 = poly[(i + 1) % n]
+				var d: Vector2 = next_v - prev_v
+				if d.length_squared() > 0.0001:
+					return d.normalized()
+	return Vector2.ZERO
+
+
+# Returns [prev_v, next_v] — the two polygon vertices adjacent to a vertex
+# coinciding with `local_pos`. These ARE the corners of the polygon's
+# abutment edge through the matching vertex; using them directly as a
+# road approach's leading-edge endpoints (`left_pts[0]`, `right_pts[0]`)
+# makes the road mesh's transverse edge coincident with the polygon
+# outline polyline — same length, same angle, same shared corner points.
+# The road quad widens from its normal half-width at the next vertex up
+# to the polygon abutment width at the bridge endpoint.
+# Returns empty array if no polygon vertex is within 0.5 m.
+func _polygon_vertex_neighbors_at_local(local_pos: Vector2) -> Array:
+	for poly in _bridge_deck_polygons:
+		var n: int = poly.size()
+		if n < 3:
+			continue
+		for i in range(n):
+			if poly[i].distance_to(local_pos) < 0.5:
+				var prev_v: Vector2 = poly[(i - 1 + n) % n]
+				var next_v: Vector2 = poly[(i + 1) % n]
+				return [prev_v, next_v]
+	return []
+
+
 func _bridge_prescan_ways(ways: Array) -> void:
 	for way in ways:
 		var tags: Dictionary = way.get("tags", {})
@@ -5435,6 +5589,214 @@ func _bridge_prescan_ways(ways: Array) -> void:
 			continue
 		for n in nodes:
 			_register_bridge_node(n.lat, n.lon, way_id)
+
+
+# Stage 1 bridge ramp detection — instantiate the detector lazily, parented
+# to self so it lives next to the deck nodes. Detection runs once after the
+# initial OSM load; later, debug toggle is F9. Never touches mesh code.
+func _ensure_ramp_detector() -> void:
+	if _ramp_detector != null:
+		return
+	var script: GDScript = load("res://osm/bridge_ramp_detector.gd")
+	if script == null:
+		push_warning("BridgeRampDetector script not found")
+		return
+	_ramp_detector = script.new()
+	_ramp_detector.name = "BridgeRampDetector"
+	add_child(_ramp_detector)
+
+
+# Stage 2A wrapper: way-aware road vertex Y.
+#
+# Used ONLY by primary drivable road meshes built in
+# _compute_road_geometry_thread. Curbs, sidewalks, lane markings, lamps,
+# tram beds and footways still sample terrain directly — Stage 2A is
+# scoped to primary road surface only.
+#
+# When the ramp flag is OFF (default), behaves byte-identical to the
+# legacy direct call. When ON, the detector filters candidate ramps by
+# `way_id` first, then projects the point onto each candidate's polyline
+# with strict perpendicular tolerance. A nearby perpendicular or parallel
+# road CANNOT be affected unless its way_id is explicitly registered for
+# that ramp.
+#
+# Thread-safe: the detector takes its mutex internally on the read path.
+func _road_sample_y_for_way(way_id: int, point: Vector2,
+		centerline_distance: float, height_offset: float) -> float:
+	var terrain_y: float = _sample_elevation(point.x, point.y)
+	if _ramp_detector == null:
+		return terrain_y + height_offset
+	return _ramp_detector.sample_road_y_for_way(
+			way_id, point, centerline_distance, terrain_y, height_offset)
+
+
+# Stage 2A.3 — SNAP polyline endpoints to polygon outline.
+# For each endpoint OUTSIDE polygon and within SNAP_DIST of polygon
+# outline, MOVE it to the closest polygon outline point. This ensures
+# the road mesh's edge is EXACTLY on the polygon outline → bridge mesh
+# meets road mesh flush. Skip if endpoint already inside polygon
+# (polyline crosses naturally).
+func _smart_extend_polyline_to_polygon(points: PackedVector2Array,
+		polygon: PackedVector2Array, way_id: int, chunk_key: String) -> PackedVector2Array:
+	const SNAP_DIST := 5.0
+	if points.size() < 2 or polygon.size() < 3:
+		return points
+	var result: PackedVector2Array = points.duplicate()
+	var first_inside: bool = Geometry2D.is_point_in_polygon(result[0], polygon)
+	var last_inside: bool = Geometry2D.is_point_in_polygon(result[result.size() - 1], polygon)
+	# Snap FIRST endpoint if needed.
+	if not first_inside:
+		var first: Vector2 = result[0]
+		var snap_first: Vector2 = _closest_point_on_polygon_outline(first, polygon)
+		var d_first: float = first.distance_to(snap_first)
+		if d_first <= SNAP_DIST and d_first > 0.01:
+			result[0] = snap_first
+			if OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG"):
+				print("[BridgeRamp] SNAP way=%d chunk=%s first %.2f m to polygon"
+						% [way_id, chunk_key, d_first])
+	# Snap LAST endpoint if needed.
+	if not last_inside:
+		var last_idx: int = result.size() - 1
+		var last: Vector2 = result[last_idx]
+		var snap_last: Vector2 = _closest_point_on_polygon_outline(last, polygon)
+		var d_last: float = last.distance_to(snap_last)
+		if d_last <= SNAP_DIST and d_last > 0.01:
+			result[last_idx] = snap_last
+			if OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG"):
+				print("[BridgeRamp] SNAP way=%d chunk=%s last %.2f m to polygon"
+						% [way_id, chunk_key, d_last])
+	return result
+
+
+# Returns the closest point on polygon's outline (any edge) to `point`.
+func _closest_point_on_polygon_outline(point: Vector2, polygon: PackedVector2Array) -> Vector2:
+	var best_pt: Vector2 = polygon[0]
+	var best_dist: float = INF
+	for j in range(polygon.size()):
+		var p1: Vector2 = polygon[j]
+		var p2: Vector2 = polygon[(j + 1) % polygon.size()]
+		var closest: Vector2 = Geometry2D.get_closest_point_to_segment(point, p1, p2)
+		var d: float = closest.distance_to(point)
+		if d < best_dist:
+			best_dist = d
+			best_pt = closest
+	return best_pt
+
+
+func _min_dist_to_polygon_outline(point: Vector2, polygon: PackedVector2Array) -> float:
+	var best: float = INF
+	for j in range(polygon.size()):
+		var p1: Vector2 = polygon[j]
+		var p2: Vector2 = polygon[(j + 1) % polygon.size()]
+		var closest: Vector2 = Geometry2D.get_closest_point_to_segment(point, p1, p2)
+		var d: float = closest.distance_to(point)
+		if d < best:
+			best = d
+	return best
+
+
+# Old extension helper (replaced by _smart_extend_polyline_to_polygon).
+# Kept for reference if simpler logic ever needed.
+func _extend_polyline_to_polygon_edge(points: PackedVector2Array,
+		polygon: PackedVector2Array, way_id: int, chunk_key: String) -> PackedVector2Array:
+	const MAX_EXT := 10.0
+	if points.size() < 2 or polygon.size() < 3:
+		return points
+	var result: PackedVector2Array = points.duplicate()
+	# Try extending FIRST endpoint (backward direction).
+	var first: Vector2 = result[0]
+	if not Geometry2D.is_point_in_polygon(first, polygon):
+		var tangent: Vector2 = first - result[1]
+		var t_len: float = tangent.length()
+		if t_len > 0.001:
+			tangent = tangent / t_len
+			var ray_end: Vector2 = first + tangent * MAX_EXT
+			var best_inter: Vector2 = Vector2.INF
+			var best_dist: float = MAX_EXT + 1.0
+			for j in range(polygon.size()):
+				var p1: Vector2 = polygon[j]
+				var p2: Vector2 = polygon[(j + 1) % polygon.size()]
+				var inter = Geometry2D.segment_intersects_segment(first, ray_end, p1, p2)
+				if inter == null:
+					continue
+				var d: float = (inter as Vector2).distance_to(first)
+				if d < best_dist:
+					best_dist = d
+					best_inter = inter
+			if best_inter != Vector2.INF:
+				result.insert(0, best_inter)
+				if OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG"):
+					print("[BridgeRamp] EXTEND way=%d chunk=%s first endpoint by %.2f m" \
+							% [way_id, chunk_key, best_dist])
+	# Try extending LAST endpoint (forward direction).
+	var last_idx: int = result.size() - 1
+	var last: Vector2 = result[last_idx]
+	if not Geometry2D.is_point_in_polygon(last, polygon):
+		var tangent: Vector2 = last - result[last_idx - 1]
+		var t_len: float = tangent.length()
+		if t_len > 0.001:
+			tangent = tangent / t_len
+			var ray_end: Vector2 = last + tangent * MAX_EXT
+			var best_inter: Vector2 = Vector2.INF
+			var best_dist: float = MAX_EXT + 1.0
+			for j in range(polygon.size()):
+				var p1: Vector2 = polygon[j]
+				var p2: Vector2 = polygon[(j + 1) % polygon.size()]
+				var inter = Geometry2D.segment_intersects_segment(last, ray_end, p1, p2)
+				if inter == null:
+					continue
+				var d: float = (inter as Vector2).distance_to(last)
+				if d < best_dist:
+					best_dist = d
+					best_inter = inter
+			if best_inter != Vector2.INF:
+				result.append(best_inter)
+				if OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG"):
+					print("[BridgeRamp] EXTEND way=%d chunk=%s last endpoint by %.2f m" \
+							% [way_id, chunk_key, best_dist])
+	return result
+
+
+# Stage 2A.2 helper: clips the polyline so it does NOT enter any bridge
+# polygon. Uses Geometry2D.clip_polyline_with_polygon, which returns
+# disjoint outside-polygon segments. We pick the longest piece — the
+# main approach road — and discard interior pieces (which would be on
+# the deck and rendered by the bridge mesh anyway). Only called for
+# ramp-owning ways.
+func _clip_polyline_outside_bridge_polygons(points: PackedVector2Array, way_id: int,
+		chunk_key: String) -> PackedVector2Array:
+	if points.size() < 2 or _bridge_deck_polygons.is_empty():
+		return points
+	var debug := OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG")
+	if debug:
+		var inside_first := false
+		var inside_last := false
+		for poly in _bridge_deck_polygons:
+			if poly.size() >= 3 and Geometry2D.is_point_in_polygon(points[0], poly):
+				inside_first = true
+			if poly.size() >= 3 and Geometry2D.is_point_in_polygon(points[points.size() - 1], poly):
+				inside_last = true
+		print("[BridgeRamp] CLIP way=%d chunk=%s n=%d first_inside=%s last_inside=%s"
+				% [way_id, chunk_key, points.size(), inside_first, inside_last])
+	var current: PackedVector2Array = points
+	for poly in _bridge_deck_polygons:
+		if poly.size() < 3:
+			continue
+		var pieces: Array = Geometry2D.clip_polyline_with_polygon(current, poly)
+		if debug:
+			var sizes: Array = []
+			for p in pieces:
+				sizes.append((p as PackedVector2Array).size())
+			print("[BridgeRamp]   pieces=%d sizes=%s" % [pieces.size(), str(sizes)])
+		if pieces.is_empty():
+			return PackedVector2Array()
+		var best := PackedVector2Array()
+		for p in pieces:
+			var pp: PackedVector2Array = p
+			if pp.size() > best.size():
+				best = pp
+		current = best
+	return current
 
 
 ## Returns the two long-axis endpoints (abutments) of a deck polygon —
@@ -11638,7 +12000,8 @@ func _process_curb_queue() -> void:
 				"width": item.width,
 				"height_offset": item.height_offset,
 				"curb_height": item.curb_height,
-				"parent": item.parent
+				"parent": item.parent,
+				"way_id": item.get("way_id", 0),  # Stage 2B: keep way_id for ramp sampler
 			})
 			smoothed_count += 1
 
@@ -11722,8 +12085,22 @@ func _init_curb_mesh_state(item: Dictionary) -> void:
 	if not current_group.is_empty():
 		groups.append(current_group)
 
+	# Stage 2B: cumulative centerline distance for ramp sampler. Starts at 0
+	# at the chunk-clipped first point. Distances are informational only —
+	# the way-aware sampler uses point projection, not absolute distance.
+	var cum_dist: PackedFloat32Array = PackedFloat32Array()
+	cum_dist.resize(points.size())
+	if points.size() > 0:
+		cum_dist[0] = 0.0
+		var acc: float = 0.0
+		for i in range(1, points.size()):
+			acc += points[i - 1].distance_to(points[i])
+			cum_dist[i] = acc
+
 	_curb_mesh_state = {
 		"points": points,
+		"cum_dist": cum_dist,
+		"way_id": int(item.get("way_id", 0)),
 		"road_width": road_width,
 		"road_height": item.height_offset,
 		"curb_height": curb_height,
@@ -11790,9 +12167,15 @@ func _process_curb_segments(max_count: int) -> int:
 			if avg.length_squared() > 0.001:
 				perp2 = avg.normalized()
 
-		# Elevation в центре и на краях — как дорога использует maxf(edge, center)
-		var h_center1 := _sample_elevation(p1.x, p1.y)
-		var h_center2 := _sample_elevation(p2.x, p2.y)
+		# Stage 2B: elevation through the way-aware ramp sampler so curbs
+		# follow the same Y the road centerline used. Pass road_y_offset=0
+		# because the curb code adds its own offsets below.
+		var curb_way_id: int = int(state.get("way_id", 0))
+		var cum_dist_arr: PackedFloat32Array = state.get("cum_dist", PackedFloat32Array())
+		var cl_d1: float = cum_dist_arr[i] if i < cum_dist_arr.size() else 0.0
+		var cl_d2: float = cum_dist_arr[i + 1] if (i + 1) < cum_dist_arr.size() else cl_d1
+		var h_center1 := _road_sample_y_for_way(curb_way_id, p1, cl_d1, 0.0)
+		var h_center2 := _road_sample_y_for_way(curb_way_id, p2, cl_d2, 0.0)
 
 		var left_inner1 := p1 + perp1 * (road_width * 0.5)
 		var left_outer1 := p1 + perp1 * (road_width * 0.5 + curb_width)
