@@ -25,7 +25,7 @@ static var _queue_processor: OSMLoader = null  # Один инстанс обр�
 
 # Кеширование
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 6  # v6: добавлен poi node id
+const CACHE_VERSION := 7  # v7: добавлен way[man_made=bridge] (single-way deck outlines)
 var use_cache := true
 
 var http_request: HTTPRequest
@@ -255,6 +255,7 @@ func _start_network_request() -> void:
   way["leisure"](%s);
   way["waterway"](%s);
   way["amenity"](%s);
+  way["man_made"="bridge"](%s);
   relation["building"](%s);
   relation["amenity"](%s);
   relation["highway"="pedestrian"](%s);
@@ -278,7 +279,7 @@ func _start_network_request() -> void:
 out body geom;
 >;
 out skel qt;
-""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
+""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
 	retry_count = 0
@@ -439,6 +440,17 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 
 			if way_nodes.size() > 1:
 				var tags_d: Dictionary = element.get("tags", {})
+				# A closed way tagged man_made=bridge is a single-polygon
+				# bridge deck outline (no relation needed). Route it to
+				# bridge_decks so the deck mesh builder picks it up.
+				if tags_d.get("man_made", "") == "bridge" and way_nodes.size() > 2:
+					bridge_decks.append({
+						"nodes": way_nodes,
+						"tags": tags_d,
+						"relation_id": element.get("id", 0),
+					})
+					way_by_id[element.id] = way_nodes
+					continue
 				var way_data := {
 					"id": element.id,
 					"nodes": way_nodes,
