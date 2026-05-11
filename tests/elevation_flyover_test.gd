@@ -24,6 +24,14 @@ var camera_yaw: float = 180.0    # degrees, 180 = facing south
 var test_running: bool = false
 var test_time: float = 0.0
 
+# Path mode: camera follows a polyline of lat,lon waypoints
+var path_waypoints: Array[Vector2] = []  # lat,lon pairs from --path CLI
+var path_local: PackedVector2Array = PackedVector2Array()  # local XZ after conversion
+var path_segment: int = 0
+var path_t: float = 0.0
+var path_from_deck: bool = false  # --path=deck: auto-build path from deck polygon
+var path_reverse: bool = false    # --reverse: fly polygon in reverse order
+
 # Phase tracking
 enum Phase { LOADING, FLYING }
 var current_phase: int = Phase.LOADING
@@ -56,11 +64,32 @@ func _ready() -> void:
 			test_location.y = float(arg.substr(11))
 		elif arg == "--no-chess":
 			chess_pattern = false
+		elif arg.begins_with("--cam-height="):
+			fly_height_above_ground = float(arg.substr(13))
+		elif arg == "--path=deck":
+			path_from_deck = true
+		elif arg == "--reverse":
+			path_reverse = true
+		elif arg.begins_with("--path="):
+			# Format: --path=lat1,lon1:lat2,lon2:lat3,lon3
+			var pairs: PackedStringArray = arg.substr(7).split(":")
+			for pair in pairs:
+				var coords: PackedStringArray = pair.split(",")
+				if coords.size() == 2:
+					path_waypoints.append(Vector2(float(coords[0]), float(coords[1])))
+			if path_waypoints.size() >= 2:
+				test_location = path_waypoints[0]
 
 	print("\n========== ELEVATION FLYOVER TEST ==========")
 	print("Location: (%.4f, %.4f)" % [test_location.x, test_location.y])
 	print("Chess pattern: %s" % ("ON — only every other chunk loads" if chess_pattern else "OFF — all chunks"))
-	print("Flying south %.0f km/h at %.0fm above ground for %.0fs" % [fly_speed * 3.6, fly_height_above_ground, test_duration])
+	if path_from_deck:
+		print("Path mode: DECK (will build from bridge deck polygon after load)")
+	elif path_waypoints.size() >= 2:
+		print("Path mode: %d waypoints" % path_waypoints.size())
+		for wi in path_waypoints.size():
+			print("  [%d] (%.6f, %.6f)" % [wi, path_waypoints[wi].x, path_waypoints[wi].y])
+	print("Flying %.0f km/h at %.0fm above ground for %.0fs" % [fly_speed * 3.6, fly_height_above_ground, test_duration])
 	print("Spike threshold: %.1f ms" % spike_threshold_ms)
 	print("=============================================\n")
 
@@ -262,11 +291,79 @@ func _on_terrain_loaded() -> void:
 	var chunks_after_load: int = osm_terrain._loaded_chunks.size() if osm_terrain and "_loaded_chunks" in osm_terrain else -1
 	print("  Chunks loaded: %d" % chunks_after_load)
 
-	# Set fixed camera height = spawn elevation + 200m
+	# Build path from deck polygon: straight line north→south
+	if path_from_deck and osm_terrain and "_bridge_deck_polygons" in osm_terrain:
+		var polys: Array = osm_terrain._bridge_deck_polygons
+		print("  Deck polygons found: %d" % polys.size())
+		# Find northernmost (min local.y) and southernmost (max local.y) vertex
+		var north_pt := Vector2.ZERO
+		var south_pt := Vector2.ZERO
+		var min_z: float = INF
+		var max_z: float = -INF
+		for poly in polys:
+			for v in poly:
+				if v.y < min_z:
+					min_z = v.y
+					north_pt = v
+				if v.y > max_z:
+					max_z = v.y
+					south_pt = v
+		if min_z < INF and max_z > -INF:
+			path_local.clear()
+			if path_reverse:
+				path_local.append(south_pt)
+				path_local.append(north_pt)
+				print("  Deck path: south→north (reversed)")
+			else:
+				path_local.append(north_pt)
+				path_local.append(south_pt)
+				print("  Deck path: north→south")
+			var total_len: float = north_pt.distance_to(south_pt)
+			test_duration = total_len / fly_speed + 5.0
+			var s_lat: float = osm_terrain.start_lat if "start_lat" in osm_terrain else test_location.x
+			var s_lon: float = osm_terrain.start_lon if "start_lon" in osm_terrain else test_location.y
+			var lon_scale: float = cos(deg_to_rad(s_lat)) * 111000.0
+			var n_lat: float = s_lat - north_pt.y / 111000.0
+			var n_lon: float = s_lon + north_pt.x / lon_scale
+			var s_lat2: float = s_lat - south_pt.y / 111000.0
+			var s_lon2: float = s_lon + south_pt.x / lon_scale
+			print("  North: local=(%.1f, %.1f) latlon=(%.6f, %.6f)" % [north_pt.x, north_pt.y, n_lat, n_lon])
+			print("  South: local=(%.1f, %.1f) latlon=(%.6f, %.6f)" % [south_pt.x, south_pt.y, s_lat2, s_lon2])
+			print("  Straight line: %.0fm, duration %.0fs" % [total_len, test_duration])
+			camera.global_position.x = path_local[0].x
+			camera.global_position.z = path_local[0].y
+			var init_dir: Vector2 = path_local[1] - path_local[0]
+			camera_yaw = rad_to_deg(atan2(-init_dir.x, -init_dir.y))
+			camera.rotation_degrees = Vector3(camera_pitch, camera_yaw, 0)
+		else:
+			print("  WARNING: No deck polygon vertices found, falling back to south flight")
+
+	# Convert path waypoints to local coordinates
+	elif path_waypoints.size() >= 2 and osm_terrain and osm_terrain.has_method("_latlon_to_local"):
+		path_local.clear()
+		for wp in path_waypoints:
+			var local: Vector2 = osm_terrain._latlon_to_local(wp.x, wp.y)
+			path_local.append(local)
+		# Compute total path length and set duration
+		var total_len: float = 0.0
+		for si in range(path_local.size() - 1):
+			total_len += path_local[si].distance_to(path_local[si + 1])
+		test_duration = total_len / fly_speed + 5.0  # +5s buffer
+		print("  Path: %d local points, total %.0fm, duration %.0fs" % [
+			path_local.size(), total_len, test_duration])
+		# Start camera at first waypoint
+		camera.global_position.x = path_local[0].x
+		camera.global_position.z = path_local[0].y
+		# Initial yaw toward second waypoint
+		var init_dir: Vector2 = path_local[1] - path_local[0]
+		camera_yaw = rad_to_deg(atan2(-init_dir.x, -init_dir.y))
+		camera.rotation_degrees = Vector3(camera_pitch, camera_yaw, 0)
+
+	# Set fixed camera height = spawn elevation + fly_height_above_ground
 	if osm_terrain and osm_terrain.has_method("get_spawn_elevation"):
 		var elev: float = osm_terrain.get_spawn_elevation()
 		if elev > 0.0:
-			fixed_camera_y = elev + 200.0
+			fixed_camera_y = elev + fly_height_above_ground
 			camera.global_position.y = fixed_camera_y
 			print("  Spawn elevation: %.1fm ASL, camera fixed at %.1fm" % [elev, fixed_camera_y])
 
@@ -312,12 +409,49 @@ func _process(delta: float) -> void:
 	if not test_running:
 		return
 
-	# Move camera south, maintain height above terrain
-	camera.global_position.z += fly_speed * delta
-
-	# Fixed camera height
-	if fixed_camera_y > 0.0:
-		camera.global_position.y = fixed_camera_y
+	# Move camera along path or south
+	if path_local.size() >= 2:
+		var advance: float = fly_speed * delta
+		while advance > 0.0 and path_segment < path_local.size() - 1:
+			var seg_start: Vector2 = path_local[path_segment]
+			var seg_end: Vector2 = path_local[path_segment + 1]
+			var seg_len: float = seg_start.distance_to(seg_end)
+			if seg_len < 0.001:
+				path_segment += 1
+				path_t = 0.0
+				continue
+			var remaining: float = seg_len * (1.0 - path_t)
+			if advance < remaining:
+				path_t += advance / seg_len
+				advance = 0.0
+			else:
+				advance -= remaining
+				path_segment += 1
+				path_t = 0.0
+		if path_segment >= path_local.size() - 1:
+			_end_test()
+			return
+		var a: Vector2 = path_local[path_segment]
+		var b: Vector2 = path_local[path_segment + 1]
+		var pos: Vector2 = a.lerp(b, path_t)
+		camera.global_position.x = pos.x
+		camera.global_position.z = pos.y
+		# Camera Y from terrain + height
+		if osm_terrain and osm_terrain.has_method("_sample_elevation"):
+			var ground: float = osm_terrain._sample_elevation(pos.x, pos.y)
+			if ground > 0.0:
+				camera.global_position.y = ground + fly_height_above_ground
+		# Smooth yaw rotation toward movement direction
+		var seg_dir: Vector2 = b - a
+		var target_yaw: float = rad_to_deg(atan2(-seg_dir.x, -seg_dir.y))
+		var yaw_rad: float = lerp_angle(deg_to_rad(camera_yaw), deg_to_rad(target_yaw), minf(delta * 3.0, 1.0))
+		camera_yaw = rad_to_deg(yaw_rad)
+		camera.rotation_degrees = Vector3(camera_pitch, camera_yaw, 0)
+	else:
+		camera.global_position.z += fly_speed * delta
+		# Fixed camera height
+		if fixed_camera_y > 0.0:
+			camera.global_position.y = fixed_camera_y
 
 	# Sync car position for chunk loading — drive at terrain height
 	if car:

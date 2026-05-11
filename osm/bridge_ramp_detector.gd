@@ -573,8 +573,11 @@ func _detect_polygon_bridges() -> void:
 			if not _is_drivable(way):
 				continue
 			var tags: Dictionary = way.get("tags", {})
-			if tags.get("bridge", "") == "yes":
-				continue   # on-deck way, not approaching
+			# bridge=yes ways that cross the polygon boundary still need
+			# ramps (e.g. secondary road entering/exiting the deck).
+			# The portal detection below will naturally skip ways that are
+			# entirely inside (no inside↔outside transition).
+			var is_bridge_way: bool = tags.get("bridge", "") == "yes"
 			var nodes: Array = way.get("nodes", [])
 			if nodes.size() < 2:
 				continue
@@ -598,6 +601,11 @@ func _detect_polygon_bridges() -> void:
 			var inside_flags: Array = []
 			for lp in locals:
 				inside_flags.append(Geometry2D.is_point_in_polygon(lp, poly))
+			var any_inside := false
+			for fl in inside_flags:
+				if bool(fl):
+					any_inside = true
+					break
 			# First inside↔outside transition along the way.
 			var portal_idx := -1
 			var step := 0
@@ -632,7 +640,7 @@ func _detect_polygon_bridges() -> void:
 						break
 				if has_bridge_link_inside:
 					break
-			if not has_bridge_link_inside:
+			if not has_bridge_link_inside and not is_bridge_way:
 				continue
 			var portal_node: Dictionary = nodes[portal_idx]
 			var portal_pos: Vector2 = locals[portal_idx]

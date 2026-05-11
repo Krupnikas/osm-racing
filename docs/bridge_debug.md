@@ -423,3 +423,125 @@ Naïve fix (raise RAMP_BUDGET globally) was tried in Attempt #15.5 and REJECTED:
 - Walker terminates at way end → adjacent roads NOT lifted.
 
 **Effect on other ramps:** none. RAMP_BUDGET still 35 m for non-cutting ways. Behaviour unchanged.
+
+## Flyover Test for Bridge Ramp Debugging
+
+### Running the test
+
+Start from coordinates south of the bridge so it gets loaded as the camera flies south:
+
+```bash
+# Октябрьский мост — start south of south abutment
+/Applications/Godot.app/Contents/MacOS/Godot --path . tests/elevation_flyover_test.tscn \
+  -- --test-lat=59.1195566 --test-lon=37.9037360 --no-chess --with-all
+```
+
+Path mode — fly a custom route along deck edges:
+
+```bash
+# Fly along the south end of the bridge deck
+/Applications/Godot.app/Contents/MacOS/Godot --path . tests/elevation_flyover_test.tscn \
+  -- --path=59.1170,37.9040:59.1190,37.9040:59.1210,37.9030:59.1230,37.9030 \
+  --no-chess --with-all --cam-height=30
+```
+
+Deck polygon flyover — fly around the bridge deck perimeter:
+
+```bash
+# Fly the deck polygon outline at 50m above ground
+/Applications/Godot.app/Contents/MacOS/Godot --path . tests/elevation_flyover_test.tscn \
+  -- --test-lat=59.1195 --test-lon=37.9040 --path=deck \
+  --no-chess --with-all --cam-height=50
+
+# Same but in reverse direction
+/Applications/Godot.app/Contents/MacOS/Godot --path . tests/elevation_flyover_test.tscn \
+  -- --test-lat=59.1195 --test-lon=37.9040 --path=deck --reverse \
+  --no-chess --with-all --cam-height=50
+```
+
+Key flags:
+- `--no-chess` — load ALL chunks (chess pattern skips every other chunk, may miss bridge)
+- `--with-all` — enable buildings, lamps, curbs, vegetation
+- `--test-lat=X --test-lon=Y` — start position; camera flies south at 100 km/h
+- `--cam-height=N` — camera height above terrain in meters (default 38)
+- `--path=deck` — auto-build path from bridge deck polygon vertices (prints all vertex coords with lat/lon); camera flies the polygon perimeter
+- `--reverse` — fly the path in reverse direction (works with `--path=deck` and `--path=...`)
+- `--path=lat1,lon1:lat2,lon2:...` — fly a path through manual waypoints (camera rotates smoothly to face direction of movement; test ends when path is completed)
+
+### Filtering diagnostic output
+
+```bash
+# Lateral exit detection (deck ramp at _link way exits)
+... 2>&1 | grep "LateralExit"
+
+# Standalone bridge road vertex dump (3D coords per vertex pair)
+... 2>&1 | grep "BridgeRoad"
+
+# All bridge diagnostics + errors
+... 2>&1 | grep -E "LateralExit|BridgeRoad|SCRIPT ERROR"
+
+# Save full log, filter after
+... 2>&1 | tee /tmp/flyover.log
+grep "LateralExit" /tmp/flyover.log
+```
+
+### Key diagnostic print tags
+
+| Tag | Source function | What it shows |
+|-----|----------------|---------------|
+| `[LateralExitScan]` | `_detect_deck_lateral_exits` | Every `_link` bridge way evaluated: way_id, highway, midpoint, polygon count, on_deck |
+| `[LateralExit]` | `_detect_deck_lateral_exits` | Registered exit: way_id, start/end, position, base_elev |
+| `[BridgeRoadDump]` | `_create_bridge_road` | Road summary: way_id, ref_elev, deck_top, shared endpoints, ramp lengths |
+| `[BridgeRoadVert]` | `_create_bridge_road` | Per-vertex 3D coords (left/right) — verify ramp S-curve shape |
+
+### What to verify
+
+1. **ref_elev alignment**: `[BridgeRoadDump] ref_elev` should be ~124.6 (abutment level), NOT ~120 (river level). If it shows river level, the deck-aware ref_elev fix (shared endpoint samples deck surface Y) isn't working.
+
+2. **deck_top match**: standalone road's `deck_top` should be polygon's `deck_top` + `height_offset` (0.008 for secondary_link). The road sits 8mm above the deck.
+
+3. **Ramp S-curve**: `[BridgeRoadVert]` Y values should smoothstep from ground level to deck_top. Ramp covers `ramp_end` or `ramp_start` meters from the free endpoint.
+
+4. **Lateral exit registration**: `[LateralExitScan] on_deck=true` confirms midpoint is inside polygon. `[LateralExit]` confirms exit was registered with position and direction.
+
+5. **base_elev=0.0**: elevation data wasn't available at detection time. The ramp code (`_deck_surface_y_at`) samples live — fallback to polygon ref_elev if still 0.
+
+### Key ways at Октябрьский мост
+
+| Way ID | Type | Role |
+|--------|------|------|
+| 78314250 | secondary, bridge=yes | Main carriageway (on_deck → lane markings) |
+| 43844912 | secondary_link, bridge=yes | South exit ramp (standalone road, lateral exit from deck) |
+| 43844947 | secondary, cutting=yes | South approach road (ground level, goes under bridge) |
+
+### Querying OSM data for bridge ways
+
+Use the Overpass API to understand what objects exist on/near the bridge:
+
+```bash
+# All bridge=yes highway ways inside the deck polygon (relation 13095564)
+curl -s 'https://overpass-api.de/api/interpreter' \
+  --data-urlencode 'data=[out:json];relation(13095564);map_to_area->.bridge;way(area.bridge)[highway][bridge=yes];out tags;' \
+  | python3 -m json.tool
+
+# Tags of a specific way
+curl -s 'https://overpass-api.de/api/interpreter' \
+  --data-urlencode 'data=[out:json];way(43844912);out tags;'
+
+# Way geometry (nodes + lat/lon)
+curl -s 'https://overpass-api.de/api/interpreter' \
+  --data-urlencode 'data=[out:json];way(43844912);out geom;'
+
+# All _link bridge ways near a coordinate
+curl -s 'https://overpass-api.de/api/interpreter' \
+  --data-urlencode 'data=[out:json];way(around:500,59.113,37.904)[highway~"_link$"][bridge=yes];out tags;'
+```
+
+This helps identify:
+- Which ways are `_link` (arm ramps) vs main carriageways
+- Whether a way is `steps`, `footway`, `primary`, etc.
+- Node coordinates to understand road geometry
+
+### In-game debug overlay (F9)
+
+Press F9 to toggle bridge ramp debug overlay (`bridge_ramp_detector.gd`). Shows ramp zones, shared/free endpoints, and detected ramp corridors as colored markers.
