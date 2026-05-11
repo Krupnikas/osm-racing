@@ -455,6 +455,27 @@ What to check at each ramp:
 
 Look for: grass gap at ramp base, Z-fight, deck mesh covering road approach.
 
+### Drive test — spawn at north ramps
+
+```bash
+# Start at north ramp junction, drive onto bridge
+/Applications/Godot.app/Contents/MacOS/Godot --path . -- --autostart 0
+```
+Location select: "Октябрьский мост" → spawns at 59.118453, 37.902972 (north ramp area).
+Drive south onto the bridge, check all ramp transitions from ground level.
+
+### Ramp grass gap fix (RESOLVED)
+
+**Problem:** Grass terrain overlapped the ramp base where the deck descends to ground level.
+Road ended at the polygon boundary; deck ramp went underground; grass mesh filled the gap.
+
+**Solution (3 parts):**
+1. **Ramp base underground** — `_deck_surface_y_at` ramp base Y = `local_elevation - 0.1m` (was `+0.008`). Deck mesh dips 10cm below terrain at polygon boundary, guaranteeing intersection with road surface.
+2. **Asphalt apron patches** — detected from on-deck bridge way endpoints near polygon boundary (`_detect_ramp_junction`). Each junction creates a quad mesh: 6m inward under the ramp + 1m outward, road width + 1m margin each side. Uses `_cached_road_albedo` with world-space UV (0.1 scale), matching deck texture.
+3. **Timing fix** — aprons created on-demand: if deck already built when junction detected, create immediately; if junction detected before deck, create when deck builds. Both orders handled.
+
+**Apron terrain corridor** registered in `_chunk_terrain_roads` for grass cutout, but only effective if terrain hasn't been built yet for that chunk (terrain builds before roads in most cases). The apron at +5cm above terrain visually covers grass regardless.
+
 Path mode — fly a custom route along deck edges:
 
 ```bash
