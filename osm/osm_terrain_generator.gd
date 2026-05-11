@@ -6939,15 +6939,16 @@ func _create_on_deck_footway(smoothed_points: PackedVector2Array, width: float, 
 # _register_ramp_junction when the deck is already built, or from
 # _create_bridge_deck_mesh for any junctions detected before deck build.
 func _create_single_ramp_apron(junc: Dictionary, ref_elev: float) -> void:
-	const APRON_LEN := 5.0
+	const APRON_LEN := 1.0
 	var center: Vector2 = junc.pos
 	var outward: Vector2 = junc.dir
 	var hw: float = float(junc.width) * 0.5 + 1.0
 	var ap_perp := Vector2(-outward.y, outward.x)
 
-	# Inner edge at polygon boundary, outer edge APRON_LEN outside (over the gap)
-	var inner_l: Vector2 = center - ap_perp * hw
-	var inner_r: Vector2 = center + ap_perp * hw
+	# Inner edge 6m inside polygon (under ramp), outer edge APRON_LEN outside
+	const INWARD := 6.0
+	var inner_l: Vector2 = center - ap_perp * hw - outward * INWARD
+	var inner_r: Vector2 = center + ap_perp * hw - outward * INWARD
 	var outer_l: Vector2 = center - ap_perp * hw + outward * APRON_LEN
 	var outer_r: Vector2 = center + ap_perp * hw + outward * APRON_LEN
 
