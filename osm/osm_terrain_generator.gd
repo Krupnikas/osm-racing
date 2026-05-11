@@ -6391,7 +6391,9 @@ func _fix_shared_endpoint_perps(pts: PackedVector2Array, perps: Array[Vector2], 
 func _subdivide_ramp_tris(verts: PackedVector3Array, idxs: PackedInt32Array,
 		full_polygon: PackedVector2Array, layer: int, uv_scale: float, ref_elev: float) -> Dictionary:
 	const MAX_EDGE := 3.0
-	const MAX_ITER := 4
+	# 10 iterations handles 700m polygon edges (adaptive: only ramp-zone
+	# triangles split, +3 tris/iter → ~30 extra tris total).
+	const MAX_ITER := 10
 	var v := Array()
 	for vi in range(verts.size()):
 		v.append(verts[vi])
