@@ -21,7 +21,7 @@ const LOCATIONS := [
 	{"ru": "Череповец",               "en": "CHEREPOVETS",   "lat": 59.150406, "lon": 37.948805, "dist_km":     0, "races": 3, "status": "unlocked", "chunk": "cherepovets"},
 	{"ru": "Новый Век",               "en": "NEW CENTURY",   "lat": 59.123567, "lon": 37.982864, "dist_km":    12, "races": 4, "status": "unlocked", "chunk": "noviy_vek"},
 	{"ru": "Ледовый дворец",          "en": "ICE PALACE",    "lat": 59.089216, "lon": 37.917488, "dist_km":    24, "races": 5, "status": "unlocked", "chunk": "ledoviy_dvorets"},
-	{"ru": "Октябрьский мост",        "en": "OKT. BRIDGE",   "lat": 59.113453, "lon": 37.903733, "dist_km":    38, "races": 2, "status": "unlocked", "chunk": "oktyabrsky_most"},
+	{"ru": "Октябрьский мост",        "en": "OKT. BRIDGE",   "lat": 59.118453, "lon": 37.902972, "dist_km":    38, "races": 2, "status": "unlocked", "chunk": "oktyabrsky_most"},
 	{"ru": "Москва (Отрадное)",       "en": "MOSCOW",        "lat": 55.860580, "lon": 37.599646, "dist_km":   492, "races": 6, "status": "unlocked", "chunk": "moscow"},
 	{"ru": "Тбилиси (Важа-Пшавела)",  "en": "TBILISI",       "lat": 41.723972, "lon": 44.730502, "dist_km":  2140, "races": 4, "status": "unlocked", "chunk": "tbilisi"},
 	{"ru": "Дубай (Крик)",            "en": "DUBAI / CREEK", "lat": 25.208591, "lon": 55.344100, "dist_km":  4220, "races": 3, "status": "unlocked", "chunk": "dubai"},

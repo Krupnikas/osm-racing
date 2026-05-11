@@ -396,6 +396,11 @@ var _bridge_deck_nodes: Dictionary = {}  # poly_idx -> Array[Node3D]
 # ramp is visible. Each: {pos, inward_dir, half_width, base_elev}.
 var _deck_lateral_exits: Array = []
 
+# Ramp junction points — where on-deck bridge ways meet the polygon boundary.
+# Detected in _apply_road_result. Each: {pos: Vector2, dir: Vector2, width: float}
+# where dir points outward (away from polygon center).
+var _deck_ramp_junctions: Array = []
+
 # Stage 1 bridge approach ramp detection (read-only, debug overlay).
 # Detector is instantiated lazily on first chunk load; never modifies
 # bridge rendering. See docs/bridge_ramp_design.md and
@@ -3056,6 +3061,7 @@ func reset_terrain() -> void:
 	_deck_entry_edges_cache.clear()
 	_deck_polygon_ref_elev.clear()
 	_deck_lateral_exits.clear()
+	_deck_ramp_junctions.clear()
 	_deck_exit_way_ids.clear()
 	# Free deck nodes parented to `self` (they're not under any chunk so the
 	# chunk-unload pass won't sweep them up).
@@ -3204,6 +3210,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 			"tags": deck.get("tags", {}),
 			"parent": parent,
 		})
+		# Grass cutout at ramp junctions is handled per-junction in
+		# _register_ramp_junction (small corridors, not full-axis strips).
 		# A man_made=bridge polygon can span chunks the player hasn't
 		# triggered yet (Oktyabrsky deck = ~600 m, while load_distance is
 		# tighter). Eagerly request elevation for every chunk the polygon
@@ -4974,6 +4982,9 @@ func _apply_road_result(result: Dictionary) -> void:
 			_way_id_disp, highway_type, on_deck, smoothed_points.size()])
 
 	if is_bridge and on_deck:
+		# Detect ramp junction: endpoint near polygon boundary → apron needed
+		if highway_type not in ["footway", "path", "steps"] and smoothed_points.size() >= 2:
+			_detect_ramp_junction(result.nodes, smoothed_points, width)
 		var is_footway_on_deck: bool = highway_type in ["footway", "path"]
 		if not is_footway_on_deck:
 			_create_on_deck_lane_markings(smoothed_points, width, result.get("tags", {}), parent)
@@ -6158,7 +6169,9 @@ func _deck_surface_y_at(point: Vector2, full_polygon: PackedVector2Array, layer:
 		var local := _sample_elevation(point.x, point.y)
 		if local == 0.0:
 			local = ref_elev
-		y = lerpf(local, deck_top, _smooth_step(t))
+		# Ramp base 10cm below terrain so it dips underground and
+		# guarantees intersection with ground road — no gap possible.
+		y = lerpf(local - 0.1, deck_top, _smooth_step(t))
 	# Lateral exit ramps — where _link bridge roads depart the polygon,
 	# the deck ramps down to meet the standalone bridge road's surface.
 	for exit_data in _deck_lateral_exits:
@@ -6182,7 +6195,7 @@ func _deck_surface_y_at(point: Vector2, full_polygon: PackedVector2Array, layer:
 		var base_e: float = _sample_elevation(exit_data.pos.x, exit_data.pos.y)
 		if base_e == 0.0:
 			base_e = ref_elev
-		var exit_y: float = lerpf(base_e, deck_top, _smooth_step(nt))
+		var exit_y: float = lerpf(base_e - 0.1, deck_top, _smooth_step(nt))
 		# Perpendicular fade: linear blend to deck_top outside arm road width
 		if across > hw:
 			var fade_t: float = (across - hw) / 15.0
@@ -6251,6 +6264,50 @@ func _is_point_on_bridge_deck(point: Vector2) -> bool:
 		if poly.size() >= 3 and Geometry2D.is_point_in_polygon(point, poly):
 			return true
 	return false
+
+
+# Detects ramp junction points where an on-deck bridge way's endpoint
+# sits near the polygon boundary. Creates apron mesh immediately if
+# the deck is already built (roads typically load after deck).
+func _detect_ramp_junction(nodes: Array, pts: PackedVector2Array, width: float) -> void:
+	if nodes.size() < 2 or pts.size() < 2:
+		return
+	const SNAP := 5.0
+	var first_local := _latlon_to_local(nodes[0].lat, nodes[0].lon)
+	var last_local := _latlon_to_local(nodes[nodes.size() - 1].lat, nodes[nodes.size() - 1].lon)
+	for pi in _bridge_deck_polygons.size():
+		var poly: PackedVector2Array = _bridge_deck_polygons[pi]
+		if poly.size() < 3:
+			continue
+		# Check first node
+		var d0: float = _min_dist_to_polygon_outline(first_local, poly)
+		if d0 < SNAP:
+			var dir: Vector2 = (pts[0] - pts[1]).normalized()
+			_register_ramp_junction(first_local, dir, width, pi)
+		# Check last node
+		var dN: float = _min_dist_to_polygon_outline(last_local, poly)
+		if dN < SNAP:
+			var last_idx: int = pts.size() - 1
+			var dir: Vector2 = (pts[last_idx] - pts[last_idx - 1]).normalized()
+			_register_ramp_junction(last_local, dir, width, pi)
+
+
+func _register_ramp_junction(pos: Vector2, dir: Vector2, width: float, poly_idx: int) -> void:
+	const SNAP := 5.0
+	for j in _deck_ramp_junctions:
+		if j.pos.distance_to(pos) < SNAP:
+			return  # duplicate
+	var junc := {"pos": pos, "dir": dir, "width": width, "poly_idx": poly_idx}
+	_deck_ramp_junctions.append(junc)
+	print("[RampJunction] #%d at (%.1f,%.1f) dir=(%.2f,%.2f) w=%.1f poly=%d" % [
+		_deck_ramp_junctions.size() - 1, pos.x, pos.y, dir.x, dir.y, width, poly_idx])
+	# If the deck mesh is already built, create the apron immediately.
+	if _bridge_deck_nodes.has(poly_idx):
+		var ref_elev: float = _deck_polygon_ref_elev.get(poly_idx, NAN)
+		if not is_nan(ref_elev):
+			_create_single_ramp_apron(junc, ref_elev)
+	else:
+		print("[RampJunction]   deck not built yet for poly %d — apron deferred" % poly_idx)
 
 
 func _is_way_on_bridge_deck(nodes: Array) -> bool:
@@ -6562,6 +6619,12 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 	all_nodes.append_array(railing_nodes)
 	_bridge_deck_nodes[poly_idx] = all_nodes
 
+	# Create aprons for any ramp junctions already detected before deck build.
+	# Most junctions arrive after deck (roads load later), but handle both orders.
+	for junc in _deck_ramp_junctions:
+		if junc.get("poly_idx", -1) == poly_idx:
+			_create_single_ramp_apron(junc, ref_elev)
+
 
 # Renders thin white lane-divider strips on top of the deck for an on-deck
 # vehicle road. Edges already come from the curb / centre-divider geometry,
@@ -6870,6 +6933,87 @@ func _create_on_deck_footway(smoothed_points: PackedVector2Array, width: float, 
 			curb_mi.material_override = curb_mat
 			curb_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			parent.add_child(curb_mi)
+
+
+# Creates a single asphalt apron mesh at one ramp junction. Called from
+# _register_ramp_junction when the deck is already built, or from
+# _create_bridge_deck_mesh for any junctions detected before deck build.
+func _create_single_ramp_apron(junc: Dictionary, ref_elev: float) -> void:
+	const APRON_LEN := 5.0
+	var center: Vector2 = junc.pos
+	var outward: Vector2 = junc.dir
+	var hw: float = float(junc.width) * 0.5 + 1.0
+	var ap_perp := Vector2(-outward.y, outward.x)
+
+	# Inner edge at polygon boundary, outer edge APRON_LEN outside (over the gap)
+	var inner_l: Vector2 = center - ap_perp * hw
+	var inner_r: Vector2 = center + ap_perp * hw
+	var outer_l: Vector2 = center - ap_perp * hw + outward * APRON_LEN
+	var outer_r: Vector2 = center + ap_perp * hw + outward * APRON_LEN
+
+	# 5cm above terrain — enough to clear grass without visible floating
+	const Y_OFF := 0.05
+	var y_il: float = _sample_elevation(inner_l.x, inner_l.y) + Y_OFF
+	var y_ir: float = _sample_elevation(inner_r.x, inner_r.y) + Y_OFF
+	var y_ol: float = _sample_elevation(outer_l.x, outer_l.y) + Y_OFF
+	var y_or: float = _sample_elevation(outer_r.x, outer_r.y) + Y_OFF
+
+	var verts := PackedVector3Array([
+		Vector3(inner_l.x, y_il, inner_l.y),
+		Vector3(inner_r.x, y_ir, inner_r.y),
+		Vector3(outer_l.x, y_ol, outer_l.y),
+		Vector3(outer_r.x, y_or, outer_r.y),
+	])
+	var uvs := PackedVector2Array([
+		Vector2(0, 0), Vector2(1, 0),
+		Vector2(0, APRON_LEN * 0.1), Vector2(1, APRON_LEN * 0.1),
+	])
+	var norms := PackedVector3Array([Vector3.UP, Vector3.UP, Vector3.UP, Vector3.UP])
+	var idxs := PackedInt32Array([0, 2, 1, 1, 2, 3])
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_NORMAL] = norms
+	arrays[Mesh.ARRAY_INDEX] = idxs
+
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	# DEBUG: bright red so we can see apron positions
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(1.0, 0.0, 0.0)
+	mat.roughness = 0.9
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+	var mi := MeshInstance3D.new()
+	mi.name = "RampApron"
+	mi.mesh = mesh
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	# Parent to self (same as deck mesh) so it survives chunk unloading
+	add_child(mi)
+
+	# Track with deck nodes for cleanup
+	var poly_idx: int = junc.get("poly_idx", 0)
+	if _bridge_deck_nodes.has(poly_idx):
+		_bridge_deck_nodes[poly_idx].append(mi)
+
+	# Register terrain corridor to cut grass under the apron
+	var corridor := PackedVector2Array([outer_l, outer_r, inner_r, inner_l])
+	var cx := int(floor(center.x / chunk_size))
+	var cz := int(floor(center.y / chunk_size))
+	var ck := "%d,%d" % [cx, cz]
+	if not _chunk_terrain_roads.has(ck):
+		_chunk_terrain_roads[ck] = []
+	_chunk_terrain_roads[ck].append(corridor)
+
+	print("[RampApron] created at (%.1f,%.1f) outward=(%.2f,%.2f) Y=%.2f..%.2f" % [
+		center.x, center.y, outward.x, outward.y,
+		_sample_elevation(center.x, center.y) + Y_OFF,
+		_sample_elevation(center.x + outward.x * APRON_LEN, center.y + outward.y * APRON_LEN) + Y_OFF])
 
 
 # 110 cm vertical-bar railing along the deck perimeter. Skips edges that

@@ -436,6 +436,25 @@ Start from coordinates south of the bridge so it gets loaded as the camera flies
   -- --test-lat=59.1195566 --test-lon=37.9037360 --no-chess --with-all
 ```
 
+**Full bridge ramp inspection** — fly from north abutment to south abutment, covering all 5 ramps.
+The polygon's northernmost point is ~59.1181 and southernmost ~59.1089.
+Start north of the bridge, fly south through the entire span:
+
+```bash
+# North→South: all ramps visible (N main ramps first, then lateral exit, then S main ramps)
+/Applications/Godot.app/Contents/MacOS/Godot --path . tests/elevation_flyover_test.tscn \
+  -- --path=59.1190,37.9025:59.1080,37.9055 \
+  --no-chess --with-all --cam-height=40
+```
+
+What to check at each ramp:
+1. **North ramps** (~59.1181): ways 82697420 + 78314252 meet ground roads 39643699 + 39643698
+2. **NE lateral exit** (~59.1171, 37.9010): way 78314250 arm tip
+3. **South lateral exit** (~59.1172, 37.9035): way 43844912 meets 43844947 (cutting=yes)
+4. **South ramps** (~59.1089): ways 82697419 + 116079419 meet ground roads 39644855 + 45481836
+
+Look for: grass gap at ramp base, Z-fight, deck mesh covering road approach.
+
 Path mode — fly a custom route along deck edges:
 
 ```bash
