@@ -6965,9 +6965,13 @@ func _create_single_ramp_apron(junc: Dictionary, ref_elev: float) -> void:
 		Vector3(outer_l.x, y_ol, outer_l.y),
 		Vector3(outer_r.x, y_or, outer_r.y),
 	])
+	# World-space UV (same scale as deck: 0.1 = 10m per repeat)
+	const UV_S := 0.1
 	var uvs := PackedVector2Array([
-		Vector2(0, 0), Vector2(1, 0),
-		Vector2(0, APRON_LEN * 0.1), Vector2(1, APRON_LEN * 0.1),
+		Vector2(inner_l.x * UV_S, inner_l.y * UV_S),
+		Vector2(inner_r.x * UV_S, inner_r.y * UV_S),
+		Vector2(outer_l.x * UV_S, outer_l.y * UV_S),
+		Vector2(outer_r.x * UV_S, outer_r.y * UV_S),
 	])
 	var norms := PackedVector3Array([Vector3.UP, Vector3.UP, Vector3.UP, Vector3.UP])
 	var idxs := PackedInt32Array([0, 2, 1, 1, 2, 3])
@@ -6982,11 +6986,13 @@ func _create_single_ramp_apron(junc: Dictionary, ref_elev: float) -> void:
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
-	# DEBUG: bright red so we can see apron positions
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(1.0, 0.0, 0.0)
+	mat.albedo_color = Color(0.7, 0.7, 0.7)
 	mat.roughness = 0.9
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if _cached_road_albedo:
+		mat.albedo_texture = _cached_road_albedo
+		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 
 	var mi := MeshInstance3D.new()
 	mi.name = "RampApron"
