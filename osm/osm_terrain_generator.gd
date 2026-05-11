@@ -4965,12 +4965,8 @@ func _apply_road_result(result: Dictionary) -> void:
 	# corridor / lamp / traffic-network registration below so the bridge
 	# road is part of the navigation graph.
 	var on_deck: bool = is_bridge and _is_way_on_bridge_deck(result.nodes)
-	# _link roads inside the polygon are lateral ramp connectors — they need
-	# their own standalone road mesh with smoothstep ramps, not just markings.
-	if on_deck and highway_type.ends_with("_link"):
-		on_deck = false
-	# Note: footways inside the polygon stay on-deck; the lateral exit corridor
-	# in _deck_surface_y_at handles ramping them down at arm exits.
+	# All bridge=yes roads inside polygon stay on-deck — the lateral exit
+	# system in _deck_surface_y_at ramps the deck surface down at arm tips.
 
 	var _way_id_disp: int = int(result.get("way_id", 0))
 	if is_bridge:
