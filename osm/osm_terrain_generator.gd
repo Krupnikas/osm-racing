@@ -6168,7 +6168,9 @@ func _deck_surface_y_at(point: Vector2, full_polygon: PackedVector2Array, layer:
 	for exit_data in _deck_lateral_exits:
 		var to_pt: Vector2 = point - exit_data.pos
 		var along: float = to_pt.dot(exit_data.inward_dir)
-		if along < 0.0 or along > BRIDGE_RAMP_LENGTH:
+		# Allow negative along — polygon tip vertices are behind exit pos.
+		# They should be at ground level (nt clamped to 0).
+		if along < -30.0 or along > BRIDGE_RAMP_LENGTH:
 			continue
 		var perp_dir := Vector2(-exit_data.inward_dir.y, exit_data.inward_dir.x)
 		var across: float = absf(to_pt.dot(perp_dir))
@@ -6178,7 +6180,7 @@ func _deck_surface_y_at(point: Vector2, full_polygon: PackedVector2Array, layer:
 		var corridor_w: float = hw + 15.0
 		if across > corridor_w:
 			continue
-		var nt: float = along / BRIDGE_RAMP_LENGTH
+		var nt: float = clampf(along / BRIDGE_RAMP_LENGTH, 0.0, 1.0)
 		# Sample ground elevation at the exit point live (elevation data
 		# may not have been available at detection time).
 		var base_e: float = _sample_elevation(exit_data.pos.x, exit_data.pos.y)
