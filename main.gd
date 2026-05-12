@@ -13,7 +13,7 @@ func _ready() -> void:
 		MusicManager.set_category(MusicManager.Category.WORK)
 		_setup_work_mode()
 	else:
-		MusicManager.set_category(MusicManager.Category.RACE)
+		MusicManager.set_category(MusicManager.ALL_CATEGORIES)
 
 
 func _setup_work_mode() -> void:

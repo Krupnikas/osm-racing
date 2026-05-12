@@ -23,7 +23,7 @@ var track_info := {
 	"element_80_s_menya_hvatit.mp3": ["Элемент-80", "С меня хватит", Category.RACE],
 	"tuhliy_bez_kontrolya.mp3": ["Тухлый", "Без контроля", Category.RACE],
 	"luka_fiasko_v_tilte.mp3": ["Лука Фиаско", "В тильте", Category.RACE],
-	"rps_delay_delo.mp3": ["Р₽С", "Делай дело (feat. Молодой Дро)", Category.RACE],
+	"rps_delay_delo.mp3": ["Р₽С", "Делай дело (feat. Молодой Дро)", Category.MENU],
 	"lihoy_bugi_klikuha_moya.mp3": ["Лихой Буги", "Кликуха Моя", Category.RACE],
 	"staticheskiy_he_edinstvenniy.mp3": ["Статический Хэ", "Единственный", Category.RACE],
 	"dvuhpoloska.mp3": ["Двухполоска", "Двухполоска", Category.RACE],
@@ -32,7 +32,8 @@ var track_info := {
 	"fond_aziatskogo_dublyazha_krepost_evropy.mp3": ["Фонд Азиатского Дубляжа", "Крепость Европа", Category.RACE],
 }
 
-var current_category: Category = Category.MENU
+const ALL_CATEGORIES: int = -1
+var current_category: int = Category.MENU
 var current_track_path: String = ""
 var music_player: AudioStreamPlayer
 
@@ -52,7 +53,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.physical_keycode == KEY_M:
 			play_next_track()
 
-func set_category(category: Category) -> void:
+func set_category(category: int) -> void:
 	if current_category == category:
 		return
 	current_category = category
@@ -100,13 +101,15 @@ func _play_path(path: String) -> void:
 	var artist: String = info[0]
 	var title: String = info[1]
 
-	print("MusicManager: Now playing: %s - %s [%s]" % [artist, title, Category.keys()[current_category].to_lower()])
+	var cat_name := "all" if current_category == ALL_CATEGORIES else Category.keys()[current_category].to_lower()
+	print("MusicManager: Now playing: %s - %s [%s]" % [artist, title, cat_name])
 	track_started.emit(title, artist)
 
-func _get_category_tracks(category: Category) -> Array[String]:
+func _get_category_tracks(category: int) -> Array[String]:
 	var result: Array[String] = []
 	for filename: String in track_info:
-		var info: Array = track_info[filename]
-		if info[2] == category:
+		if category == ALL_CATEGORIES:
+			result.append("res://audio/music/" + filename)
+		elif track_info[filename][2] == category:
 			result.append("res://audio/music/" + filename)
 	return result

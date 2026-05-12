@@ -97,9 +97,9 @@ func _ready() -> void:
 		var mm = get_node("/root/MusicManager")
 		if mm.has_signal("track_started"):
 			mm.track_started.connect(_on_track_started)
-			var idx: int = mm.current_track_index
-			if idx >= 0 and idx < mm.playlist.size():
-				var fname: String = mm.playlist[idx].get_file()
+			var path: String = mm.current_track_path
+			if path != "":
+				var fname: String = path.get_file()
 				var info: Array = mm.track_info.get(fname, ["Unknown Artist", "Unknown Track"])
 				_on_track_started(info[1], info[0])
 
