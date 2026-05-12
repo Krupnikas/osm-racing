@@ -230,6 +230,15 @@ var _pending_batch_chunks: Array[String] = []  # Чанки с pending road batc
 var _chunk_terrain_roads: Dictionary = {}  # chunk_key → Array[{points: PackedVector2Array, width: float}] — для отложенного выреза террейна
 var _deferred_path_polys: Dictionary = {}  # chunk_key → Array[{polys, raw_points, width, height_offset, parent}] — footpath polygons waiting for road clipping at finalization
 var _chunk_water_polygons: Dictionary = {}  # chunk_key → Array[PackedVector2Array] — водоёмы для выреза террейна + берег
+# Global, dedup'd water polygons (full, un-clipped). Per-chunk water entries
+# only see their own slice; chunks deep inside a huge reservoir (Рыбинское,
+# 11×16 km) have no polygon nodes in their bbox and never register one
+# locally. Iterating this list with an AABB pre-filter lets every chunk's
+# terrain cutout / point-in-water lookup see the full polygon. Keyed by
+# polygon hash so a relation joined in one chunk's data is stored once.
+var _global_water_polygons: Array[PackedVector2Array] = []
+var _global_water_polygon_bboxes: Array[Rect2] = []
+var _global_water_polygon_hashes: Dictionary = {}  # hash → idx
 var _deferred_terrain_chunks: Array[String] = []  # Чанки ожидающие terrain clipping (ждут соседей)
 
 var _chunk_pending_deferred: Dictionary = {}  # chunk_key → int — счётчик pending deferred items (lamps, footway, manholes, billboard, traffic)
@@ -359,6 +368,44 @@ var _draw_call_logging_enabled := true  # PHASE 1 DIAGNOSTIC: Track draw calls b
 var _terrain_objects_queue: Array = []  # Очередь {type, nodes, tags, parent}
 # Очередь растительности (деревья, кусты, трава) - обрабатывается отдельно с меньшим приоритетом
 var _vegetation_queue: Array = []  # Очередь {type, points, parent, dense}
+
+# Bridge / deck registry (restored from 7102d8c).
+#   _bridge_node_ways[coord_key] = { way_id: true, ... } — every node touched
+#     by a highway+bridge=yes way. Used to detect shared endpoints between
+#     adjacent bridge segments.
+#   _bridge_deck_polygons — local-coord outlines from man_made=bridge
+#     relations; the flat deck mesh is built on top of these.
+#   _deck_entry_edges_cache — memoised long-axis frame for each deck polygon
+#     (avoid recomputing the ramp axis per vertex).
+var _bridge_node_ways: Dictionary = {}
+var _bridge_deck_polygons: Array[PackedVector2Array] = []
+var _deck_entry_edges_cache: Dictionary = {}
+# Per-polygon "reference elevation" — single constant Y the whole deck sits
+# on (= max elevation of polygon vertices in loaded chunks, i.e. abutment /
+# bank level). This is the design-doc principle: a real bridge has one deck
+# elevation for the whole span, not per-vertex terrain noise. Indexed by
+# poly index in _bridge_deck_polygons.
+var _deck_polygon_ref_elev: Dictionary = {}
+# Bridge deck mesh + collision + railing nodes per polygon index. They live
+# directly under `self` (not under the spawning chunk), so the camera-
+# direction culler can't hide them when the player is still on the bridge.
+# Cleared in reset_terrain to free per-location decks.
+var _bridge_deck_nodes: Dictionary = {}  # poly_idx -> Array[Node3D]
+# Lateral exit points where _link bridge roads depart the deck polygon.
+# Deck mesh ramps down at these points so the standalone bridge road's
+# ramp is visible. Each: {pos, inward_dir, half_width, base_elev}.
+var _deck_lateral_exits: Array = []
+
+# Ramp junction points — where on-deck bridge ways meet the polygon boundary.
+# Detected in _apply_road_result. Each: {pos: Vector2, dir: Vector2, width: float}
+# where dir points outward (away from polygon center).
+var _deck_ramp_junctions: Array = []
+
+# Stage 1 bridge approach ramp detection (read-only, debug overlay).
+# Detector is instantiated lazily on first chunk load; never modifies
+# bridge rendering. See docs/bridge_ramp_design.md and
+# osm/bridge_ramp_detector.gd.
+var _ramp_detector: Node = null
 
 # FPS статистика для отображения на экране
 var _fps_samples: Array[float] = []
@@ -505,6 +552,10 @@ const BRIDGE_MIN_LENGTH_FOR_PILLARS := 60.0  # Минимальная длина
 const BRIDGE_PILLAR_SPACING := 20.0     # Расстояние между опорами моста
 const BRIDGE_PILLAR_RADIUS := 0.5       # Радиус опоры моста
 const BRIDGE_PILLAR_COLOR := Color(0.55, 0.53, 0.5)  # Цвет бетонных опор
+# Bridge deck (man_made=bridge relation) — flat platform constants.
+# Restored from 7102d8c (Oktyabrsky deck rendering, lost in sk merge).
+const BRIDGE_DECK_HEIGHT := 5.0         # Константная высота деки моста над землёй
+const BRIDGE_RAMP_LENGTH := 35.0        # Длина рампы на СВОБОДНОМ конце
 
 ## Snap start_lat/start_lon to global grid so chunk boundaries are identical
 ## regardless of the exact start position. Nearby starts (same city) snap to the
@@ -1751,6 +1802,9 @@ func _process(delta: float) -> void:
 
 # Начать загрузку карты
 func start_loading() -> void:
+	# Re-snap origin in case start_lat/start_lon were changed after _ready().
+	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
+	_snap_origin_to_grid()
 	print("OSM: Starting initial loading... (generation %d)" % _load_generation)
 	print("OSM: State before start: _loaded_chunks=%d, _loading_chunks=%d" % [_loaded_chunks.size(), _loading_chunks.size()])
 
@@ -1817,6 +1871,9 @@ func start_loading() -> void:
 	_road_batch_data.clear()  # Очищаем road batch data
 	_chunk_terrain_roads.clear()
 	_chunk_water_polygons.clear()
+	_global_water_polygons.clear()
+	_global_water_polygon_bboxes.clear()
+	_global_water_polygon_hashes.clear()
 	_deferred_terrain_chunks.clear()
 	# Clear threaded terrain gen results
 	_terrain_thread_mutex.lock()
@@ -2995,7 +3052,24 @@ func reset_terrain() -> void:
 	_road_batch_data.clear()
 	_chunk_terrain_roads.clear()
 	_chunk_water_polygons.clear()
+	_global_water_polygons.clear()
+	_global_water_polygon_bboxes.clear()
+	_global_water_polygon_hashes.clear()
 	_deferred_path_polys.clear()
+	_bridge_node_ways.clear()
+	_bridge_deck_polygons.clear()
+	_deck_entry_edges_cache.clear()
+	_deck_polygon_ref_elev.clear()
+	_deck_lateral_exits.clear()
+	_deck_ramp_junctions.clear()
+	_deck_exit_way_ids.clear()
+	# Free deck nodes parented to `self` (they're not under any chunk so the
+	# chunk-unload pass won't sweep them up).
+	for poly_idx in _bridge_deck_nodes:
+		for n in _bridge_deck_nodes[poly_idx]:
+			if is_instance_valid(n):
+				n.queue_free()
+	_bridge_deck_nodes.clear()
 	_deferred_terrain_chunks.clear()
 
 	# Reset draw call stats (prevent stale stats across location changes)
@@ -3106,6 +3180,67 @@ func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: 
 ## Dispatch terrain generation: Phase 1+2 run on worker thread, Phase 3 on main thread.
 ## For non-chunk (initial load), runs synchronously on main thread.
 func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String = "", gen: int = -1) -> void:
+	# Pre-scan: register every node touched by a highway+bridge=yes way so
+	# road meshes downstream can detect shared bridge endpoints. Main thread,
+	# safe to write the global dict.
+	_bridge_prescan_ways(osm_data.get("ways", []))
+
+	# Collect man_made=bridge relation outlines into the global polygon list.
+	# Each polygon becomes one flat asphalt deck mesh + railing in
+	# _process_terrain_objects_queue (type "bridge_deck"). Dedup by start
+	# vertex so a polygon shared across chunks is only built once.
+	for deck in osm_data.get("bridge_decks", []):
+		var deck_nodes: Array = deck.get("nodes", [])
+		if deck_nodes.size() < 3:
+			continue
+		var poly := PackedVector2Array()
+		for n in deck_nodes:
+			poly.append(_latlon_to_local(n["lat"], n["lon"]))
+		var dominated := false
+		for existing in _bridge_deck_polygons:
+			if existing.size() > 0 and poly.size() > 0 and existing[0].distance_to(poly[0]) < 1.0:
+				dominated = true
+				break
+		if dominated:
+			continue
+		_bridge_deck_polygons.append(poly)
+		_terrain_objects_queue.append({
+			"type": "bridge_deck",
+			"polygon": poly,
+			"tags": deck.get("tags", {}),
+			"parent": parent,
+		})
+		# Grass cutout at ramp junctions is handled per-junction in
+		# _register_ramp_junction (small corridors, not full-axis strips).
+		# A man_made=bridge polygon can span chunks the player hasn't
+		# triggered yet (Oktyabrsky deck = ~600 m, while load_distance is
+		# tighter). Eagerly request elevation for every chunk the polygon
+		# touches so the deck mesh isn't blocked forever waiting for
+		# remote chunks the player hasn't driven into.
+		if enable_elevation:
+			var deck_chunks := {}
+			for v in poly:
+				var cx := int(floor(v.x / chunk_size))
+				var cz := int(floor(v.y / chunk_size))
+				deck_chunks["%d,%d" % [cx, cz]] = Vector2i(cx, cz)
+			for ck in deck_chunks:
+				var cxz: Vector2i = deck_chunks[ck]
+				_request_elevation(ck, cxz.x, cxz.y)
+
+	# Detect lateral exit points where _link bridge roads depart the deck.
+	# Must run after prescan (shared endpoints) and polygon collection,
+	# but before the deck mesh is built.
+	_detect_deck_lateral_exits(osm_data.get("ways", []))
+
+	# Stage 1+2 bridge ramp detection: notify the detector on every chunk
+	# load so it can accumulate the road-graph view across chunks and
+	# rebuild the ramp spatial index BEFORE this chunk's Phase 3 road
+	# meshing samples vertex Y. Synchronous (not call_deferred) so the
+	# index is current when sample_road_y is called.
+	_ensure_ramp_detector()
+	if _ramp_detector != null:
+		_ramp_detector.notify_chunk_loaded(osm_data, self)
+
 	if chunk_key == "":
 		# Initial load (no chunk key) — run synchronously on main thread
 		_generate_terrain_sync(osm_data, parent, chunk_key)
@@ -3216,8 +3351,20 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 			for j in range(nodes.size()):
 				raw_pts[j] = _ll.call(nodes[j].lat, nodes[j].lon)
 			var smoothed_pts := _smooth_road_corners(raw_pts)
+			# Tag every road seg with way_id + bridge flag so the bridge
+			# helpers can find neighbour bridge tangents and skip non-bridge
+			# segments. Without these the corridor / shared-endpoint logic
+			# from 7102d8c can't function.
+			var rseg_way_id: int = int(way.get("id", 0))
+			var rseg_is_bridge: bool = tags.get("bridge", "") == "yes"
 			for j in range(smoothed_pts.size() - 1):
-				var rseg := {"p1": smoothed_pts[j], "p2": smoothed_pts[j + 1], "width": road_w}
+				var rseg := {
+					"p1": smoothed_pts[j],
+					"p2": smoothed_pts[j + 1],
+					"width": road_w,
+					"way_id": rseg_way_id,
+					"bridge": rseg_is_bridge,
+				}
 				var p1: Vector2 = rseg.p1
 				var p2: Vector2 = rseg.p2
 				var min_x: float = minf(p1.x, p2.x) - road_w / 2.0
@@ -3744,6 +3891,15 @@ func _process_phase3_queue() -> bool:
 					pass  # Не фильтруем — каждый чанк рисует свой клипнутый кусок
 				elif tags.get("amenity") == "parking":
 					pass  # Не фильтруем — _create_parking клипает через intersect_polygons
+				elif tags.get("natural") == "water" or tags.get("landuse") in ["reservoir", "basin"]:
+					# Huge water polygons (rivers, reservoirs) cannot be center-
+					# filtered — the centre is far from any single chunk. Use
+					# bbox-overlap instead: any chunk whose bbox the polygon
+					# touches gets to process it (and clips per-chunk inside
+					# _create_natural_immediate). Restored from 53b0537.
+					var w_bbox := _get_way_local_bbox(nodes)
+					if w_bbox.position.x > chunk_max_x or w_bbox.end.x < chunk_min_x or w_bbox.position.y > chunk_max_z or w_bbox.end.y < chunk_min_z:
+						continue
 				elif tags.has("building") or tags.has("amenity"):
 					var center := _get_way_center(nodes)
 					if not (center.x >= chunk_min_x and center.x < chunk_max_x and center.y >= chunk_min_z and center.y < chunk_max_z):
@@ -3795,8 +3951,32 @@ func _process_phase3_queue() -> bool:
 			elif tags.has("amenity") and not tags.has("building"):
 				_create_amenity_building(nodes, tags, target, null, true)  # skip_spatial_hash
 			elif tags.has("natural"):
-				_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+				# Pre-register water polygons synchronously so the tree /
+				# lamp / lookup checks in the upcoming "points" phase see
+				# them. The mesh + shore are still built lazily from the
+				# terrain queue.
+				if tags.get("natural") == "water" and enable_water and nodes.size() >= 3:
+					var wpts := PackedVector2Array()
+					for n in nodes:
+						wpts.append(_latlon_to_local(n.lat, n.lon))
+					_register_global_water_polygon(wpts)
+					for clipped in _clip_polygon_to_chunk(wpts, chunk_key):
+						_register_water_polygon(clipped, target)
+				# Large water polygons (reservoirs, lakes) must be processed
+				# first so that narrower water strips contained inside them
+				# can skip redundant shore edges facing open water (53b0537).
+				if tags.get("natural", "") == "water" and nodes.size() > 200:
+					_terrain_objects_queue.push_front({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+				else:
+					_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
 			elif tags.has("landuse"):
+				if tags.get("landuse") in ["reservoir", "basin"] and enable_water and nodes.size() >= 3:
+					var lpts := PackedVector2Array()
+					for n in nodes:
+						lpts.append(_latlon_to_local(n.lat, n.lon))
+					_register_global_water_polygon(lpts)
+					for clipped in _clip_polygon_to_chunk(lpts, chunk_key):
+						_register_water_polygon(clipped, target)
 				_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 			elif tags.has("leisure"):
 				_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
@@ -4053,8 +4233,16 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 			for j in range(nodes.size()):
 				raw_pts[j] = _latlon_to_local(nodes[j].lat, nodes[j].lon)
 			var smoothed_pts := _smooth_road_corners(raw_pts)
+			var sync_way_id: int = int(way.get("id", 0))
+			var sync_is_bridge: bool = tags.get("bridge", "") == "yes"
 			for j in range(smoothed_pts.size() - 1):
-				_add_road_segment_to_spatial_hash({"p1": smoothed_pts[j], "p2": smoothed_pts[j + 1], "width": road_w}, chunk_key)
+				_add_road_segment_to_spatial_hash({
+					"p1": smoothed_pts[j],
+					"p2": smoothed_pts[j + 1],
+					"width": road_w,
+					"way_id": sync_way_id,
+					"bridge": sync_is_bridge,
+				}, chunk_key)
 		if (tags.has("building") or (tags.has("amenity") and not tags.has("highway"))) and nodes.size() >= 3:
 			var bpoints := PackedVector2Array()
 			for node in nodes:
@@ -4082,8 +4270,26 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 		elif tags.has("amenity") and not tags.has("building"):
 			_create_amenity_building(nodes, tags, target, null)
 		elif tags.has("natural"):
-			_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+			# Pre-register water polygons synchronously (see threaded path).
+			if tags.get("natural") == "water" and enable_water and nodes.size() >= 3:
+				var wpts := PackedVector2Array()
+				for n in nodes:
+					wpts.append(_latlon_to_local(n.lat, n.lon))
+				_register_global_water_polygon(wpts)
+				for clipped in _clip_polygon_to_chunk(wpts, chunk_key):
+					_register_water_polygon(clipped, target)
+			if tags.get("natural", "") == "water" and nodes.size() > 200:
+				_terrain_objects_queue.push_front({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
+			else:
+				_terrain_objects_queue.append({"type": "natural", "nodes": nodes, "tags": tags, "parent": target})
 		elif tags.has("landuse"):
+			if tags.get("landuse") in ["reservoir", "basin"] and enable_water and nodes.size() >= 3:
+				var lpts := PackedVector2Array()
+				for n in nodes:
+					lpts.append(_latlon_to_local(n.lat, n.lon))
+				_register_global_water_polygon(lpts)
+				for clipped in _clip_polygon_to_chunk(lpts, chunk_key):
+					_register_water_polygon(clipped, target)
 			_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 		elif tags.has("leisure"):
 			_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
@@ -4203,6 +4409,9 @@ func _compute_averaged_perpendiculars(points: PackedVector2Array) -> Array[Vecto
 func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node, way_id: int = 0, skip_spatial_hash: bool = false) -> void:
 	if not enable_roads:
 		return
+	# Steps are not rendered as road surfaces.
+	if tags.get("highway", "") == "steps":
+		return
 	# Добавляем в очередь для отложенного создания (per-chunk)
 	var rq_ck := ""
 	if parent.name.begins_with("Chunk_"):
@@ -4229,8 +4438,15 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 	for i in range(nodes.size()):
 		raw_pts[i] = _latlon_to_local(nodes[i].lat, nodes[i].lon)
 	var smoothed_pts := _smooth_road_corners(raw_pts)
+	var seg_is_bridge: bool = tags.get("bridge", "") == "yes"
 	for i in range(smoothed_pts.size() - 1):
-		var seg := {"p1": smoothed_pts[i], "p2": smoothed_pts[i + 1], "width": width}
+		var seg := {
+			"p1": smoothed_pts[i],
+			"p2": smoothed_pts[i + 1],
+			"width": width,
+			"way_id": way_id,
+			"bridge": seg_is_bridge,
+		}
 		_add_road_segment_to_spatial_hash(seg, rq_ck)
 
 
@@ -4338,6 +4554,12 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	# the parent road mesh, causing z-fighting when textures differ.
 	# By moving raw[0] along the link direction by parent_half_width, the link starts at the
 	# parent edge, and smoothing creates a curve from there — preserving roundings, no overlap.
+	#
+	# EXCEPTION (Stage 2A.3 root-cause fix, verified by visual debug overlay):
+	# when the parent at the junction is a bridge=yes way, there is NO parent road mesh —
+	# on-deck bridge=yes ways render as deck-painted markings, not road meshes. The shift
+	# is unnecessary and creates the visible 2.7 m gap between road approach and bridge
+	# polygon outline. The polygon outline IS a vertex of the road's node[0] in OSM data.
 	if highway_type.ends_with("_link") and local_points.size() >= 2:
 		var parent_hw: float = 6.0
 		if highway_type in ["motorway_link", "trunk_link"]:
@@ -4348,15 +4570,19 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			parent_hw = 5.0
 		else:
 			parent_hw = 4.0
-		# Shift start point
-		var dir_start: Vector2 = (local_points[1] - local_points[0]).normalized()
-		var shift_dist_start: float = minf(parent_hw, local_points[0].distance_to(local_points[1]) * 0.5)
-		local_points[0] = local_points[0] + dir_start * shift_dist_start
-		# Shift end point
-		var last_idx: int = local_points.size() - 1
-		var dir_end: Vector2 = (local_points[last_idx - 1] - local_points[last_idx]).normalized()
-		var shift_dist_end: float = minf(parent_hw, local_points[last_idx].distance_to(local_points[last_idx - 1]) * 0.5)
-		local_points[last_idx] = local_points[last_idx] + dir_end * shift_dist_end
+		var first_node: Dictionary = nodes[0]
+		var last_node: Dictionary = nodes[nodes.size() - 1]
+		# Shift start unless the start junction is shared with a bridge=yes way.
+		if not _bridge_endpoint_touches_any(first_node.lat, first_node.lon):
+			var dir_start: Vector2 = (local_points[1] - local_points[0]).normalized()
+			var shift_dist_start: float = minf(parent_hw, local_points[0].distance_to(local_points[1]) * 0.5)
+			local_points[0] = local_points[0] + dir_start * shift_dist_start
+		# Shift end unless the end junction is shared with a bridge=yes way.
+		if not _bridge_endpoint_touches_any(last_node.lat, last_node.lon):
+			var last_idx: int = local_points.size() - 1
+			var dir_end: Vector2 = (local_points[last_idx - 1] - local_points[last_idx]).normalized()
+			var shift_dist_end: float = minf(parent_hw, local_points[last_idx].distance_to(local_points[last_idx - 1]) * 0.5)
+			local_points[last_idx] = local_points[last_idx] + dir_end * shift_dist_end
 
 	# Smoothing (thread-safe: pure math) — skip for tram (straight tracks, smoothing creates wobble)
 	var smoothed_points: PackedVector2Array
@@ -4445,8 +4671,9 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				])
 			terrain_corridors.append_array(_build_terrain_corridors_for_polyline(full_subdivided, corridor_delta, clip_rect))
 
-		# Clip polyline to chunk with margin (for mesh vertices)
 		var points: PackedVector2Array = validated
+
+		# Clip polyline to chunk with margin (for mesh vertices)
 		if chunk_key != "initial" and chunk_key != "":
 			var ck_parts: PackedStringArray = chunk_key.split(",")
 			var ck_x := int(ck_parts[0])
@@ -4464,6 +4691,30 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		# Without this, long straight segments have only 2 vertices and the flat quad
 		# diverges from the terrain surface on slopes.
 		points = _subdivide_for_elevation(points)
+
+		# Diagnostic: for ramp-owning ways, log + record the FIRST/LAST
+		# vertex after ALL processing so the detector overlay can draw
+		# them as 3D markers (visualise the gap to the bridge polygon).
+		if _ramp_detector != null \
+				and _ramp_detector.way_owns_ramp(_debug_way_id) \
+				and points.size() >= 2:
+			# Send to detector for overlay (deferred = main-thread safe).
+			_ramp_detector.call_deferred("record_road_endpoints",
+					_debug_way_id, chunk_key,
+					points[0], points[points.size() - 1])
+			if OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG"):
+				var pidx_log: Array = _ramp_detector.get_polygon_indices_for_way(_debug_way_id)
+				for pi in pidx_log:
+					if int(pi) < 0 or int(pi) >= _bridge_deck_polygons.size(): continue
+					var poly_log: PackedVector2Array = _bridge_deck_polygons[int(pi)]
+					var d_first: float = _min_dist_to_polygon_outline(points[0], poly_log)
+					var d_last: float = _min_dist_to_polygon_outline(points[points.size() - 1], poly_log)
+					print("[BridgeRamp] FINAL way=%d chunk=%s n=%d first=(%.2f,%.2f) d=%.2f last=(%.2f,%.2f) d=%.2f"
+							% [_debug_way_id, chunk_key, points.size(),
+								points[0].x, points[0].y, d_first,
+								points[points.size() - 1].x, points[points.size() - 1].y, d_last])
+
+
 
 		if _debug_way:
 			print("ROAD_DEBUG way=%d validated=%d clipped=%d chunk=%s margin=%.1f" % [_debug_way_id, validated.size(), points.size(), chunk_key, half_w + 1.0])
@@ -4521,6 +4772,52 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				right_pts.append(Vector2(p.x + perp.x * half_w, p.y + perp.y * half_w))
 				accum_lens.append(accum_len)
 
+			# Bridge-endpoint perp override (Attempt #12, see docs/bridge_debug.md):
+			# At a ramp-owning way's first/last vertex coinciding with a polygon
+			# vertex, override perpendiculars[0]/[n-1] with the polygon outline
+			# tangent at that vertex (averaged direction prev→next). This makes
+			# l[0]/r[0] (computed as p[0] ± perp * half_w) lie ON the polygon
+			# outline by construction — no Z-offset, no angular mismatch at the
+			# abutment seam. Road keeps its standard 7 m carriageway width;
+			# polygon mesh covers the deck-only lateral wedge between road edge
+			# and polygon outline corner (v15 east, v18 west). Width override
+			# (Attempt #13) was tried and reverted: snapping l[0]/r[0] directly
+			# to v15/v18 (12 m wide) deformed lane-marking textures (UV stretch
+			# across trapezoidal quad) and caused l[0] to extend beyond the
+			# chunk boundary, overlapping the neighbouring chunk's road mesh.
+			# Sign of the polygon tangent is flipped if it would invert the
+			# perpendicular relative to the road's natural left/right side
+			# (otherwise the first quad twists into an X and the mesh
+			# degenerates).
+			if _ramp_detector != null and _ramp_detector.way_owns_ramp(_debug_way_id) and n_points >= 2:
+				var first_n: Dictionary = nodes[0]
+				if _bridge_endpoint_touches_any(first_n.lat, first_n.lon):
+					var first_local := Vector2(
+							(first_n.lon - t_start_lon) * t_lon_scale,
+							-(first_n.lat - t_start_lat) * 111000.0)
+					if points[0].distance_to(first_local) < 0.5:
+						var d_first := _polygon_abutment_dir_at_local(first_local)
+						if d_first != Vector2.ZERO:
+							if d_first.dot(perpendiculars[0]) < 0.0:
+								d_first = -d_first
+							var p0: Vector2 = points[0]
+							left_pts[0] = Vector2(p0.x - d_first.x * half_w, p0.y - d_first.y * half_w)
+							right_pts[0] = Vector2(p0.x + d_first.x * half_w, p0.y + d_first.y * half_w)
+				var last_n: Dictionary = nodes[nodes.size() - 1]
+				if _bridge_endpoint_touches_any(last_n.lat, last_n.lon):
+					var last_local := Vector2(
+							(last_n.lon - t_start_lon) * t_lon_scale,
+							-(last_n.lat - t_start_lat) * 111000.0)
+					var li: int = n_points - 1
+					if points[li].distance_to(last_local) < 0.5:
+						var d_last := _polygon_abutment_dir_at_local(last_local)
+						if d_last != Vector2.ZERO:
+							if d_last.dot(perpendiculars[li]) < 0.0:
+								d_last = -d_last
+							var pn: Vector2 = points[li]
+							left_pts[li] = Vector2(pn.x - d_last.x * half_w, pn.y - d_last.y * half_w)
+							right_pts[li] = Vector2(pn.x + d_last.x * half_w, pn.y + d_last.y * half_w)
+
 			# Chunk rect for 2D intersection
 			var mesh_clip_rect := PackedVector2Array()
 			if chunk_min_x != -INF:
@@ -4552,14 +4849,19 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 							break
 
 				if not need_clip:
-					# Fast path: quad fully inside chunk — two triangles
+					# Fast path: quad fully inside chunk — two triangles.
+					# Stage 2A: edge vertices share the centerline distance
+					# of the seg index that produced them, so all four call
+					# sites pass accum_lens[seg] or accum_lens[seg+1].
 					var base_idx := vertices.size()
 					var uv_y0: float = accum_lens[seg] * uv_scale
 					var uv_y1: float = accum_lens[seg + 1] * uv_scale
-					var h_l0: float = _sample_elevation(l0.x, l0.y) + height_offset + z_offset
-					var h_r0: float = _sample_elevation(r0.x, r0.y) + height_offset + z_offset
-					var h_l1: float = _sample_elevation(l1.x, l1.y) + height_offset + z_offset
-					var h_r1: float = _sample_elevation(r1.x, r1.y) + height_offset + z_offset
+					var cl_d_seg: float = accum_lens[seg]
+					var cl_d_next: float = accum_lens[seg + 1]
+					var h_l0: float = _road_sample_y_for_way(_debug_way_id, l0, cl_d_seg, height_offset + z_offset)
+					var h_r0: float = _road_sample_y_for_way(_debug_way_id, r0, cl_d_seg, height_offset + z_offset)
+					var h_l1: float = _road_sample_y_for_way(_debug_way_id, l1, cl_d_next, height_offset + z_offset)
+					var h_r1: float = _road_sample_y_for_way(_debug_way_id, r1, cl_d_next, height_offset + z_offset)
 					vertices.append(Vector3(l0.x, h_l0, l0.y))
 					uvs.append(Vector2(0.0, uv_y0))
 					normals.append(Vector3.UP)
@@ -4592,6 +4894,12 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 						if tri_idx.is_empty():
 							continue
 						var base_idx := vertices.size()
+						# Stage 2A clipped path: kept as terrain fallback —
+						# applying way-aware ramp here projects v2 onto the
+						# centerline and creates a vertical "patch" at chunk
+						# seams where part of the quad is on-ramp and part is
+						# off-ramp. Documented as known limitation; revisit
+						# in Stage 2B with proper polygon-edge stitching.
 						for v2 in clip_poly:
 							var h: float = _sample_elevation(v2.x, v2.y) + height_offset + z_offset
 							vertices.append(Vector3(v2.x, h, v2.y))
@@ -4656,8 +4964,34 @@ func _apply_road_result(result: Dictionary) -> void:
 	var is_bridge: bool = result.is_bridge
 	var elevation_info: Dictionary = result.elevation_info
 
+	# A bridge=yes way INSIDE a man_made=bridge polygon doesn't get its own
+	# road mesh / ramps / barriers — the deck polygon IS the road surface.
+	# Vehicle roads on the deck only paint lane markings; footways become a
+	# slightly raised sidewalk strip with a curb on the inner edge. This is
+	# the asaxenov bridge handling restored from 7102d8c after the sk merge
+	# wiped it. The on-deck branch still falls through to the regular
+	# corridor / lamp / traffic-network registration below so the bridge
+	# road is part of the navigation graph.
+	var on_deck: bool = is_bridge and _is_way_on_bridge_deck(result.nodes)
+	# All bridge=yes roads inside polygon stay on-deck — the lateral exit
+	# system in _deck_surface_y_at ramps the deck surface down at arm tips.
+
+	var _way_id_disp: int = int(result.get("way_id", 0))
 	if is_bridge:
-		_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent)
+		print("[BridgeDispatch] way=%d type=%s on_deck=%s pts=%d" % [
+			_way_id_disp, highway_type, on_deck, smoothed_points.size()])
+
+	if is_bridge and on_deck:
+		# Detect ramp junction: endpoint near polygon boundary → apron needed
+		if highway_type not in ["footway", "path", "steps"] and smoothed_points.size() >= 2:
+			_detect_ramp_junction(result.nodes, smoothed_points, width)
+		var is_footway_on_deck: bool = highway_type in ["footway", "path"]
+		if not is_footway_on_deck:
+			_create_on_deck_lane_markings(smoothed_points, width, result.get("tags", {}), parent)
+		else:
+			_create_on_deck_footway(smoothed_points, width, result.get("tags", {}), parent, chunk_key, result.nodes)
+	elif is_bridge:
+		_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent, int(result.get("way_id", 0)), result.get("tags", {}))
 	elif highway_type in ["footway", "path"] and smoothed_points.size() >= 2:
 		# Defer footway splitting + vertex gen to avoid 10-15ms spikes from
 		# _is_point_on_vehicle_road (spatial hash + intersection contours per point)
@@ -4720,7 +5054,8 @@ func _apply_road_result(result: Dictionary) -> void:
 			"curb_height": curb_height,
 			"parent": parent,
 			"is_bridge": is_bridge,
-			"bridge_info": elevation_info
+			"bridge_info": elevation_info,
+			"way_id": int(result.get("way_id", 0)),  # Stage 2B: thread through to curb sampler
 		})
 
 	# Lamps (major roads only) - clip to chunk rect, deferred
@@ -4789,27 +5124,52 @@ func _create_rail_collision(points: PackedVector2Array, parent: Node3D) -> void:
 	parent.add_child(body)
 
 
-## Создаёт дорогу-мост с рампами подъёма/спуска и опорами
-func _create_bridge_road(nodes: Array, width: float, texture_key: String, height_offset: float, bridge_info: Dictionary, parent: Node3D) -> void:
+## Standalone bridge road (bridge=yes way that is NOT inside a man_made=
+## bridge deck polygon). Restored verbatim from 7102d8c — same shared/free
+## endpoint detection, same ramp profile via `_bridge_height_at`, same
+## pillars+barriers wiring. Only the per-vertex Y is shifted up by
+## `_sample_elevation()` so the bridge sits on the elevation-aware terrain
+## instead of at world Y=0.
+func _create_bridge_road(nodes: Array, width: float, texture_key: String, height_offset: float, _bridge_info: Dictionary, parent: Node3D, way_id: int = 0, tags: Dictionary = {}) -> void:
 	if nodes.size() < 2:
 		return
 
-	# Конвертируем в локальные координаты
 	var points: PackedVector2Array = []
 	for node in nodes:
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
-	# Вычисляем общую длину моста
 	var total_length := 0.0
 	for i in range(points.size() - 1):
 		total_length += points[i].distance_to(points[i + 1])
-
 	if total_length < 1.0:
 		return
 
-	# Добавляем промежуточные точки для плавных рамп (минимум каждые 10м)
-	const BRIDGE_SEGMENT_LENGTH := 10.0
+	# Shared/free endpoints — by OSM lat/lon (NOT local coords, which can
+	# diverge between adjacent ways due to clipping/smoothing).
+	var first_n: Dictionary = nodes[0]
+	var last_n: Dictionary = nodes[nodes.size() - 1]
+	var start_shared: bool = _bridge_endpoint_is_shared(first_n.lat, first_n.lon)
+	var end_shared: bool = _bridge_endpoint_is_shared(last_n.lat, last_n.lon)
+
+	# Ramp lengths on both ends. Shared end → 0 (no ramp, the way meets its
+	# neighbour at full deck height). Free end → cover up to BRIDGE_RAMP_LENGTH
+	# so even short ways reach deck height before transitioning down.
+	var ramp_from_start: float = 0.0
+	var ramp_from_end: float = 0.0
+	if not start_shared:
+		ramp_from_start = minf(BRIDGE_RAMP_LENGTH, total_length)
+	if not end_shared:
+		ramp_from_end = minf(BRIDGE_RAMP_LENGTH, total_length)
+	# Both ends free + shorter than 2× ramp — split evenly so they don't
+	# overlap and zero out the centre.
+	if not start_shared and not end_shared and total_length < BRIDGE_RAMP_LENGTH * 2.0:
+		ramp_from_start = total_length * 0.5
+		ramp_from_end = total_length * 0.5
+
+	# Subdivide long segments so the smooth-step ramp stays smooth.
+	# 5m gives ~7 vertices in the 35m ramp zone for a smooth S-curve.
+	const BRIDGE_SEGMENT_LENGTH := 5.0
 	if total_length > BRIDGE_SEGMENT_LENGTH * 2:
 		var refined_points: PackedVector2Array = []
 		for i in range(points.size() - 1):
@@ -4817,7 +5177,6 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 			var p2: Vector2 = points[i + 1]
 			var seg_length: float = p1.distance_to(p2)
 			var num_subdivs: int = max(1, int(ceil(seg_length / BRIDGE_SEGMENT_LENGTH)))
-
 			refined_points.append(p1)
 			for j in range(1, num_subdivs):
 				var t: float = float(j) / float(num_subdivs)
@@ -4825,11 +5184,6 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 		refined_points.append(points[points.size() - 1])
 		points = refined_points
 
-	# Параметры моста
-	var bridge_height: float = bridge_info.get("bridge_height", BRIDGE_BASE_HEIGHT)
-	var ramp_length: float = bridge_info.get("ramp_length", minf(BRIDGE_MAX_RAMP, total_length * BRIDGE_RAMP_RATIO))
-
-	# Создаём массивы для меша
 	var vertices := PackedVector3Array()
 	var uvs := PackedVector2Array()
 	var normals := PackedVector3Array()
@@ -4837,68 +5191,70 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 
 	var half_w := width * 0.5
 	var accumulated_length := 0.0
-
-	# Вычисляем перпендикуляры для каждой точки (усреднённые для сглаживания)
+	var point_heights := PackedFloat64Array()
 	var perpendiculars: Array[Vector2] = _compute_averaged_perpendiculars(points)
+	if way_id != 0 and not _bridge_node_ways.is_empty():
+		_fix_shared_endpoint_perps(points, perpendiculars, nodes, way_id)
+
+	# Reference elevation for the standalone bridge — max of the way's
+	# endpoint elevations (one constant per bridge, like for relation decks).
+	# When an endpoint is shared AND sits on a deck polygon, use the polygon's
+	# surface Y so the standalone road aligns with the deck (terrain under the
+	# bridge may be at river level, much lower than the abutment).
+	var p_first: Vector2 = points[0]
+	var p_last: Vector2 = points[points.size() - 1]
+	var elev_a: float
+	var elev_b: float
+	if start_shared and _is_point_on_bridge_deck(p_first):
+		elev_a = _deck_surface_y_at_cached(p_first) - BRIDGE_DECK_HEIGHT
+	else:
+		elev_a = _sample_elevation(p_first.x, p_first.y)
+	if end_shared and _is_point_on_bridge_deck(p_last):
+		elev_b = _deck_surface_y_at_cached(p_last) - BRIDGE_DECK_HEIGHT
+	else:
+		elev_b = _sample_elevation(p_last.x, p_last.y)
+	var ref_elev: float = maxf(elev_a, elev_b)
+	var deck_top: float = ref_elev + BRIDGE_DECK_HEIGHT + height_offset
 
 	for i in range(points.size()):
 		var p: Vector2 = points[i]
 		var perp: Vector2 = perpendiculars[i]
-
-		var base_elev: float = _sample_elevation(p.x, p.y) + height_offset
-
-		# Вычисляем высоту моста в этой точке с учётом рамп
-		var point_height := base_elev
-		if ramp_length > 0.1:
-			# Рампа в начале
-			if accumulated_length < ramp_length:
-				var t: float = accumulated_length / ramp_length
-				t = _smooth_step(t)
-				point_height = base_elev + bridge_height * t
-			# Рампа в конце
-			elif accumulated_length > total_length - ramp_length:
-				var t: float = (total_length - accumulated_length) / ramp_length
-				t = _smooth_step(t)
-				point_height = base_elev + bridge_height * t
-			# Плоская часть моста
-			else:
-				point_height = base_elev + bridge_height
+		# Bridge Y = lerp(local_terrain, deck_top, smooth_step(t)) so the
+		# deck stays flat on its middle section and ties down to local
+		# ground at the abutments.
+		var ramp_t: float = 1.0
+		if ramp_from_start > 0.0 and accumulated_length < ramp_from_start:
+			ramp_t = accumulated_length / ramp_from_start
+		elif ramp_from_end > 0.0 and accumulated_length > total_length - ramp_from_end:
+			ramp_t = (total_length - accumulated_length) / ramp_from_end
+		var point_height: float
+		if ramp_t >= 1.0:
+			point_height = deck_top
 		else:
-			# Короткий мост - просто приподнимаем
-			point_height = base_elev + bridge_height
+			var local := _sample_elevation(p.x, p.y)
+			if local == 0.0:
+				local = ref_elev
+			point_height = lerpf(local + height_offset, deck_top, _smooth_step(ramp_t))
 
-		# Добавляем вершины (левая и правая сторона дороги)
+		point_heights.append(point_height)
 		var left := Vector3(p.x - perp.x * half_w, point_height, p.y - perp.y * half_w)
 		var right := Vector3(p.x + perp.x * half_w, point_height, p.y + perp.y * half_w)
-
 		vertices.append(left)
 		vertices.append(right)
 
-		# UV координаты
 		uvs.append(Vector2(0.0, accumulated_length * 0.1))
 		uvs.append(Vector2(1.0, accumulated_length * 0.1))
-
-		# Нормали (вверх)
 		normals.append(Vector3.UP)
 		normals.append(Vector3.UP)
 
-		# Обновляем накопленную длину
 		if i < points.size() - 1:
 			accumulated_length += points[i].distance_to(points[i + 1])
 
-	# Создаём индексы (квады -> треугольники)
 	for i in range(points.size() - 1):
 		var base_idx := i * 2
-		# Первый треугольник
-		indices.append(base_idx)
-		indices.append(base_idx + 2)
-		indices.append(base_idx + 1)
-		# Второй треугольник
-		indices.append(base_idx + 1)
-		indices.append(base_idx + 2)
-		indices.append(base_idx + 3)
+		indices.append(base_idx); indices.append(base_idx + 2); indices.append(base_idx + 1)
+		indices.append(base_idx + 1); indices.append(base_idx + 2); indices.append(base_idx + 3)
 
-	# Создаём меш
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = vertices
@@ -4906,10 +5262,19 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 	arrays[Mesh.ARRAY_NORMAL] = normals
 	arrays[Mesh.ARRAY_INDEX] = indices
 
+	if way_id in [43844912, 128566919]:
+		print("[BridgeRoadDump] way=%d ref_elev=%.1f deck_top=%.1f start_shared=%s end_shared=%s ramp_start=%.1f ramp_end=%.1f" % [
+			way_id, ref_elev, deck_top, start_shared, end_shared, ramp_from_start, ramp_from_end])
+		print("[BridgeRoadDump] verts=%d (left/right pairs):" % vertices.size())
+		for vi in range(0, vertices.size(), 2):
+			var vl: Vector3 = vertices[vi]
+			var vr: Vector3 = vertices[vi + 1] if vi + 1 < vertices.size() else vl
+			print("[BridgeRoadVert] %d: left=(%.1f, %.1f, %.1f) right=(%.1f, %.1f, %.1f)" % [
+				vi / 2, vl.x, vl.y, vl.z, vr.x, vr.y, vr.z])
+
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
-	# Материал
 	var material: Material = WetRoadMaterial.create_road_shader_material(
 		_road_textures.get(texture_key, null),
 		_normal_textures.get("asphalt", null),
@@ -4920,22 +5285,107 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 	if material is ShaderMaterial:
 		WetRoadMaterial.apply_road_type_params(material, texture_key)
 
-	# Создаём MeshInstance3D
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.name = "BridgeRoad"
 	mesh_instance.mesh = mesh
-	mesh_instance.material_override = material  # Используем material_override для обновления wet mode
+	mesh_instance.material_override = material
 	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	parent.add_child(mesh_instance)
 
-	# Создаём коллизию для моста
 	_create_bridge_collision(vertices, indices, parent)
+	_create_bridge_pillars(points, ramp_from_start, ramp_from_end, total_length, parent, ref_elev)
+	_create_bridge_barriers(nodes, points, width, ramp_from_start, ramp_from_end, total_length, height_offset, parent, way_id, ref_elev)
+	_create_bridge_road_lane_markings(points, perpendiculars, point_heights, width, tags, parent)
 
-	# Создаём опоры моста
-	_create_bridge_pillars(points, bridge_height, ramp_length, total_length, parent)
 
-	# Создаём отбойники по краям моста
-	_create_bridge_barriers(points, width, bridge_height, ramp_length, total_length, height_offset, parent)
+
+## Lane markings for standalone bridge roads. Uses pre-computed per-vertex
+## heights from _create_bridge_road so markings follow the smoothstep ramp.
+func _create_bridge_road_lane_markings(pts: PackedVector2Array, perps: Array[Vector2],
+		heights: PackedFloat64Array, road_width: float, tags: Dictionary, parent: Node3D) -> void:
+	if pts.size() < 2:
+		return
+	var lanes_str: String = str(tags.get("lanes", "2"))
+	var lane_count: int = int(lanes_str) if lanes_str.is_valid_int() else 2
+	lane_count = clampi(lane_count, 1, 6)
+	if lane_count <= 1:
+		return
+	var half_w: float = road_width * 0.5
+
+	const LINE_WIDTH := 0.15
+	const DASH_LENGTH := 3.0
+	const DASH_GAP := 3.0
+	const MARKING_Y_OFFSET := 0.003
+
+	var marking_mat := StandardMaterial3D.new()
+	marking_mat.albedo_color = Color(1.0, 1.0, 1.0)
+	marking_mat.roughness = 0.6
+	marking_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_material(marking_mat)
+
+	var acc_lengths := PackedFloat64Array()
+	acc_lengths.resize(pts.size())
+	acc_lengths[0] = 0.0
+	for i in range(1, pts.size()):
+		acc_lengths[i] = acc_lengths[i - 1] + pts[i - 1].distance_to(pts[i])
+
+	var lane_w: float = road_width / float(lane_count)
+	for lane_i in range(1, lane_count):
+		var offset: float = -half_w + lane_w * float(lane_i)
+		for seg_i in range(pts.size() - 1):
+			var sp1 := pts[seg_i]
+			var sp2 := pts[seg_i + 1]
+			var seg_len := sp1.distance_to(sp2)
+			var seg_acc := acc_lengths[seg_i]
+			var h1: float = heights[seg_i] + MARKING_Y_OFFSET
+			var h2: float = heights[seg_i + 1] + MARKING_Y_OFFSET
+			var cycle := DASH_LENGTH + DASH_GAP
+			var pos := 0.0
+			while pos < seg_len:
+				var abs_pos := seg_acc + pos
+				var in_cycle := fmod(abs_pos, cycle)
+				if in_cycle < DASH_LENGTH:
+					var dash_remaining := DASH_LENGTH - in_cycle
+					var draw_len := minf(dash_remaining, seg_len - pos)
+					var t1 := pos / seg_len
+					var t2 := (pos + draw_len) / seg_len
+					var dp1 := sp1.lerp(sp2, t1)
+					var dp2 := sp1.lerp(sp2, t2)
+					var dperp1 := perps[seg_i].lerp(perps[seg_i + 1], t1)
+					var dperp2 := perps[seg_i].lerp(perps[seg_i + 1], t2)
+					var dy1: float = lerpf(h1, h2, t1)
+					var dy2: float = lerpf(h1, h2, t2)
+					var o1 := dp1 + dperp1 * offset
+					var o2 := dp2 + dperp2 * offset
+					var hw := LINE_WIDTH * 0.5
+					var v1 := Vector3(o1.x - dperp1.x * hw, dy1, o1.y - dperp1.y * hw)
+					var v2 := Vector3(o1.x + dperp1.x * hw, dy1, o1.y + dperp1.y * hw)
+					var v3 := Vector3(o2.x + dperp2.x * hw, dy2, o2.y + dperp2.y * hw)
+					var v4 := Vector3(o2.x - dperp2.x * hw, dy2, o2.y - dperp2.y * hw)
+					st.set_normal(Vector3.UP)
+					st.add_vertex(v1); st.set_normal(Vector3.UP)
+					st.add_vertex(v2); st.set_normal(Vector3.UP)
+					st.add_vertex(v3)
+					st.set_normal(Vector3.UP)
+					st.add_vertex(v1); st.set_normal(Vector3.UP)
+					st.add_vertex(v3); st.set_normal(Vector3.UP)
+					st.add_vertex(v4)
+					pos += draw_len
+				else:
+					var gap_remaining := cycle - in_cycle
+					pos += gap_remaining
+
+	var committed := st.commit()
+	if committed and committed.get_surface_count() > 0:
+		var mesh_inst := MeshInstance3D.new()
+		mesh_inst.name = "BridgeRoadLaneMarkings"
+		mesh_inst.mesh = committed
+		mesh_inst.material_override = marking_mat
+		mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		parent.add_child(mesh_inst)
 
 
 ## Создаёт коллизию для моста
@@ -4961,49 +5411,52 @@ func _create_bridge_collision(vertices: PackedVector3Array, indices: PackedInt32
 
 
 ## Создаёт опоры моста
-func _create_bridge_pillars(points: PackedVector2Array, bridge_height: float, ramp_length: float, total_length: float, parent: Node3D) -> void:
-	# Короткие и низкие мосты не нуждаются в опорах
-	if bridge_height < 1.5 or total_length < BRIDGE_MIN_LENGTH_FOR_PILLARS:
+## Pillars on the flat section of the bridge (between the two ramp regions).
+## Restored verbatim from 7102d8c — same signature with ramp_from_start /
+## ramp_from_end so shared-endpoint segments don't get an unwanted ramp.
+## Each pillar drops from the deck (`ref_elev + BRIDGE_DECK_HEIGHT`) to the
+## actual ground at its base.
+func _create_bridge_pillars(points: PackedVector2Array, ramp_from_start: float, ramp_from_end: float, total_length: float, parent: Node3D, ref_elev: float) -> void:
+	if total_length < BRIDGE_MIN_LENGTH_FOR_PILLARS:
 		return
 
-	# Создаём опоры только на плоской части моста (не на рампах)
-	var accumulated := 0.0
-	var last_pillar_pos := -BRIDGE_PILLAR_SPACING  # Чтобы первая опора была сразу после рампы
+	var flat_start: float = ramp_from_start
+	var flat_end: float = total_length - ramp_from_end
+	if flat_end <= flat_start:
+		return  # bridge is all ramp — no pillars
 
+	var deck_top: float = ref_elev + BRIDGE_DECK_HEIGHT
+	var accumulated := 0.0
+	var last_pillar_pos: float = -BRIDGE_PILLAR_SPACING
 	for i in range(points.size() - 1):
 		var p1 := points[i]
 		var p2 := points[i + 1]
 		var segment_length := p1.distance_to(p2)
-
-		# Начало и конец сегмента в терминах accumulated distance
 		var seg_start := accumulated
 		var seg_end := accumulated + segment_length
 
-		# Границы плоской части (после рампы в начале, до рампы в конце)
-		var flat_start := ramp_length
-		var flat_end := total_length - ramp_length
-
-		# Пересечение сегмента с плоской частью
 		var check_start := maxf(seg_start, flat_start)
 		var check_end := minf(seg_end, flat_end)
-
 		if check_start < check_end:
-			# Создаём опоры вдоль этого сегмента
 			var pos := check_start
 			while pos <= check_end:
 				if pos - last_pillar_pos >= BRIDGE_PILLAR_SPACING:
-					# Интерполируем позицию на сегменте
-					var t := (pos - seg_start) / segment_length if segment_length > 0 else 0.0
+					var t: float = (pos - seg_start) / segment_length if segment_length > 0 else 0.0
 					t = clampf(t, 0.0, 1.0)
 					var pillar_pos_2d := p1.lerp(p2, t)
 					var ground_elev := _sample_elevation(pillar_pos_2d.x, pillar_pos_2d.y)
-
-					# Создаём опору
-					_create_single_pillar(pillar_pos_2d, ground_elev, bridge_height, parent)
+					if ground_elev == 0.0:
+						# Over water / unloaded chunk — make the pillar reach
+						# down a sensible amount from the deck instead of
+						# floating at world Y=0.
+						ground_elev = deck_top - BRIDGE_DECK_HEIGHT * 2.0
+					var pillar_height: float = deck_top - ground_elev
+					if pillar_height < 0.5:
+						pos += BRIDGE_PILLAR_SPACING * 0.5
+						continue
+					_create_single_pillar(pillar_pos_2d, ground_elev, pillar_height, parent)
 					last_pillar_pos = pos
-
-				pos += BRIDGE_PILLAR_SPACING * 0.5  # Шаг проверки меньше spacing для точности
-
+				pos += BRIDGE_PILLAR_SPACING * 0.5
 		accumulated += segment_length
 
 
@@ -5046,48 +5499,51 @@ func _create_single_pillar(pos: Vector2, ground_elev: float, bridge_height: floa
 	pillar.add_child(body)
 
 
-## Создаёт отбойники по краям моста
-func _create_bridge_barriers(points: PackedVector2Array, road_width: float, bridge_height: float, ramp_length: float, total_length: float, height_offset: float, parent: Node3D) -> void:
+## Bridge edge barriers. Heights match the road mesh's lerp(local, deck_top)
+## profile so the barrier stays coplanar. Skips quads whose endpoints fall
+## into another bridge way's corridor (ramp merges open).
+func _create_bridge_barriers(_nodes: Array, points: PackedVector2Array, road_width: float, ramp_from_start: float, ramp_from_end: float, total_length: float, height_offset: float, parent: Node3D, self_way_id: int = 0, ref_elev: float = 0.0) -> void:
 	if points.size() < 2:
 		return
 
-	const BARRIER_HEIGHT := 0.8  # Высота отбойника
-	const BARRIER_WIDTH := 0.15  # Толщина отбойника
-	const BARRIER_COLOR := Color(0.6, 0.6, 0.6)  # Серый металл
+	const BARRIER_HEIGHT := 0.8
+	const BARRIER_WIDTH := 0.15
+	const BARRIER_COLOR := Color(0.6, 0.6, 0.6)
 
 	var half_road := road_width * 0.5
 	var perpendiculars: Array[Vector2] = _compute_averaged_perpendiculars(points)
+	var barrier_ck := _get_chunk_key_from_node(parent)
+	var deck_top: float = ref_elev + BRIDGE_DECK_HEIGHT + height_offset
 
-	# Создаём меши для левого и правого отбойника
-	for side in [-1, 1]:  # -1 = левый, 1 = правый
+	for side in [-1, 1]:
 		var vertices := PackedVector3Array()
 		var indices := PackedInt32Array()
 		var normals := PackedVector3Array()
+		var skip_point: Array[bool] = []
+		skip_point.resize(points.size())
 
 		var accumulated := 0.0
 
 		for i in range(points.size()):
 			var p: Vector2 = points[i]
 			var perp: Vector2 = perpendiculars[i]
+			var barrier_pt := Vector2(p.x + perp.x * half_road * side, p.y + perp.y * half_road * side)
+			skip_point[i] = _point_in_other_bridge_corridor(barrier_pt, barrier_ck, self_way_id)
 
-			# Базовая высота
-			var base_elev: float = _sample_elevation(p.x, p.y) + height_offset
-
-			# Высота моста в этой точке
-			var bridge_y := 0.0
-			if ramp_length > 0.1:
-				if accumulated < ramp_length:
-					var t: float = accumulated / ramp_length
-					bridge_y = _smooth_step(t) * bridge_height
-				elif accumulated > total_length - ramp_length:
-					var t: float = (total_length - accumulated) / ramp_length
-					bridge_y = _smooth_step(t) * bridge_height
-				else:
-					bridge_y = bridge_height
+			# Match the road mesh's lerp(local, deck_top, smooth_step(t)).
+			var ramp_t: float = 1.0
+			if ramp_from_start > 0.0 and accumulated < ramp_from_start:
+				ramp_t = accumulated / ramp_from_start
+			elif ramp_from_end > 0.0 and accumulated > total_length - ramp_from_end:
+				ramp_t = (total_length - accumulated) / ramp_from_end
+			var road_y: float
+			if ramp_t >= 1.0:
+				road_y = deck_top
 			else:
-				bridge_y = bridge_height
-
-			var road_y: float = base_elev + bridge_y
+				var local := _sample_elevation(p.x, p.y)
+				if local == 0.0:
+					local = ref_elev
+				road_y = lerpf(local + height_offset, deck_top, _smooth_step(ramp_t))
 
 			# Позиция отбойника (на краю дороги)
 			var barrier_x: float = p.x + perp.x * half_road * side
@@ -5117,6 +5573,10 @@ func _create_bridge_barriers(points: PackedVector2Array, road_width: float, brid
 
 		# Создаём индексы для граней
 		for i in range(points.size() - 1):
+			# Drop this barrier quad if either endpoint lies inside another
+			# bridge way's corridor (ramp merge gap).
+			if skip_point[i] or skip_point[i + 1]:
+				continue
 			var base_idx := i * 4
 
 			# Внешняя стенка (2 треугольника)
@@ -5137,7 +5597,12 @@ func _create_bridge_barriers(points: PackedVector2Array, road_width: float, brid
 			indices.append(base_idx + 3)
 			indices.append(base_idx + 7)
 
-		if vertices.size() < 8:
+		# Skip empty: every quad got dropped via skip_point (all points landed
+		# inside another bridge way's corridor) → indices is empty → Godot
+		# throws "index_array_len==NO_INDEX_ARRAY" and corrupts the side.
+		# That exception was bubbling up and silently killing the whole
+		# road/deck/pillar pipeline for this bridge.
+		if vertices.size() < 8 or indices.is_empty():
 			continue
 
 		# Создаём меш
@@ -5182,6 +5647,1575 @@ func _create_bridge_barriers(points: PackedVector2Array, road_width: float, brid
 		coll_shape.shape = shape
 		body.add_child(coll_shape)
 		parent.add_child(body)
+
+
+# === Bridge deck + endpoint registry (restored from 7102d8c) =================
+# Тут реставрирована система отрисовки деки моста (man_made=bridge relation)
+# и реестра общих концов между bridge=yes way'ями. Потеряны при мёрже sk→main
+# 0463f00 — sk-сторона переписала эту секцию под elevation, не сохранив
+# моих наработок по Октябрьскому мосту.
+
+func _bridge_coord_key(lat: float, lon: float) -> String:
+	return "%.7f,%.7f" % [lat, lon]
+
+
+func _register_bridge_node(lat: float, lon: float, way_id: int) -> void:
+	var k := _bridge_coord_key(lat, lon)
+	if not _bridge_node_ways.has(k):
+		_bridge_node_ways[k] = {}
+	(_bridge_node_ways[k] as Dictionary)[way_id] = true
+
+
+func _bridge_endpoint_is_shared(lat: float, lon: float) -> bool:
+	var k := _bridge_coord_key(lat, lon)
+	var entries: Dictionary = _bridge_node_ways.get(k, {})
+	return entries.size() >= 2
+
+
+func _bridge_endpoint_touches_any(lat: float, lon: float) -> bool:
+	var k := _bridge_coord_key(lat, lon)
+	return _bridge_node_ways.has(k)
+
+
+# Returns the polygon outline direction at a vertex coinciding with `local_pos`.
+# When a road approach (e.g. cutting=yes ramp) ends at a man_made=bridge polygon
+# vertex, the road's transverse leading edge must lie ON the polygon abutment
+# line — not perpendicular to the road tangent (which generally differs by a
+# few degrees and produces a sub-meter lateral seam). The abutment direction
+# is `(poly[i+1] - poly[i-1]).normalized()`: average of the two edges meeting
+# at the vertex, which is exactly the tangent of the polygon outline there.
+# Returns Vector2.ZERO if no polygon vertex is found within 0.5 m of local_pos.
+# See docs/bridge_debug.md (Attempt #12) for the geometry derivation.
+func _polygon_abutment_dir_at_local(local_pos: Vector2) -> Vector2:
+	for poly in _bridge_deck_polygons:
+		var n: int = poly.size()
+		if n < 3:
+			continue
+		for i in range(n):
+			if poly[i].distance_to(local_pos) < 0.5:
+				var prev_v: Vector2 = poly[(i - 1 + n) % n]
+				var next_v: Vector2 = poly[(i + 1) % n]
+				var d: Vector2 = next_v - prev_v
+				if d.length_squared() > 0.0001:
+					return d.normalized()
+	return Vector2.ZERO
+
+
+# Returns [prev_v, next_v] — the two polygon vertices adjacent to a vertex
+# coinciding with `local_pos`. These ARE the corners of the polygon's
+# abutment edge through the matching vertex; using them directly as a
+# road approach's leading-edge endpoints (`left_pts[0]`, `right_pts[0]`)
+# makes the road mesh's transverse edge coincident with the polygon
+# outline polyline — same length, same angle, same shared corner points.
+# The road quad widens from its normal half-width at the next vertex up
+# to the polygon abutment width at the bridge endpoint.
+# Returns empty array if no polygon vertex is within 0.5 m.
+func _polygon_vertex_neighbors_at_local(local_pos: Vector2) -> Array:
+	for poly in _bridge_deck_polygons:
+		var n: int = poly.size()
+		if n < 3:
+			continue
+		for i in range(n):
+			if poly[i].distance_to(local_pos) < 0.5:
+				var prev_v: Vector2 = poly[(i - 1 + n) % n]
+				var next_v: Vector2 = poly[(i + 1) % n]
+				return [prev_v, next_v]
+	return []
+
+
+func _bridge_prescan_ways(ways: Array) -> void:
+	for way in ways:
+		var tags: Dictionary = way.get("tags", {})
+		if not tags.has("highway"):
+			continue
+		if tags.get("bridge", "") != "yes":
+			continue
+		var nodes: Array = way.get("nodes", [])
+		if nodes.size() < 2:
+			continue
+		var way_id: int = int(way.get("id", 0))
+		if way_id == 75621890:
+			continue
+		for n in nodes:
+			_register_bridge_node(n.lat, n.lon, way_id)
+
+
+## Detect lateral exit points where _link bridge roads depart the deck polygon.
+## Must run after _bridge_prescan_ways (shared endpoint data) and after polygon
+## collection. Registers exit data so _deck_surface_y_at ramps the deck down
+## and _subdivide_ramp_tris creates fine mesh in the exit zone.
+var _deck_exit_way_ids: Dictionary = {}  # dedup across chunks
+func _detect_deck_lateral_exits(ways: Array) -> void:
+	if _bridge_deck_polygons.is_empty():
+		return
+	for way in ways:
+		var tags: Dictionary = way.get("tags", {})
+		if tags.get("bridge", "") != "yes":
+			continue
+		var highway: String = str(tags.get("highway", ""))
+		if not highway.ends_with("_link"):
+			continue
+		var nodes: Array = way.get("nodes", [])
+		if nodes.size() < 2:
+			continue
+		var way_id: int = int(way.get("id", 0))
+		if _deck_exit_way_ids.has(way_id):
+			continue
+		var mid_idx: int = nodes.size() / 2
+		var mid_local: Vector2 = _latlon_to_local(nodes[mid_idx].lat, nodes[mid_idx].lon)
+		print("[LateralExitScan] way=%d hw=%s mid=(%.1f,%.1f) polys=%d on_deck=%s" % [
+			way_id, highway, mid_local.x, mid_local.y,
+			_bridge_deck_polygons.size(), _is_point_on_bridge_deck(mid_local)])
+		if not _is_point_on_bridge_deck(mid_local):
+			continue
+		_deck_exit_way_ids[way_id] = true
+		var first_n: Dictionary = nodes[0]
+		var last_n: Dictionary = nodes[nodes.size() - 1]
+		var p0: Vector2 = _latlon_to_local(first_n.lat, first_n.lon)
+		var pN: Vector2 = _latlon_to_local(last_n.lat, last_n.lon)
+		var s0: bool = _bridge_endpoint_is_shared(first_n.lat, first_n.lon)
+		var sN: bool = _bridge_endpoint_is_shared(last_n.lat, last_n.lon)
+		var road_w: float = 7.0
+		if tags.has("width"):
+			var w_str: String = str(tags.width)
+			if w_str.is_valid_float():
+				road_w = float(w_str)
+		elif highway in ["primary_link", "trunk_link"]:
+			road_w = 9.0
+		# Free start endpoint inside polygon → lateral exit
+		if not s0 and _is_point_on_bridge_deck(p0):
+			var p1: Vector2 = _latlon_to_local(nodes[1].lat, nodes[1].lon)
+			var base_e: float = _sample_elevation(p0.x, p0.y)
+			_deck_lateral_exits.append({
+				"pos": p0,
+				"inward_dir": (p1 - p0).normalized(),
+				"half_width": road_w * 0.5,
+				"base_elev": base_e,
+			})
+			print("[LateralExit] way=%d start pos=(%.1f,%.1f) base_elev=%.1f" % [way_id, p0.x, p0.y, base_e])
+		# Free end endpoint inside polygon → lateral exit
+		if not sN and _is_point_on_bridge_deck(pN):
+			var p_prev: Vector2 = _latlon_to_local(nodes[nodes.size() - 2].lat, nodes[nodes.size() - 2].lon)
+			var base_e: float = _sample_elevation(pN.x, pN.y)
+			_deck_lateral_exits.append({
+				"pos": pN,
+				"inward_dir": (p_prev - pN).normalized(),
+				"half_width": road_w * 0.5,
+				"base_elev": base_e,
+			})
+			print("[LateralExit] way=%d end pos=(%.1f,%.1f) base_elev=%.1f" % [way_id, pN.x, pN.y, base_e])
+	# Second pass: bridge=yes non-_link ways with endpoint on polygon
+	# boundary. These are on-deck roads entering through polygon arm tips
+	# (e.g. secondary road entering from northwest arm). The main ramp
+	# axis only covers the two most distant polygon ends, so these arms
+	# need lateral exit treatment to ramp the deck surface down.
+	const BOUNDARY_SNAP := 3.0
+	for way in ways:
+		var tags: Dictionary = way.get("tags", {})
+		if tags.get("bridge", "") != "yes":
+			continue
+		var highway: String = str(tags.get("highway", ""))
+		if highway.ends_with("_link") or highway.is_empty():
+			continue
+		var nodes: Array = way.get("nodes", [])
+		if nodes.size() < 2:
+			continue
+		var way_id: int = int(way.get("id", 0))
+		if _deck_exit_way_ids.has(way_id):
+			continue
+		var first_n: Dictionary = nodes[0]
+		var last_n: Dictionary = nodes[nodes.size() - 1]
+		var p0: Vector2 = _latlon_to_local(first_n.lat, first_n.lon)
+		var pN: Vector2 = _latlon_to_local(last_n.lat, last_n.lon)
+		# Check if either endpoint is on/near a polygon boundary vertex,
+		# but NOT in the main ramp zone (those are already handled by the
+		# primary ramp axis in _deck_surface_y_at).
+		for poly in _bridge_deck_polygons:
+			if poly.size() < 3:
+				continue
+			var d0: float = _min_dist_to_polygon_outline(p0, poly)
+			var dN: float = _min_dist_to_polygon_outline(pN, poly)
+			if d0 > BOUNDARY_SNAP and dN > BOUNDARY_SNAP:
+				continue
+			# Must be inside the polygon (on-deck way, not outside).
+			if not Geometry2D.is_point_in_polygon(p0, poly) \
+					and not Geometry2D.is_point_in_polygon(pN, poly):
+				continue
+			# Skip endpoints in the main ramp zone — already covered.
+			var ramp_info: Dictionary = _get_deck_ramp_axis(poly)
+			if d0 <= BOUNDARY_SNAP:
+				var proj0: float = (p0 - ramp_info.origin).dot(ramp_info.axis)
+				var end_dist0: float = minf(proj0 - float(ramp_info.min_proj), float(ramp_info.max_proj) - proj0)
+				if end_dist0 < BRIDGE_RAMP_LENGTH:
+					d0 = INF  # mask out — already handled by main ramp
+			if dN <= BOUNDARY_SNAP:
+				var projN: float = (pN - ramp_info.origin).dot(ramp_info.axis)
+				var end_distN: float = minf(projN - float(ramp_info.min_proj), float(ramp_info.max_proj) - projN)
+				if end_distN < BRIDGE_RAMP_LENGTH:
+					dN = INF  # mask out
+			if d0 > BOUNDARY_SNAP and dN > BOUNDARY_SNAP:
+				continue
+			_deck_exit_way_ids[way_id] = true
+			var road_w: float = 7.0
+			if tags.has("width"):
+				var w_str: String = str(tags.width)
+				if w_str.is_valid_float():
+					road_w = float(w_str)
+			elif highway in ["primary", "trunk"]:
+				road_w = 9.0
+			if d0 <= BOUNDARY_SNAP and Geometry2D.is_point_in_polygon(p0, poly):
+				var p1: Vector2 = _latlon_to_local(nodes[1].lat, nodes[1].lon)
+				var base_e: float = _sample_elevation(p0.x, p0.y)
+				_deck_lateral_exits.append({
+					"pos": p0,
+					"inward_dir": (p1 - p0).normalized(),
+					"half_width": road_w * 0.5,
+					"base_elev": base_e,
+				})
+				print("[LateralExit] way=%d boundary start pos=(%.1f,%.1f) base_elev=%.1f" % [way_id, p0.x, p0.y, base_e])
+			if dN <= BOUNDARY_SNAP and Geometry2D.is_point_in_polygon(pN, poly):
+				var p_prev: Vector2 = _latlon_to_local(nodes[nodes.size() - 2].lat, nodes[nodes.size() - 2].lon)
+				var base_e: float = _sample_elevation(pN.x, pN.y)
+				_deck_lateral_exits.append({
+					"pos": pN,
+					"inward_dir": (p_prev - pN).normalized(),
+					"half_width": road_w * 0.5,
+					"base_elev": base_e,
+				})
+				print("[LateralExit] way=%d boundary end pos=(%.1f,%.1f) base_elev=%.1f" % [way_id, pN.x, pN.y, base_e])
+			break
+
+
+# Stage 1 bridge ramp detection — instantiate the detector lazily, parented
+# to self so it lives next to the deck nodes. Detection runs once after the
+# initial OSM load; later, debug toggle is F9. Never touches mesh code.
+func _ensure_ramp_detector() -> void:
+	if _ramp_detector != null:
+		return
+	var script: GDScript = load("res://osm/bridge_ramp_detector.gd")
+	if script == null:
+		push_warning("BridgeRampDetector script not found")
+		return
+	_ramp_detector = script.new()
+	_ramp_detector.name = "BridgeRampDetector"
+	add_child(_ramp_detector)
+
+
+# Stage 2A wrapper: way-aware road vertex Y.
+#
+# Used ONLY by primary drivable road meshes built in
+# _compute_road_geometry_thread. Curbs, sidewalks, lane markings, lamps,
+# tram beds and footways still sample terrain directly — Stage 2A is
+# scoped to primary road surface only.
+#
+# When the ramp flag is OFF (default), behaves byte-identical to the
+# legacy direct call. When ON, the detector filters candidate ramps by
+# `way_id` first, then projects the point onto each candidate's polyline
+# with strict perpendicular tolerance. A nearby perpendicular or parallel
+# road CANNOT be affected unless its way_id is explicitly registered for
+# that ramp.
+#
+# Thread-safe: the detector takes its mutex internally on the read path.
+func _road_sample_y_for_way(way_id: int, point: Vector2,
+		centerline_distance: float, height_offset: float) -> float:
+	var terrain_y: float = _sample_elevation(point.x, point.y)
+	if _ramp_detector == null:
+		return terrain_y + height_offset
+	return _ramp_detector.sample_road_y_for_way(
+			way_id, point, centerline_distance, terrain_y, height_offset)
+
+
+# Stage 2A.3 — SNAP polyline endpoints to polygon outline.
+# For each endpoint OUTSIDE polygon and within SNAP_DIST of polygon
+# outline, MOVE it to the closest polygon outline point. This ensures
+# the road mesh's edge is EXACTLY on the polygon outline → bridge mesh
+# meets road mesh flush. Skip if endpoint already inside polygon
+# (polyline crosses naturally).
+func _smart_extend_polyline_to_polygon(points: PackedVector2Array,
+		polygon: PackedVector2Array, way_id: int, chunk_key: String) -> PackedVector2Array:
+	const SNAP_DIST := 5.0
+	if points.size() < 2 or polygon.size() < 3:
+		return points
+	var result: PackedVector2Array = points.duplicate()
+	var first_inside: bool = Geometry2D.is_point_in_polygon(result[0], polygon)
+	var last_inside: bool = Geometry2D.is_point_in_polygon(result[result.size() - 1], polygon)
+	# Snap FIRST endpoint if needed.
+	if not first_inside:
+		var first: Vector2 = result[0]
+		var snap_first: Vector2 = _closest_point_on_polygon_outline(first, polygon)
+		var d_first: float = first.distance_to(snap_first)
+		if d_first <= SNAP_DIST and d_first > 0.01:
+			result[0] = snap_first
+			if OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG"):
+				print("[BridgeRamp] SNAP way=%d chunk=%s first %.2f m to polygon"
+						% [way_id, chunk_key, d_first])
+	# Snap LAST endpoint if needed.
+	if not last_inside:
+		var last_idx: int = result.size() - 1
+		var last: Vector2 = result[last_idx]
+		var snap_last: Vector2 = _closest_point_on_polygon_outline(last, polygon)
+		var d_last: float = last.distance_to(snap_last)
+		if d_last <= SNAP_DIST and d_last > 0.01:
+			result[last_idx] = snap_last
+			if OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG"):
+				print("[BridgeRamp] SNAP way=%d chunk=%s last %.2f m to polygon"
+						% [way_id, chunk_key, d_last])
+	return result
+
+
+# Returns the closest point on polygon's outline (any edge) to `point`.
+func _closest_point_on_polygon_outline(point: Vector2, polygon: PackedVector2Array) -> Vector2:
+	var best_pt: Vector2 = polygon[0]
+	var best_dist: float = INF
+	for j in range(polygon.size()):
+		var p1: Vector2 = polygon[j]
+		var p2: Vector2 = polygon[(j + 1) % polygon.size()]
+		var closest: Vector2 = Geometry2D.get_closest_point_to_segment(point, p1, p2)
+		var d: float = closest.distance_to(point)
+		if d < best_dist:
+			best_dist = d
+			best_pt = closest
+	return best_pt
+
+
+func _min_dist_to_polygon_outline(point: Vector2, polygon: PackedVector2Array) -> float:
+	var best: float = INF
+	for j in range(polygon.size()):
+		var p1: Vector2 = polygon[j]
+		var p2: Vector2 = polygon[(j + 1) % polygon.size()]
+		var closest: Vector2 = Geometry2D.get_closest_point_to_segment(point, p1, p2)
+		var d: float = closest.distance_to(point)
+		if d < best:
+			best = d
+	return best
+
+
+# Old extension helper (replaced by _smart_extend_polyline_to_polygon).
+# Kept for reference if simpler logic ever needed.
+func _extend_polyline_to_polygon_edge(points: PackedVector2Array,
+		polygon: PackedVector2Array, way_id: int, chunk_key: String) -> PackedVector2Array:
+	const MAX_EXT := 10.0
+	if points.size() < 2 or polygon.size() < 3:
+		return points
+	var result: PackedVector2Array = points.duplicate()
+	# Try extending FIRST endpoint (backward direction).
+	var first: Vector2 = result[0]
+	if not Geometry2D.is_point_in_polygon(first, polygon):
+		var tangent: Vector2 = first - result[1]
+		var t_len: float = tangent.length()
+		if t_len > 0.001:
+			tangent = tangent / t_len
+			var ray_end: Vector2 = first + tangent * MAX_EXT
+			var best_inter: Vector2 = Vector2.INF
+			var best_dist: float = MAX_EXT + 1.0
+			for j in range(polygon.size()):
+				var p1: Vector2 = polygon[j]
+				var p2: Vector2 = polygon[(j + 1) % polygon.size()]
+				var inter = Geometry2D.segment_intersects_segment(first, ray_end, p1, p2)
+				if inter == null:
+					continue
+				var d: float = (inter as Vector2).distance_to(first)
+				if d < best_dist:
+					best_dist = d
+					best_inter = inter
+			if best_inter != Vector2.INF:
+				result.insert(0, best_inter)
+				if OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG"):
+					print("[BridgeRamp] EXTEND way=%d chunk=%s first endpoint by %.2f m" \
+							% [way_id, chunk_key, best_dist])
+	# Try extending LAST endpoint (forward direction).
+	var last_idx: int = result.size() - 1
+	var last: Vector2 = result[last_idx]
+	if not Geometry2D.is_point_in_polygon(last, polygon):
+		var tangent: Vector2 = last - result[last_idx - 1]
+		var t_len: float = tangent.length()
+		if t_len > 0.001:
+			tangent = tangent / t_len
+			var ray_end: Vector2 = last + tangent * MAX_EXT
+			var best_inter: Vector2 = Vector2.INF
+			var best_dist: float = MAX_EXT + 1.0
+			for j in range(polygon.size()):
+				var p1: Vector2 = polygon[j]
+				var p2: Vector2 = polygon[(j + 1) % polygon.size()]
+				var inter = Geometry2D.segment_intersects_segment(last, ray_end, p1, p2)
+				if inter == null:
+					continue
+				var d: float = (inter as Vector2).distance_to(last)
+				if d < best_dist:
+					best_dist = d
+					best_inter = inter
+			if best_inter != Vector2.INF:
+				result.append(best_inter)
+				if OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG"):
+					print("[BridgeRamp] EXTEND way=%d chunk=%s last endpoint by %.2f m" \
+							% [way_id, chunk_key, best_dist])
+	return result
+
+
+# Stage 2A.2 helper: clips the polyline so it does NOT enter any bridge
+# polygon. Uses Geometry2D.clip_polyline_with_polygon, which returns
+# disjoint outside-polygon segments. We pick the longest piece — the
+# main approach road — and discard interior pieces (which would be on
+# the deck and rendered by the bridge mesh anyway). Only called for
+# ramp-owning ways.
+func _clip_polyline_outside_bridge_polygons(points: PackedVector2Array, way_id: int,
+		chunk_key: String) -> PackedVector2Array:
+	if points.size() < 2 or _bridge_deck_polygons.is_empty():
+		return points
+	var debug := OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG")
+	if debug:
+		var inside_first := false
+		var inside_last := false
+		for poly in _bridge_deck_polygons:
+			if poly.size() >= 3 and Geometry2D.is_point_in_polygon(points[0], poly):
+				inside_first = true
+			if poly.size() >= 3 and Geometry2D.is_point_in_polygon(points[points.size() - 1], poly):
+				inside_last = true
+		print("[BridgeRamp] CLIP way=%d chunk=%s n=%d first_inside=%s last_inside=%s"
+				% [way_id, chunk_key, points.size(), inside_first, inside_last])
+	var current: PackedVector2Array = points
+	for poly in _bridge_deck_polygons:
+		if poly.size() < 3:
+			continue
+		var pieces: Array = Geometry2D.clip_polyline_with_polygon(current, poly)
+		if debug:
+			var sizes: Array = []
+			for p in pieces:
+				sizes.append((p as PackedVector2Array).size())
+			print("[BridgeRamp]   pieces=%d sizes=%s" % [pieces.size(), str(sizes)])
+		if pieces.is_empty():
+			return PackedVector2Array()
+		var best := PackedVector2Array()
+		for p in pieces:
+			var pp: PackedVector2Array = p
+			if pp.size() > best.size():
+				best = pp
+		current = best
+	return current
+
+
+## Returns the two long-axis endpoints (abutments) of a deck polygon —
+## those are the points where the bridge ties down to the surrounding
+## terrain. Reuses the long-axis frame already computed in
+## `_get_deck_ramp_axis`.
+func _polygon_axis_ends(poly: PackedVector2Array) -> Array:
+	var ramp := _get_deck_ramp_axis(poly)
+	var origin: Vector2 = ramp.origin
+	var axis: Vector2 = ramp.axis
+	var axis_a: Vector2 = origin + axis * float(ramp.min_proj)
+	var axis_b: Vector2 = origin + axis * float(ramp.max_proj)
+	return [axis_a, axis_b]
+
+
+## True iff the chunks holding both abutment points have their elevation
+## grids loaded. We only need these two points (not every polygon vertex)
+## to compute `ref_elev` correctly — bridge polygons can be longer than the
+## streaming radius, so blocking on full coverage would never resolve.
+func _are_axis_end_chunks_loaded(axis_a: Vector2, axis_b: Vector2) -> bool:
+	if not enable_elevation:
+		return true
+	for p in [axis_a, axis_b]:
+		var cx := int(floor(p.x / chunk_size))
+		var cz := int(floor(p.y / chunk_size))
+		var grid: Dictionary = _chunk_elevation_data.get("%d,%d" % [cx, cz], {})
+		if grid.is_empty():
+			return false
+	return true
+
+
+## Reference elevation for a deck polygon = max elevation of its two
+## abutments. The deck sits at `ref_elev + BRIDGE_DECK_HEIGHT` everywhere
+## (single constant Y for the whole bridge — not per-vertex terrain noise).
+## Returns NAN if the abutment chunks haven't loaded yet; caller should
+## defer building the deck.
+func _compute_and_cache_deck_ref_elev(poly_idx: int) -> float:
+	if poly_idx < 0 or poly_idx >= _bridge_deck_polygons.size():
+		return NAN
+	if _deck_polygon_ref_elev.has(poly_idx):
+		return _deck_polygon_ref_elev[poly_idx]
+	var poly: PackedVector2Array = _bridge_deck_polygons[poly_idx]
+	if poly.size() < 3:
+		return NAN
+	var ends := _polygon_axis_ends(poly)
+	var axis_a: Vector2 = ends[0]
+	var axis_b: Vector2 = ends[1]
+	if not _are_axis_end_chunks_loaded(axis_a, axis_b):
+		return NAN
+	var elev_a := _sample_elevation(axis_a.x, axis_a.y)
+	var elev_b := _sample_elevation(axis_b.x, axis_b.y)
+	var ref_elev: float = maxf(elev_a, elev_b)
+	_deck_polygon_ref_elev[poly_idx] = ref_elev
+	return ref_elev
+
+
+## Y of the deck surface at a local-coords point.
+##
+## The deck sits at `ref_elev + BRIDGE_DECK_HEIGHT` over its flat middle
+## section; near the long-axis endpoints (within `BRIDGE_RAMP_LENGTH`)
+## the deck ramps down to whatever local terrain is there so it can tie
+## into the road on the bank. Layer > 1 stacks `LAYER_HEIGHT` per layer.
+func _deck_surface_y_at(point: Vector2, full_polygon: PackedVector2Array, layer: int, ref_elev: float) -> float:
+	var max_h: float = BRIDGE_DECK_HEIGHT + maxf(0, layer - 1) * LAYER_HEIGHT
+	var deck_top: float = ref_elev + max_h
+	if full_polygon.size() < 3:
+		return deck_top
+	var ramp_info: Dictionary = _get_deck_ramp_axis(full_polygon)
+	var proj: float = (point - ramp_info.origin).dot(ramp_info.axis)
+	var min_end_dist: float = minf(proj - float(ramp_info.min_proj), float(ramp_info.max_proj) - proj)
+	var t := clampf(min_end_dist / BRIDGE_RAMP_LENGTH, 0.0, 1.0)
+	var y: float = deck_top
+	if t < 1.0:
+		# Inside the ramp zone (within BRIDGE_RAMP_LENGTH of an axis end).
+		var local := _sample_elevation(point.x, point.y)
+		if local == 0.0:
+			local = ref_elev
+		# Ramp base 10cm below terrain so it dips underground and
+		# guarantees intersection with ground road — no gap possible.
+		y = lerpf(local - 0.1, deck_top, _smooth_step(t))
+	# Lateral exit ramps — where _link bridge roads depart the polygon,
+	# the deck ramps down to meet the standalone bridge road's surface.
+	for exit_data in _deck_lateral_exits:
+		var to_pt: Vector2 = point - exit_data.pos
+		var along: float = to_pt.dot(exit_data.inward_dir)
+		# Allow negative along — polygon tip vertices are behind exit pos.
+		# They should be at ground level (nt clamped to 0).
+		if along < -30.0 or along > BRIDGE_RAMP_LENGTH:
+			continue
+		var perp_dir := Vector2(-exit_data.inward_dir.y, exit_data.inward_dir.x)
+		var across: float = absf(to_pt.dot(perp_dir))
+		var hw: float = float(exit_data.half_width)
+		# Wide corridor covers the full polygon width at the exit so
+		# sidewalks alongside the arm also ramp down correctly.
+		var corridor_w: float = hw + 15.0
+		if across > corridor_w:
+			continue
+		var nt: float = clampf(along / BRIDGE_RAMP_LENGTH, 0.0, 1.0)
+		# Sample ground elevation at the exit point live (elevation data
+		# may not have been available at detection time).
+		var base_e: float = _sample_elevation(exit_data.pos.x, exit_data.pos.y)
+		if base_e == 0.0:
+			base_e = ref_elev
+		var exit_y: float = lerpf(base_e - 0.1, deck_top, _smooth_step(nt))
+		# Perpendicular fade: linear blend to deck_top outside arm road width
+		if across > hw:
+			var fade_t: float = (across - hw) / 15.0
+			exit_y = lerpf(exit_y, deck_top, fade_t)
+		y = minf(y, exit_y)
+	return y
+
+
+## Convenience wrapper for callers that only know a point (not which
+## polygon owns it). Looks up the containing polygon and uses its cached
+## ref_elev. For points outside any deck polygon (off-bridge), returns
+## terrain ground so consumers don't crater into Y=0.
+func _deck_surface_y_at_cached(point: Vector2) -> float:
+	for i in _bridge_deck_polygons.size():
+		var poly: PackedVector2Array = _bridge_deck_polygons[i]
+		if poly.size() < 3:
+			continue
+		if not Geometry2D.is_point_in_polygon(point, poly):
+			continue
+		var ref_elev: float = _deck_polygon_ref_elev.get(i, NAN)
+		if is_nan(ref_elev):
+			# Polygon known but its ref_elev isn't computed yet — try once.
+			ref_elev = _compute_and_cache_deck_ref_elev(i)
+		if is_nan(ref_elev):
+			continue
+		return _deck_surface_y_at(point, poly, 1, ref_elev)
+	return _sample_elevation(point.x, point.y)
+
+
+# Computes the long-axis frame (origin + axis + min/max projection) for a
+# deck polygon. Cached per polygon — 100m+ Oktyabrsky deck calls this many
+# times during meshing and railing, recomputing every time was wasted work.
+func _get_deck_ramp_axis(poly: PackedVector2Array) -> Dictionary:
+	var poly_idx := -1
+	for i in range(_bridge_deck_polygons.size()):
+		if _bridge_deck_polygons[i] == poly:
+			poly_idx = i
+			break
+	if poly_idx >= 0 and _deck_entry_edges_cache.has(poly_idx):
+		return _deck_entry_edges_cache[poly_idx]
+	var max_dist_sq := 0.0
+	var end_a := poly[0]
+	var end_b := poly[1] if poly.size() > 1 else poly[0]
+	for i in range(poly.size()):
+		for j in range(i + 1, poly.size()):
+			var d: float = poly[i].distance_squared_to(poly[j])
+			if d > max_dist_sq:
+				max_dist_sq = d
+				end_a = poly[i]
+				end_b = poly[j]
+	var axis: Vector2 = (end_b - end_a).normalized()
+	var min_proj := INF
+	var max_proj := -INF
+	for p in poly:
+		var proj: float = (p - end_a).dot(axis)
+		min_proj = minf(min_proj, proj)
+		max_proj = maxf(max_proj, proj)
+	var result := {"origin": end_a, "axis": axis, "min_proj": min_proj, "max_proj": max_proj}
+	if poly_idx >= 0:
+		_deck_entry_edges_cache[poly_idx] = result
+	return result
+
+
+func _is_point_on_bridge_deck(point: Vector2) -> bool:
+	for poly in _bridge_deck_polygons:
+		if poly.size() >= 3 and Geometry2D.is_point_in_polygon(point, poly):
+			return true
+	return false
+
+
+# Detects ramp junction points where an on-deck bridge way's endpoint
+# sits near the polygon boundary. Creates apron mesh immediately if
+# the deck is already built (roads typically load after deck).
+func _detect_ramp_junction(nodes: Array, pts: PackedVector2Array, width: float) -> void:
+	if nodes.size() < 2 or pts.size() < 2:
+		return
+	const SNAP := 5.0
+	var first_local := _latlon_to_local(nodes[0].lat, nodes[0].lon)
+	var last_local := _latlon_to_local(nodes[nodes.size() - 1].lat, nodes[nodes.size() - 1].lon)
+	for pi in _bridge_deck_polygons.size():
+		var poly: PackedVector2Array = _bridge_deck_polygons[pi]
+		if poly.size() < 3:
+			continue
+		# Check first node
+		var d0: float = _min_dist_to_polygon_outline(first_local, poly)
+		if d0 < SNAP:
+			var dir: Vector2 = (pts[0] - pts[1]).normalized()
+			_register_ramp_junction(first_local, dir, width, pi)
+		# Check last node
+		var dN: float = _min_dist_to_polygon_outline(last_local, poly)
+		if dN < SNAP:
+			var last_idx: int = pts.size() - 1
+			var dir: Vector2 = (pts[last_idx] - pts[last_idx - 1]).normalized()
+			_register_ramp_junction(last_local, dir, width, pi)
+
+
+func _register_ramp_junction(pos: Vector2, dir: Vector2, width: float, poly_idx: int) -> void:
+	const SNAP := 5.0
+	for j in _deck_ramp_junctions:
+		if j.pos.distance_to(pos) < SNAP:
+			return  # duplicate
+	var junc := {"pos": pos, "dir": dir, "width": width, "poly_idx": poly_idx}
+	_deck_ramp_junctions.append(junc)
+	print("[RampJunction] #%d at (%.1f,%.1f) dir=(%.2f,%.2f) w=%.1f poly=%d" % [
+		_deck_ramp_junctions.size() - 1, pos.x, pos.y, dir.x, dir.y, width, poly_idx])
+	# If the deck mesh is already built, create the apron immediately.
+	if _bridge_deck_nodes.has(poly_idx):
+		var ref_elev: float = _deck_polygon_ref_elev.get(poly_idx, NAN)
+		if not is_nan(ref_elev):
+			_create_single_ramp_apron(junc, ref_elev)
+	else:
+		print("[RampJunction]   deck not built yet for poly %d — apron deferred" % poly_idx)
+
+
+func _is_way_on_bridge_deck(nodes: Array) -> bool:
+	if _bridge_deck_polygons.is_empty() or nodes.size() < 2:
+		return false
+	var mid_idx: int = nodes.size() / 2
+	var mid_local := _latlon_to_local(nodes[mid_idx].lat, nodes[mid_idx].lon)
+	return _is_point_on_bridge_deck(mid_local)
+
+
+# Direction of the nearest OTHER bridge way at the given local point — used
+# to average perpendiculars at shared bridge endpoints so adjacent way
+# meshes meet seamlessly.
+func _find_neighbor_bridge_tangent(point: Vector2, self_way_id: int) -> Vector2:
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+	var best_dist := INF
+	var best_dir := Vector2.ZERO
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			var segs := _query_road_hash(key, "")
+			for seg in segs:
+				if not seg.get("bridge", false):
+					continue
+				if seg.get("way_id", 0) == self_way_id:
+					continue
+				if seg.width < 4.0:
+					continue
+				var d1: float = point.distance_to(seg.p1)
+				var d2: float = point.distance_to(seg.p2)
+				var min_d: float = minf(d1, d2)
+				if min_d < 2.0 and min_d < best_dist:
+					best_dist = min_d
+					if d1 < d2:
+						best_dir = (seg.p2 - seg.p1).normalized()
+					else:
+						best_dir = (seg.p1 - seg.p2).normalized()
+	return best_dir
+
+
+# Half the distance to the nearest other bridge centreline in `direction`,
+# so two roads each shrinking by that amount meet flush. Returns 0 when
+# there is no other bridge ahead.
+func _find_midpoint_to_other_bridge_road(origin: Vector2, direction: Vector2, self_way_id: int) -> float:
+	var cell_x := int(floor(origin.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(origin.y / ROAD_CELL_SIZE))
+	var best_dist := INF
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			var segs := _query_road_hash(key, "")
+			for seg in segs:
+				if not seg.get("bridge", false):
+					continue
+				if seg.get("way_id", 0) == self_way_id:
+					continue
+				if seg.width < 4.0:
+					continue
+				var closest := Geometry2D.get_closest_point_to_segment(origin, seg.p1, seg.p2)
+				var to_other := closest - origin
+				if to_other.dot(direction) <= 0:
+					continue
+				var dist := origin.distance_to(closest)
+				if dist < best_dist:
+					best_dist = dist
+	if best_dist < INF:
+		return best_dist * 0.5
+	return 0.0
+
+
+# `point` lies inside another bridge way's road corridor. Used by barriers
+# to open gaps where ramps merge into a main bridge.
+func _point_in_other_bridge_corridor(point: Vector2, ck: String = "", self_way_id: int = 0) -> bool:
+	const MARGIN := -0.5
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			var segs := _query_road_hash(key, ck)
+			for seg in segs:
+				if not seg.get("bridge", false):
+					continue
+				if self_way_id != 0 and seg.get("way_id", 0) == self_way_id:
+					continue
+				var s_width: float = seg.width
+				if s_width < 4.0:
+					continue
+				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+				if point.distance_to(closest) < s_width / 2.0 + MARGIN:
+					return true
+	return false
+
+
+# Height of a bridge way at accumulated distance along its centreline.
+# `ramp_from_*` sides ramp up over the given length; sides == 0 stay at full
+# deck height (used at shared bridge endpoints). Shared by road mesh,
+# pillars, and barriers so they stay coplanar.
+func _bridge_height_at(accumulated: float, ramp_from_start: float, ramp_from_end: float, total_length: float, height_offset: float) -> float:
+	var h := BRIDGE_DECK_HEIGHT
+	if ramp_from_start > 0.0 and accumulated < ramp_from_start:
+		h = _smooth_step(accumulated / ramp_from_start) * BRIDGE_DECK_HEIGHT
+	elif ramp_from_end > 0.0 and accumulated > total_length - ramp_from_end:
+		var rem: float = total_length - accumulated
+		h = _smooth_step(rem / ramp_from_end) * BRIDGE_DECK_HEIGHT
+	return height_offset + h
+
+
+# Averages perpendiculars at shared bridge endpoints so adjacent way meshes
+# meet seamlessly. Pass the smoothed local-coord polyline + node OSM list.
+func _fix_shared_endpoint_perps(pts: PackedVector2Array, perps: Array[Vector2], nodes: Array, self_way_id: int) -> void:
+	if pts.size() < 2 or nodes.size() < 2:
+		return
+	var first_node: Dictionary = nodes[0]
+	if _bridge_endpoint_is_shared(first_node.lat, first_node.lon):
+		var neighbor_dir := _find_neighbor_bridge_tangent(pts[0], self_way_id)
+		if neighbor_dir != Vector2.ZERO:
+			var my_dir: Vector2 = (pts[1] - pts[0]).normalized()
+			var avg_dir: Vector2 = (my_dir + neighbor_dir).normalized()
+			if avg_dir.length_squared() > 0.01:
+				perps[0] = Vector2(-avg_dir.y, avg_dir.x)
+	var last_node: Dictionary = nodes[nodes.size() - 1]
+	if _bridge_endpoint_is_shared(last_node.lat, last_node.lon):
+		var last_idx: int = pts.size() - 1
+		var neighbor_dir2 := _find_neighbor_bridge_tangent(pts[last_idx], self_way_id)
+		if neighbor_dir2 != Vector2.ZERO:
+			var my_dir2: Vector2 = (pts[last_idx] - pts[last_idx - 1]).normalized()
+			var avg_dir2: Vector2 = (my_dir2 + neighbor_dir2).normalized()
+			if avg_dir2.length_squared() > 0.01:
+				perps[last_idx] = Vector2(-avg_dir2.y, avg_dir2.x)
+
+
+# Recursively splits triangles whose edges exceed MAX_EDGE so the ramp
+# transitions stay smooth. Returns reshaped {vertices, indices, uvs, normals}.
+# `ref_elev` is the polygon's reference elevation — same constant the deck
+# top sits on (`ref_elev + BRIDGE_DECK_HEIGHT`). The ramp test uses it.
+func _subdivide_ramp_tris(verts: PackedVector3Array, idxs: PackedInt32Array,
+		full_polygon: PackedVector2Array, layer: int, uv_scale: float, ref_elev: float) -> Dictionary:
+	const MAX_EDGE := 3.0
+	# 10 iterations handles 700m polygon edges (adaptive: only ramp-zone
+	# triangles split, +3 tris/iter → ~30 extra tris total).
+	const MAX_ITER := 10
+	var v := Array()
+	for vi in range(verts.size()):
+		v.append(verts[vi])
+	var tris := Array()
+	for ii in range(idxs.size()):
+		tris.append(idxs[ii])
+	# A vertex sits in the ramp zone if its Y is below the deck top.
+	var max_h: float = BRIDGE_DECK_HEIGHT + maxf(0, layer - 1) * LAYER_HEIGHT
+	var deck_top: float = ref_elev + max_h
+	for _iter in range(MAX_ITER):
+		var new_tris := PackedInt32Array()
+		var changed := false
+		var mid_cache := {}
+		for ti in range(0, tris.size(), 3):
+			var i0: int = tris[ti]
+			var i1: int = tris[ti + 1]
+			var i2: int = tris[ti + 2]
+			var v0: Vector3 = v[i0]
+			var v1: Vector3 = v[i1]
+			var v2: Vector3 = v[i2]
+			var in_ramp: bool = v0.y < deck_top - 0.01 or v1.y < deck_top - 0.01 or v2.y < deck_top - 0.01
+			# Also subdivide triangles near lateral exit points — these
+			# start at deck_top but the midpoints will get ramp Y from
+			# _deck_surface_y_at, seeding further subdivision.
+			if not in_ramp and not _deck_lateral_exits.is_empty():
+				var r_sq: float = (BRIDGE_RAMP_LENGTH + MAX_EDGE * 2) * (BRIDGE_RAMP_LENGTH + MAX_EDGE * 2)
+				for exit_data in _deck_lateral_exits:
+					var ep: Vector2 = exit_data.pos
+					for vi3 in [v0, v1, v2]:
+						if Vector2(vi3.x, vi3.z).distance_squared_to(ep) < r_sq:
+							in_ramp = true
+							break
+					if in_ramp:
+						break
+			if not in_ramp:
+				new_tris.append(i0); new_tris.append(i1); new_tris.append(i2)
+				continue
+			var d01: float = v0.distance_to(v1)
+			var d12: float = v1.distance_to(v2)
+			var d20: float = v2.distance_to(v0)
+			if d01 <= MAX_EDGE and d12 <= MAX_EDGE and d20 <= MAX_EDGE:
+				new_tris.append(i0); new_tris.append(i1); new_tris.append(i2)
+				continue
+			changed = true
+			var m01: int = _get_or_create_midpoint(v, mid_cache, i0, i1, full_polygon, layer, ref_elev)
+			var m12: int = _get_or_create_midpoint(v, mid_cache, i1, i2, full_polygon, layer, ref_elev)
+			var m20: int = _get_or_create_midpoint(v, mid_cache, i2, i0, full_polygon, layer, ref_elev)
+			new_tris.append(i0); new_tris.append(m01); new_tris.append(m20)
+			new_tris.append(m01); new_tris.append(i1); new_tris.append(m12)
+			new_tris.append(m20); new_tris.append(m12); new_tris.append(i2)
+			new_tris.append(m01); new_tris.append(m12); new_tris.append(m20)
+		tris = Array(new_tris)
+		if not changed:
+			break
+	var out_v := PackedVector3Array()
+	var out_uv := PackedVector2Array()
+	var out_n := PackedVector3Array()
+	for vi2 in range(v.size()):
+		out_v.append(v[vi2])
+		out_uv.append(Vector2(v[vi2].x * uv_scale, v[vi2].z * uv_scale))
+		out_n.append(Vector3.UP)
+	return {"vertices": out_v, "indices": PackedInt32Array(tris), "uvs": out_uv, "normals": out_n}
+
+
+func _get_or_create_midpoint(v: Array, cache: Dictionary, i_a: int, i_b: int,
+		full_polygon: PackedVector2Array, layer: int, ref_elev: float) -> int:
+	var key: int = mini(i_a, i_b) * 100000 + maxi(i_a, i_b)
+	if cache.has(key):
+		return cache[key]
+	var va: Vector3 = v[i_a]
+	var vb: Vector3 = v[i_b]
+	var mid_2d := Vector2((va.x + vb.x) * 0.5, (va.z + vb.z) * 0.5)
+	var mid_y: float = _deck_surface_y_at(mid_2d, full_polygon, layer, ref_elev)
+	var idx: int = v.size()
+	v.append(Vector3(mid_2d.x, mid_y, mid_2d.y))
+	cache[key] = idx
+	return idx
+
+
+# Builds the flat asphalt deck mesh + railing for one man_made=bridge
+# polygon. Caller MUST have ensured the polygon's ref_elev is cached
+# (axis-end chunks loaded) — the queue handler in
+# `_process_terrain_objects_queue` defers items until that's true.
+func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, parent: Node3D, full_polygon: PackedVector2Array = PackedVector2Array()) -> void:
+	if points.size() < 3:
+		return
+
+	var indices := Geometry2D.triangulate_polygon(points)
+	if indices.is_empty():
+		return
+
+	var poly_idx: int = _bridge_deck_polygons.find(full_polygon)
+	var ref_elev: float = _compute_and_cache_deck_ref_elev(poly_idx)
+	if is_nan(ref_elev):
+		# Caller should never let us reach here; bail rather than build
+		# at Y=0 (= 120 m underground here).
+		return
+
+	var layer: int = int(str(tags.get("layer", "1"))) if str(tags.get("layer", "1")).is_valid_int() else 1
+
+	var vertices := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var normals := PackedVector3Array()
+	var tri_indices := PackedInt32Array()
+	var uv_scale := 0.1  # 10m per UV repeat
+
+	var use_ramp: bool = full_polygon.size() >= 3
+	for i in points.size():
+		var p := points[i]
+		var y_here: float = _deck_surface_y_at(p, full_polygon, layer, ref_elev)
+		vertices.append(Vector3(p.x, y_here, p.y))
+		uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
+		normals.append(Vector3.UP)
+	tri_indices = indices
+	if use_ramp:
+		var sub_result: Dictionary = _subdivide_ramp_tris(vertices, tri_indices, full_polygon, layer, uv_scale, ref_elev)
+		vertices = sub_result.vertices
+		tri_indices = sub_result.indices
+		uvs = sub_result.uvs
+		normals = sub_result.normals
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = tri_indices
+
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.7, 0.7, 0.7)
+	material.roughness = 0.9
+	material.metallic = 0.0
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if _cached_road_albedo:
+		material.albedo_texture = _cached_road_albedo
+		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.name = "BridgeDeck"
+	mesh_inst.mesh = arr_mesh
+	mesh_inst.material_override = material
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mesh_inst)
+
+	var body := StaticBody3D.new()
+	body.name = "BridgeDeckCollision"
+	body.collision_layer = 1
+	body.add_to_group("Road")
+	var shape := CollisionShape3D.new()
+	var coll_shape := ConcavePolygonShape3D.new()
+	var faces := PackedVector3Array()
+	for i in range(0, tri_indices.size(), 3):
+		faces.append(vertices[tri_indices[i]])
+		faces.append(vertices[tri_indices[i + 1]])
+		faces.append(vertices[tri_indices[i + 2]])
+	coll_shape.set_faces(faces)
+	shape.shape = coll_shape
+	body.add_child(shape)
+	parent.add_child(body)
+
+	var railing_nodes: Array = _create_deck_railing(points, ref_elev, parent)
+	var all_nodes: Array = [mesh_inst, body]
+	all_nodes.append_array(railing_nodes)
+	_bridge_deck_nodes[poly_idx] = all_nodes
+
+	# Create aprons for any ramp junctions already detected before deck build.
+	# Most junctions arrive after deck (roads load later), but handle both orders.
+	for junc in _deck_ramp_junctions:
+		if junc.get("poly_idx", -1) == poly_idx:
+			_create_single_ramp_apron(junc, ref_elev)
+
+
+# Renders thin white lane-divider strips on top of the deck for an on-deck
+# vehicle road. Edges already come from the curb / centre-divider geometry,
+# so this only paints the dashed dividers between lanes.
+func _create_on_deck_lane_markings(pts: PackedVector2Array, road_width: float, tags: Dictionary, parent: Node3D) -> void:
+	if pts.size() < 2:
+		return
+	# Subdivide at 5 m grid crossings so per-vertex Y from
+	# _deck_surface_y_at_cached tracks the smoothstep ramp curve
+	# (same idea as _subdivide_for_elevation on terrain roads).
+	pts = _subdivide_for_elevation(pts, 5.0)
+
+	var lanes_str: String = str(tags.get("lanes", "2"))
+	var lane_count: int = int(lanes_str) if lanes_str.is_valid_int() else 2
+	lane_count = clampi(lane_count, 1, 6)
+	var half_w: float = road_width * 0.5
+	var perps: Array[Vector2] = _compute_averaged_perpendiculars(pts)
+
+	const LINE_WIDTH := 0.15
+	const DASH_LENGTH := 3.0
+	const DASH_GAP := 3.0
+	const MARKING_Y_OFFSET := 0.003
+
+	var marking_mat := StandardMaterial3D.new()
+	marking_mat.albedo_color = Color(1.0, 1.0, 1.0)
+	marking_mat.roughness = 0.6
+	marking_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	marking_mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_material(marking_mat)
+
+	var acc_lengths := PackedFloat64Array()
+	acc_lengths.resize(pts.size())
+	acc_lengths[0] = 0.0
+	for i in range(1, pts.size()):
+		acc_lengths[i] = acc_lengths[i - 1] + pts[i - 1].distance_to(pts[i])
+
+	var add_line_segment := func(p1: Vector2, p2: Vector2, perp1: Vector2, perp2: Vector2,
+			offset: float, lw: float) -> void:
+		var o1 := p1 + perp1 * offset
+		var o2 := p2 + perp2 * offset
+		var y1: float = _deck_surface_y_at_cached(p1) + MARKING_Y_OFFSET
+		var y2: float = _deck_surface_y_at_cached(p2) + MARKING_Y_OFFSET
+		var hw := lw * 0.5
+		var v1 := Vector3(o1.x - perp1.x * hw, y1, o1.y - perp1.y * hw)
+		var v2 := Vector3(o1.x + perp1.x * hw, y1, o1.y + perp1.y * hw)
+		var v3 := Vector3(o2.x + perp2.x * hw, y2, o2.y + perp2.y * hw)
+		var v4 := Vector3(o2.x - perp2.x * hw, y2, o2.y - perp2.y * hw)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(v1); st.set_normal(Vector3.UP)
+		st.add_vertex(v2); st.set_normal(Vector3.UP)
+		st.add_vertex(v3)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(v1); st.set_normal(Vector3.UP)
+		st.add_vertex(v3); st.set_normal(Vector3.UP)
+		st.add_vertex(v4)
+
+	if lane_count > 1:
+		var lane_w: float = road_width / float(lane_count)
+		for lane_i in range(1, lane_count):
+			var offset: float = -half_w + lane_w * float(lane_i)
+			for seg_i in range(pts.size() - 1):
+				var sp1 := pts[seg_i]
+				var sp2 := pts[seg_i + 1]
+				var seg_len := sp1.distance_to(sp2)
+				var seg_acc := acc_lengths[seg_i]
+				var cycle := DASH_LENGTH + DASH_GAP
+				var pos := 0.0
+				while pos < seg_len:
+					var abs_pos := seg_acc + pos
+					var in_cycle := fmod(abs_pos, cycle)
+					if in_cycle < DASH_LENGTH:
+						var dash_remaining := DASH_LENGTH - in_cycle
+						var draw_len := minf(dash_remaining, seg_len - pos)
+						var t1 := pos / seg_len
+						var t2 := (pos + draw_len) / seg_len
+						var dp1 := sp1.lerp(sp2, t1)
+						var dp2 := sp1.lerp(sp2, t2)
+						var dperp1 := perps[seg_i].lerp(perps[seg_i + 1], t1)
+						var dperp2 := perps[seg_i].lerp(perps[seg_i + 1], t2)
+						add_line_segment.call(dp1, dp2, dperp1, dperp2, offset, LINE_WIDTH)
+						pos += draw_len
+					else:
+						var gap_remaining := cycle - in_cycle
+						pos += gap_remaining
+
+	var committed := st.commit()
+	if committed and committed.get_surface_count() > 0:
+		var mesh_inst := MeshInstance3D.new()
+		mesh_inst.name = "BridgeLaneMarkings"
+		mesh_inst.mesh = committed
+		mesh_inst.material_override = marking_mat
+		mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		parent.add_child(mesh_inst)
+
+
+# Renders a footway/path that runs ON a man_made=bridge deck as a slightly
+# raised sidewalk strip with an inner curb butting up against the carriage-
+# way. Edges expand TOWARD the deck edge (so two parallel pieces — ПЧ and
+# тротуар — meet flush). Restored from 7102d8c. Without this, footways
+# inside the deck polygon either disappeared or rendered as separate sad
+# little bridges.
+func _create_on_deck_footway(smoothed_points: PackedVector2Array, width: float, tags: Dictionary, parent: Node3D, chunk_key: String, full_nodes: Array = []) -> void:
+	var pts: PackedVector2Array = _remove_polyline_zigzag(smoothed_points)
+	if pts.size() < 2:
+		return
+	# Subdivide at 5 m grid crossings so the footway mesh follows the
+	# deck ramp smoothstep curve instead of linearly interpolating Y
+	# between sparse OSM nodes.
+	pts = _subdivide_for_elevation(pts, 5.0)
+	var half_w: float = width * 0.5
+	var perps: Array[Vector2] = _compute_averaged_perpendiculars(pts)
+	var hw_lefts := PackedFloat64Array()
+	var hw_rights := PackedFloat64Array()
+	hw_lefts.resize(pts.size())
+	hw_rights.resize(pts.size())
+	var max_expand: float = half_w + 3.0
+
+	# Determine which side is "toward deck edge". Sparse ways clipped to a
+	# chunk can leave only 2 points whose midpoint lands at a polygon corner,
+	# making the local probe fail (both sides exit the deck within 0.5m).
+	# Use the FULL way's middle node when available so the probe sees a
+	# representative interior point. Fall back to the chunked midpoint.
+	var mid_p: Vector2
+	var mid_perp: Vector2
+	if full_nodes.size() >= 2:
+		var fmid_idx: int = full_nodes.size() / 2
+		mid_p = _latlon_to_local(full_nodes[fmid_idx].lat, full_nodes[fmid_idx].lon)
+		var prev_n: Dictionary = full_nodes[maxi(0, fmid_idx - 1)]
+		var next_n: Dictionary = full_nodes[mini(full_nodes.size() - 1, fmid_idx + 1)]
+		var prev_p: Vector2 = _latlon_to_local(prev_n.lat, prev_n.lon)
+		var next_p: Vector2 = _latlon_to_local(next_n.lat, next_n.lon)
+		var dir: Vector2 = (next_p - prev_p)
+		if dir.length_squared() < 0.01:
+			dir = Vector2(1, 0)
+		dir = dir.normalized()
+		mid_perp = Vector2(-dir.y, dir.x)
+	else:
+		var mid_k: int = clampi(pts.size() / 2, 0, pts.size() - 1)
+		mid_p = pts[mid_k]
+		mid_perp = perps[mid_k]
+	var left_deck_dist: float = 0.0
+	var right_deck_dist: float = 0.0
+	for ds in range(1, 30):
+		var d: float = float(ds) * 0.5
+		if left_deck_dist == 0.0 and not _is_point_on_bridge_deck(mid_p - mid_perp * d):
+			left_deck_dist = d
+		if right_deck_dist == 0.0 and not _is_point_on_bridge_deck(mid_p + mid_perp * d):
+			right_deck_dist = d
+		if left_deck_dist > 0 and right_deck_dist > 0:
+			break
+	var expand_left: bool = left_deck_dist > 0 and (right_deck_dist == 0 or left_deck_dist < right_deck_dist)
+	var expand_right: bool = right_deck_dist > 0 and (left_deck_dist == 0 or right_deck_dist < left_deck_dist)
+
+	for k in range(pts.size()):
+		var p: Vector2 = pts[k]
+		var perp: Vector2 = perps[k]
+		var hwl: float = half_w
+		var hwr: float = half_w
+		if expand_left:
+			for dist_step in range(1, 16):
+				var dist: float = half_w + float(dist_step) * 0.2
+				if dist > max_expand:
+					break
+				if not _is_point_on_bridge_deck(p - perp * dist):
+					hwl = dist + 0.3
+					break
+				hwl = dist
+		else:
+			# Non-expanding side: clamp so the footway doesn't ride onto the
+			# adjacent vehicle road.
+			if _is_point_on_vehicle_road(p - perp * hwl, 0.0, chunk_key):
+				for clamp_s in range(1, int(hwl / 0.1) + 1):
+					var td: float = hwl - float(clamp_s) * 0.1
+					if td < 0.2:
+						hwl = 0.2
+						break
+					if not _is_point_on_vehicle_road(p - perp * td, 0.0, chunk_key):
+						hwl = td
+						break
+		if expand_right:
+			for dist_step in range(1, 16):
+				var dist: float = half_w + float(dist_step) * 0.2
+				if dist > max_expand:
+					break
+				if not _is_point_on_bridge_deck(p + perp * dist):
+					hwr = dist + 0.3
+					break
+				hwr = dist
+		else:
+			if _is_point_on_vehicle_road(p + perp * hwr, 0.0, chunk_key):
+				for clamp_s in range(1, int(hwr / 0.1) + 1):
+					var td: float = hwr - float(clamp_s) * 0.1
+					if td < 0.2:
+						hwr = 0.2
+						break
+					if not _is_point_on_vehicle_road(p + perp * td, 0.0, chunk_key):
+						hwr = td
+						break
+		hw_lefts[k] = hwl
+		hw_rights[k] = hwr
+
+	# Smooth (3-point moving average) to remove sub-1m notches between
+	# consecutive vertices.
+	if pts.size() >= 3:
+		var sl := hw_lefts.duplicate()
+		var sr := hw_rights.duplicate()
+		for k in range(1, pts.size() - 1):
+			hw_lefts[k] = (sl[k - 1] + sl[k] + sl[k + 1]) / 3.0
+			hw_rights[k] = (sr[k - 1] + sr[k] + sr[k + 1]) / 3.0
+
+	# Build sidewalk surface — sits 23 cm above the deck.
+	var verts := PackedVector3Array()
+	var uv_arr := PackedVector2Array()
+	var norm_arr := PackedVector3Array()
+	var idx_arr := PackedInt32Array()
+	var acc := 0.0
+	for k in range(pts.size()):
+		var p: Vector2 = pts[k]
+		var perp: Vector2 = perps[k]
+		var deck_y_here: float = _deck_surface_y_at_cached(p) + 0.23
+		verts.append(Vector3(p.x - perp.x * hw_lefts[k], deck_y_here, p.y - perp.y * hw_lefts[k]))
+		verts.append(Vector3(p.x + perp.x * hw_rights[k], deck_y_here, p.y + perp.y * hw_rights[k]))
+		uv_arr.append(Vector2(0.0, acc * 0.1))
+		uv_arr.append(Vector2(1.0, acc * 0.1))
+		norm_arr.append(Vector3.UP)
+		norm_arr.append(Vector3.UP)
+		if k < pts.size() - 1:
+			acc += pts[k].distance_to(pts[k + 1])
+	for k in range(pts.size() - 1):
+		var bi: int = k * 2
+		idx_arr.append(bi); idx_arr.append(bi + 2); idx_arr.append(bi + 1)
+		idx_arr.append(bi + 1); idx_arr.append(bi + 2); idx_arr.append(bi + 3)
+
+	if verts.size() >= 4:
+		if not _road_batch_data.has(chunk_key):
+			_road_batch_data[chunk_key] = {}
+		var fw_tex := "path"
+		if not _road_batch_data[chunk_key].has(fw_tex):
+			_road_batch_data[chunk_key][fw_tex] = {
+				"vertices": PackedVector3Array(),
+				"uvs": PackedVector2Array(),
+				"normals": PackedVector3Array(),
+				"indices": PackedInt32Array(),
+				"parent": parent,
+			}
+		var batch: Dictionary = _road_batch_data[chunk_key][fw_tex]
+		var vertex_offset: int = batch["vertices"].size()
+		batch["vertices"].append_array(verts)
+		batch["uvs"].append_array(uv_arr)
+		batch["normals"].append_array(norm_arr)
+		if vertex_offset > 0:
+			var offset_indices := PackedInt32Array()
+			offset_indices.resize(idx_arr.size())
+			for oi in range(idx_arr.size()):
+				offset_indices[oi] = idx_arr[oi] + vertex_offset
+			batch["indices"].append_array(offset_indices)
+		else:
+			batch["indices"].append_array(idx_arr)
+
+	# Curb: 22 cm tall strip on both edges of the sidewalk so it reads as a
+	# raised pavement against the carriageway.
+	if pts.size() >= 2:
+		var curb_h: float = 0.22
+		var curb_st := SurfaceTool.new()
+		curb_st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		var curb_mat := StandardMaterial3D.new()
+		curb_mat.albedo_color = Color(0.65, 0.63, 0.60)
+		curb_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		curb_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		curb_st.set_material(curb_mat)
+		for side in [-1, 1]:
+			for k in range(pts.size() - 1):
+				var cp1: Vector2 = pts[k]
+				var cp2: Vector2 = pts[k + 1]
+				var cdir: Vector2 = (cp2 - cp1).normalized()
+				var cperp: Vector2 = Vector2(-cdir.y, cdir.x)
+				var chw1: float = hw_lefts[k] if side == -1 else hw_rights[k]
+				var chw2: float = hw_lefts[k + 1] if side == -1 else hw_rights[k + 1]
+				var e1: Vector2 = cp1 + cperp * chw1 * side
+				var e2: Vector2 = cp2 + cperp * chw2 * side
+				var dy1: float = _deck_surface_y_at_cached(cp1) + 0.01
+				var dy2: float = _deck_surface_y_at_cached(cp2) + 0.01
+				var cv1 := Vector3(e1.x, dy1, e1.y)
+				var cv2 := Vector3(e2.x, dy2, e2.y)
+				var cv3 := Vector3(e2.x, dy2 + curb_h, e2.y)
+				var cv4 := Vector3(e1.x, dy1 + curb_h, e1.y)
+				var face_n := (cv2 - cv1).cross(cv4 - cv1).normalized()
+				var edge_center := (cv1 + cv2) * 0.5
+				var center_3d := Vector3(cp1.x, edge_center.y, cp1.y)
+				if face_n.dot(edge_center - center_3d) < 0:
+					face_n = -face_n
+				curb_st.set_normal(face_n); curb_st.add_vertex(cv1)
+				curb_st.set_normal(face_n); curb_st.add_vertex(cv2)
+				curb_st.set_normal(face_n); curb_st.add_vertex(cv3)
+				curb_st.set_normal(face_n); curb_st.add_vertex(cv1)
+				curb_st.set_normal(face_n); curb_st.add_vertex(cv3)
+				curb_st.set_normal(face_n); curb_st.add_vertex(cv4)
+		var curb_committed := curb_st.commit()
+		if curb_committed and curb_committed.get_surface_count() > 0:
+			var curb_mi := MeshInstance3D.new()
+			curb_mi.name = "BridgeSidewalkCurb"
+			curb_mi.mesh = curb_committed
+			curb_mi.material_override = curb_mat
+			curb_mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			parent.add_child(curb_mi)
+
+
+# Creates a single asphalt apron mesh at one ramp junction. Called from
+# _register_ramp_junction when the deck is already built, or from
+# _create_bridge_deck_mesh for any junctions detected before deck build.
+func _create_single_ramp_apron(junc: Dictionary, ref_elev: float) -> void:
+	const APRON_LEN := 1.0
+	var center: Vector2 = junc.pos
+	var outward: Vector2 = junc.dir
+	var hw: float = float(junc.width) * 0.5 + 1.0
+	var ap_perp := Vector2(-outward.y, outward.x)
+
+	# Inner edge 6m inside polygon (under ramp), outer edge APRON_LEN outside
+	const INWARD := 6.0
+	var inner_l: Vector2 = center - ap_perp * hw - outward * INWARD
+	var inner_r: Vector2 = center + ap_perp * hw - outward * INWARD
+	var outer_l: Vector2 = center - ap_perp * hw + outward * APRON_LEN
+	var outer_r: Vector2 = center + ap_perp * hw + outward * APRON_LEN
+
+	# 5cm above terrain — enough to clear grass without visible floating
+	const Y_OFF := 0.05
+	var y_il: float = _sample_elevation(inner_l.x, inner_l.y) + Y_OFF
+	var y_ir: float = _sample_elevation(inner_r.x, inner_r.y) + Y_OFF
+	var y_ol: float = _sample_elevation(outer_l.x, outer_l.y) + Y_OFF
+	var y_or: float = _sample_elevation(outer_r.x, outer_r.y) + Y_OFF
+
+	var verts := PackedVector3Array([
+		Vector3(inner_l.x, y_il, inner_l.y),
+		Vector3(inner_r.x, y_ir, inner_r.y),
+		Vector3(outer_l.x, y_ol, outer_l.y),
+		Vector3(outer_r.x, y_or, outer_r.y),
+	])
+	# World-space UV (same scale as deck: 0.1 = 10m per repeat)
+	const UV_S := 0.1
+	var uvs := PackedVector2Array([
+		Vector2(inner_l.x * UV_S, inner_l.y * UV_S),
+		Vector2(inner_r.x * UV_S, inner_r.y * UV_S),
+		Vector2(outer_l.x * UV_S, outer_l.y * UV_S),
+		Vector2(outer_r.x * UV_S, outer_r.y * UV_S),
+	])
+	var norms := PackedVector3Array([Vector3.UP, Vector3.UP, Vector3.UP, Vector3.UP])
+	var idxs := PackedInt32Array([0, 2, 1, 1, 2, 3])
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_NORMAL] = norms
+	arrays[Mesh.ARRAY_INDEX] = idxs
+
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.7, 0.7, 0.7)
+	mat.roughness = 0.9
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	if _cached_road_albedo:
+		mat.albedo_texture = _cached_road_albedo
+		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+
+	var mi := MeshInstance3D.new()
+	mi.name = "RampApron"
+	mi.mesh = mesh
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	# Parent to self (same as deck mesh) so it survives chunk unloading
+	add_child(mi)
+
+	# Track with deck nodes for cleanup
+	var poly_idx: int = junc.get("poly_idx", 0)
+	if _bridge_deck_nodes.has(poly_idx):
+		_bridge_deck_nodes[poly_idx].append(mi)
+
+	# Register terrain corridor to cut grass under the apron
+	var corridor := PackedVector2Array([outer_l, outer_r, inner_r, inner_l])
+	var cx := int(floor(center.x / chunk_size))
+	var cz := int(floor(center.y / chunk_size))
+	var ck := "%d,%d" % [cx, cz]
+	if not _chunk_terrain_roads.has(ck):
+		_chunk_terrain_roads[ck] = []
+	_chunk_terrain_roads[ck].append(corridor)
+
+	print("[RampApron] created at (%.1f,%.1f) outward=(%.2f,%.2f) Y=%.2f..%.2f" % [
+		center.x, center.y, outward.x, outward.y,
+		_sample_elevation(center.x, center.y) + Y_OFF,
+		_sample_elevation(center.x + outward.x * APRON_LEN, center.y + outward.y * APRON_LEN) + Y_OFF])
+
+
+# 110 cm vertical-bar railing along the deck perimeter. Skips edges that
+# coincide with a vehicle road entry (so cars can drive on/off the deck) and
+# edges that lie on a chunk boundary (the neighbouring chunk paints its half).
+# `ref_elev` is the polygon's reference elevation — the railing Y is queried
+# via the same `_deck_surface_y_at(p, poly, 1, ref_elev)` so it matches the
+# deck mesh exactly, no per-vertex elevation noise.
+func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Node3D) -> Array:
+	var created: Array = []
+	if poly.size() < 3:
+		return created
+
+	const RAILING_HEIGHT := 1.1
+	const BAR_SPACING := 0.12
+	const BAR_RADIUS := 0.015
+	const RAIL_COLOR := Color(0.3, 0.3, 0.33)
+	const TOP_RAIL_THICKNESS := 0.04
+
+	var ck := _get_chunk_key_from_node(parent)
+	var has_chunk_rect := false
+	var chunk_rect := Rect2()
+	if not ck.is_empty():
+		chunk_rect = _get_chunk_rect_from_key(ck)
+		has_chunk_rect = true
+	var edge_tol := 0.5
+
+	var material := StandardMaterial3D.new()
+	material.albedo_color = RAIL_COLOR
+	material.metallic = 0.6
+	material.roughness = 0.5
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	st.set_material(material)
+
+	var pn := poly.size()
+	for i in range(pn):
+		var p1 := poly[i]
+		var p2 := poly[(i + 1) % pn]
+
+		if has_chunk_rect:
+			var rx := chunk_rect.position.x
+			var rz := chunk_rect.position.y
+			var rx2 := rx + chunk_rect.size.x
+			var rz2 := rz + chunk_rect.size.y
+			if absf(p1.x - rx) < edge_tol and absf(p2.x - rx) < edge_tol:
+				continue
+			if absf(p1.x - rx2) < edge_tol and absf(p2.x - rx2) < edge_tol:
+				continue
+			if absf(p1.y - rz) < edge_tol and absf(p2.y - rz) < edge_tol:
+				continue
+			if absf(p1.y - rz2) < edge_tol and absf(p2.y - rz2) < edge_tol:
+				continue
+
+		var seg_len := p1.distance_to(p2)
+		if seg_len < 0.3:
+			continue
+
+		var edge_mid := (p1 + p2) * 0.5
+		if _is_point_on_vehicle_road(edge_mid, 0.0, ""):
+			continue
+
+		# Skip edges near lateral exits (arm ramp openings)
+		var near_exit := false
+		for exit_data in _deck_lateral_exits:
+			var ep: Vector2 = exit_data.pos
+			var skip_r: float = float(exit_data.half_width) + 15.0
+			if p1.distance_to(ep) < skip_r or p2.distance_to(ep) < skip_r or edge_mid.distance_to(ep) < skip_r:
+				near_exit = true
+				break
+		if near_exit:
+			continue
+
+		var dir := (p2 - p1).normalized()
+		var outward := Vector2(-dir.y, dir.x)
+		var perp3 := Vector3(outward.x, 0, outward.y)
+		var along3 := Vector3(dir.x, 0, dir.y)
+
+		var num_bars := int(seg_len / BAR_SPACING)
+		for bi in range(num_bars + 1):
+			var t: float = float(bi) / float(maxi(num_bars, 1))
+			var bp := p1.lerp(p2, t)
+			var cx := bp.x + outward.x * 0.05
+			var cz := bp.y + outward.y * 0.05
+			var base := Vector3(cx, _deck_surface_y_at(bp, poly, 1, ref_elev), cz)
+			var hw := BAR_RADIUS
+			for face in range(4):
+				var n: Vector3
+				var off1: Vector3
+				var off2: Vector3
+				match face:
+					0: n = perp3; off1 = along3 * hw; off2 = -along3 * hw
+					1: n = -perp3; off1 = -along3 * hw; off2 = along3 * hw
+					2: n = along3; off1 = perp3 * hw; off2 = -perp3 * hw
+					3: n = -along3; off1 = -perp3 * hw; off2 = perp3 * hw
+				var v1 := base + off1 + n * hw
+				var v2 := base + off2 + n * hw
+				var v3 := v2 + Vector3(0, RAILING_HEIGHT, 0)
+				var v4 := v1 + Vector3(0, RAILING_HEIGHT, 0)
+				st.set_normal(n)
+				st.add_vertex(v1)
+				st.set_normal(n)
+				st.add_vertex(v2)
+				st.set_normal(n)
+				st.add_vertex(v3)
+				st.set_normal(n)
+				st.add_vertex(v1)
+				st.set_normal(n)
+				st.add_vertex(v3)
+				st.set_normal(n)
+				st.add_vertex(v4)
+
+		var rail_y1: float = _deck_surface_y_at(p1, poly, 1, ref_elev) + RAILING_HEIGHT
+		var rail_y2: float = _deck_surface_y_at(p2, poly, 1, ref_elev) + RAILING_HEIGHT
+		var tp1 := Vector3(p1.x + outward.x * 0.05, rail_y1, p1.y + outward.y * 0.05)
+		var tp2 := Vector3(p2.x + outward.x * 0.05, rail_y2, p2.y + outward.y * 0.05)
+		var th := TOP_RAIL_THICKNESS
+		st.set_normal(Vector3.UP)
+		st.add_vertex(tp1 + perp3 * th)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(tp2 + perp3 * th)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(tp2 - perp3 * th)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(tp1 + perp3 * th)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(tp2 - perp3 * th)
+		st.set_normal(Vector3.UP)
+		st.add_vertex(tp1 - perp3 * th)
+		st.set_normal(perp3)
+		st.add_vertex(tp1 + perp3 * th)
+		st.set_normal(perp3)
+		st.add_vertex(tp2 + perp3 * th)
+		st.set_normal(perp3)
+		st.add_vertex(tp2 + perp3 * th - Vector3(0, th, 0))
+		st.set_normal(perp3)
+		st.add_vertex(tp1 + perp3 * th)
+		st.set_normal(perp3)
+		st.add_vertex(tp2 + perp3 * th - Vector3(0, th, 0))
+		st.set_normal(perp3)
+		st.add_vertex(tp1 + perp3 * th - Vector3(0, th, 0))
+
+	var committed := st.commit()
+	if committed == null or committed.get_surface_count() == 0:
+		return created
+
+	var mesh_inst := MeshInstance3D.new()
+	mesh_inst.name = "BridgeDeckRailing"
+	mesh_inst.mesh = committed
+	mesh_inst.material_override = material
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mesh_inst)
+	created.append(mesh_inst)
+
+	var coll_body := StaticBody3D.new()
+	coll_body.name = "DeckRailingCollision"
+	coll_body.collision_layer = 2
+	for i in range(pn):
+		var p1 := poly[i]
+		var p2 := poly[(i + 1) % pn]
+		var seg_len := p1.distance_to(p2)
+		if seg_len < 1.0:
+			continue
+		if has_chunk_rect:
+			var rx := chunk_rect.position.x
+			var rz := chunk_rect.position.y
+			var rx2 := rx + chunk_rect.size.x
+			var rz2 := rz + chunk_rect.size.y
+			if absf(p1.x - rx) < edge_tol and absf(p2.x - rx) < edge_tol:
+				continue
+			if absf(p1.x - rx2) < edge_tol and absf(p2.x - rx2) < edge_tol:
+				continue
+			if absf(p1.y - rz) < edge_tol and absf(p2.y - rz) < edge_tol:
+				continue
+			if absf(p1.y - rz2) < edge_tol and absf(p2.y - rz2) < edge_tol:
+				continue
+		var mid_pt := (p1 + p2) * 0.5
+		if _is_point_on_vehicle_road(mid_pt, 1.0, ""):
+			continue
+		var coll_deck_y: float = _deck_surface_y_at(mid_pt, poly, 1, ref_elev)
+		var coll_shape_node := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		box.size = Vector3(seg_len, RAILING_HEIGHT, 0.1)
+		coll_shape_node.shape = box
+		var angle := atan2(p2.y - p1.y, p2.x - p1.x)
+		coll_shape_node.position = Vector3(mid_pt.x, coll_deck_y + RAILING_HEIGHT * 0.5, mid_pt.y)
+		coll_shape_node.rotation.y = -angle
+		coll_body.add_child(coll_shape_node)
+	parent.add_child(coll_body)
+	created.append(coll_body)
+	return created
+
+# === End restored bridge deck section =======================================
 
 
 func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: String, height_offset: float, parent: Node3D) -> void:
@@ -6295,32 +8329,59 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 				if in_chunk:
 					relevant_parking.append(parking_poly)
 
-	# Собираем водные полигоны из 3x3 соседей, расширенные на SHORE_WIDTH для выреза
+	# Собираем водные полигоны из глобального реестра — каждый full polygon
+	# зарегистрирован один раз, чанки находят его по AABB пересечению. Это
+	# покрывает чанки внутри огромных полигонов (Рыбинское вдхр), которые
+	# не получили way в своих OSM-данных.
 	var relevant_water_shore: Array[PackedVector2Array] = []
+	# Per-chunk water polygons we'll render mesh + shore for.
+	var per_chunk_water: Array[PackedVector2Array] = []
 	if enable_water:
-		for dx2 in range(-1, 2):
-			for dz2 in range(-1, 2):
-				var nk := "%d,%d" % [ck_x + dx2, ck_z + dz2]
-				if _chunk_water_polygons.has(nk):
-					for water_poly in _chunk_water_polygons[nk]:
-						if water_poly.size() < 3:
-							continue
-						# Проверяем пересечение с чанком (грубая проверка по AABB)
-						var in_chunk := false
-						for wp in water_poly:
-							if wp.x >= ch_min_x - SHORE_WIDTH - 5.0 and wp.x <= ch_max_x + SHORE_WIDTH + 5.0 and wp.y >= ch_min_z - SHORE_WIDTH - 5.0 and wp.y <= ch_max_z + SHORE_WIDTH + 5.0:
-								in_chunk = true
-								break
-						if in_chunk:
-							# Расширяем полигон на SHORE_WIDTH для выреза из террейна
-							# offset_polygon: positive delta расширяет CCW, сужает CW
-							var delta := SHORE_WIDTH
-							if not _is_polygon_ccw(water_poly):
-								delta = -delta
-							var expanded := Geometry2D.offset_polygon(water_poly, delta)
-							for ep in expanded:
-								if ep.size() >= 3:
-									relevant_water_shore.append(ep)
+		var inflated := Rect2(
+			ch_min_x - SHORE_WIDTH - 5.0,
+			ch_min_z - SHORE_WIDTH - 5.0,
+			(ch_max_x - ch_min_x) + 2 * (SHORE_WIDTH + 5.0),
+			(ch_max_z - ch_min_z) + 2 * (SHORE_WIDTH + 5.0)
+		)
+		var chunk_rect_clip := PackedVector2Array([
+			Vector2(ch_min_x, ch_min_z),
+			Vector2(ch_max_x, ch_min_z),
+			Vector2(ch_max_x, ch_max_z),
+			Vector2(ch_min_x, ch_max_z),
+		])
+		for i in _global_water_polygons.size():
+			var bbox: Rect2 = _global_water_polygon_bboxes[i]
+			if not bbox.intersects(inflated):
+				continue
+			var water_poly: PackedVector2Array = _global_water_polygons[i]
+			if water_poly.size() < 3:
+				continue
+			# Clip polygon to chunk rect for water mesh + per-chunk
+			# polygon list (used by shore "facing open water" check).
+			for clipped_w in Geometry2D.intersect_polygons(water_poly, chunk_rect_clip):
+				if clipped_w.size() >= 3:
+					per_chunk_water.append(clipped_w)
+			# Расширяем полигон на SHORE_WIDTH для выреза из террейна
+			var delta := SHORE_WIDTH
+			if not _is_polygon_ccw(water_poly):
+				delta = -delta
+			var expanded := Geometry2D.offset_polygon(water_poly, delta)
+			for ep in expanded:
+				if ep.size() >= 3:
+					relevant_water_shore.append(ep)
+	# Render water mesh + shore for this chunk's slices of global polygons.
+	# Without this the terrain hole has no water filling it (chunk falls
+	# into empty void below the road / bridge).
+	if not per_chunk_water.is_empty():
+		# Update per-chunk water hash so other queries (point-in-water,
+		# tree placement) see this chunk's water — even though the way
+		# wasn't in this chunk's OSM data.
+		if not _chunk_water_polygons.has(chunk_key):
+			_chunk_water_polygons[chunk_key] = []
+		for cw in per_chunk_water:
+			_chunk_water_polygons[chunk_key].append(cw)
+			_create_polygon_mesh_with_texture(cw, "water", WATER_Y, parent_node, true)
+			call_deferred("_create_shore_mesh", cw, parent_node)
 
 	# Отправляем клиппинг в worker thread (тяжёлая операция O(n²))
 	var chunk_rect := PackedVector2Array([
@@ -7972,11 +10033,19 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -
 	var clipped_polys := _clip_polygon_to_chunk(points, chunk_key)
 	for clipped in clipped_polys:
 		if is_water and enable_water:
-			_register_water_polygon(clipped, parent)
-			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
-			_create_shore_mesh(clipped, parent)
+			# Water mesh + shore are now rendered globally per chunk in
+			# _create_deferred_terrain — that handles chunks deep inside a
+			# huge polygon (whose data didn't return the way at all) the
+			# same as chunks holding boundary nodes. Just register it.
+			pass
 		elif texture_key != "grass" and not is_water and enable_vegetation:
-			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
+			# Skip land polygons (forest, etc.) whose centroid sits inside a
+			# registered water polygon — OSM occasionally has natural=wood
+			# overlapping rivers/reservoirs, and the green forest mesh at
+			# Y=elev-0.02 would otherwise hide the water at Y=elev+WATER_Y.
+			var clipped_center := _get_polygon_center(clipped)
+			if not _is_point_in_water(clipped_center, chunk_key):
+				_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
 		# Генерируем густые деревья внутри лесных полигонов
 		if natural_type in ["wood", "tree_row"]:
 			_generate_trees_in_polygon(clipped, parent, true)
@@ -8042,11 +10111,13 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 		if has_tree_override:
 			_generate_trees_in_polygon(clipped, parent, dense_override)
 		if is_water and enable_water:
-			_register_water_polygon(clipped, parent)
-			_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
-			_create_shore_mesh(clipped, parent)
+			# See _create_natural_immediate: water mesh + shore is rendered
+			# globally in _create_deferred_terrain, not per-immediate-poly.
+			pass
 		elif texture_key != "grass" and not is_water and enable_vegetation:
-			_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
+			var clipped_center := _get_polygon_center(clipped)
+			if not _is_point_in_water(clipped_center, chunk_key):
+				_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
 		if landuse_type == "forest":
 			_generate_trees_in_polygon(clipped, parent, true)
 
@@ -8564,6 +10635,35 @@ func _waterway_to_polygon(points: PackedVector2Array, width: float) -> PackedVec
 	return result
 
 
+## Registers a water polygon globally (deduped by hash) so every chunk's
+## terrain cutout / lookup can see it, even if its OSM data didn't return
+## the way (huge polygons appear only in chunks holding a boundary node).
+func _register_global_water_polygon(full_points: PackedVector2Array) -> void:
+	if full_points.size() < 3:
+		return
+	# Cheap hash: first 3 points (32-bit fixed-point) — stable across chunks
+	# that all derive coords from the same start_lat/start_lon.
+	var h: int = 0
+	for i in range(mini(3, full_points.size())):
+		h = (h * 1000003) ^ int(full_points[i].x * 1000.0)
+		h = (h * 1000003) ^ int(full_points[i].y * 1000.0)
+	if _global_water_polygon_hashes.has(h):
+		return
+	_global_water_polygon_hashes[h] = _global_water_polygons.size()
+	_global_water_polygons.append(full_points)
+	# Compute AABB for fast polygon-skip in lookups.
+	var min_x := full_points[0].x
+	var max_x := min_x
+	var min_y := full_points[0].y
+	var max_y := min_y
+	for p in full_points:
+		min_x = minf(min_x, p.x)
+		max_x = maxf(max_x, p.x)
+		min_y = minf(min_y, p.y)
+		max_y = maxf(max_y, p.y)
+	_global_water_polygon_bboxes.append(Rect2(min_x, min_y, max_x - min_x, max_y - min_y))
+
+
 ## Регистрирует водный полигон в _chunk_water_polygons для terrain clipping и per-chunk spatial hash
 func _register_water_polygon(points: PackedVector2Array, parent: Node3D) -> void:
 	var ck := _get_chunk_key_from_node(parent)
@@ -8660,6 +10760,16 @@ func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 	# Chunk boundary tolerance for edge detection
 	var edge_tol := 0.5  # meters
 
+	# Other water polygons in this chunk — used to skip shore edges that face
+	# open water (e.g. narrow river strip embedded inside the reservoir).
+	# Restored from 53b0537 — depends on call_deferred so larger polygon was
+	# registered earlier this frame.
+	var other_water_polys: Array = []
+	if not shore_ck.is_empty():
+		for ex: PackedVector2Array in _chunk_water_polygons.get(shore_ck, []):
+			if ex.size() >= 3 and ex != poly:
+				other_water_polys.append(ex)
+
 	for ei in range(pn):
 		var i0 := ei
 		var i1 := (ei + 1) % pn
@@ -8689,6 +10799,18 @@ func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 		var in1 := poly[i1]
 		var out0 := outer[i0]
 		var out1 := outer[i1]
+
+		# Skip shore edge if its outer-top midpoint is inside another water
+		# polygon (this edge is not a real shoreline — it's facing open water).
+		if not other_water_polys.is_empty():
+			var mid := (out0 + out1) * 0.5
+			var in_other := false
+			for ow: PackedVector2Array in other_water_polys:
+				if Geometry2D.is_point_in_polygon(mid, ow):
+					in_other = true
+					break
+			if in_other:
+				continue
 		# Нормаль наклонной поверхности (примерно 45° наружу-вверх)
 		var edge_dir := (in1 - in0).normalized()
 		var outward_2d := Vector2(edge_dir.y, -edge_dir.x) * out_sign
@@ -8795,7 +10917,10 @@ func _create_waterway(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	for clipped in clipped_polys:
 		_register_water_polygon(clipped, parent)
 		_create_polygon_mesh_with_texture(clipped, "water", WATER_Y, parent, true)
-		_create_shore_mesh(clipped, parent)
+		# No shore for waterway=* lines: rivers/canals/streams are typically
+		# inside a larger natural=water polygon (which has its own shore), or
+		# they are too narrow to want banks of their own. Drawing shore here
+		# put two brown stripes through the middle of every big river.
 
 func _create_3d_building(points: PackedVector2Array, color: Color, building_height: float, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
 	# Минимум 4 точки для нормального здания (3 - треугольник, плохо)
@@ -10370,7 +12495,8 @@ func _process_curb_queue() -> void:
 				"width": item.width,
 				"height_offset": item.height_offset,
 				"curb_height": item.curb_height,
-				"parent": item.parent
+				"parent": item.parent,
+				"way_id": item.get("way_id", 0),  # Stage 2B: keep way_id for ramp sampler
 			})
 			smoothed_count += 1
 
@@ -10454,8 +12580,22 @@ func _init_curb_mesh_state(item: Dictionary) -> void:
 	if not current_group.is_empty():
 		groups.append(current_group)
 
+	# Stage 2B: cumulative centerline distance for ramp sampler. Starts at 0
+	# at the chunk-clipped first point. Distances are informational only —
+	# the way-aware sampler uses point projection, not absolute distance.
+	var cum_dist: PackedFloat32Array = PackedFloat32Array()
+	cum_dist.resize(points.size())
+	if points.size() > 0:
+		cum_dist[0] = 0.0
+		var acc: float = 0.0
+		for i in range(1, points.size()):
+			acc += points[i - 1].distance_to(points[i])
+			cum_dist[i] = acc
+
 	_curb_mesh_state = {
 		"points": points,
+		"cum_dist": cum_dist,
+		"way_id": int(item.get("way_id", 0)),
 		"road_width": road_width,
 		"road_height": item.height_offset,
 		"curb_height": curb_height,
@@ -10522,9 +12662,15 @@ func _process_curb_segments(max_count: int) -> int:
 			if avg.length_squared() > 0.001:
 				perp2 = avg.normalized()
 
-		# Elevation в центре и на краях — как дорога использует maxf(edge, center)
-		var h_center1 := _sample_elevation(p1.x, p1.y)
-		var h_center2 := _sample_elevation(p2.x, p2.y)
+		# Stage 2B: elevation through the way-aware ramp sampler so curbs
+		# follow the same Y the road centerline used. Pass road_y_offset=0
+		# because the curb code adds its own offsets below.
+		var curb_way_id: int = int(state.get("way_id", 0))
+		var cum_dist_arr: PackedFloat32Array = state.get("cum_dist", PackedFloat32Array())
+		var cl_d1: float = cum_dist_arr[i] if i < cum_dist_arr.size() else 0.0
+		var cl_d2: float = cum_dist_arr[i + 1] if (i + 1) < cum_dist_arr.size() else cl_d1
+		var h_center1 := _road_sample_y_for_way(curb_way_id, p1, cl_d1, 0.0)
+		var h_center2 := _road_sample_y_for_way(curb_way_id, p2, cl_d2, 0.0)
 
 		var left_inner1 := p1 + perp1 * (road_width * 0.5)
 		var left_outer1 := p1 + perp1 * (road_width * 0.5 + curb_width)
@@ -10763,7 +12909,13 @@ func _sort_queue_by_distance(queue: Array, player_pos: Vector3) -> void:
 
 	# Вычисляем расстояние для каждого элемента
 	for item in queue:
-		var first_node = item.nodes[0] if item.nodes.size() > 0 else null
+		# bridge_deck items use a "polygon" (local-coord) instead of "nodes".
+		var poly = item.get("polygon", null)
+		if poly is PackedVector2Array and poly.size() > 0:
+			item["_dist"] = poly[0].distance_squared_to(player_pos_2d)
+			continue
+		var nodes_arr = item.get("nodes", [])
+		var first_node = nodes_arr[0] if (nodes_arr is Array and nodes_arr.size() > 0) else null
 		if first_node:
 			var pos_2d := _latlon_to_local(first_node.lat, first_node.lon)
 			item["_dist"] = pos_2d.distance_squared_to(player_pos_2d)
@@ -10839,11 +12991,13 @@ func _process_terrain_objects_queue() -> void:
 
 		var item: Dictionary = _terrain_objects_queue.pop_front()
 
-		# Проверяем что parent ещё существует
-		if not is_instance_valid(item.get("parent")):
-			continue
-
 		var obj_type: String = item.get("type", "")
+		# Bridge decks parent themselves to `self`, not to chunks; the
+		# chunk that originally queued them may already have unloaded but
+		# the deck must still build (it's per-relation, not per-chunk).
+		# Other types still require their owning chunk to be alive.
+		if obj_type != "bridge_deck" and not is_instance_valid(item.get("parent")):
+			continue
 		var t0 := Time.get_ticks_usec()
 
 		match obj_type:
@@ -10856,6 +13010,28 @@ func _process_terrain_objects_queue() -> void:
 			"leisure":
 				_create_leisure_immediate(item.nodes, item.tags, item.parent, item.get("way_id", 0))
 				_record_perf("terrain_leisure", Time.get_ticks_usec() - t0)
+			"bridge_deck":
+				var poly: PackedVector2Array = item.get("polygon", PackedVector2Array())
+				var poly_idx: int = _bridge_deck_polygons.find(poly)
+				# Defer until both abutment (long-axis) chunks have
+				# elevation. That's all we need for ref_elev — the rest of
+				# the polygon uses the constant ref_elev as its baseline.
+				# Long bridges (Oktyabrsky 1 km) span more chunks than the
+				# streaming radius ever covers, so requiring full coverage
+				# would never resolve.
+				var ref_elev: float = _compute_and_cache_deck_ref_elev(poly_idx)
+				if is_nan(ref_elev):
+					deferred.append(item)
+					continue
+				# Parent the deck to self, not to the chunk that happened to
+				# spawn it: a 1 km bridge mesh otherwise gets hidden the
+				# moment its owner chunk falls behind the camera-direction
+				# culler (~315 m behind), even though the player is still
+				# driving on top of it. reset_terrain() frees orphan deck
+				# nodes via _bridge_deck_nodes.
+				var deck_parent: Node3D = self
+				_create_bridge_deck_mesh(poly, item.get("tags", {}), deck_parent, poly)
+				_record_perf("terrain_bridge_deck", Time.get_ticks_usec() - t0)
 
 		processed += 1
 
@@ -10971,7 +13147,10 @@ func _process_vegetation_queue() -> void:
 		var ck_parking_polys: Array = ck_parking_data.get("polys", [])
 		var ck_water_data: Dictionary = _chunk_water_hashes.get(chunk_key, {})
 		var ck_water_hash: Dictionary = ck_water_data.get("hash", {})
-		var ck_water_polys: Array = ck_water_data.get("polys", [])
+		# Pass GLOBAL water polygons to the vegetation worker so trees scattered
+		# inside a forest polygon that overlaps a huge water polygon (whose
+		# nodes aren't in this chunk's OSM data) still detect "in water".
+		var ck_water_polys: Array = _global_water_polygons.duplicate()
 
 		var elev_grid: Dictionary = _chunk_elevation_data.get(chunk_key, {})
 		var base_elev: float = 0.0
@@ -12852,6 +15031,25 @@ func _get_way_center(nodes: Array) -> Vector2:
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		center += local
 	return center / nodes.size()
+
+
+## Returns axis-aligned bounding box of a way's nodes in local coordinates.
+## Used to filter huge water polygons by bbox-overlap instead of centroid
+## (centroid of a 11-km-long reservoir lies nowhere near any single chunk).
+func _get_way_local_bbox(nodes: Array) -> Rect2:
+	if nodes.size() == 0:
+		return Rect2()
+	var first: Vector2 = _latlon_to_local(nodes[0].lat, nodes[0].lon)
+	var min_pt := first
+	var max_pt := first
+	for i in range(1, nodes.size()):
+		var p: Vector2 = _latlon_to_local(nodes[i].lat, nodes[i].lon)
+		min_pt.x = minf(min_pt.x, p.x)
+		min_pt.y = minf(min_pt.y, p.y)
+		max_pt.x = maxf(max_pt.x, p.x)
+		max_pt.y = maxf(max_pt.y, p.y)
+	return Rect2(min_pt, max_pt - min_pt)
+
 
 ## Get chunk key from parent node name (e.g. "Chunk_1_2" -> "1,2")
 func _get_chunk_key_from_node(node: Node3D) -> String:
@@ -15679,48 +17877,29 @@ func _is_point_in_any_parking(point: Vector2, ck: String = "") -> bool:
 
 
 ## Проверяет, находится ли точка внутри водного полигона (main thread)
-func _is_point_in_water(point: Vector2, ck: String = "") -> bool:
-	var cell_x := int(floor(point.x / WATER_CELL_SIZE))
-	var cell_y := int(floor(point.y / WATER_CELL_SIZE))
-	var chunks_to_check: Array = [ck] if ck != "" else _chunk_water_hashes.keys()
-	for c in chunks_to_check:
-		if not _chunk_water_hashes.has(c):
+func _is_point_in_water(point: Vector2, _ck: String = "") -> bool:
+	# Use the global polygon list — it contains every water polygon
+	# registered by ANY chunk (deduped by hash) and so works for chunks
+	# whose own OSM data didn't return the relation. AABB pre-check
+	# skips polygons not near the point in O(1).
+	for i in _global_water_polygons.size():
+		var bbox: Rect2 = _global_water_polygon_bboxes[i]
+		if not bbox.has_point(point):
 			continue
-		var data: Dictionary = _chunk_water_hashes[c]
-		var h: Dictionary = data.get("hash", {})
-		var polys: Array = data.get("polys", [])
-		for dx in range(-1, 2):
-			for dy in range(-1, 2):
-				var key := Vector2i(cell_x + dx, cell_y + dy)
-				if not h.has(key):
-					continue
-				for entry in h[key]:
-					var widx: int = entry.idx
-					if widx < polys.size():
-						var wp: PackedVector2Array = polys[widx]
-						if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
-							return true
+		var wp: PackedVector2Array = _global_water_polygons[i]
+		if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
+			return true
 	return false
 
 
 ## Проверяет, находится ли точка внутри водного полигона (thread-safe)
-static func _is_point_in_water_threadsafe(point: Vector2, water_hash: Dictionary, water_polys: Array) -> bool:
-	var cell_x := int(floor(point.x / WATER_CELL_SIZE))
-	var cell_y := int(floor(point.y / WATER_CELL_SIZE))
-	var checked: Dictionary = {}
-	for dx in range(-1, 2):
-		for dy in range(-1, 2):
-			var key := Vector2i(cell_x + dx, cell_y + dy)
-			if not water_hash.has(key):
-				continue
-			for entry in water_hash[key]:
-				var widx: int = entry.idx
-				if not checked.has(widx):
-					checked[widx] = true
-					if widx < water_polys.size():
-						var wp: PackedVector2Array = water_polys[widx]
-						if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
-							return true
+## water_polys here is the GLOBAL list (full polygons), passed by snapshot
+## to worker threads via task_data. AABB pre-check is folded into the
+## main-thread version; here we just iterate (workers tolerate latency).
+static func _is_point_in_water_threadsafe(point: Vector2, _water_hash: Dictionary, water_polys: Array) -> bool:
+	for wp in water_polys:
+		if wp.size() >= 3 and Geometry2D.is_point_in_polygon(point, wp):
+			return true
 	return false
 
 
@@ -18001,35 +20180,32 @@ func _clip_polyline_to_rect(points: PackedVector2Array, min_x: float, max_x: flo
 
 
 func _clip_segment_to_rect_segment(a: Vector2, b: Vector2, min_x: float, max_x: float, min_z: float, max_z: float) -> PackedVector2Array:
+	# Liang-Barsky line clipping. Inlined (no lambda) because GDScript
+	# lambdas capture floats by value, breaking t0/t1 mutation across calls.
 	var dx := b.x - a.x
 	var dy := b.y - a.y
 	var t0 := 0.0
 	var t1 := 1.0
-
-	var clip_test := func(p: float, q: float) -> bool:
+	var ps: Array[float] = [-dx, dx, -dy, dy]
+	var qs: Array[float] = [a.x - min_x, max_x - a.x, a.y - min_z, max_z - a.y]
+	for i in range(4):
+		var p: float = ps[i]
+		var q: float = qs[i]
 		if absf(p) < 0.000001:
-			return q >= 0.0
-		var r := q / p
+			if q < 0.0:
+				return PackedVector2Array()
+			continue
+		var r: float = q / p
 		if p < 0.0:
 			if r > t1:
-				return false
+				return PackedVector2Array()
 			if r > t0:
 				t0 = r
 		else:
 			if r < t0:
-				return false
+				return PackedVector2Array()
 			if r < t1:
 				t1 = r
-		return true
-
-	if not clip_test.call(-dx, a.x - min_x):
-		return PackedVector2Array()
-	if not clip_test.call(dx, max_x - a.x):
-		return PackedVector2Array()
-	if not clip_test.call(-dy, a.y - min_z):
-		return PackedVector2Array()
-	if not clip_test.call(dy, max_z - a.y):
-		return PackedVector2Array()
 	if t1 < t0:
 		return PackedVector2Array()
 

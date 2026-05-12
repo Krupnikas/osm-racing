@@ -5,8 +5,8 @@ extends Control
 ## Карта вращается под игрока (направление движения всегда вверх)
 
 # Константы отрисовки
-const MAP_RADIUS := 200.0        # Радиус карты в пикселях (2x)
-const MAP_CENTER := Vector2(210, 210)  # Центр карты (с отступом от края)
+const MAP_RADIUS := 130.0        # Радиус карты в пикселях
+const MAP_CENTER := Vector2(140, 140)  # Центр карты (с отступом от края)
 const WORLD_RADIUS := 150.0      # Радиус видимости в мировых метрах
 const CACHE_EXTRA_RADIUS := 100.0  # Дополнительный радиус кэширования (впереди и сзади)
 
@@ -73,7 +73,7 @@ const WORK_EDGE_MARKER_SIZE := 10.0  # Размер маркера на краю
 
 
 func _ready() -> void:
-	custom_minimum_size = Vector2(420, 420)
+	custom_minimum_size = Vector2(280, 280)
 
 	# Ждём один кадр чтобы сцена полностью загрузилась
 	await get_tree().process_frame
@@ -239,10 +239,12 @@ func _draw_roads(player_pos: Vector3, player_rotation: float) -> void:
 		var rel1 := p1 - player_pos_2d
 		var rel2 := p2 - player_pos_2d
 
-		# Грубый clip по дистанции
-		var dist1 := rel1.length()
-		var dist2 := rel2.length()
-		if dist1 > WORLD_RADIUS * 1.5 and dist2 > WORLD_RADIUS * 1.5:
+		# Грубый clip: проверяем расстояние от ОТРЕЗКА до игрока, а не от
+		# концов. Иначе длинные segments (как 720m primary мостов с 2-node
+		# way'ями) выпадают, когда игрок между их концами.
+		var seg_to_player := Geometry2D.get_closest_point_to_segment(
+			Vector2.ZERO, rel1, rel2)
+		if seg_to_player.length() > WORLD_RADIUS * 1.5:
 			continue
 
 		# Вращаем
@@ -269,13 +271,16 @@ func _draw_roads(player_pos: Vector3, player_rotation: float) -> void:
 			var edge_pt := _clip_to_circle(inside_pt, outside_pt)
 			draw_line(inside_pt, edge_pt, style.color, style.width, true)
 		else:
-			# Обе точки снаружи - проверяем пересечение с кругом
-			# Упрощённая проверка: если линия близка к центру, рисуем
-			var mid := (screen1 + screen2) / 2.0
-			if (mid - MAP_CENTER).length() <= MAP_RADIUS:
-				# Находим точки пересечения
-				var clip1 := _clip_to_circle(MAP_CENTER, screen1)
-				var clip2 := _clip_to_circle(MAP_CENTER, screen2)
+			# Обе точки снаружи. Сегмент всё ещё может пересекать круг —
+			# например 720m мостовой way с двумя нодами и игроком где-то
+			# посередине. Проверяем кратчайшее расстояние от MAP_CENTER до
+			# отрезка screen1→screen2; если ≤ MAP_RADIUS, считаем точки
+			# пересечения и рисуем хорду.
+			var closest := Geometry2D.get_closest_point_to_segment(
+				MAP_CENTER, screen1, screen2)
+			if closest.distance_to(MAP_CENTER) <= MAP_RADIUS:
+				var clip1 := _clip_to_circle(closest, screen1)
+				var clip2 := _clip_to_circle(closest, screen2)
 				draw_line(clip1, clip2, style.color, style.width, true)
 
 

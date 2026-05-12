@@ -31,6 +31,15 @@ func run_all_tests() -> void:
 	test_is_way_on_bridge_deck()
 	test_bridge_deck_not_found_when_empty()
 	test_prescan_skips_blacklisted_ways()
+	test_polygon_axis_ends_finds_long_axis_extremes()
+	test_compute_ref_elev_returns_max_axis_end_elev()
+	test_compute_ref_elev_returns_nan_when_axis_chunks_missing()
+	test_compute_ref_elev_caches_result()
+	test_deck_surface_y_constant_in_middle()
+	test_deck_surface_y_lerps_at_axis_ends()
+	test_deck_surface_y_handles_unloaded_local_via_ref_fallback()
+	test_deck_surface_y_at_cached_returns_terrain_outside_deck()
+	test_deck_surface_y_at_cached_uses_polygon_ref_elev()
 
 	print("\n=== Results ===")
 	print("Passed: %d" % tests_passed)
@@ -268,4 +277,210 @@ func test_bridge_deck_not_found_when_empty() -> void:
 	var nodes := [{"lat": 0.0, "lon": 0.0}, {"lat": 0.001, "lon": 0.0}]
 	_assert(not gen._is_way_on_bridge_deck(nodes),
 		"no_deck_way_returns_false")
+	gen.free()
+
+
+# === Polygon axis ends + ref_elev (post-merge restoration) ===
+
+# Build a uniform 5×5 elevation grid covering one chunk and stash it under
+# `chunk_key`. `chunk_size` matches the gen's chunk_size; the grid origin
+# is at the chunk's local bottom-left corner.
+func _stash_uniform_elev(gen: Node3D, chunk_x: int, chunk_z: int, elev: float) -> void:
+	var step: float = gen.chunk_size / 4.0  # 5 samples → 4 intervals
+	var grid := []
+	for _r in 5:
+		var row := []
+		for _c in 5:
+			row.append(elev)
+		grid.append(row)
+	var ck := "%d,%d" % [chunk_x, chunk_z]
+	gen._chunk_elevation_data[ck] = {
+		"grid": grid,
+		"grid_res": 5,
+		"base_x": float(chunk_x) * gen.chunk_size,
+		"base_z": float(chunk_z) * gen.chunk_size,
+		"grid_step": step,
+	}
+
+
+func test_polygon_axis_ends_finds_long_axis_extremes() -> void:
+	var gen := _make_gen()
+	# Wide rectangle 600×30, long axis runs along x.
+	var poly := PackedVector2Array([
+		Vector2(-300, -15), Vector2(300, -15),
+		Vector2(300, 15), Vector2(-300, 15),
+	])
+	gen._bridge_deck_polygons.append(poly)
+	var ends: Array = gen._polygon_axis_ends(poly)
+	# The two axis ends should be on opposite long sides (x ≈ ±300, |x|≈300).
+	var xs := [absf(ends[0].x), absf(ends[1].x)]
+	xs.sort()
+	_assert(xs[0] >= 290.0 and xs[1] >= 290.0,
+		"axis_ends_at_long_axis_extremes",
+		"got %s" % str(ends))
+	gen.free()
+
+
+func test_compute_ref_elev_returns_max_axis_end_elev() -> void:
+	var gen := _make_gen()
+	gen.enable_elevation = true
+	# Long polygon spanning chunks 0..2 (chunk_size=200 → x ∈ [-100, 500]).
+	var poly := PackedVector2Array([
+		Vector2(-100, -10), Vector2(500, -10),
+		Vector2(500, 10), Vector2(-100, 10),
+	])
+	gen._bridge_deck_polygons.append(poly)
+	# axis_a (-100, ?) → chunk -1 (since floor(-100/200) = -1)
+	# axis_b (500, ?)  → chunk 2  (since floor(500/200)  = 2)
+	_stash_uniform_elev(gen, -1, 0, 110.0)  # bank_a
+	_stash_uniform_elev(gen, 2, 0, 115.0)   # bank_b (higher)
+	var ref_elev: float = gen._compute_and_cache_deck_ref_elev(0)
+	_assert(absf(ref_elev - 115.0) < 0.5,
+		"ref_elev_is_max_of_axis_end_elevs",
+		"expected ~115, got %.2f" % ref_elev)
+	gen.free()
+
+
+func test_compute_ref_elev_returns_nan_when_axis_chunks_missing() -> void:
+	var gen := _make_gen()
+	gen.enable_elevation = true
+	var poly := PackedVector2Array([
+		Vector2(-100, -10), Vector2(500, -10),
+		Vector2(500, 10), Vector2(-100, 10),
+	])
+	gen._bridge_deck_polygons.append(poly)
+	_stash_uniform_elev(gen, -1, 0, 110.0)  # only one abutment loaded
+	var ref_elev: float = gen._compute_and_cache_deck_ref_elev(0)
+	_assert(is_nan(ref_elev),
+		"ref_elev_nan_when_one_abutment_chunk_missing",
+		"expected NAN, got %s" % str(ref_elev))
+	gen.free()
+
+
+func test_compute_ref_elev_caches_result() -> void:
+	var gen := _make_gen()
+	gen.enable_elevation = true
+	var poly := PackedVector2Array([
+		Vector2(-100, -10), Vector2(500, -10),
+		Vector2(500, 10), Vector2(-100, 10),
+	])
+	gen._bridge_deck_polygons.append(poly)
+	_stash_uniform_elev(gen, -1, 0, 110.0)
+	_stash_uniform_elev(gen, 2, 0, 115.0)
+	var first: float = gen._compute_and_cache_deck_ref_elev(0)
+	# Now wipe the elevation grid — cached value should still come back.
+	gen._chunk_elevation_data.clear()
+	var second: float = gen._compute_and_cache_deck_ref_elev(0)
+	_assert(absf(first - second) < 0.001,
+		"ref_elev_cached_after_first_compute",
+		"first=%.2f second=%.2f" % [first, second])
+	gen.free()
+
+
+func test_deck_surface_y_constant_in_middle() -> void:
+	var gen := _make_gen()
+	gen.enable_elevation = true
+	# 600m long polygon → flat middle is far from BRIDGE_RAMP_LENGTH (35m)
+	# from either axis end.
+	var poly := PackedVector2Array([
+		Vector2(-300, -15), Vector2(300, -15),
+		Vector2(300, 15), Vector2(-300, 15),
+	])
+	gen._bridge_deck_polygons.append(poly)
+	_stash_uniform_elev(gen, -2, 0, 100.0)  # axis_a chunk
+	_stash_uniform_elev(gen, 1, 0, 110.0)   # axis_b chunk
+	var ref_elev: float = gen._compute_and_cache_deck_ref_elev(0)
+	# A point at x=0 (middle): t == 1, Y must be ref_elev + BRIDGE_DECK_HEIGHT.
+	var y_mid: float = gen._deck_surface_y_at(Vector2(0, 0), poly, 1, ref_elev)
+	var expected: float = ref_elev + gen.BRIDGE_DECK_HEIGHT
+	_assert(absf(y_mid - expected) < 0.01,
+		"deck_y_constant_in_flat_middle",
+		"expected %.2f, got %.2f (ref=%.2f)" % [expected, y_mid, ref_elev])
+	gen.free()
+
+
+func test_deck_surface_y_lerps_at_axis_ends() -> void:
+	var gen := _make_gen()
+	gen.enable_elevation = true
+	var poly := PackedVector2Array([
+		Vector2(-300, -15), Vector2(300, -15),
+		Vector2(300, 15), Vector2(-300, 15),
+	])
+	gen._bridge_deck_polygons.append(poly)
+	# Left abutment chunk at 100m, right at 110m → ref_elev = 110m
+	_stash_uniform_elev(gen, -2, 0, 100.0)
+	_stash_uniform_elev(gen, 1, 0, 110.0)
+	var ref_elev: float = gen._compute_and_cache_deck_ref_elev(0)
+	# Point on axis_a (x=-300): t=0, Y == local elev (= 100) + 0
+	var y_at_axis_a: float = gen._deck_surface_y_at(Vector2(-300, 0), poly, 1, ref_elev)
+	_assert(absf(y_at_axis_a - 100.0) < 1.0,
+		"deck_y_lerps_to_local_at_axis_a",
+		"expected ~100, got %.2f" % y_at_axis_a)
+	# Point at axis_b (x=300): t=0, Y == local elev (= 110)
+	var y_at_axis_b: float = gen._deck_surface_y_at(Vector2(300, 0), poly, 1, ref_elev)
+	_assert(absf(y_at_axis_b - 110.0) < 1.0,
+		"deck_y_lerps_to_local_at_axis_b",
+		"expected ~110, got %.2f" % y_at_axis_b)
+	# Point 35m+ inside: Y == ref_elev + BRIDGE_DECK_HEIGHT
+	var y_inside: float = gen._deck_surface_y_at(Vector2(-260, 0), poly, 1, ref_elev)
+	var expected_inside: float = ref_elev + gen.BRIDGE_DECK_HEIGHT
+	_assert(absf(y_inside - expected_inside) < 0.5,
+		"deck_y_at_full_deck_after_ramp_zone",
+		"expected ~%.2f, got %.2f" % [expected_inside, y_inside])
+	gen.free()
+
+
+func test_deck_surface_y_handles_unloaded_local_via_ref_fallback() -> void:
+	var gen := _make_gen()
+	gen.enable_elevation = true
+	var poly := PackedVector2Array([
+		Vector2(-300, -15), Vector2(300, -15),
+		Vector2(300, 15), Vector2(-300, 15),
+	])
+	gen._bridge_deck_polygons.append(poly)
+	# Both axis-end chunks loaded so we get ref_elev.
+	_stash_uniform_elev(gen, -2, 0, 100.0)
+	_stash_uniform_elev(gen, 1, 0, 100.0)
+	var ref_elev: float = gen._compute_and_cache_deck_ref_elev(0)
+	# Now query a point in the ramp zone whose chunk is NOT loaded
+	# (chunk -1 between the two axis chunks).
+	var y: float = gen._deck_surface_y_at(Vector2(-280, 0), poly, 1, ref_elev)
+	# Local would be 0 → fallback to ref_elev (=100). At edge t≈0,
+	# Y ≈ ref_elev + small. Anything between [ref_elev, ref_elev + 5].
+	_assert(y >= ref_elev - 0.5 and y <= ref_elev + gen.BRIDGE_DECK_HEIGHT + 0.5,
+		"deck_y_falls_back_to_ref_when_local_chunk_unloaded",
+		"got %.2f, ref=%.2f, deck_top=%.2f" % [y, ref_elev, ref_elev + gen.BRIDGE_DECK_HEIGHT])
+	gen.free()
+
+
+func test_deck_surface_y_at_cached_returns_terrain_outside_deck() -> void:
+	var gen := _make_gen()
+	gen.enable_elevation = true
+	# No deck polygons at all → cached lookup must return _sample_elevation
+	# (== 0 in absence of grids), NOT some bridge-derived value.
+	var y: float = gen._deck_surface_y_at_cached(Vector2(50, 50))
+	_assert(absf(y) < 0.001,
+		"cached_returns_zero_when_no_deck_and_no_elev_data",
+		"expected 0, got %.2f" % y)
+	gen.free()
+
+
+func test_deck_surface_y_at_cached_uses_polygon_ref_elev() -> void:
+	var gen := _make_gen()
+	gen.enable_elevation = true
+	var poly := PackedVector2Array([
+		Vector2(-300, -15), Vector2(300, -15),
+		Vector2(300, 15), Vector2(-300, 15),
+	])
+	gen._bridge_deck_polygons.append(poly)
+	_stash_uniform_elev(gen, -2, 0, 100.0)
+	_stash_uniform_elev(gen, 1, 0, 110.0)
+	# Pre-warm cache.
+	gen._compute_and_cache_deck_ref_elev(0)
+	# Query a flat-middle point via the cached wrapper.
+	var y: float = gen._deck_surface_y_at_cached(Vector2(0, 0))
+	var expected: float = 110.0 + gen.BRIDGE_DECK_HEIGHT
+	_assert(absf(y - expected) < 0.5,
+		"cached_uses_polygon_ref_elev",
+		"expected %.2f, got %.2f" % [expected, y])
 	gen.free()
