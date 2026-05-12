@@ -1,9 +1,10 @@
-[gd_scene load_steps=5 format=3 uid="uid://race_hud_001"]
+[gd_scene load_steps=6 format=3 uid="uid://race_hud_001"]
 
 [ext_resource type="Script" path="res://ui/race_hud.gd" id="1_race_hud"]
 [ext_resource type="Texture2D" path="res://ui/assets/zhazhda-speed.png" id="2_bg"]
 [ext_resource type="Theme" path="res://ui/racing_theme.tres" id="3_theme"]
 [ext_resource type="PackedScene" uid="uid://loading_screen_001" path="res://ui/LoadingScreen.tscn" id="4_loading"]
+[ext_resource type="Theme" path="res://ui/zhazhda_theme.tres" id="5_zhazhda"]
 
 [node name="RaceHUD" type="Control"]
 process_mode = 3
@@ -142,6 +143,7 @@ vertical_alignment = 1
 
 [node name="LoadingScreen" parent="." instance=ExtResource("4_loading")]
 visible = false
+theme = ExtResource("5_zhazhda")
 
 [node name="ResultPanel" type="Control" parent="."]
 layout_mode = 1

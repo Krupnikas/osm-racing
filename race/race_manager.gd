@@ -124,7 +124,17 @@ func start_race(track) -> void:
 
 	print("RaceManager: Starting race on track '%s'" % track.track_name)
 
-	# ВАЖНО: Перемещаем машину на старт ДО загрузки terrain
+	# Update terrain_generator origin FIRST so subsequent lat/lon-to-local
+	# conversions (start_pos here, waypoint positions in route building,
+	# minimap track polyline) all reference the correct race origin.
+	# Without this, a free-roam session at a different lat/lon (e.g.
+	# Октябрьский мост) leaves start_lat/start_lon at the free-roam value
+	# and the entire race route is offset by hundreds of meters.
+	if _terrain_generator:
+		_terrain_generator.start_lat = track.start_lat
+		_terrain_generator.start_lon = track.start_lon
+
+	# Перемещаем машину на старт ДО загрузки terrain
 	# Это нужно чтобы terrain_generator загрузил чанки вокруг старта, а не финиша
 	var start_pos := _latlon_to_local(track.start_lat, track.start_lon)
 	start_pos.y = 1.0
@@ -147,9 +157,7 @@ func start_race(track) -> void:
 		_terrain_generator.initial_load_progress.connect(_on_load_progress)
 		_terrain_generator.initial_load_complete.connect(_on_load_complete)
 
-		# Запускаем загрузку с координат старта
-		_terrain_generator.start_lat = track.start_lat
-		_terrain_generator.start_lon = track.start_lon
+		# Запускаем загрузку с координат старта (origin уже установлен выше)
 		_terrain_generator.reset_terrain()
 		# Даём кадр на сброс состояния перед загрузкой
 		await get_tree().process_frame
