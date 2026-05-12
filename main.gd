@@ -10,7 +10,10 @@ func _ready() -> void:
 	CarSpawner.replace_player_car(self)
 
 	if RaceState.is_work_mode:
+		MusicManager.set_category(MusicManager.Category.WORK)
 		_setup_work_mode()
+	else:
+		MusicManager.set_category(MusicManager.Category.RACE)
 
 
 func _setup_work_mode() -> void:

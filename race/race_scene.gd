@@ -28,7 +28,8 @@ func _ready() -> void:
 	if _hud and _hud.has_method("show_hud"):
 		_hud.show_hud()
 
-	# Музыка автоматически запускается в MusicManager._ready()
+	if MusicManager:
+		MusicManager.set_category(MusicManager.Category.RACE)
 
 	# Автостарт гонки если есть выбранный трек
 	print("RaceScene: RaceState.selected_track = ", RaceState.selected_track)

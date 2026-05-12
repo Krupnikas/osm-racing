@@ -119,7 +119,7 @@ func _on_generation_complete() -> void:
 
 	# Музыка
 	if MusicManager:
-		MusicManager.play_random_track()
+		MusicManager.set_category(MusicManager.Category.RACE)
 
 	print("TestTrackScene: Ready to drive!")
 

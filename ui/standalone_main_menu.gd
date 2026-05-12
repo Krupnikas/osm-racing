@@ -38,6 +38,8 @@ func _input(event: InputEvent) -> void:
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	if MusicManager:
+		MusicManager.set_category(MusicManager.Category.MENU)
 
 	# Refresh BrandBlock status time every minute (24h)
 	_refresh_brand_status()
