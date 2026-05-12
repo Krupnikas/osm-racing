@@ -101,7 +101,7 @@ func _play_path(path: String) -> void:
 	var artist: String = info[0]
 	var title: String = info[1]
 
-	var cat_name := "all" if current_category == ALL_CATEGORIES else Category.keys()[current_category].to_lower()
+	var cat_name: String = "all" if current_category == ALL_CATEGORIES else Category.keys()[current_category].to_lower()
 	print("MusicManager: Now playing: %s - %s [%s]" % [artist, title, cat_name])
 	track_started.emit(title, artist)
 
