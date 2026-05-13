@@ -78,13 +78,8 @@ func _on_checkpoint_pressed() -> void:
 
 
 func _on_modes_back_pressed() -> void:
-	"""Назад из режимов в главное меню"""
 	hide_menu()
 	back_pressed.emit()
-	# Показываем главное меню
-	var main_menu := get_tree().current_scene.find_child("MainMenu", true, false)
-	if main_menu:
-		main_menu.get_node("VBox").visible = true
 
 
 func _on_tracks_back_pressed() -> void:
@@ -98,15 +93,10 @@ func _on_track_selected(track) -> void:
 	hide_menu()
 	race_selected.emit(track)
 
-	# Скрываем главное меню и снимаем паузу
-	var main_menu := get_tree().current_scene.find_child("MainMenu", true, false)
-	if main_menu:
-		main_menu.visible = false
-		# Показываем HUD со спидометром
-		if main_menu._hud:
-			main_menu._hud.show_hud()
-
-	# Снимаем паузу для гонки
+	# Показываем HUD и снимаем паузу
+	var hud := get_tree().current_scene.find_child("HUD", true, false)
+	if hud and hud.has_method("show_hud"):
+		hud.show_hud()
 	get_tree().paused = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 

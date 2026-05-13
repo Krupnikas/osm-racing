@@ -1,4 +1,4 @@
-[gd_scene load_steps=13 format=3 uid="uid://dxqmenu001"]
+[gd_scene load_steps=14 format=3 uid="uid://dxqmenu001"]
 
 [ext_resource type="Script"      path="res://ui/standalone_main_menu.gd"          id="1_script"]
 [ext_resource type="PackedScene" uid="uid://car_selection_001" path="res://ui/car_selection.tscn" id="3_car_selection"]
@@ -10,6 +10,7 @@
 [ext_resource type="PackedScene" uid="uid://brand_mark_001"   path="res://ui/components/brand_mark.tscn" id="8_brand"]
 [ext_resource type="Script"      path="res://ui/components/corner_chrome.gd"      id="9_chrome"]
 [ext_resource type="Shader"      path="res://ui/gauss_blur.gdshader"              id="10_blur"]
+[ext_resource type="PackedScene" uid="uid://loading_screen_001" path="res://ui/LoadingScreen.tscn" id="12_loading"]
 
 [sub_resource type="ShaderMaterial" id="GlowBlurH"]
 shader = ExtResource("10_blur")
@@ -806,6 +807,10 @@ script = ExtResource("6_career_menu")
 
 [node name="TrackDisplay" type="CanvasLayer" parent="."]
 script = ExtResource("5_track_display")
+
+[node name="LoadingScreen" parent="." instance=ExtResource("12_loading")]
+visible = false
+z_index = 100
 
 [connection signal="pressed" from="VBox/StartRow/StartButton" to="." method="_on_start_pressed"]
 [connection signal="pressed" from="VBox/RacesRow/RacesButton" to="." method="_on_races_pressed"]
