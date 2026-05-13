@@ -64,7 +64,7 @@ static func _update_car_references(scene_root: Node3D, new_car: Node3D) -> void:
 	# Перебираем все ноды с car_path
 	for node_path in [
 		"OSMTerrain", "CameraManager", "UI/HUD", "UI/CoordsLabel",
-		"UI/MainMenu", "RaceManager",
+		"RaceManager",
 	]:
 		var node := scene_root.get_node_or_null(node_path)
 		if node and node.get("car_path") != null:

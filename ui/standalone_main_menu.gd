@@ -27,6 +27,7 @@ var _current_mode: String = "sprint"  # "sprint" или "checkpoint"
 var _map_selected_lat: float = 0.0
 var _map_selected_lon: float = 0.0
 var _bar_pulse_tween: Tween
+var _pending_scene_path: String = ""
 
 
 func _input(event: InputEvent) -> void:
@@ -105,6 +106,34 @@ func _ready() -> void:
 					print("StandaloneMenu: Autostart location %d: %s" % [idx, locations[idx]])
 					_start_free_roam.call_deferred(locations[idx])
 					return
+
+
+func _change_scene_async(path: String) -> void:
+	_pending_scene_path = path
+	$LoadingScreen.visible = true
+	$LoadingScreen.set_progress(0.0)
+	$LoadingScreen.set_status("Загрузка...")
+	ResourceLoader.load_threaded_request(path)
+	set_process(true)
+
+
+func _process(_delta: float) -> void:
+	if _pending_scene_path == "":
+		set_process(false)
+		return
+	var progress_arr: Array = []
+	var status := ResourceLoader.load_threaded_get_status(_pending_scene_path, progress_arr)
+	if status == ResourceLoader.THREAD_LOAD_IN_PROGRESS:
+		if not progress_arr.is_empty():
+			$LoadingScreen.set_progress(progress_arr[0])
+	elif status == ResourceLoader.THREAD_LOAD_LOADED:
+		var scene := ResourceLoader.load_threaded_get(_pending_scene_path) as PackedScene
+		_pending_scene_path = ""
+		get_tree().change_scene_to_packed(scene)
+	elif status == ResourceLoader.THREAD_LOAD_FAILED:
+		push_error("Failed to load scene: " + _pending_scene_path)
+		_pending_scene_path = ""
+		$LoadingScreen.visible = false
 
 
 func _populate_tracks(mode: String = "") -> void:
@@ -337,9 +366,7 @@ func _start_free_roam_at(loc: Dictionary) -> void:
 	RaceState.free_roam_lat = float(loc.get("lat", 0.0))
 	RaceState.free_roam_lon = float(loc.get("lon", 0.0))
 	RaceState.selected_track = null
-	if MusicManager:
-		MusicManager.play_next_track()
-	get_tree().change_scene_to_file.call_deferred("res://main.tscn")
+	_change_scene_async("res://main.tscn")
 
 
 func _on_races_pressed() -> void:
@@ -364,7 +391,7 @@ func _on_race_chosen(track) -> void:
 	RaceState.is_career_race = false
 	if MusicManager:
 		MusicManager.play_next_track()
-	get_tree().change_scene_to_file.call_deferred("res://race/race_scene.tscn")
+	_change_scene_async("res://race/race_scene.tscn")
 
 
 func _on_race_select_back() -> void:
@@ -484,9 +511,7 @@ func _start_free_roam_at_coords(lat: float, lon: float) -> void:
 	RaceState.free_roam_lat = lat
 	RaceState.free_roam_lon = lon
 	RaceState.selected_track = null
-	if MusicManager:
-		MusicManager.play_next_track()
-	get_tree().change_scene_to_file.call_deferred("res://main.tscn")
+	_change_scene_async("res://main.tscn")
 
 
 func _start_free_roam(location_name: String) -> void:
@@ -523,8 +548,7 @@ func _start_free_roam(location_name: String) -> void:
 	if MusicManager:
 		MusicManager.play_next_track()
 
-	# Сразу загружаем сцену - она сама покажет прогресс
-	get_tree().change_scene_to_file("res://main.tscn")
+	_change_scene_async("res://main.tscn")
 
 
 # === Режим гонок ===
@@ -567,8 +591,7 @@ func _on_track_selected(track) -> void:
 	if MusicManager:
 		MusicManager.play_next_track()
 
-	# Сразу загружаем сцену - она сама покажет прогресс
-	get_tree().change_scene_to_file("res://race/race_scene.tscn")
+	_change_scene_async("res://race/race_scene.tscn")
 
 
 # === Управление ===
@@ -730,9 +753,8 @@ func _on_test_track_selected(track: Dictionary) -> void:
 	if MusicManager:
 		MusicManager.play_next_track()
 
-	# Загружаем сцену (кастомную или стандартную тестовую)
 	var scene_path: String = track.get("scene_path", "res://race/test_track_scene.tscn")
-	get_tree().change_scene_to_file(scene_path)
+	_change_scene_async(scene_path)
 
 
 # === Панель «Другое» ===
