@@ -1,0 +1,43 @@
+[gd_scene load_steps=2 format=3 uid="uid://near_miss_card_001"]
+
+[ext_resource type="Script" path="res://ui/components/near_miss_card.gd" id="1"]
+
+[node name="NearMissCard" type="PanelContainer"]
+custom_minimum_size = Vector2(260, 0)
+script = ExtResource("1")
+
+[node name="HBox" type="HBoxContainer" parent="."]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Icon" type="Label" parent="HBox"]
+layout_mode = 2
+text = "⚡"
+vertical_alignment = 1
+
+[node name="Mid" type="VBoxContainer" parent="HBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="Title" type="Label" parent="HBox/Mid"]
+layout_mode = 2
+text = "NEAR MISS"
+
+[node name="Sub" type="Label" parent="HBox/Mid"]
+layout_mode = 2
+text = "ПРОЕЗД ВПРИТЫК · КОМБО"
+
+[node name="Count" type="Label" parent="HBox"]
+layout_mode = 2
+text = "×4"
+vertical_alignment = 1
+
+[node name="Plus" type="Label" parent="HBox"]
+layout_mode = 2
+text = "+100"
+vertical_alignment = 1
+
+[node name="IntoNitro" type="Label" parent="HBox"]
+layout_mode = 2
+text = "в нитро"
+vertical_alignment = 1

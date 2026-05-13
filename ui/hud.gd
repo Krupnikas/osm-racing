@@ -44,6 +44,24 @@ func _ready() -> void:
 		_car.rpm_changed.connect(_on_rpm_changed)
 		_car.gear_changed.connect(_on_gear_changed)
 
+	# Day / night swap for the round speedometer. NightModeManager is a
+	# scene child (not autoload), so we walk the current scene to find it.
+	var night_mgr: Node = null
+	var scene_root := get_tree().current_scene
+	if scene_root:
+		night_mgr = scene_root.find_child("NightModeManager", true, false)
+	if night_mgr and night_mgr.has_signal("night_mode_changed"):
+		night_mgr.night_mode_changed.connect(_on_night_mode_changed)
+		var is_night: bool = false
+		if night_mgr.get("is_night") != null:
+			is_night = bool(night_mgr.is_night)
+		_on_night_mode_changed(is_night)
+
+
+func _on_night_mode_changed(enabled: bool) -> void:
+	if _speedometer and _speedometer.has_method("set_night"):
+		_speedometer.set_night(enabled)
+
 
 func _process(_delta: float) -> void:
 	# Для GEVP Vehicle читаем значения напрямую (нет сигналов)
@@ -87,8 +105,27 @@ func _on_gear_changed(gear: int) -> void:
 
 
 func _update_speedometer() -> void:
-	if _speedometer and _speedometer.has_method("update_values"):
+	if not _speedometer:
+		return
+	# Legacy path: old square speedometer used `update_values(speed, rpm, gear)`.
+	if _speedometer.has_method("update_values"):
 		_speedometer.update_values(_current_speed, _current_rpm, _current_gear)
+		return
+	# New round speedometer reads exported properties; numeric gear is
+	# easier to format than the "N/R/1..6" string we keep for the legacy
+	# component.
+	_speedometer.current_speed_kmh = _current_speed
+	var gear_int := 1
+	if _current_gear == "R":
+		gear_int = -1
+	elif _current_gear == "N":
+		gear_int = 0
+	elif _current_gear.is_valid_int():
+		gear_int = int(_current_gear)
+	_speedometer.current_gear = gear_int
+	# Pull nitro % from the car if it exposes one.
+	if _car_rigidbody and _car_rigidbody.get("nitro_pct") != null:
+		_speedometer.nitro_pct = float(_car_rigidbody.nitro_pct)
 
 
 func show_hud() -> void:

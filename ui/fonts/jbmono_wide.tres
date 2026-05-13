@@ -1,0 +1,10 @@
+[gd_resource type="FontVariation" load_steps=2 format=3]
+
+[ext_resource type="FontFile" path="res://ui/fonts/JetBrainsMono-VariableFont_wght.ttf" id="1_jb"]
+
+[resource]
+base_font = ExtResource("1_jb")
+variation_opentype = {
+"wght": 400
+}
+spacing_glyph = 2
