@@ -12280,10 +12280,7 @@ func _process_road_queue() -> void:
 			if not is_instance_valid(item.parent):
 				lamp_arr.pop_front()
 				continue
-			# Skip lamps under bridge polygons
-			if _any_point_on_bridge_deck(item.points):
-				lamp_arr.pop_front()
-				continue
+			# Bridge deck lamps are allowed — they'll get deck Y in _generate_street_lamps_incremental
 			var start_idx: int = item.get("_lamp_seg_idx", 0)
 			var processed: int = _generate_street_lamps_incremental(item.points, item.width, item.parent, start_idx, queue_start, lamp_budget_us)
 			if processed >= item.points.size() - 1:
@@ -17658,13 +17655,15 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 		var left_in_intersection := _is_point_in_intersection_shape(lamp_pos_left, false, left_ck) >= 0
 		if not left_in_intersection and not _is_point_in_any_parking(lamp_pos_left, left_ck) and not _is_point_near_road(lamp_pos_left, 0.1, left_ck) and not _is_point_in_water(lamp_pos_left, left_ck):
 			if _loaded_chunks.has(left_ck):
-				_add_lamp_to_batch(left_ck, Vector3(lamp_pos_left.x, _sample_elevation(lamp_pos_left.x, lamp_pos_left.y), lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[left_ck])
+				var left_y: float = get_surface_y(lamp_pos_left.x, lamp_pos_left.y)
+				_add_lamp_to_batch(left_ck, Vector3(lamp_pos_left.x, left_y, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[left_ck])
 
 		if both_sides:
 			var right_ck := "%d,%d" % [int(floor(lamp_pos_right.x / chunk_size)), int(floor(lamp_pos_right.y / chunk_size))]
 			if _is_point_in_intersection_shape(lamp_pos_right, false, right_ck) < 0 and not _is_point_in_any_parking(lamp_pos_right, right_ck) and not _is_point_near_road(lamp_pos_right, 0.1, right_ck) and not _is_point_in_water(lamp_pos_right, right_ck):
 				if _loaded_chunks.has(right_ck):
-					_add_lamp_to_batch(right_ck, Vector3(lamp_pos_right.x, _sample_elevation(lamp_pos_right.x, lamp_pos_right.y), lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[right_ck])
+					var right_y: float = get_surface_y(lamp_pos_right.x, lamp_pos_right.y)
+					_add_lamp_to_batch(right_ck, Vector3(lamp_pos_right.x, right_y, lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[right_ck])
 
 		next_lamp_dist += lamp_spacing
 
