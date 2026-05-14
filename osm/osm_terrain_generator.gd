@@ -7095,6 +7095,7 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 	const RAIL_COLOR := Color(0.3, 0.3, 0.33)
 	const TOP_RAIL_THICKNESS := 0.04
 	const RAIL_SUBDIV := 5.0
+	const MIN_DECK_HEIGHT_FOR_RAILING := 1.5  # no railing when deck < 1.5m above ground
 
 	var ck := _get_chunk_key_from_node(parent)
 	var has_chunk_rect := false
@@ -7139,21 +7140,6 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 		if seg_len < 0.3:
 			continue
 
-		var edge_mid := (p1 + p2) * 0.5
-		if _is_point_on_vehicle_road(edge_mid, 0.0, ""):
-			continue
-
-		# Skip edges near lateral exits (arm ramp openings)
-		var near_exit := false
-		for exit_data in _deck_lateral_exits:
-			var ep: Vector2 = exit_data.pos
-			var skip_r: float = float(exit_data.half_width) + 15.0
-			if p1.distance_to(ep) < skip_r or p2.distance_to(ep) < skip_r or edge_mid.distance_to(ep) < skip_r:
-				near_exit = true
-				break
-		if near_exit:
-			continue
-
 		var dir := (p2 - p1).normalized()
 		var outward := Vector2(-dir.y, dir.x)
 		var perp3 := Vector3(outward.x, 0, outward.y)
@@ -7163,9 +7149,15 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 		for bi in range(num_bars + 1):
 			var t: float = float(bi) / float(maxi(num_bars, 1))
 			var bp := p1.lerp(p2, t)
+			var bar_deck_y: float = _deck_surface_y_at(bp, y_poly, layer, ref_elev)
+			var bar_ground_y: float = _sample_elevation(bp.x, bp.y)
+			if bar_ground_y == 0.0:
+				bar_ground_y = ref_elev
+			if bar_deck_y - bar_ground_y < MIN_DECK_HEIGHT_FOR_RAILING:
+				continue
 			var cx := bp.x + outward.x * 0.05
 			var cz := bp.y + outward.y * 0.05
-			var base := Vector3(cx, _deck_surface_y_at(bp, y_poly, layer, ref_elev), cz)
+			var base := Vector3(cx, bar_deck_y, cz)
 			var hw := BAR_RADIUS
 			for face in range(4):
 				var n: Vector3
@@ -7203,6 +7195,13 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 			var t2_r: float = float(ri + 1) / float(num_rail_segs)
 			var rp1 := p1.lerp(p2, t1_r)
 			var rp2 := p1.lerp(p2, t2_r)
+			var rp_mid := rp1.lerp(rp2, 0.5)
+			var seg_deck_y: float = _deck_surface_y_at(rp_mid, y_poly, layer, ref_elev)
+			var seg_ground_y: float = _sample_elevation(rp_mid.x, rp_mid.y)
+			if seg_ground_y == 0.0:
+				seg_ground_y = ref_elev
+			if seg_deck_y - seg_ground_y < MIN_DECK_HEIGHT_FOR_RAILING:
+				continue
 			var ry1: float = _deck_surface_y_at(rp1, y_poly, layer, ref_elev) + RAILING_HEIGHT
 			var ry2: float = _deck_surface_y_at(rp2, y_poly, layer, ref_elev) + RAILING_HEIGHT
 			var rtp1 := Vector3(rp1.x + outward.x * 0.05, ry1, rp1.y + outward.y * 0.05)
@@ -7268,16 +7267,18 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 				continue
 			if absf(p1.y - rz2) < edge_tol and absf(p2.y - rz2) < edge_tol:
 				continue
-		var mid_pt := (p1 + p2) * 0.5
-		if _is_point_on_vehicle_road(mid_pt, 1.0, ""):
-			continue
 		var angle := atan2(p2.y - p1.y, p2.x - p1.x)
 		var coll_segs := maxi(1, int(ceil(seg_len / RAIL_SUBDIV)))
 		for ci in range(coll_segs):
 			var ct1: float = (float(ci) + 0.5) / float(coll_segs)
 			var cp := p1.lerp(p2, ct1)
-			var cseg_len: float = seg_len / float(coll_segs)
 			var cy: float = _deck_surface_y_at(cp, y_poly, layer, ref_elev)
+			var cgy: float = _sample_elevation(cp.x, cp.y)
+			if cgy == 0.0:
+				cgy = ref_elev
+			if cy - cgy < MIN_DECK_HEIGHT_FOR_RAILING:
+				continue
+			var cseg_len: float = seg_len / float(coll_segs)
 			var coll_shape_node := CollisionShape3D.new()
 			var box := BoxShape3D.new()
 			box.size = Vector3(cseg_len, RAILING_HEIGHT, 0.1)
