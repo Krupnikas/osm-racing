@@ -386,6 +386,7 @@ var _deck_entry_edges_cache: Dictionary = {}
 # elevation for the whole span, not per-vertex terrain noise. Indexed by
 # poly index in _bridge_deck_polygons.
 var _deck_polygon_ref_elev: Dictionary = {}
+var _deck_polygon_layer: Dictionary = {}  # poly_idx -> int (OSM layer tag)
 # Bridge deck mesh + collision + railing nodes per polygon index. They live
 # directly under `self` (not under the spawning chunk), so the camera-
 # direction culler can't hide them when the player is still on the bridge.
@@ -3060,6 +3061,7 @@ func reset_terrain() -> void:
 	_bridge_deck_polygons.clear()
 	_deck_entry_edges_cache.clear()
 	_deck_polygon_ref_elev.clear()
+	_deck_polygon_layer.clear()
 	_deck_lateral_exits.clear()
 	_deck_ramp_junctions.clear()
 	_deck_exit_way_ids.clear()
@@ -6221,7 +6223,8 @@ func _deck_surface_y_at_cached(point: Vector2) -> float:
 			ref_elev = _compute_and_cache_deck_ref_elev(i)
 		if is_nan(ref_elev):
 			continue
-		return _deck_surface_y_at(point, poly, 1, ref_elev)
+		var layer: int = _deck_polygon_layer.get(i, 1)
+		return _deck_surface_y_at(point, poly, layer, ref_elev)
 	return _sample_elevation(point.x, point.y)
 
 
@@ -6270,7 +6273,8 @@ func get_surface_y(x: float, z: float) -> float:
 			if is_nan(ref_elev):
 				ref_elev = _compute_and_cache_deck_ref_elev(i)
 			if not is_nan(ref_elev):
-				return _deck_surface_y_at(point, poly, 1, ref_elev)
+				var layer: int = _deck_polygon_layer.get(i, 1)
+				return _deck_surface_y_at(point, poly, layer, ref_elev)
 	return _sample_elevation(x, z)
 
 
@@ -6582,6 +6586,7 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 		return
 
 	var layer: int = int(str(tags.get("layer", "1"))) if str(tags.get("layer", "1")).is_valid_int() else 1
+	_deck_polygon_layer[poly_idx] = layer
 
 	var vertices := PackedVector3Array()
 	var uvs := PackedVector2Array()
@@ -6646,7 +6651,7 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 	body.add_child(shape)
 	parent.add_child(body)
 
-	var railing_nodes: Array = _create_deck_railing(points, ref_elev, parent)
+	var railing_nodes: Array = _create_deck_railing(points, ref_elev, parent, full_polygon, layer)
 	var all_nodes: Array = [mesh_inst, body]
 	all_nodes.append_array(railing_nodes)
 	_bridge_deck_nodes[poly_idx] = all_nodes
@@ -7070,9 +7075,9 @@ func _create_single_ramp_apron(junc: Dictionary, ref_elev: float) -> void:
 # coincide with a vehicle road entry (so cars can drive on/off the deck) and
 # edges that lie on a chunk boundary (the neighbouring chunk paints its half).
 # `ref_elev` is the polygon's reference elevation — the railing Y is queried
-# via the same `_deck_surface_y_at(p, poly, 1, ref_elev)` so it matches the
+# via the same `_deck_surface_y_at(p, poly, layer, ref_elev)` so it matches the
 # deck mesh exactly, no per-vertex elevation noise.
-func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Node3D) -> Array:
+func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Node3D, full_polygon: PackedVector2Array = PackedVector2Array(), layer: int = 1) -> Array:
 	var created: Array = []
 	if poly.size() < 3:
 		return created
@@ -7082,6 +7087,7 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 	const BAR_RADIUS := 0.015
 	const RAIL_COLOR := Color(0.3, 0.3, 0.33)
 	const TOP_RAIL_THICKNESS := 0.04
+	const RAIL_SUBDIV := 5.0
 
 	var ck := _get_chunk_key_from_node(parent)
 	var has_chunk_rect := false
@@ -7101,6 +7107,8 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	st.set_material(material)
 
+	# Use full polygon for Y calculation (ramp axis), clipped poly for edge positions
+	var y_poly: PackedVector2Array = full_polygon if full_polygon.size() >= 3 else poly
 	var pn := poly.size()
 	for i in range(pn):
 		var p1 := poly[i]
@@ -7150,7 +7158,7 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 			var bp := p1.lerp(p2, t)
 			var cx := bp.x + outward.x * 0.05
 			var cz := bp.y + outward.y * 0.05
-			var base := Vector3(cx, _deck_surface_y_at(bp, poly, 1, ref_elev), cz)
+			var base := Vector3(cx, _deck_surface_y_at(bp, y_poly, layer, ref_elev), cz)
 			var hw := BAR_RADIUS
 			for face in range(4):
 				var n: Vector3
@@ -7178,35 +7186,46 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 				st.set_normal(n)
 				st.add_vertex(v4)
 
-		var rail_y1: float = _deck_surface_y_at(p1, poly, 1, ref_elev) + RAILING_HEIGHT
-		var rail_y2: float = _deck_surface_y_at(p2, poly, 1, ref_elev) + RAILING_HEIGHT
-		var tp1 := Vector3(p1.x + outward.x * 0.05, rail_y1, p1.y + outward.y * 0.05)
-		var tp2 := Vector3(p2.x + outward.x * 0.05, rail_y2, p2.y + outward.y * 0.05)
+		# Top rail — subdivided to follow deck ramp profile (smoothstep).
+		# A single quad per edge would linearly interpolate Y, going under the
+		# deck on long edges that cross the ramp zone.
 		var th := TOP_RAIL_THICKNESS
-		st.set_normal(Vector3.UP)
-		st.add_vertex(tp1 + perp3 * th)
-		st.set_normal(Vector3.UP)
-		st.add_vertex(tp2 + perp3 * th)
-		st.set_normal(Vector3.UP)
-		st.add_vertex(tp2 - perp3 * th)
-		st.set_normal(Vector3.UP)
-		st.add_vertex(tp1 + perp3 * th)
-		st.set_normal(Vector3.UP)
-		st.add_vertex(tp2 - perp3 * th)
-		st.set_normal(Vector3.UP)
-		st.add_vertex(tp1 - perp3 * th)
-		st.set_normal(perp3)
-		st.add_vertex(tp1 + perp3 * th)
-		st.set_normal(perp3)
-		st.add_vertex(tp2 + perp3 * th)
-		st.set_normal(perp3)
-		st.add_vertex(tp2 + perp3 * th - Vector3(0, th, 0))
-		st.set_normal(perp3)
-		st.add_vertex(tp1 + perp3 * th)
-		st.set_normal(perp3)
-		st.add_vertex(tp2 + perp3 * th - Vector3(0, th, 0))
-		st.set_normal(perp3)
-		st.add_vertex(tp1 + perp3 * th - Vector3(0, th, 0))
+		var num_rail_segs := maxi(1, int(ceil(seg_len / RAIL_SUBDIV)))
+		for ri in range(num_rail_segs):
+			var t1_r: float = float(ri) / float(num_rail_segs)
+			var t2_r: float = float(ri + 1) / float(num_rail_segs)
+			var rp1 := p1.lerp(p2, t1_r)
+			var rp2 := p1.lerp(p2, t2_r)
+			var ry1: float = _deck_surface_y_at(rp1, y_poly, layer, ref_elev) + RAILING_HEIGHT
+			var ry2: float = _deck_surface_y_at(rp2, y_poly, layer, ref_elev) + RAILING_HEIGHT
+			var rtp1 := Vector3(rp1.x + outward.x * 0.05, ry1, rp1.y + outward.y * 0.05)
+			var rtp2 := Vector3(rp2.x + outward.x * 0.05, ry2, rp2.y + outward.y * 0.05)
+			# Top face
+			st.set_normal(Vector3.UP)
+			st.add_vertex(rtp1 + perp3 * th)
+			st.set_normal(Vector3.UP)
+			st.add_vertex(rtp2 + perp3 * th)
+			st.set_normal(Vector3.UP)
+			st.add_vertex(rtp2 - perp3 * th)
+			st.set_normal(Vector3.UP)
+			st.add_vertex(rtp1 + perp3 * th)
+			st.set_normal(Vector3.UP)
+			st.add_vertex(rtp2 - perp3 * th)
+			st.set_normal(Vector3.UP)
+			st.add_vertex(rtp1 - perp3 * th)
+			# Outer side face
+			st.set_normal(perp3)
+			st.add_vertex(rtp1 + perp3 * th)
+			st.set_normal(perp3)
+			st.add_vertex(rtp2 + perp3 * th)
+			st.set_normal(perp3)
+			st.add_vertex(rtp2 + perp3 * th - Vector3(0, th, 0))
+			st.set_normal(perp3)
+			st.add_vertex(rtp1 + perp3 * th)
+			st.set_normal(perp3)
+			st.add_vertex(rtp2 + perp3 * th - Vector3(0, th, 0))
+			st.set_normal(perp3)
+			st.add_vertex(rtp1 + perp3 * th - Vector3(0, th, 0))
 
 	var committed := st.commit()
 	if committed == null or committed.get_surface_count() == 0:
@@ -7245,15 +7264,20 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 		var mid_pt := (p1 + p2) * 0.5
 		if _is_point_on_vehicle_road(mid_pt, 1.0, ""):
 			continue
-		var coll_deck_y: float = _deck_surface_y_at(mid_pt, poly, 1, ref_elev)
-		var coll_shape_node := CollisionShape3D.new()
-		var box := BoxShape3D.new()
-		box.size = Vector3(seg_len, RAILING_HEIGHT, 0.1)
-		coll_shape_node.shape = box
 		var angle := atan2(p2.y - p1.y, p2.x - p1.x)
-		coll_shape_node.position = Vector3(mid_pt.x, coll_deck_y + RAILING_HEIGHT * 0.5, mid_pt.y)
-		coll_shape_node.rotation.y = -angle
-		coll_body.add_child(coll_shape_node)
+		var coll_segs := maxi(1, int(ceil(seg_len / RAIL_SUBDIV)))
+		for ci in range(coll_segs):
+			var ct1: float = (float(ci) + 0.5) / float(coll_segs)
+			var cp := p1.lerp(p2, ct1)
+			var cseg_len: float = seg_len / float(coll_segs)
+			var cy: float = _deck_surface_y_at(cp, y_poly, layer, ref_elev)
+			var coll_shape_node := CollisionShape3D.new()
+			var box := BoxShape3D.new()
+			box.size = Vector3(cseg_len, RAILING_HEIGHT, 0.1)
+			coll_shape_node.shape = box
+			coll_shape_node.position = Vector3(cp.x, cy + RAILING_HEIGHT * 0.5, cp.y)
+			coll_shape_node.rotation.y = -angle
+			coll_body.add_child(coll_shape_node)
 	parent.add_child(coll_body)
 	created.append(coll_body)
 	return created
