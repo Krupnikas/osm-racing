@@ -11,6 +11,7 @@ class Waypoint:
 	var width: float  # Ширина проезжей части этого направления в метрах
 	var lanes_count: int  # Количество полос на этом way
 	var is_oneway: bool  # true = OSM oneway way (center = center of carriageway)
+	var is_bridge: bool  # waypoint на мосту (рейкаст для высоты не нужен)
 	var next_waypoints: Array[Waypoint] = []
 	var prev_waypoints: Array[Waypoint] = []
 	var chunk_key: String
@@ -25,6 +26,7 @@ class Waypoint:
 		chunk_key = chunk
 		road_id = rid
 		is_oneway = false
+		is_bridge = false
 
 # Хранение waypoints по чанкам
 var waypoints_by_chunk: Dictionary = {}  # "x,z" -> Array[Waypoint]
@@ -256,7 +258,11 @@ func _create_directional_waypoints(points: PackedVector2Array, speed_limit: floa
 
 		var start_height := 0.0
 		var end_height := 0.0
-		if terrain_generator and terrain_generator.has_method("_sample_elevation"):
+		# For bridge roads, use get_surface_y which returns deck height when on a bridge polygon
+		if is_bridge and terrain_generator and terrain_generator.has_method("get_surface_y"):
+			start_height = terrain_generator.get_surface_y(start_2d.x, start_2d.y)
+			end_height = terrain_generator.get_surface_y(end_2d.x, end_2d.y)
+		elif terrain_generator and terrain_generator.has_method("_sample_elevation"):
 			start_height = terrain_generator._sample_elevation(start_2d.x, start_2d.y)
 			end_height = terrain_generator._sample_elevation(end_2d.x, end_2d.y)
 
@@ -277,12 +283,19 @@ func _create_directional_waypoints(points: PackedVector2Array, speed_limit: floa
 
 		var segment_waypoints: Array[Waypoint] = []
 
+		# For bridge roads using get_surface_y, sample deck height per-waypoint
+		var has_surface_y: bool = is_bridge and terrain_generator and terrain_generator.has_method("get_surface_y")
+		var use_bridge_formula: bool = is_bridge and bridge_height > 0.0 and not has_surface_y
+
 		for j in range(num_waypoints):
 			var t := float(j) / float(num_waypoints - 1)
 			var pos := start_pos.lerp(end_pos, t)
 
-			# Добавляем высоту моста с учётом рамп
-			if is_bridge and bridge_height > 0.0:
+			if has_surface_y:
+				# Sample actual deck/terrain height at this exact point
+				pos.y = terrain_generator.get_surface_y(pos.x, pos.z)
+			elif use_bridge_formula:
+				# Fallback: generic bridge ramp formula
 				var current_distance := accumulated_distance + t * segment_length
 				var bridge_y := _calculate_bridge_height_at_distance(current_distance, total_road_length, bridge_height, ramp_length)
 				pos.y += bridge_y
@@ -291,6 +304,8 @@ func _create_directional_waypoints(points: PackedVector2Array, speed_limit: floa
 			var wp_chunk_key := _get_chunk_key_for_position(pos)
 
 			var waypoint := Waypoint.new(pos, direction, speed_limit, width, lanes, wp_chunk_key, road_id)
+			if is_bridge:
+				waypoint.is_bridge = true
 			segment_waypoints.append(waypoint)
 			all_road_waypoints.append(waypoint)
 

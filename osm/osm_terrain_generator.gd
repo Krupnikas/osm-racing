@@ -5289,7 +5289,7 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 	mesh_instance.name = "BridgeRoad"
 	mesh_instance.mesh = mesh
 	mesh_instance.material_override = material
-	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	parent.add_child(mesh_instance)
 
 	_create_bridge_collision(vertices, indices, parent)
@@ -6259,10 +6259,42 @@ func _get_deck_ramp_axis(poly: PackedVector2Array) -> Dictionary:
 	return result
 
 
+func get_surface_y(x: float, z: float) -> float:
+	"""Returns deck Y if point is on a bridge deck, otherwise terrain Y.
+	Used by RoadNetwork for correct bridge waypoint heights."""
+	var point := Vector2(x, z)
+	for i in _bridge_deck_polygons.size():
+		var poly: PackedVector2Array = _bridge_deck_polygons[i]
+		if poly.size() >= 3 and Geometry2D.is_point_in_polygon(point, poly):
+			var ref_elev: float = _deck_polygon_ref_elev.get(i, NAN)
+			if is_nan(ref_elev):
+				ref_elev = _compute_and_cache_deck_ref_elev(i)
+			if not is_nan(ref_elev):
+				return _deck_surface_y_at(point, poly, 1, ref_elev)
+	return _sample_elevation(x, z)
+
+
 func _is_point_on_bridge_deck(point: Vector2) -> bool:
 	for poly in _bridge_deck_polygons:
 		if poly.size() >= 3 and Geometry2D.is_point_in_polygon(point, poly):
 			return true
+	return false
+
+
+func _any_point_on_bridge_deck(points: PackedVector2Array) -> bool:
+	"""Check if ANY point in the polyline is inside a bridge deck polygon.
+	Samples up to 5 evenly-spaced points for performance."""
+	if points.size() < 1:
+		return false
+	var step: int = maxi(1, points.size() / 5)
+	var idx := 0
+	while idx < points.size():
+		if _is_point_on_bridge_deck(points[idx]):
+			return true
+		idx += step
+	# Always check last point
+	if _is_point_on_bridge_deck(points[points.size() - 1]):
+		return true
 	return false
 
 
@@ -6595,7 +6627,7 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 	mesh_inst.name = "BridgeDeck"
 	mesh_inst.mesh = arr_mesh
 	mesh_inst.material_override = material
-	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	parent.add_child(mesh_inst)
 
 	var body := StaticBody3D.new()
@@ -6954,10 +6986,21 @@ func _create_single_ramp_apron(junc: Dictionary, ref_elev: float) -> void:
 
 	# 5cm above terrain — enough to clear grass without visible floating
 	const Y_OFF := 0.05
-	var y_il: float = _sample_elevation(inner_l.x, inner_l.y) + Y_OFF
-	var y_ir: float = _sample_elevation(inner_r.x, inner_r.y) + Y_OFF
-	var y_ol: float = _sample_elevation(outer_l.x, outer_l.y) + Y_OFF
-	var y_or: float = _sample_elevation(outer_r.x, outer_r.y) + Y_OFF
+	var y_il: float = _sample_elevation(inner_l.x, inner_l.y)
+	var y_ir: float = _sample_elevation(inner_r.x, inner_r.y)
+	var y_ol: float = _sample_elevation(outer_l.x, outer_l.y)
+	var y_or: float = _sample_elevation(outer_r.x, outer_r.y)
+	# Fall back to ref_elev when elevation data isn't loaded yet for this chunk
+	if y_il == 0.0 or y_ir == 0.0 or y_ol == 0.0 or y_or == 0.0:
+		if ref_elev > 0.0:
+			if y_il == 0.0: y_il = ref_elev
+			if y_ir == 0.0: y_ir = ref_elev
+			if y_ol == 0.0: y_ol = ref_elev
+			if y_or == 0.0: y_or = ref_elev
+	y_il += Y_OFF
+	y_ir += Y_OFF
+	y_ol += Y_OFF
+	y_or += Y_OFF
 
 	var verts := PackedVector3Array([
 		Vector3(inner_l.x, y_il, inner_l.y),
@@ -7624,6 +7667,10 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 	var smoothed_points: PackedVector2Array = item.smoothed_points
 	var width: float = item.width * 2.0  # Визуальная ширина x2 (ROAD_WIDTHS хранит логическую)
 	var parent: Node3D = item.parent
+
+	# Skip footways under bridge polygons
+	if _any_point_on_bridge_deck(smoothed_points):
+		return true  # done, skip this footway
 
 	# Phase 1: classify points (on_road / in_parking) incrementally
 	var pt_idx: int = item.get("_pt_idx", 0)
@@ -12186,6 +12233,10 @@ func _process_road_queue() -> void:
 			if not is_instance_valid(item.parent):
 				lamp_arr.pop_front()
 				continue
+			# Skip lamps under bridge polygons
+			if _any_point_on_bridge_deck(item.points):
+				lamp_arr.pop_front()
+				continue
 			var start_idx: int = item.get("_lamp_seg_idx", 0)
 			var processed: int = _generate_street_lamps_incremental(item.points, item.width, item.parent, start_idx, queue_start, lamp_budget_us)
 			if processed >= item.points.size() - 1:
@@ -12211,6 +12262,10 @@ func _process_road_queue() -> void:
 				break
 			var item: Dictionary = mh_arr[0]
 			if not is_instance_valid(item.parent):
+				mh_arr.pop_front()
+				continue
+			# Skip manholes under bridge polygons
+			if _any_point_on_bridge_deck(item.points):
 				mh_arr.pop_front()
 				continue
 			mh_arr.pop_front()
@@ -12469,6 +12524,9 @@ func _process_curb_queue() -> void:
 			break
 		var item: Dictionary = _curb_queue.pop_front()
 		if is_instance_valid(item.parent) and item.local_points.size() >= 2:
+			# Skip curbs under bridge polygons (ground-level roads under bridges)
+			if not item.get("is_bridge", false) and _any_point_on_bridge_deck(item.local_points):
+				continue
 			# Точки уже в локальных координатах — пропускаем latlon конвертацию
 			# Сглаживание тоже не нужно: дорога и бордюр используют одни и те же raw points,
 			# а сглаживание дороги происходит в _add_road_to_batch_fast
@@ -15940,7 +15998,8 @@ func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
 		var inst: Node3D = scene.instantiate()
 		var scale_val: float = entry.scale
 		var y_offset: float = entry.get("y_offset", 0.0)
-		inst.position = Vector3(pos.x, y_offset, pos.y)
+		var ground_y: float = _sample_elevation(pos.x, pos.y)
+		inst.position = Vector3(pos.x, ground_y + y_offset, pos.y)
 		inst.scale = Vector3.ONE * scale_val
 		inst.rotation_degrees.y = entry.rotation_y
 		# Visibility range 150m (like traffic signs)
