@@ -253,6 +253,9 @@ func _attempt_spawn_in_chunk(chunk_key: String, player_pos: Vector3) -> bool:
 		_return_npc_to_pool(npc)
 		return false
 
+	# Рейкаст для реальной высоты поверхности (попадёт в мост или землю)
+	spawn_pos.y = _raycast_ground_y(spawn_pos)
+
 	# Позиция на полосе и ориентация
 	npc.global_position = spawn_pos
 	# VehicleBody3D "вперёд" = -Z axis, direction(x,z) -> rotation_y
@@ -260,6 +263,10 @@ func _attempt_spawn_in_chunk(chunk_key: String, player_pos: Vector3) -> bool:
 
 	# Добавляем в списки
 	active_npcs.append(npc)
+
+	print("[NPC Spawn] chunk=%s bridge=%s pos=(%.1f, %.1f, %.1f) wp_y=%.1f" % [
+		chunk_key, spawn_waypoint.is_bridge, spawn_pos.x, spawn_pos.y, spawn_pos.z,
+		spawn_waypoint.position.y])
 
 	return true
 
@@ -316,6 +323,8 @@ func _update_despawning() -> void:
 		var npc = active_npcs[i]
 		var distance: float = npc.global_position.distance_to(player_pos)
 		if distance > despawn_distance:
+			print("[NPC Despawn] reason=distance dist=%.0f pos=(%.1f, %.1f, %.1f)" % [
+				distance, npc.global_position.x, npc.global_position.y, npc.global_position.z])
 			_return_npc_to_pool(npc)
 
 
@@ -447,6 +456,8 @@ func _get_npc_from_pool():
 func _on_npc_request_despawn(npc) -> void:
 	"""Обработчик запроса на despawn от NPC"""
 	if npc in active_npcs:
+		print("[NPC Despawn] reason=request pos=(%.1f, %.1f, %.1f)" % [
+			npc.global_position.x, npc.global_position.y, npc.global_position.z])
 		_return_npc_to_pool(npc)
 
 
@@ -504,6 +515,20 @@ func _return_npc_to_pool(npc) -> void:
 	inactive_npcs.append(npc)
 
 	#print("TrafficManager: Despawned NPC (%d active)" % active_npcs.size())
+
+
+func _raycast_ground_y(pos: Vector3) -> float:
+	var space_state := get_viewport().find_world_3d().direct_space_state
+	if not space_state:
+		return pos.y + 0.1
+	var ray_from := Vector3(pos.x, maxf(pos.y + 200.0, 2000.0), pos.z)
+	var ray_to := Vector3(pos.x, minf(pos.y - 200.0, -10.0), pos.z)
+	var query := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
+	query.collision_mask = 1
+	var result := space_state.intersect_ray(query)
+	if not result.is_empty():
+		return result.position.y + 0.1
+	return pos.y + 0.1
 
 
 func _get_player_position() -> Vector3:

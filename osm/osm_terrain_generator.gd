@@ -386,11 +386,14 @@ var _deck_entry_edges_cache: Dictionary = {}
 # elevation for the whole span, not per-vertex terrain noise. Indexed by
 # poly index in _bridge_deck_polygons.
 var _deck_polygon_ref_elev: Dictionary = {}
+var _deck_polygon_layer: Dictionary = {}  # poly_idx -> int (OSM layer tag)
 # Bridge deck mesh + collision + railing nodes per polygon index. They live
 # directly under `self` (not under the spawning chunk), so the camera-
 # direction culler can't hide them when the player is still on the bridge.
 # Cleared in reset_terrain to free per-location decks.
 var _bridge_deck_nodes: Dictionary = {}  # poly_idx -> Array[Node3D]
+var _custom_bridge_models: Array = []  # custom models parented to self (bridge pylons etc.)
+var _placed_bridge_model_keys: Dictionary = {}  # dedup guard for self-parented models
 # Lateral exit points where _link bridge roads depart the deck polygon.
 # Deck mesh ramps down at these points so the standalone bridge road's
 # ramp is visible. Each: {pos, inward_dir, half_width, base_elev}.
@@ -3060,6 +3063,7 @@ func reset_terrain() -> void:
 	_bridge_deck_polygons.clear()
 	_deck_entry_edges_cache.clear()
 	_deck_polygon_ref_elev.clear()
+	_deck_polygon_layer.clear()
 	_deck_lateral_exits.clear()
 	_deck_ramp_junctions.clear()
 	_deck_exit_way_ids.clear()
@@ -3070,6 +3074,11 @@ func reset_terrain() -> void:
 			if is_instance_valid(n):
 				n.queue_free()
 	_bridge_deck_nodes.clear()
+	for m in _custom_bridge_models:
+		if is_instance_valid(m):
+			m.queue_free()
+	_custom_bridge_models.clear()
+	_placed_bridge_model_keys.clear()
 	_deferred_terrain_chunks.clear()
 
 	# Reset draw call stats (prevent stale stats across location changes)
@@ -5289,7 +5298,7 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 	mesh_instance.name = "BridgeRoad"
 	mesh_instance.mesh = mesh
 	mesh_instance.material_override = material
-	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	parent.add_child(mesh_instance)
 
 	_create_bridge_collision(vertices, indices, parent)
@@ -6221,7 +6230,8 @@ func _deck_surface_y_at_cached(point: Vector2) -> float:
 			ref_elev = _compute_and_cache_deck_ref_elev(i)
 		if is_nan(ref_elev):
 			continue
-		return _deck_surface_y_at(point, poly, 1, ref_elev)
+		var layer: int = _deck_polygon_layer.get(i, 1)
+		return _deck_surface_y_at(point, poly, layer, ref_elev)
 	return _sample_elevation(point.x, point.y)
 
 
@@ -6259,10 +6269,43 @@ func _get_deck_ramp_axis(poly: PackedVector2Array) -> Dictionary:
 	return result
 
 
+func get_surface_y(x: float, z: float) -> float:
+	"""Returns deck Y if point is on a bridge deck, otherwise terrain Y.
+	Used by RoadNetwork for correct bridge waypoint heights."""
+	var point := Vector2(x, z)
+	for i in _bridge_deck_polygons.size():
+		var poly: PackedVector2Array = _bridge_deck_polygons[i]
+		if poly.size() >= 3 and Geometry2D.is_point_in_polygon(point, poly):
+			var ref_elev: float = _deck_polygon_ref_elev.get(i, NAN)
+			if is_nan(ref_elev):
+				ref_elev = _compute_and_cache_deck_ref_elev(i)
+			if not is_nan(ref_elev):
+				var layer: int = _deck_polygon_layer.get(i, 1)
+				return _deck_surface_y_at(point, poly, layer, ref_elev)
+	return _sample_elevation(x, z)
+
+
 func _is_point_on_bridge_deck(point: Vector2) -> bool:
 	for poly in _bridge_deck_polygons:
 		if poly.size() >= 3 and Geometry2D.is_point_in_polygon(point, poly):
 			return true
+	return false
+
+
+func _any_point_on_bridge_deck(points: PackedVector2Array) -> bool:
+	"""Check if ANY point in the polyline is inside a bridge deck polygon.
+	Samples up to 5 evenly-spaced points for performance."""
+	if points.size() < 1:
+		return false
+	var step: int = maxi(1, points.size() / 5)
+	var idx := 0
+	while idx < points.size():
+		if _is_point_on_bridge_deck(points[idx]):
+			return true
+		idx += step
+	# Always check last point
+	if _is_point_on_bridge_deck(points[points.size() - 1]):
+		return true
 	return false
 
 
@@ -6550,6 +6593,7 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 		return
 
 	var layer: int = int(str(tags.get("layer", "1"))) if str(tags.get("layer", "1")).is_valid_int() else 1
+	_deck_polygon_layer[poly_idx] = layer
 
 	var vertices := PackedVector3Array()
 	var uvs := PackedVector2Array()
@@ -6595,7 +6639,7 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 	mesh_inst.name = "BridgeDeck"
 	mesh_inst.mesh = arr_mesh
 	mesh_inst.material_override = material
-	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	parent.add_child(mesh_inst)
 
 	var body := StaticBody3D.new()
@@ -6614,7 +6658,7 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 	body.add_child(shape)
 	parent.add_child(body)
 
-	var railing_nodes: Array = _create_deck_railing(points, ref_elev, parent)
+	var railing_nodes: Array = _create_deck_railing(points, ref_elev, parent, full_polygon, layer)
 	var all_nodes: Array = [mesh_inst, body]
 	all_nodes.append_array(railing_nodes)
 	_bridge_deck_nodes[poly_idx] = all_nodes
@@ -6954,10 +6998,21 @@ func _create_single_ramp_apron(junc: Dictionary, ref_elev: float) -> void:
 
 	# 5cm above terrain — enough to clear grass without visible floating
 	const Y_OFF := 0.05
-	var y_il: float = _sample_elevation(inner_l.x, inner_l.y) + Y_OFF
-	var y_ir: float = _sample_elevation(inner_r.x, inner_r.y) + Y_OFF
-	var y_ol: float = _sample_elevation(outer_l.x, outer_l.y) + Y_OFF
-	var y_or: float = _sample_elevation(outer_r.x, outer_r.y) + Y_OFF
+	var y_il: float = _sample_elevation(inner_l.x, inner_l.y)
+	var y_ir: float = _sample_elevation(inner_r.x, inner_r.y)
+	var y_ol: float = _sample_elevation(outer_l.x, outer_l.y)
+	var y_or: float = _sample_elevation(outer_r.x, outer_r.y)
+	# Fall back to ref_elev when elevation data isn't loaded yet for this chunk
+	if y_il == 0.0 or y_ir == 0.0 or y_ol == 0.0 or y_or == 0.0:
+		if ref_elev > 0.0:
+			if y_il == 0.0: y_il = ref_elev
+			if y_ir == 0.0: y_ir = ref_elev
+			if y_ol == 0.0: y_ol = ref_elev
+			if y_or == 0.0: y_or = ref_elev
+	y_il += Y_OFF
+	y_ir += Y_OFF
+	y_ol += Y_OFF
+	y_or += Y_OFF
 
 	var verts := PackedVector3Array([
 		Vector3(inner_l.x, y_il, inner_l.y),
@@ -7027,9 +7082,9 @@ func _create_single_ramp_apron(junc: Dictionary, ref_elev: float) -> void:
 # coincide with a vehicle road entry (so cars can drive on/off the deck) and
 # edges that lie on a chunk boundary (the neighbouring chunk paints its half).
 # `ref_elev` is the polygon's reference elevation — the railing Y is queried
-# via the same `_deck_surface_y_at(p, poly, 1, ref_elev)` so it matches the
+# via the same `_deck_surface_y_at(p, poly, layer, ref_elev)` so it matches the
 # deck mesh exactly, no per-vertex elevation noise.
-func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Node3D) -> Array:
+func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Node3D, full_polygon: PackedVector2Array = PackedVector2Array(), layer: int = 1) -> Array:
 	var created: Array = []
 	if poly.size() < 3:
 		return created
@@ -7039,6 +7094,7 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 	const BAR_RADIUS := 0.015
 	const RAIL_COLOR := Color(0.3, 0.3, 0.33)
 	const TOP_RAIL_THICKNESS := 0.04
+	const RAIL_SUBDIV := 5.0
 
 	var ck := _get_chunk_key_from_node(parent)
 	var has_chunk_rect := false
@@ -7058,6 +7114,8 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	st.set_material(material)
 
+	# Use full polygon for Y calculation (ramp axis), clipped poly for edge positions
+	var y_poly: PackedVector2Array = full_polygon if full_polygon.size() >= 3 else poly
 	var pn := poly.size()
 	for i in range(pn):
 		var p1 := poly[i]
@@ -7107,7 +7165,7 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 			var bp := p1.lerp(p2, t)
 			var cx := bp.x + outward.x * 0.05
 			var cz := bp.y + outward.y * 0.05
-			var base := Vector3(cx, _deck_surface_y_at(bp, poly, 1, ref_elev), cz)
+			var base := Vector3(cx, _deck_surface_y_at(bp, y_poly, layer, ref_elev), cz)
 			var hw := BAR_RADIUS
 			for face in range(4):
 				var n: Vector3
@@ -7135,35 +7193,46 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 				st.set_normal(n)
 				st.add_vertex(v4)
 
-		var rail_y1: float = _deck_surface_y_at(p1, poly, 1, ref_elev) + RAILING_HEIGHT
-		var rail_y2: float = _deck_surface_y_at(p2, poly, 1, ref_elev) + RAILING_HEIGHT
-		var tp1 := Vector3(p1.x + outward.x * 0.05, rail_y1, p1.y + outward.y * 0.05)
-		var tp2 := Vector3(p2.x + outward.x * 0.05, rail_y2, p2.y + outward.y * 0.05)
+		# Top rail — subdivided to follow deck ramp profile (smoothstep).
+		# A single quad per edge would linearly interpolate Y, going under the
+		# deck on long edges that cross the ramp zone.
 		var th := TOP_RAIL_THICKNESS
-		st.set_normal(Vector3.UP)
-		st.add_vertex(tp1 + perp3 * th)
-		st.set_normal(Vector3.UP)
-		st.add_vertex(tp2 + perp3 * th)
-		st.set_normal(Vector3.UP)
-		st.add_vertex(tp2 - perp3 * th)
-		st.set_normal(Vector3.UP)
-		st.add_vertex(tp1 + perp3 * th)
-		st.set_normal(Vector3.UP)
-		st.add_vertex(tp2 - perp3 * th)
-		st.set_normal(Vector3.UP)
-		st.add_vertex(tp1 - perp3 * th)
-		st.set_normal(perp3)
-		st.add_vertex(tp1 + perp3 * th)
-		st.set_normal(perp3)
-		st.add_vertex(tp2 + perp3 * th)
-		st.set_normal(perp3)
-		st.add_vertex(tp2 + perp3 * th - Vector3(0, th, 0))
-		st.set_normal(perp3)
-		st.add_vertex(tp1 + perp3 * th)
-		st.set_normal(perp3)
-		st.add_vertex(tp2 + perp3 * th - Vector3(0, th, 0))
-		st.set_normal(perp3)
-		st.add_vertex(tp1 + perp3 * th - Vector3(0, th, 0))
+		var num_rail_segs := maxi(1, int(ceil(seg_len / RAIL_SUBDIV)))
+		for ri in range(num_rail_segs):
+			var t1_r: float = float(ri) / float(num_rail_segs)
+			var t2_r: float = float(ri + 1) / float(num_rail_segs)
+			var rp1 := p1.lerp(p2, t1_r)
+			var rp2 := p1.lerp(p2, t2_r)
+			var ry1: float = _deck_surface_y_at(rp1, y_poly, layer, ref_elev) + RAILING_HEIGHT
+			var ry2: float = _deck_surface_y_at(rp2, y_poly, layer, ref_elev) + RAILING_HEIGHT
+			var rtp1 := Vector3(rp1.x + outward.x * 0.05, ry1, rp1.y + outward.y * 0.05)
+			var rtp2 := Vector3(rp2.x + outward.x * 0.05, ry2, rp2.y + outward.y * 0.05)
+			# Top face
+			st.set_normal(Vector3.UP)
+			st.add_vertex(rtp1 + perp3 * th)
+			st.set_normal(Vector3.UP)
+			st.add_vertex(rtp2 + perp3 * th)
+			st.set_normal(Vector3.UP)
+			st.add_vertex(rtp2 - perp3 * th)
+			st.set_normal(Vector3.UP)
+			st.add_vertex(rtp1 + perp3 * th)
+			st.set_normal(Vector3.UP)
+			st.add_vertex(rtp2 - perp3 * th)
+			st.set_normal(Vector3.UP)
+			st.add_vertex(rtp1 - perp3 * th)
+			# Outer side face
+			st.set_normal(perp3)
+			st.add_vertex(rtp1 + perp3 * th)
+			st.set_normal(perp3)
+			st.add_vertex(rtp2 + perp3 * th)
+			st.set_normal(perp3)
+			st.add_vertex(rtp2 + perp3 * th - Vector3(0, th, 0))
+			st.set_normal(perp3)
+			st.add_vertex(rtp1 + perp3 * th)
+			st.set_normal(perp3)
+			st.add_vertex(rtp2 + perp3 * th - Vector3(0, th, 0))
+			st.set_normal(perp3)
+			st.add_vertex(rtp1 + perp3 * th - Vector3(0, th, 0))
 
 	var committed := st.commit()
 	if committed == null or committed.get_surface_count() == 0:
@@ -7202,15 +7271,20 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 		var mid_pt := (p1 + p2) * 0.5
 		if _is_point_on_vehicle_road(mid_pt, 1.0, ""):
 			continue
-		var coll_deck_y: float = _deck_surface_y_at(mid_pt, poly, 1, ref_elev)
-		var coll_shape_node := CollisionShape3D.new()
-		var box := BoxShape3D.new()
-		box.size = Vector3(seg_len, RAILING_HEIGHT, 0.1)
-		coll_shape_node.shape = box
 		var angle := atan2(p2.y - p1.y, p2.x - p1.x)
-		coll_shape_node.position = Vector3(mid_pt.x, coll_deck_y + RAILING_HEIGHT * 0.5, mid_pt.y)
-		coll_shape_node.rotation.y = -angle
-		coll_body.add_child(coll_shape_node)
+		var coll_segs := maxi(1, int(ceil(seg_len / RAIL_SUBDIV)))
+		for ci in range(coll_segs):
+			var ct1: float = (float(ci) + 0.5) / float(coll_segs)
+			var cp := p1.lerp(p2, ct1)
+			var cseg_len: float = seg_len / float(coll_segs)
+			var cy: float = _deck_surface_y_at(cp, y_poly, layer, ref_elev)
+			var coll_shape_node := CollisionShape3D.new()
+			var box := BoxShape3D.new()
+			box.size = Vector3(cseg_len, RAILING_HEIGHT, 0.1)
+			coll_shape_node.shape = box
+			coll_shape_node.position = Vector3(cp.x, cy + RAILING_HEIGHT * 0.5, cp.y)
+			coll_shape_node.rotation.y = -angle
+			coll_body.add_child(coll_shape_node)
 	parent.add_child(coll_body)
 	created.append(coll_body)
 	return created
@@ -7624,6 +7698,10 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 	var smoothed_points: PackedVector2Array = item.smoothed_points
 	var width: float = item.width * 2.0  # Визуальная ширина x2 (ROAD_WIDTHS хранит логическую)
 	var parent: Node3D = item.parent
+
+	# Skip footways under bridge polygons
+	if _any_point_on_bridge_deck(smoothed_points):
+		return true  # done, skip this footway
 
 	# Phase 1: classify points (on_road / in_parking) incrementally
 	var pt_idx: int = item.get("_pt_idx", 0)
@@ -12186,6 +12264,10 @@ func _process_road_queue() -> void:
 			if not is_instance_valid(item.parent):
 				lamp_arr.pop_front()
 				continue
+			# Skip lamps under bridge polygons
+			if _any_point_on_bridge_deck(item.points):
+				lamp_arr.pop_front()
+				continue
 			var start_idx: int = item.get("_lamp_seg_idx", 0)
 			var processed: int = _generate_street_lamps_incremental(item.points, item.width, item.parent, start_idx, queue_start, lamp_budget_us)
 			if processed >= item.points.size() - 1:
@@ -12211,6 +12293,10 @@ func _process_road_queue() -> void:
 				break
 			var item: Dictionary = mh_arr[0]
 			if not is_instance_valid(item.parent):
+				mh_arr.pop_front()
+				continue
+			# Skip manholes under bridge polygons
+			if _any_point_on_bridge_deck(item.points):
 				mh_arr.pop_front()
 				continue
 			mh_arr.pop_front()
@@ -12469,6 +12555,9 @@ func _process_curb_queue() -> void:
 			break
 		var item: Dictionary = _curb_queue.pop_front()
 		if is_instance_valid(item.parent) and item.local_points.size() >= 2:
+			# Skip curbs under bridge polygons (ground-level roads under bridges)
+			if not item.get("is_bridge", false) and _any_point_on_bridge_deck(item.local_points):
+				continue
 			# Точки уже в локальных координатах — пропускаем latlon конвертацию
 			# Сглаживание тоже не нужно: дорога и бордюр используют одни и те же raw points,
 			# а сглаживание дороги происходит в _add_road_to_batch_fast
@@ -15940,13 +16029,27 @@ func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
 		var inst: Node3D = scene.instantiate()
 		var scale_val: float = entry.scale
 		var y_offset: float = entry.get("y_offset", 0.0)
-		inst.position = Vector3(pos.x, y_offset, pos.y)
+		var ground_y: float = _sample_elevation(pos.x, pos.y)
+		inst.position = Vector3(pos.x, ground_y + y_offset, pos.y)
 		inst.scale = Vector3.ONE * scale_val
 		inst.rotation_degrees.y = entry.rotation_y
-		# Visibility range 150m (like traffic signs)
-		_set_visibility_range_recursive(inst, 150.0)
-		_set_no_shadow_recursive(inst)
-		parent.add_child(inst)
+		var vis_range: float = entry.get("visibility_range", 150.0)
+		if vis_range > 300.0:
+			# Large-range model (e.g. bridge pylon) — parent to self so it
+			# persists like bridge deck nodes and isn't unloaded with the chunk.
+			# Guard against duplicate placement on chunk reload.
+			var model_key := "%s_%.4f_%.4f" % [model_path, lat, lon]
+			if _placed_bridge_model_keys.has(model_key):
+				inst.queue_free()
+				continue
+			_placed_bridge_model_keys[model_key] = true
+			_set_visibility_range_recursive(inst, vis_range)
+			self.add_child(inst)
+			_custom_bridge_models.append(inst)
+		else:
+			_set_visibility_range_recursive(inst, vis_range)
+			_set_no_shadow_recursive(inst)
+			parent.add_child(inst)
 		print("OSM: Placed custom model '%s' at (%.1f, %.1f) in chunk %s, scale=%.1f" % [
 			model_path.get_file(), pos.x, pos.y, chunk_key, scale_val])
 

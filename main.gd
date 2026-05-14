@@ -159,17 +159,20 @@ func _spawn_car_on_road() -> void:
 	if not road_dir.is_finite():
 		road_dir = Vector3(0, 0, 1)
 
-	# Рейкаст для высоты поверхности
-	var space_state := _car.get_world_3d().direct_space_state
-	var ray_from := Vector3(road_pos.x, maxf(road_pos.y + 200.0, 2000.0), road_pos.z)
-	var ray_to := Vector3(road_pos.x, minf(road_pos.y - 200.0, -10.0), road_pos.z)
-	var ray_query := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
-	ray_query.collision_mask = 1
-	var ray_result := space_state.intersect_ray(ray_query)
-	if not ray_result.is_empty():
-		road_pos.y = ray_result.position.y + 1.0
+	# Рейкаст для высоты поверхности (на мостах используем wp.position.y)
+	if not nearest_wp.is_bridge:
+		var space_state := _car.get_world_3d().direct_space_state
+		var ray_from := Vector3(road_pos.x, maxf(road_pos.y + 200.0, 2000.0), road_pos.z)
+		var ray_to := Vector3(road_pos.x, minf(road_pos.y - 200.0, -10.0), road_pos.z)
+		var ray_query := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
+		ray_query.collision_mask = 1
+		var ray_result := space_state.intersect_ray(ray_query)
+		if not ray_result.is_empty():
+			road_pos.y = ray_result.position.y + 0.1
+		else:
+			road_pos.y += 0.1
 	else:
-		road_pos.y += 1.0
+		road_pos.y += 0.1
 
 	if not (_car_rb is RigidBody3D):
 		return
@@ -218,6 +221,13 @@ func _show_world() -> void:
 			if not _car.rotation.is_finite():
 				_car.rotation = Vector3.ZERO
 			_car_rb.freeze = false
+			# Dampen velocities for a few frames to prevent bounce on unfreeze
+			for i in 3:
+				await get_tree().physics_frame
+				if not is_instance_valid(_car_rb):
+					return
+				_car_rb.linear_velocity = Vector3.ZERO
+				_car_rb.angular_velocity = Vector3.ZERO
 
 
 func _setup_work_mode() -> void:
