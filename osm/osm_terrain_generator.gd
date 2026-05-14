@@ -6178,9 +6178,9 @@ func _deck_surface_y_at(point: Vector2, full_polygon: PackedVector2Array, layer:
 		var local := _sample_elevation(point.x, point.y)
 		if local == 0.0:
 			local = ref_elev
-		# Ramp base 10cm below terrain so it dips underground and
+		# Ramp base 30cm below terrain so it dips underground and
 		# guarantees intersection with ground road — no gap possible.
-		y = lerpf(local - 0.1, deck_top, _smooth_step(t))
+		y = lerpf(local - 0.3, deck_top, _smooth_step(t))
 	# Lateral exit ramps — where _link bridge roads depart the polygon,
 	# the deck ramps down to meet the standalone bridge road's surface.
 	for exit_data in _deck_lateral_exits:
@@ -6204,7 +6204,7 @@ func _deck_surface_y_at(point: Vector2, full_polygon: PackedVector2Array, layer:
 		var base_e: float = _sample_elevation(exit_data.pos.x, exit_data.pos.y)
 		if base_e == 0.0:
 			base_e = ref_elev
-		var exit_y: float = lerpf(base_e - 0.1, deck_top, _smooth_step(nt))
+		var exit_y: float = lerpf(base_e - 0.3, deck_top, _smooth_step(nt))
 		# Perpendicular fade: linear blend to deck_top outside arm road width
 		if across > hw:
 			var fade_t: float = (across - hw) / 15.0
@@ -6626,14 +6626,13 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 	var arr_mesh := ArrayMesh.new()
 	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
-	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.7, 0.7, 0.7)
-	material.roughness = 0.9
-	material.metallic = 0.0
-	material.cull_mode = BaseMaterial3D.CULL_DISABLED
-	if _cached_road_albedo:
-		material.albedo_texture = _cached_road_albedo
-		material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	var material: Material = WetRoadMaterial.create_road_shader_material(
+		_cached_road_albedo, _normal_textures.get("asphalt", null),
+		_is_wet_mode, _is_night_mode,
+		_noise_textures.get("micro", null),
+		_noise_textures.get("macro", null))
+	if material is ShaderMaterial:
+		WetRoadMaterial.apply_road_type_params(material, "ow2")
 
 	var mesh_inst := MeshInstance3D.new()
 	mesh_inst.name = "BridgeDeck"
@@ -7041,13 +7040,13 @@ func _create_single_ramp_apron(junc: Dictionary, ref_elev: float) -> void:
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.7, 0.7, 0.7)
-	mat.roughness = 0.9
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	if _cached_road_albedo:
-		mat.albedo_texture = _cached_road_albedo
-		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	var mat: Material = WetRoadMaterial.create_road_shader_material(
+		_cached_road_albedo, _normal_textures.get("asphalt", null),
+		_is_wet_mode, _is_night_mode,
+		_noise_textures.get("micro", null),
+		_noise_textures.get("macro", null))
+	if mat is ShaderMaterial:
+		WetRoadMaterial.apply_road_type_params(mat, "ow2")
 
 	var mi := MeshInstance3D.new()
 	mi.name = "RampApron"
@@ -7055,13 +7054,29 @@ func _create_single_ramp_apron(junc: Dictionary, ref_elev: float) -> void:
 	mi.material_override = mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
+	# Collision so car can drive on the apron
+	var body := StaticBody3D.new()
+	body.name = "RampApronCollision"
+	body.collision_layer = 1
+	body.add_to_group("Road")
+	var shape := CollisionShape3D.new()
+	var coll_shape := ConcavePolygonShape3D.new()
+	var faces := PackedVector3Array()
+	for idx in idxs:
+		faces.append(verts[idx])
+	coll_shape.set_faces(faces)
+	shape.shape = coll_shape
+	body.add_child(shape)
+
 	# Parent to self (same as deck mesh) so it survives chunk unloading
 	add_child(mi)
+	add_child(body)
 
 	# Track with deck nodes for cleanup
 	var poly_idx: int = junc.get("poly_idx", 0)
 	if _bridge_deck_nodes.has(poly_idx):
 		_bridge_deck_nodes[poly_idx].append(mi)
+		_bridge_deck_nodes[poly_idx].append(body)
 
 	# Register terrain corridor to cut grass under the apron
 	var corridor := PackedVector2Array([outer_l, outer_r, inner_r, inner_l])
@@ -7095,7 +7110,7 @@ func _create_deck_railing(poly: PackedVector2Array, ref_elev: float, parent: Nod
 	const RAIL_COLOR := Color(0.3, 0.3, 0.33)
 	const TOP_RAIL_THICKNESS := 0.04
 	const RAIL_SUBDIV := 5.0
-	const MIN_DECK_HEIGHT_FOR_RAILING := 1.5  # no railing when deck < 1.5m above ground
+	const MIN_DECK_HEIGHT_FOR_RAILING := 0.5  # no railing when deck < 0.5m above ground
 
 	var ck := _get_chunk_key_from_node(parent)
 	var has_chunk_rect := false
