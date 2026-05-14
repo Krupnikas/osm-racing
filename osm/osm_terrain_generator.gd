@@ -392,6 +392,8 @@ var _deck_polygon_layer: Dictionary = {}  # poly_idx -> int (OSM layer tag)
 # direction culler can't hide them when the player is still on the bridge.
 # Cleared in reset_terrain to free per-location decks.
 var _bridge_deck_nodes: Dictionary = {}  # poly_idx -> Array[Node3D]
+var _custom_bridge_models: Array = []  # custom models parented to self (bridge pylons etc.)
+var _placed_bridge_model_keys: Dictionary = {}  # dedup guard for self-parented models
 # Lateral exit points where _link bridge roads depart the deck polygon.
 # Deck mesh ramps down at these points so the standalone bridge road's
 # ramp is visible. Each: {pos, inward_dir, half_width, base_elev}.
@@ -3072,6 +3074,11 @@ func reset_terrain() -> void:
 			if is_instance_valid(n):
 				n.queue_free()
 	_bridge_deck_nodes.clear()
+	for m in _custom_bridge_models:
+		if is_instance_valid(m):
+			m.queue_free()
+	_custom_bridge_models.clear()
+	_placed_bridge_model_keys.clear()
 	_deferred_terrain_chunks.clear()
 
 	# Reset draw call stats (prevent stale stats across location changes)
@@ -16026,10 +16033,23 @@ func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
 		inst.position = Vector3(pos.x, ground_y + y_offset, pos.y)
 		inst.scale = Vector3.ONE * scale_val
 		inst.rotation_degrees.y = entry.rotation_y
-		# Visibility range 150m (like traffic signs)
-		_set_visibility_range_recursive(inst, 150.0)
-		_set_no_shadow_recursive(inst)
-		parent.add_child(inst)
+		var vis_range: float = entry.get("visibility_range", 150.0)
+		if vis_range > 300.0:
+			# Large-range model (e.g. bridge pylon) — parent to self so it
+			# persists like bridge deck nodes and isn't unloaded with the chunk.
+			# Guard against duplicate placement on chunk reload.
+			var model_key := "%s_%.4f_%.4f" % [model_path, lat, lon]
+			if _placed_bridge_model_keys.has(model_key):
+				inst.queue_free()
+				continue
+			_placed_bridge_model_keys[model_key] = true
+			_set_visibility_range_recursive(inst, vis_range)
+			self.add_child(inst)
+			_custom_bridge_models.append(inst)
+		else:
+			_set_visibility_range_recursive(inst, vis_range)
+			_set_no_shadow_recursive(inst)
+			parent.add_child(inst)
 		print("OSM: Placed custom model '%s' at (%.1f, %.1f) in chunk %s, scale=%.1f" % [
 			model_path.get_file(), pos.x, pos.y, chunk_key, scale_val])
 
