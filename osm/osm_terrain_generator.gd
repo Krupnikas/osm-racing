@@ -17352,7 +17352,7 @@ func _get_lod2_building_material(color: Color) -> StandardMaterial3D:
 
 ## Плоский террейн для LOD1/2 чанков (без вырезов дорог/зданий)
 func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void:
-	var grid_res := 5
+	var grid_res := 20  # 10m cells to match LOD0 terrain resolution
 	var step := chunk_size / grid_res
 	var vertices := PackedVector3Array()
 	var uvs := PackedVector2Array()
@@ -17388,7 +17388,23 @@ func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void
 
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	_rs_add_mesh(chunk_key, mesh, _ground_shader_material)
+	# Set material on surface directly (belt-and-suspenders with RS override)
+	var mat: Material = _ground_shader_material
+	if mat:
+		mesh.surface_set_material(0, mat)
+	else:
+		# Fallback: plain grass texture if shader material missing
+		var fb := StandardMaterial3D.new()
+		fb.cull_mode = BaseMaterial3D.CULL_DISABLED
+		if _ground_textures.has("grass"):
+			fb.albedo_texture = _ground_textures["grass"]
+			fb.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		else:
+			fb.albedo_color = Color(0.3, 0.5, 0.2)
+		mat = fb
+		mesh.surface_set_material(0, mat)
+		print("WARNING: LOD2 terrain %s using fallback material (no ground shader)" % chunk_key)
+	_rs_add_mesh(chunk_key, mesh, mat)
 
 
 ## Генерация LOD2 зданий-коробок для одного чанка (все здания в один ArrayMesh)
