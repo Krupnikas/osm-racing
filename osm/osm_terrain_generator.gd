@@ -64,6 +64,23 @@ var _lon_scale := 0.0  # Cached cos(deg_to_rad(start_lat)) * 111000.0
 @export var load_distance := 500.0  # Дистанция подгрузки чанков
 @export var unload_distance := 700.0  # Дистанция выгрузки чанков
 @export var render_distance := 400.0  # Дальность прорисовки (и начало тумана)
+
+# LOD system — 3 уровня детализации чанков
+@export_group("LOD System")
+@export var lod0_distance := 500.0   ## Полная детализация (дороги, бордюры, фонари, всё)
+@export var lod1_distance := 500.0   ## Средняя (=LOD0, LOD1 временно отключён — фризы)
+@export var lod2_distance := 1000.0  ## Минимальная (трава без вырезов, здания-коробки без текстур)
+@export var lod_hysteresis := 50.0   ## Гистерезис для предотвращения осцилляции на границах LOD
+@export var enable_lod := true       ## Включить LOD (false = только LOD0)
+@export var enable_behind_camera_cull := true  ## Скрывать чанки позади камеры
+@export var behind_cull_dot := -0.4  ## Порог dot для LOD0 (меньше = агрессивнее, -1.0 = только строго позади)
+@export var lod_cull_dot := -0.2     ## Порог dot для LOD1/2 (менее агрессивный — дальние чанки дешевле)
+@export_group("")
+var _chunk_lod: Dictionary = {}           # chunk_key -> int (0, 1, 2)
+var _lod2_building_materials: Dictionary = {}  # color_key -> StandardMaterial3D
+var _lod_chunk_queue: Array = []  # Deferred LOD chunk generation queue [{osm_data, chunk_key, gen, lod_level}]
+var _lod_transition_rs: Dictionary = {}  # chunk_key -> {rids: Array[RID], meshes: Array} — old LOD instances kept visible during upgrade
+var _lod_transition_free_at: Dictionary = {}  # chunk_key -> int (tick_ms) — delayed free to let GPU finish rendering new instances
 @export var fog_enabled := true  # Включить туман для скрытия края мира
 @export var car_path: NodePath
 @export var camera_path: NodePath
@@ -93,7 +110,6 @@ const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slop
 @export var enable_traffic_signs := true  # Включить дорожные знаки
 @export var enable_traffic_lights := true  # Включить светофоры
 @export var enable_night_mode_windows := true  # Включить подсветку окон ночью
-@export var enable_frustum_culling := true  # Включить frustum culling чанков
 @export var enable_manholes := true  # Включить люки на дорогах
 @export var enable_crossing_signs := true  # Включить знаки пешеходных переходов
 @export var enable_fences := true  # Включить заборы (промзоны, территории)
@@ -1539,6 +1555,16 @@ func _process(delta: float) -> void:
 			var fwd := -_cam.global_transform.basis.z
 			fwd.y = 0.0
 			_cached_cam_fwd = fwd.normalized() if fwd.length_squared() > 0.001 else Vector3.FORWARD
+	# Кешируем вектор скорости машины для приоритизации загрузки
+	if _car and _car is RigidBody3D:
+		var vel: Vector3 = _car.linear_velocity
+		vel.y = 0.0
+		if vel.length_squared() > 1.0:  # > 1 m/s
+			_cached_velocity_dir = vel.normalized()
+		else:
+			_cached_velocity_dir = _cached_cam_fwd  # стоим — используем направление камеры
+	else:
+		_cached_velocity_dir = _cached_cam_fwd
 
 	# Reset add_child budget and drain deferred queue (with time budget)
 	_add_child_budget = 9999 if _initial_loading else ADD_CHILD_BUDGET_NORMAL
@@ -1657,10 +1683,19 @@ func _process(delta: float) -> void:
 		_process_deferred_fence_edges(t0, 2000)
 		_record_perf("fence_gen", Time.get_ticks_usec() - t0)
 
+	# LOD chunk queue — генерируем LOD чанки по 2 за кадр
+	if not _lod_chunk_queue.is_empty():
+		t0 = Time.get_ticks_usec()
+		_process_lod_chunk_queue()
+		_record_perf("lod_chunk_gen", Time.get_ticks_usec() - t0)
+
 	# Lazy chunk activation — включаем видимость через N кадров после финализации
 	t0 = Time.get_ticks_usec()
 	_process_chunk_activation()
 	_record_perf("chunk_activation", Time.get_ticks_usec() - t0)
+
+	# Delayed free of old LOD transition RS instances
+	_process_lod_transition_frees()
 
 	# Camera-based frustum culling для чанков (каждые 200ms)
 	_culling_update_timer += delta
@@ -1820,6 +1855,13 @@ func start_loading() -> void:
 		_loading_chunks.clear()
 	_chunk_data_received.clear()
 	_chunk_state.clear()
+	_chunk_lod.clear()
+	_lod_chunk_queue.clear()
+	for ck in _lod_transition_rs:
+		for rid in _lod_transition_rs[ck].get("rids", []):
+			RenderingServer.free_rid(rid)
+	_lod_transition_rs.clear()
+	_lod_transition_free_at.clear()
 	_elevation_in_flight.clear()
 
 	_loading_paused = false
@@ -1898,6 +1940,9 @@ func start_loading() -> void:
 		print("OSM: Loading chunks around spawn point (0, 0, 0) [_car is null or freed]")
 
 	_initial_chunks_needed = _get_initial_chunks(spawn_pos)
+	# Начальные чанки всегда LOD0
+	for ck in _initial_chunks_needed:
+		_chunk_lod[ck] = 0
 	# Сортируем начальные чанки: ближайшие к камере первыми
 	if _initial_chunks_needed.size() > 1:
 		_initial_chunks_needed.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
@@ -2187,19 +2232,55 @@ func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 	var result: Array[String] = []
 	var player_chunk_x := int(floor(player_pos.x / chunk_size))
 	var player_chunk_z := int(floor(player_pos.z / chunk_size))
+	var player_xz := Vector2(player_pos.x, player_pos.z)
 
-	# Радиус в чанках
-	var radius_chunks := int(ceil(load_distance / chunk_size))
+	# Радиус по максимальной LOD дистанции (или LOD0 only if LOD disabled)
+	var max_load_dist := lod2_distance if enable_lod else lod0_distance
+	var radius_chunks := int(ceil(max_load_dist / chunk_size))
+
+	# Направление для фильтра: не грузим LOD2 позади камеры
+	var vel_dir := Vector2(_cached_velocity_dir.x, _cached_velocity_dir.z)
+	var has_dir := vel_dir.length_squared() > 0.5
 
 	for dx in range(-radius_chunks, radius_chunks + 1):
 		for dz in range(-radius_chunks, radius_chunks + 1):
 			var cx := player_chunk_x + dx
 			var cz := player_chunk_z + dz
 			var chunk_center := Vector2(cx * chunk_size + chunk_size / 2, cz * chunk_size + chunk_size / 2)
-			if Vector2(player_pos.x, player_pos.z).distance_to(chunk_center) <= load_distance:
-				if chunk_filter.is_valid() and not chunk_filter.call(cx, cz):
+			var dist := player_xz.distance_to(chunk_center)
+
+			# Определяем LOD уровень по дистанции
+			var lod := -1
+			if dist <= lod0_distance:
+				lod = 0
+			elif enable_lod and dist <= lod1_distance:
+				lod = 1
+			elif enable_lod and dist <= lod2_distance:
+				lod = 2
+			else:
+				continue
+
+			# LOD2 позади камеры — не загружаем (экономим ~60% чанков)
+			if lod == 2 and has_dir and dist > chunk_size * 2:
+				var to_chunk := (chunk_center - player_xz).normalized()
+				if vel_dir.dot(to_chunk) < -0.3:
 					continue
-				result.append("%d,%d" % [cx, cz])
+
+			if chunk_filter.is_valid() and not chunk_filter.call(cx, cz):
+				continue
+			var key := "%d,%d" % [cx, cz]
+
+			# Гистерезис: не понижаем LOD если чанк уже загружен на более высоком уровне
+			if _loaded_chunks.has(key) or _loading_chunks.has(key):
+				var current_lod: int = _chunk_lod.get(key, 0)
+				if lod > current_lod:
+					# Понижение LOD — требуем доп. расстояние
+					var boundary := lod0_distance if current_lod == 0 else lod1_distance
+					if dist < boundary + lod_hysteresis:
+						lod = current_lod
+
+			result.append(key)
+			_chunk_lod[key] = lod
 
 	return result
 
@@ -2231,7 +2312,29 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 		_enqueue_chunk_load_request(chunk_key, -_chunk_priority_score(chunk_key))
 	_process_chunk_load_queue()
 
-	# Выгружаем далёкие чанки — сзади быстрее (300м), спереди дальше (unload_distance)
+	# LOD переходы: перезагружаем чанки при смене LOD уровня
+	for chunk_key in _loaded_chunks:
+		if _chunks_to_unload.has(chunk_key):
+			continue
+		if not _chunk_lod.has(chunk_key):
+			continue
+		var desired_lod: int = _chunk_lod[chunk_key]
+		var current_lod: int = _chunk_state.get(chunk_key, {}).get("lod_level", 0)
+		if desired_lod != current_lod:
+			print("LOD_CHANGE: %s lod %d->%d rs=%d" % [chunk_key, current_lod, desired_lod, _chunk_rs_instances.get(chunk_key, []).size()])
+			# Save old RS instances to keep visible during LOD transition (prevent blink)
+			if _chunk_rs_instances.has(chunk_key):
+				_lod_transition_rs[chunk_key] = {
+					"rids": _chunk_rs_instances[chunk_key].duplicate(),
+					"meshes": _chunk_rs_meshes.get(chunk_key, []).duplicate(),
+				}
+				# Remove from main dicts so _unload_chunk doesn't free them
+				_chunk_rs_instances.erase(chunk_key)
+				_chunk_rs_meshes.erase(chunk_key)
+			_chunks_to_unload.append(chunk_key)
+
+	# Выгружаем далёкие чанки — сзади быстрее (300м для LOD0), спереди дальше (unload_distance)
+	# LOD1/2 чанки не выгружаются агрессивно — frustum culling скроет их позади камеры
 	var move_dir := velocity.normalized() if speed > min_speed_for_prediction else Vector3.ZERO
 	for chunk_key in _loaded_chunks:
 		if _chunks_to_unload.has(chunk_key):
@@ -2242,13 +2345,16 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 		var chunk_center := Vector2(chunk_x * chunk_size + chunk_size / 2, chunk_z * chunk_size + chunk_size / 2)
 		var dist := Vector2(player_pos.x, player_pos.z).distance_to(chunk_center)
 		var max_dist := unload_distance
-		if move_dir.length_squared() > 0.5:
+		var ck_lod: int = _chunk_lod.get(chunk_key, 0)
+		if ck_lod == 0 and move_dir.length_squared() > 0.5:
 			var player_xz := Vector2(player_pos.x, player_pos.z)
 			var to_chunk := (chunk_center - player_xz).normalized()
 			var move_xz := Vector2(move_dir.x, move_dir.z)
 			if to_chunk.dot(move_xz) < -0.3:  # Чанк сзади
 				max_dist = 300.0
 		if dist > max_dist:
+			# Permanent unload — also free any LOD transition instances
+			_free_lod_transition_rs(chunk_key)
 			_chunks_to_unload.append(chunk_key)
 
 	# Отменяем загрузку далёких чанков (ещё не загрузились — только HTTP в процессе)
@@ -2260,7 +2366,8 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 		var chunk_center := Vector2(chunk_x * chunk_size + chunk_size / 2, chunk_z * chunk_size + chunk_size / 2)
 		var dist := Vector2(player_pos.x, player_pos.z).distance_to(chunk_center)
 		var max_dist := unload_distance
-		if move_dir.length_squared() > 0.5:
+		var cancel_lod: int = _chunk_lod.get(chunk_key, 0)
+		if cancel_lod == 0 and move_dir.length_squared() > 0.5:
 			var player_xz := Vector2(player_pos.x, player_pos.z)
 			var to_chunk := (chunk_center - player_xz).normalized()
 			var move_xz := Vector2(move_dir.x, move_dir.z)
@@ -2307,16 +2414,17 @@ func _enqueue_chunk_load_request(chunk_key: String, priority: float) -> void:
 			if priority > queued["priority"]:
 				queued["priority"] = priority
 				_chunk_load_queue[idx] = queued
-				_chunk_load_queue.sort_custom(func(a, b): return a["priority"] > b["priority"])
 			return
 	_chunk_load_queue.append({
 		"key": chunk_key,
 		"priority": priority,
 	})
-	_chunk_load_queue.sort_custom(func(a, b): return a["priority"] > b["priority"])
 
 
 func _process_chunk_load_queue() -> void:
+	# Sort once before processing (not on every insert)
+	if _chunk_load_queue.size() > 1:
+		_chunk_load_queue.sort_custom(func(a, b): return a["priority"] > b["priority"])
 	while _current_load_count < MAX_CONCURRENT_LOADS and _chunk_load_queue.size() > 0:
 		var next_chunk: Dictionary = _chunk_load_queue.pop_front()
 		var chunk_key: String = next_chunk["key"]
@@ -2561,6 +2669,7 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 	state["activated_ms"] = 0
 	state["last_error"] = ""
 	state["cancelled"] = false
+	state["lod_level"] = _chunk_lod.get(chunk_key, 0)
 	_chunk_state[chunk_key] = state
 	_set_chunk_stage(chunk_key, "requested")
 	_emit_chunk_debug("CHUNK_REQUEST key=%s gen=%d request_started_ms=%d" % [
@@ -2693,11 +2802,13 @@ func _unload_chunk(chunk_key: String) -> void:
 		if state_node and is_instance_valid(state_node):
 			_set_chunk_stage(chunk_key, "unloaded", {"last_error": "manual_unload"})
 			_emit_chunk_debug("CHUNK_UNLOAD key=%s had_loaded_entry=false" % chunk_key)
+			_chunk_lod.erase(chunk_key)
 			_drop_chunk_runtime_state(chunk_key)
 		return
 	if _loaded_chunks.has(chunk_key):
 		_set_chunk_stage(chunk_key, "unloaded", {"last_error": "manual_unload"})
-		_emit_chunk_debug("CHUNK_UNLOAD key=%s had_loaded_entry=true" % chunk_key)
+		_emit_chunk_debug("CHUNK_UNLOAD key=%s had_loaded_entry=true lod=%d" % [chunk_key, _chunk_lod.get(chunk_key, -1)])
+		_chunk_lod.erase(chunk_key)
 		_chunk_culling_cooldown.erase(chunk_key)
 		# NEW: Clean up lamp batch data if not yet finalized
 		if _lamp_batch_data.has(chunk_key):
@@ -2848,6 +2959,9 @@ func _unload_chunk(chunk_key: String) -> void:
 		# Clean up lazy activation
 		_chunk_activation_pending.erase(chunk_key)
 		_remove_loading_placeholder(chunk_key)
+
+		# NOTE: do NOT free _lod_transition_rs here — those old instances
+		# must stay visible until the new LOD version activates
 
 		# Free RenderingServer instances for this chunk
 		if _chunk_rs_instances.has(chunk_key):
@@ -3189,6 +3303,13 @@ func _generate_chunk_async(osm_data: Dictionary, chunk_node: Node3D, chunk_key: 
 ## Dispatch terrain generation: Phase 1+2 run on worker thread, Phase 3 on main thread.
 ## For non-chunk (initial load), runs synchronously on main thread.
 func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String = "", gen: int = -1) -> void:
+	# LOD1/2 чанки: упрощённый pipeline без spatial hashes и worker threads
+	if chunk_key != "":
+		var lod_level: int = _chunk_state.get(chunk_key, {}).get("lod_level", 0)
+		if lod_level >= 1:
+			_generate_lod_chunk(osm_data, chunk_key, gen, lod_level)
+			return
+
 	# Pre-scan: register every node touched by a highway+bridge=yes way so
 	# road meshes downstream can detect shared bridge endpoints. Main thread,
 	# safe to write the global dict.
@@ -8548,8 +8669,6 @@ func _finalize_window_batches_for_chunk(chunk_key: String) -> void:
 	mm_instance.multimesh = mm
 	mm_instance.material_override = mat
 	mm_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mm_instance.visibility_range_end = render_distance
-	mm_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 	mm_instance.name = "WindowBatch"
 
 
@@ -9066,6 +9185,127 @@ func _create_path_mesh(nodes: Array, width: float, color: Color, height_offset: 
 	im.surface_end()
 	parent.add_child(mesh)
 
+## Вычисляет высоту здания из OSM тегов (reused by LOD0 and LOD2)
+func _compute_building_height(tags: Dictionary) -> float:
+	var building_height := 0.0
+	if tags.has("height"):
+		var h_str: String = str(tags.get("height", ""))
+		h_str = h_str.replace(" m", "").replace("m", "").strip_edges()
+		if h_str.is_valid_float():
+			building_height = float(h_str)
+	if building_height <= 0.0 and tags.has("building:levels"):
+		var levels_str: String = str(tags.get("building:levels", ""))
+		if levels_str.is_valid_int():
+			building_height = int(levels_str) * 3.2
+	if building_height <= 0.0:
+		var building_type: String = str(tags.get("building", "yes"))
+		match building_type:
+			"house", "detached", "semidetached_house":
+				building_height = 7.0
+			"residential", "apartments":
+				building_height = 15.0
+			"commercial", "office":
+				building_height = 12.0
+			"industrial", "warehouse":
+				building_height = 8.0
+			"garage", "garages":
+				building_height = 3.0
+			"shed", "hut":
+				building_height = 2.5
+			"church", "cathedral":
+				building_height = 20.0
+			"school", "university":
+				building_height = 12.0
+			"hospital":
+				building_height = 18.0
+			_:
+				building_height = 8.0
+	return clamp(building_height, 2.5, 100.0)
+
+
+## Вычисляет цвет здания из OSM тегов (reused by LOD0 and LOD2)
+func _compute_building_color(tags: Dictionary) -> Color:
+	var color := COLORS["building"]
+	if tags.has("building:colour"):
+		var parsed := Color.from_string(str(tags.get("building:colour", "")), Color(-1, -1, -1))
+		if parsed.r >= 0:
+			return parsed
+	elif tags.has("building:color"):
+		var parsed := Color.from_string(str(tags.get("building:color", "")), Color(-1, -1, -1))
+		if parsed.r >= 0:
+			return parsed
+	else:
+		var amenity_type: String = str(tags.get("amenity", ""))
+		var building_type: String = str(tags.get("building", "yes"))
+		if amenity_type == "kindergarten":
+			color = Color(0.5, 0.75, 0.9)
+		elif amenity_type == "school":
+			color = Color(0.3, 0.5, 0.8)
+		elif amenity_type in ["university", "college"]:
+			color = Color(0.4, 0.45, 0.7)
+		elif amenity_type == "hospital":
+			color = Color(0.95, 0.95, 0.95)
+		elif amenity_type == "clinic":
+			color = Color(0.9, 0.9, 0.95)
+		elif amenity_type == "police":
+			color = Color(0.3, 0.4, 0.6)
+		elif amenity_type == "fire_station":
+			color = Color(0.85, 0.3, 0.25)
+		elif amenity_type == "place_of_worship":
+			color = Color(0.95, 0.9, 0.75)
+		elif amenity_type == "bank":
+			color = Color(0.5, 0.6, 0.5)
+		elif amenity_type == "post_office":
+			color = Color(0.3, 0.45, 0.7)
+		elif amenity_type in ["restaurant", "cafe", "fast_food", "bar", "pub"]:
+			color = Color(0.8, 0.6, 0.4)
+		elif amenity_type == "fuel":
+			color = Color(0.85, 0.75, 0.3)
+		elif amenity_type in ["theatre", "cinema"]:
+			color = Color(0.6, 0.35, 0.5)
+		elif amenity_type == "library":
+			color = Color(0.55, 0.45, 0.35)
+		else:
+			match building_type:
+				"house", "detached", "semidetached_house":
+					color = Color(0.75, 0.65, 0.55)
+				"residential", "apartments":
+					color = Color(0.7, 0.6, 0.5)
+				"commercial", "retail":
+					color = Color(0.6, 0.65, 0.7)
+				"office":
+					color = Color(0.55, 0.6, 0.65)
+				"industrial":
+					color = Color(0.4, 0.4, 0.45)
+				"warehouse":
+					color = Color(0.45, 0.45, 0.5)
+				"garage", "garages":
+					color = Color(0.5, 0.5, 0.48)
+				"shed", "hut":
+					color = Color(0.6, 0.5, 0.4)
+				"church", "cathedral", "chapel":
+					color = Color(0.95, 0.9, 0.75)
+				"kindergarten":
+					color = Color(0.5, 0.75, 0.9)
+				"school":
+					color = Color(0.3, 0.5, 0.8)
+				"university", "college":
+					color = Color(0.4, 0.45, 0.7)
+				"hospital":
+					color = Color(0.95, 0.95, 0.95)
+				"hotel":
+					color = Color(0.7, 0.55, 0.45)
+				"public":
+					color = Color(0.6, 0.6, 0.55)
+				"construction":
+					color = Color(0.8, 0.7, 0.4)
+				"ruins":
+					color = Color(0.5, 0.45, 0.4)
+				_:
+					color = Color(0.65, 0.55, 0.45)
+	return color
+
+
 func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: Node, way_id: int = 0, entrance_nodes: Array = [], poi_nodes: Array = [], skip_spatial_hash: bool = false) -> void:
 	if not enable_buildings or nodes.size() < 3:
 		return
@@ -9095,139 +9335,9 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	if addr_street != "" and addr_housenumber != "":
 		debug_name = "%s %s" % [addr_street, addr_housenumber]
 
-	# Определяем высоту здания из OSM данных
-	var building_height := 0.0
-
-	# Приоритет 1: точная высота в метрах
-	if tags.has("height"):
-		var h_str: String = str(tags.get("height", ""))
-		# Убираем "m" если есть
-		h_str = h_str.replace(" m", "").replace("m", "").strip_edges()
-		if h_str.is_valid_float():
-			building_height = float(h_str)
-
-	# Приоритет 2: количество этажей
-	if building_height <= 0.0 and tags.has("building:levels"):
-		var levels_str: String = str(tags.get("building:levels", ""))
-		if levels_str.is_valid_int():
-			var levels := int(levels_str)
-			building_height = levels * 3.2  # ~3.2м на этаж
-
-	# Приоритет 3: тип здания
-	if building_height <= 0.0:
-		var building_type: String = str(tags.get("building", "yes"))
-		match building_type:
-			"house", "detached", "semidetached_house":
-				building_height = 7.0  # 2 этажа
-			"residential", "apartments":
-				building_height = 15.0  # 5 этажей
-			"commercial", "office":
-				building_height = 12.0  # 4 этажа
-			"industrial", "warehouse":
-				building_height = 8.0
-			"garage", "garages":
-				building_height = 3.0
-			"shed", "hut":
-				building_height = 2.5
-			"church", "cathedral":
-				building_height = 20.0
-			"school", "university":
-				building_height = 12.0
-			"hospital":
-				building_height = 18.0
-			_:
-				building_height = 8.0  # По умолчанию ~3 этажа
-
-	# Ограничиваем высоту разумными пределами
-	building_height = clamp(building_height, 2.5, 100.0)
-
-	# Определяем цвет здания
-	var color := COLORS["building"]
-
-	# Приоритет 1: явно указанный цвет в OSM
-	if tags.has("building:colour"):
-		var colour_str: String = str(tags.get("building:colour", ""))
-		var parsed_color := Color.from_string(colour_str, Color(-1, -1, -1))
-		if parsed_color.r >= 0:
-			color = parsed_color
-	elif tags.has("building:color"):
-		var colour_str: String = str(tags.get("building:color", ""))
-		var parsed_color := Color.from_string(colour_str, Color(-1, -1, -1))
-		if parsed_color.r >= 0:
-			color = parsed_color
-	else:
-		# Приоритет 2: цвет на основе amenity (важнее чем building type)
-		var amenity_type: String = str(tags.get("amenity", ""))
-		var building_type: String = str(tags.get("building", "yes"))
-
-		# Сначала проверяем amenity - они имеют приоритет
-		if amenity_type == "kindergarten":
-			color = Color(0.5, 0.75, 0.9)  # Голубой для детских садов
-		elif amenity_type == "school":
-			color = Color(0.3, 0.5, 0.8)  # Синий для школ
-		elif amenity_type == "university" or amenity_type == "college":
-			color = Color(0.4, 0.45, 0.7)  # Тёмно-синий для вузов
-		elif amenity_type == "hospital":
-			color = Color(0.95, 0.95, 0.95)  # Белый для больниц
-		elif amenity_type == "clinic":
-			color = Color(0.9, 0.9, 0.95)  # Бело-голубой для поликлиник
-		elif amenity_type == "police":
-			color = Color(0.3, 0.4, 0.6)  # Тёмно-синий для полиции
-		elif amenity_type == "fire_station":
-			color = Color(0.85, 0.3, 0.25)  # Красный для пожарных
-		elif amenity_type == "place_of_worship":
-			color = Color(0.95, 0.9, 0.75)  # Золотистый для церквей
-		elif amenity_type == "bank":
-			color = Color(0.5, 0.6, 0.5)  # Серо-зелёный для банков
-		elif amenity_type == "post_office":
-			color = Color(0.3, 0.45, 0.7)  # Синий для почты
-		elif amenity_type in ["restaurant", "cafe", "fast_food", "bar", "pub"]:
-			color = Color(0.8, 0.6, 0.4)  # Оранжево-коричневый для еды
-		elif amenity_type == "fuel":
-			color = Color(0.85, 0.75, 0.3)  # Жёлтый для заправок
-		elif amenity_type == "theatre" or amenity_type == "cinema":
-			color = Color(0.6, 0.35, 0.5)  # Пурпурный для театров/кино
-		elif amenity_type == "library":
-			color = Color(0.55, 0.45, 0.35)  # Коричневый для библиотек
-		else:
-			# Иначе по типу здания
-			match building_type:
-				"house", "detached", "semidetached_house":
-					color = Color(0.75, 0.65, 0.55)  # Светло-бежевый
-				"residential", "apartments":
-					color = Color(0.7, 0.6, 0.5)  # Бежевый
-				"commercial", "retail":
-					color = Color(0.6, 0.65, 0.7)  # Серо-голубой
-				"office":
-					color = Color(0.55, 0.6, 0.65)  # Сине-серый
-				"industrial":
-					color = Color(0.4, 0.4, 0.45)  # Тёмно-серый для промышленных
-				"warehouse":
-					color = Color(0.45, 0.45, 0.5)  # Серый для складов
-				"garage", "garages":
-					color = Color(0.5, 0.5, 0.48)  # Серый для гаражей
-				"shed", "hut":
-					color = Color(0.6, 0.5, 0.4)  # Коричневый
-				"church", "cathedral", "chapel":
-					color = Color(0.95, 0.9, 0.75)  # Золотисто-кремовый
-				"kindergarten":
-					color = Color(0.5, 0.75, 0.9)  # Голубой
-				"school":
-					color = Color(0.3, 0.5, 0.8)  # Синий
-				"university", "college":
-					color = Color(0.4, 0.45, 0.7)  # Тёмно-синий
-				"hospital":
-					color = Color(0.95, 0.95, 0.95)  # Белый
-				"hotel":
-					color = Color(0.7, 0.55, 0.45)  # Тёплый коричневый
-				"public":
-					color = Color(0.6, 0.6, 0.55)  # Серо-оливковый
-				"construction":
-					color = Color(0.8, 0.7, 0.4)  # Жёлто-коричневый
-				"ruins":
-					color = Color(0.5, 0.45, 0.4)  # Тёмно-коричневый
-				_:
-					color = Color(0.65, 0.55, 0.45)  # Стандартный коричневатый
+	# Высота и цвет здания (из вынесенных хелперов)
+	var building_height := _compute_building_height(tags)
+	var color := _compute_building_color(tags)
 
 	var center := _get_polygon_center(points)
 	var max_elev := _sample_elevation(center.x, center.y)
@@ -9813,10 +9923,6 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	body.add_child(sign_back)
 
-	pole.visibility_range_end = 150.0
-	sign_front.visibility_range_end = 150.0
-	sign_back.visibility_range_end = 150.0
-
 	if _draw_call_logging_enabled:
 		_draw_call_stats["signs"] += 2
 
@@ -9965,10 +10071,6 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	body.add_child(sign_back)
 
-	pole.visibility_range_end = 150.0
-	sign_front.visibility_range_end = 150.0
-	sign_back.visibility_range_end = 150.0
-
 	if _draw_call_logging_enabled:
 		_draw_call_stats["signs"] += 2
 
@@ -10080,10 +10182,6 @@ func _create_tram_stop_sign_immediate(pos: Vector2, elevation: float, rotation_y
 	sign_back.rotation.y = PI
 	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	body.add_child(sign_back)
-
-	pole.visibility_range_end = 150.0
-	sign_front.visibility_range_end = 150.0
-	sign_back.visibility_range_end = 150.0
 
 	if _draw_call_logging_enabled:
 		_draw_call_stats["signs"] += 2
@@ -11953,7 +12051,7 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 				material = _building_recess_materials.get(tex_type, _building_wall_materials[tex_type])
 
 			var rid := _rs_add_mesh(chunk_key, arr_mesh, material,
-				shadow_setting, render_distance)
+				shadow_setting)
 			if not _chunk_building_rs.has(chunk_key):
 				_chunk_building_rs[chunk_key] = []
 			_chunk_building_rs[chunk_key].append(rid)
@@ -12186,20 +12284,32 @@ func _update_debug_stats(delta: float) -> void:
 	var chunks_activating := _chunk_activation_pending.size()
 	var chunks_visible := _culling_visible_count
 	var chunks_culled := _culling_culled_count
+	# LOD counts
+	var lod0_count := 0
+	var lod1_count := 0
+	var lod2_count := 0
+	for ck in _loaded_chunks:
+		var lod: int = _chunk_state.get(ck, {}).get("lod_level", 0)
+		if lod == 0:
+			lod0_count += 1
+		elif lod == 1:
+			lod1_count += 1
+		else:
+			lod2_count += 1
 	# Считаем чанки с незавершённой финализацией (видимые но неполные)
 	var chunks_incomplete := 0
 	for ck in _loaded_chunks:
 		if _pending_batch_chunks.has(ck) or _lamp_batches_to_finalize.has(ck) or _tree_batches_to_finalize.has(ck) or _billboard_batches_to_finalize.has(ck) or _building_geo_finalize_queue.has(ck) or _fence_batches_to_finalize.has(ck) or _deferred_footway_queue.has(ck) or _deferred_lamp_queue.has(ck) or _deferred_manhole_queue.has(ck) or _deferred_billboard_queue.has(ck) or _deferred_building_collisions.has(ck) or _deferred_tree_collisions.has(ck) or _deferred_road_collisions.has(ck) or _deferred_terrain_collisions.has(ck) or _deferred_lamp_lights.has(ck) or _deferred_fence_edges.has(ck):
 			chunks_incomplete += 1
 
-	_debug_label.text = "FPS: %.0f (avg:%.0f 1%%:%.0f min:%.0f) | Cam: %s\nFrame: %.1fms [%s] CPU:%.1f GPU:%.1f\nProcess: %.1fms | Physics: %.1fms\nDraw: %d | Verts: %s | VRAM: %.0fMB\nBodies: %d | Pairs: %d | Nodes: %d\nQueues: R:%d T:%d I:%d B:%d C:%d TG:%d\nChunks: %d loaded (%d incomplete) | %d loading | %d activating | %d visible | %d culled\n_process avg/max (ms):%s" % [
+	_debug_label.text = "FPS: %.0f (avg:%.0f 1%%:%.0f min:%.0f) | Cam: %s\nFrame: %.1fms [%s] CPU:%.1f GPU:%.1f\nProcess: %.1fms | Physics: %.1fms\nDraw: %d | Verts: %s | VRAM: %.0fMB\nBodies: %d | Pairs: %d | Nodes: %d\nQueues: R:%d T:%d I:%d B:%d C:%d TG:%d\nChunks: %d loaded (L0:%d L1:%d L2:%d) %d incomplete | %d loading | %d activating | %d visible | %d culled\n_process avg/max (ms):%s" % [
 		fps, avg_fps, fps_1pct, min_fps, cam_name,
 		frame_ms, bottleneck, render_cpu, render_gpu,
 		process_ms, physics_ms,
 		draw_calls, vertices_str, vram,
 		phys_bodies, phys_pairs, nodes,
 		road_q, terrain_q, infra_q, building_q, curb_q, tgen_q,
-		chunks_loaded, chunks_incomplete, chunks_loading, chunks_activating, chunks_visible, chunks_culled,
+		chunks_loaded, lod0_count, lod1_count, lod2_count, chunks_incomplete, chunks_loading, chunks_activating, chunks_visible, chunks_culled,
 		func_lines
 	]
 
@@ -12280,10 +12390,7 @@ func _process_road_queue() -> void:
 			if not is_instance_valid(item.parent):
 				lamp_arr.pop_front()
 				continue
-			# Skip lamps under bridge polygons
-			if _any_point_on_bridge_deck(item.points):
-				lamp_arr.pop_front()
-				continue
+			# Bridge deck lamps are allowed — they'll get deck Y in _generate_street_lamps_incremental
 			var start_idx: int = item.get("_lamp_seg_idx", 0)
 			var processed: int = _generate_street_lamps_incremental(item.points, item.width, item.parent, start_idx, queue_start, lamp_budget_us)
 			if processed >= item.points.size() - 1:
@@ -13488,10 +13595,6 @@ func _create_3d_building_with_texture(points: PackedVector2Array, building_heigh
 
 	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
-	# Visibility range для автоматического скрытия далёких зданий
-	wall_mesh_instance.visibility_range_end = render_distance
-	wall_mesh_instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
-
 	# Используем shared материал стен (уже с PBR текстурами)
 	wall_mesh_instance.material_override = _building_wall_materials.get(texture_type)
 
@@ -14100,7 +14203,6 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	wall_mesh_instance.mesh = wall_mesh
 
 	wall_mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	wall_mesh_instance.visibility_range_end = render_distance
 
 	# === Extension walls (pediment upper section, light color) ===
 	if has_extensions and ext_vertices.size() >= 3:
@@ -16257,8 +16359,6 @@ func _create_lamp_bulb() -> MeshInstance3D:
 	mi.mesh = sphere
 	mi.material_override = mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mi.visibility_range_end = 300.0
-	mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 	return mi
 
 
@@ -17232,6 +17332,357 @@ func _apply_terrain_thread_results() -> void:
 		_terrain_thread_mutex.unlock()
 
 
+# ─── LOD Chunk Generation ─────────────────────────────────────────────────────
+
+## Материал для LOD2 зданий-коробок (кэшированный по квантизированному цвету)
+func _get_lod2_building_material(color: Color) -> StandardMaterial3D:
+	var r := snappedf(color.r, 0.1)
+	var g := snappedf(color.g, 0.1)
+	var b := snappedf(color.b, 0.1)
+	var key := "%d_%d_%d" % [int(r * 10), int(g * 10), int(b * 10)]
+	if _lod2_building_materials.has(key):
+		return _lod2_building_materials[key]
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(r, g, b)
+	mat.roughness = 0.9
+	mat.cull_mode = BaseMaterial3D.CULL_BACK
+	_lod2_building_materials[key] = mat
+	return mat
+
+
+## Плоский террейн для LOD1/2 чанков (без вырезов дорог/зданий)
+func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void:
+	var grid_res := 20  # 10m cells to match LOD0 terrain resolution
+	var step := chunk_size / grid_res
+	var vertices := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var normals := PackedVector3Array()
+	var indices := PackedInt32Array()
+	var uv_scale := 0.25
+
+	for iz in range(grid_res + 1):
+		for ix in range(grid_res + 1):
+			var x := min_x + ix * step
+			var z := min_z + iz * step
+			var y := 0.22 + _sample_elevation(x, z)
+			vertices.append(Vector3(x, y, z))
+			uvs.append(Vector2(x * uv_scale, z * uv_scale))
+			normals.append(Vector3.UP)
+
+	for iz in range(grid_res):
+		for ix in range(grid_res):
+			var i := iz * (grid_res + 1) + ix
+			indices.append(i)
+			indices.append(i + grid_res + 1)
+			indices.append(i + 1)
+			indices.append(i + 1)
+			indices.append(i + grid_res + 1)
+			indices.append(i + grid_res + 2)
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = indices
+
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	# Set material on surface directly (belt-and-suspenders with RS override)
+	var mat: Material = _ground_shader_material
+	if mat:
+		mesh.surface_set_material(0, mat)
+	else:
+		# Fallback: plain grass texture if shader material missing
+		var fb := StandardMaterial3D.new()
+		fb.cull_mode = BaseMaterial3D.CULL_DISABLED
+		if _ground_textures.has("grass"):
+			fb.albedo_texture = _ground_textures["grass"]
+			fb.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		else:
+			fb.albedo_color = Color(0.3, 0.5, 0.2)
+		mat = fb
+		mesh.surface_set_material(0, mat)
+		print("WARNING: LOD2 terrain %s using fallback material (no ground shader)" % chunk_key)
+	_rs_add_mesh(chunk_key, mesh, mat)
+
+
+## Генерация LOD2 зданий-коробок для одного чанка (все здания в один ArrayMesh)
+func _generate_lod2_buildings(chunk_key: String, osm_data: Dictionary, min_x: float, min_z: float) -> void:
+	if not enable_buildings:
+		return
+	var ways: Array = osm_data.get("ways", [])
+	var all_verts := PackedVector3Array()
+	var all_norms := PackedVector3Array()
+	var all_idxs := PackedInt32Array()
+	var batch_color := Color(0.65, 0.55, 0.45)  # будет перезаписан
+	var batch_mat: StandardMaterial3D = null
+
+	# Группируем по квантизированному цвету
+	var color_batches: Dictionary = {}  # mat_key -> {verts, norms, idxs, mat}
+
+	for way in ways:
+		var tags: Dictionary = way.get("tags", {})
+		if not tags.has("building"):
+			continue
+		var nodes: Array = way.get("nodes", [])
+		if nodes.size() < 3:
+			continue
+
+		var points := PackedVector2Array()
+		var cx_sum := 0.0
+		var cz_sum := 0.0
+		for node in nodes:
+			var lp: Vector2 = _latlon_to_local(node.lat, node.lon)
+			points.append(lp)
+			cx_sum += lp.x
+			cz_sum += lp.y
+		var center_x2 := cx_sum / points.size()
+		var center_z2 := cz_sum / points.size()
+
+		# Фильтр: центр здания должен быть внутри чанка
+		if center_x2 < min_x or center_x2 >= min_x + chunk_size:
+			continue
+		if center_z2 < min_z or center_z2 >= min_z + chunk_size:
+			continue
+
+		# Убираем дубликат замыкающей точки
+		if points.size() > 1 and points[0].distance_to(points[points.size() - 1]) < 0.1:
+			points.remove_at(points.size() - 1)
+		if points.size() < 3:
+			continue
+
+		var building_height := _compute_building_height(tags)
+		var color := _compute_building_color(tags)
+		var base_elev := 0.22 + _sample_elevation(center_x2, center_z2)
+		var is_ccw := _is_polygon_ccw(points)
+		var normal_sign := -1.0 if is_ccw else 1.0
+
+		# Квантизируем цвет для группировки
+		var r := snappedf(color.r, 0.1)
+		var g := snappedf(color.g, 0.1)
+		var b := snappedf(color.b, 0.1)
+		var mat_key := "%d_%d_%d" % [int(r * 10), int(g * 10), int(b * 10)]
+
+		if not color_batches.has(mat_key):
+			color_batches[mat_key] = {
+				"verts": PackedVector3Array(),
+				"norms": PackedVector3Array(),
+				"idxs": PackedInt32Array(),
+				"color": Color(r, g, b),
+			}
+
+		var batch: Dictionary = color_batches[mat_key]
+		var bv: PackedVector3Array = batch["verts"]
+		var bn: PackedVector3Array = batch["norms"]
+		var bi: PackedInt32Array = batch["idxs"]
+		var n := points.size()
+
+		# Стены
+		for i in range(n):
+			var p1 := points[i]
+			var p2 := points[(i + 1) % n]
+			var dir := (p2 - p1).normalized()
+			var normal := Vector3(-dir.y * normal_sign, 0.0, dir.x * normal_sign)
+			var base := bv.size()
+			bv.append(Vector3(p1.x, base_elev, p1.y))
+			bv.append(Vector3(p2.x, base_elev, p2.y))
+			bv.append(Vector3(p2.x, base_elev + building_height, p2.y))
+			bv.append(Vector3(p1.x, base_elev + building_height, p1.y))
+			bn.append(normal); bn.append(normal); bn.append(normal); bn.append(normal)
+			bi.append(base); bi.append(base + 1); bi.append(base + 2)
+			bi.append(base); bi.append(base + 2); bi.append(base + 3)
+
+		# Крыша
+		var roof_indices := Geometry2D.triangulate_polygon(points)
+		if roof_indices.size() > 0:
+			var roof_base := bv.size()
+			for p in points:
+				bv.append(Vector3(p.x, base_elev + building_height, p.y))
+				bn.append(Vector3.UP)
+			for idx in roof_indices:
+				bi.append(roof_base + idx)
+
+		batch["verts"] = bv
+		batch["norms"] = bn
+		batch["idxs"] = bi
+
+	# Создаём меши по группам цвета
+	for mat_key in color_batches:
+		var batch: Dictionary = color_batches[mat_key]
+		var bv: PackedVector3Array = batch["verts"]
+		if bv.size() == 0:
+			continue
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = bv
+		arrays[Mesh.ARRAY_NORMAL] = batch["norms"]
+		arrays[Mesh.ARRAY_INDEX] = batch["idxs"]
+		var mesh := ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		var mat := _get_lod2_building_material(batch["color"])
+		_rs_add_mesh(chunk_key, mesh, mat)
+
+
+## Генерация LOD1 деревьев-билбордов для чанка (без spatial hash — упрощённая)
+func _create_lod1_trees(chunk_key: String, osm_data: Dictionary, min_x: float, min_z: float) -> void:
+	if not enable_vegetation:
+		return
+
+	var coords: Array = chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+
+	# Собираем полигоны зданий для простого skip
+	var building_polys: Array[PackedVector2Array] = []
+	for way in osm_data.get("ways", []):
+		var tags: Dictionary = way.get("tags", {})
+		if not tags.has("building"):
+			continue
+		var nodes: Array = way.get("nodes", [])
+		if nodes.size() < 3:
+			continue
+		var poly := PackedVector2Array()
+		for node in nodes:
+			poly.append(_latlon_to_local(node.lat, node.lon))
+		building_polys.append(poly)
+
+	var seed_value := int(abs(chunk_x * 73856093 + chunk_z * 19349669)) % 100000
+	var max_trees := 250
+	var avg_spacing := 10.0
+	var estimated_trees := mini(int((chunk_size * chunk_size) / (avg_spacing * avg_spacing)), max_trees)
+
+	var leaf_transforms: Array[Transform3D] = []
+
+	for i in range(estimated_trees):
+		var hash1 := fmod(float(seed_value + i * 7919) * 0.61803398875, 1.0)
+		var hash2 := fmod(float(seed_value + i * 104729) * 0.41421356237, 1.0)
+		var hash3 := fmod(hash1 * 17.0 + hash2 * 31.0, 1.0)
+		var hash4 := fmod(hash2 * 23.0 + hash1 * 13.0, 1.0)
+
+		var test_x := min_x + (hash1 * 0.7 + hash3 * 0.3) * chunk_size
+		var test_z := min_z + (hash2 * 0.7 + hash4 * 0.3) * chunk_size
+		var test_point := Vector2(test_x, test_z)
+
+		# Простая проверка: не внутри зданий
+		var in_building := false
+		for poly in building_polys:
+			if Geometry2D.is_point_in_polygon(test_point, poly):
+				in_building = true
+				break
+		if in_building:
+			continue
+
+		var elevation := _sample_elevation(test_x, test_z)
+		var scale_hash := fmod(float(seed_value + i * 3571) * 0.7236, 1.0)
+		var scale_hash_y := fmod(float(seed_value + i * 4919) * 0.8317, 1.0)
+		var rot_hash := fmod(float(seed_value + i * 6271) * 0.5413, 1.0)
+		var scale_xz := 0.5 + scale_hash * 1.0
+		var scale_y := 0.5 + scale_hash_y * 1.0
+		var rotation_y := rot_hash * TAU
+
+		var tree_pos := Vector3(test_x, elevation, test_z)
+		var basis := Basis(Vector3.UP, rotation_y).scaled(Vector3(scale_xz, scale_y, scale_xz))
+		leaf_transforms.append(Transform3D(basis, tree_pos))
+
+	if leaf_transforms.size() > 0 and _tree_billboard_leaf:
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = _tree_billboard_leaf
+		mm.instance_count = leaf_transforms.size()
+		for idx in range(leaf_transforms.size()):
+			mm.set_instance_transform(idx, leaf_transforms[idx])
+		var mm_inst := RenderingServer.instance_create2(mm.get_rid(), get_world_3d().scenario)
+		RenderingServer.instance_set_transform(mm_inst, Transform3D.IDENTITY)
+		RenderingServer.instance_geometry_set_cast_shadows_setting(mm_inst, RenderingServer.SHADOW_CASTING_SETTING_OFF)
+		if _chunk_activation_pending.has(chunk_key):
+			RenderingServer.instance_set_visible(mm_inst, false)
+		if not _chunk_rs_instances.has(chunk_key):
+			_chunk_rs_instances[chunk_key] = []
+			_chunk_rs_meshes[chunk_key] = []
+		_chunk_rs_instances[chunk_key].append(mm_inst)
+		_chunk_rs_meshes[chunk_key].append(mm)  # prevent GC
+
+
+## Главный оркестратор LOD чанков — ставит в очередь вместо синхронной генерации
+func _generate_lod_chunk(osm_data: Dictionary, chunk_key: String, gen: int, lod_level: int) -> void:
+	if gen != _load_generation:
+		return
+	_lod_chunk_queue.append({
+		"osm_data": osm_data,
+		"chunk_key": chunk_key,
+		"gen": gen,
+		"lod_level": lod_level,
+	})
+
+
+## Обрабатывает LOD чанки из очереди — приоритет по близости и направлению
+func _process_lod_chunk_queue() -> void:
+	var budget := 4 if not _initial_loading else 8
+	var processed := 0
+	var deferred: Array = []  # Чанки ожидающие elevation — вернём в очередь
+	# Сортируем по приоритету: ближайшие впереди первыми
+	if _lod_chunk_queue.size() > 1:
+		_lod_chunk_queue.sort_custom(func(a, b): return _chunk_priority_score(a["chunk_key"]) < _chunk_priority_score(b["chunk_key"]))
+	while processed < budget and not _lod_chunk_queue.is_empty():
+		var task: Dictionary = _lod_chunk_queue.pop_front()
+		var chunk_key: String = task["chunk_key"]
+		var gen: int = task["gen"]
+		var lod_level: int = task["lod_level"]
+		var osm_data: Dictionary = task["osm_data"]
+
+		if gen != _load_generation:
+			continue
+		# Если чанк уже выгружен или отменён — пропускаем
+		if not _loading_chunks.has(chunk_key) and not _loaded_chunks.has(chunk_key):
+			if not _chunk_state.has(chunk_key):
+				continue
+
+		# Ждём elevation данных — без них terrain рендерится на y=0
+		if enable_elevation and not _chunk_elevation_data.has(chunk_key):
+			deferred.append(task)
+			continue
+
+		var parent: Node3D = null
+		if _chunk_state.has(chunk_key):
+			parent = _chunk_state[chunk_key].get("node", null)
+		if not parent or not is_instance_valid(parent):
+			continue
+
+		var coords: Array = chunk_key.split(",")
+		var chunk_x := int(coords[0])
+		var chunk_z := int(coords[1])
+		var min_x := float(chunk_x) * chunk_size
+		var min_z := float(chunk_z) * chunk_size
+
+		# 1. Плоский террейн (трава с elevation)
+		_create_flat_terrain(chunk_key, min_x, min_z)
+
+		# 2. Здания
+		_generate_lod2_buildings(chunk_key, osm_data, min_x, min_z)
+
+		# 3. Деревья (только LOD1)
+		if lod_level == 1:
+			_create_lod1_trees(chunk_key, osm_data, min_x, min_z)
+
+		# Пометить чанк как загруженный
+		_loading_chunks.erase(chunk_key)
+		_loaded_chunks[chunk_key] = parent
+		parent.visible = false
+		_chunk_activation_pending[chunk_key] = -1
+		_set_chunk_stage(chunk_key, "activating")
+		processed += 1
+
+		_emit_chunk_debug("LOD_CHUNK_READY key=%s lod=%d rs_instances=%d" % [
+			chunk_key, lod_level,
+			_chunk_rs_instances.get(chunk_key, []).size()
+		])
+	# Вернуть чанки ожидающие elevation обратно в начало очереди
+	if not deferred.is_empty():
+		for i in range(deferred.size() - 1, -1, -1):
+			_lod_chunk_queue.push_front(deferred[i])
+
+
 ## Финализация террейн меша: триангуляция + бордюры + ArrayMesh + коллизия.
 ## Вызывается из _process_terrain_gen_queue после завершения клиппинга.
 func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Array[PackedVector2Array]) -> void:
@@ -17658,13 +18109,15 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 		var left_in_intersection := _is_point_in_intersection_shape(lamp_pos_left, false, left_ck) >= 0
 		if not left_in_intersection and not _is_point_in_any_parking(lamp_pos_left, left_ck) and not _is_point_near_road(lamp_pos_left, 0.1, left_ck) and not _is_point_in_water(lamp_pos_left, left_ck):
 			if _loaded_chunks.has(left_ck):
-				_add_lamp_to_batch(left_ck, Vector3(lamp_pos_left.x, _sample_elevation(lamp_pos_left.x, lamp_pos_left.y), lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[left_ck])
+				var left_y: float = get_surface_y(lamp_pos_left.x, lamp_pos_left.y)
+				_add_lamp_to_batch(left_ck, Vector3(lamp_pos_left.x, left_y, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[left_ck])
 
 		if both_sides:
 			var right_ck := "%d,%d" % [int(floor(lamp_pos_right.x / chunk_size)), int(floor(lamp_pos_right.y / chunk_size))]
 			if _is_point_in_intersection_shape(lamp_pos_right, false, right_ck) < 0 and not _is_point_in_any_parking(lamp_pos_right, right_ck) and not _is_point_near_road(lamp_pos_right, 0.1, right_ck) and not _is_point_in_water(lamp_pos_right, right_ck):
 				if _loaded_chunks.has(right_ck):
-					_add_lamp_to_batch(right_ck, Vector3(lamp_pos_right.x, _sample_elevation(lamp_pos_right.x, lamp_pos_right.y), lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[right_ck])
+					var right_y: float = get_surface_y(lamp_pos_right.x, lamp_pos_right.y)
+					_add_lamp_to_batch(right_ck, Vector3(lamp_pos_right.x, right_y, lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[right_ck])
 
 		next_lamp_dist += lamp_spacing
 
@@ -17896,8 +18349,6 @@ func _finalize_entrance_batch(chunk_key: String) -> void:
 		mesh_inst.mesh = arr_mesh
 		mesh_inst.name = "ResidentialEntrances"
 		mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		mesh_inst.visibility_range_end = 200.0
-		mesh_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 		parent.add_child(mesh_inst)
 
 		# Коллизии
@@ -18499,18 +18950,18 @@ func _update_tree_shadows(_player_pos: Vector3) -> void:
 
 func _setup_render_distance() -> void:
 	"""Настраивает дальность прорисовки камеры, туман и дистанции чанков"""
-	# Настраиваем дистанции загрузки чанков
-	# Зазор между load и unload нужен чтобы не флаттерить загрузку/выгрузку
-	load_distance = render_distance + 100.0  # Загружаем чуть дальше видимости
-	unload_distance = render_distance + chunk_size  # Выгружаем с запасом на chunk_size
-	print("OSM: Chunk size: %.0f, distances - load: %.0f, unload: %.0f" % [chunk_size, load_distance, unload_distance])
+	# LOD система: загружаем до lod2_distance, выгружаем с запасом
+	load_distance = lod2_distance
+	unload_distance = lod2_distance + chunk_size
+	print("OSM: Chunk size: %.0f, distances - load: %.0f, unload: %.0f (LOD0=%.0f LOD1=%.0f LOD2=%.0f)" % [
+		chunk_size, load_distance, unload_distance, lod0_distance, lod1_distance, lod2_distance])
 
-	# Настраиваем камеру
+	# Камера: far plane покрывает LOD2 с запасом
 	if _camera:
-		_camera.far = render_distance * 1.5  # Немного дальше тумана
+		_camera.far = lod2_distance * 1.25
 		print("OSM: Camera far plane set to %.0f" % _camera.far)
 
-	# Настраиваем тени DirectionalLight — 2 каскада PSSM, max distance = render_distance
+	# Тени только для LOD0 зоны (render_distance = 400м)
 	var dir_light := get_tree().current_scene.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
 	if dir_light:
 		dir_light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
@@ -18519,19 +18970,17 @@ func _setup_render_distance() -> void:
 		dir_light.shadow_normal_bias = 2.0
 		print("OSM: Shadow: 2 cascades, max distance %.0f, bias %.1f" % [render_distance, dir_light.shadow_normal_bias])
 
-	# Настраиваем туман (Godot 4 использует экспоненциальный туман)
+	# Туман: лёгкая атмосферная дымка для 2км обзора
 	if fog_enabled:
 		var world_env := get_tree().current_scene.find_child("WorldEnvironment", true, false) as WorldEnvironment
 		if world_env and world_env.environment:
 			var env := world_env.environment
 			env.fog_enabled = true
-			# Плотность тумана обратно пропорциональна дальности
-			# При 400м density ~= 0.002, при 100м ~= 0.008, при 800м ~= 0.001
-			env.fog_density = 0.8 / render_distance
-			env.fog_light_color = Color(0.7, 0.75, 0.85)  # Светло-серо-голубой
+			env.fog_density = 0.0003  # Лёгкий туман для 2км видимости
+			env.fog_light_color = Color(0.7, 0.75, 0.85)
 			env.fog_light_energy = 1.0
-			env.fog_aerial_perspective = 0.5  # Эффект дымки на расстоянии
-			print("OSM: Fog enabled (density: %.4f for %.0fm)" % [env.fog_density, render_distance])
+			env.fog_aerial_perspective = 0.7  # Усиленная дымка для ощущения глубины
+			print("OSM: Fog enabled (density: %.4f for %.0fm LOD view)" % [env.fog_density, lod2_distance])
 
 
 func _on_night_mode_changed(enabled: bool) -> void:
@@ -19169,8 +19618,6 @@ func _add_mars_entrance(world_pos: Vector3, rotation_y: float, parent: Node3D, e
 	mesh_inst.mesh = arr_mesh
 	mesh_inst.name = "MarsEntrance"
 	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	mesh_inst.visibility_range_end = 250.0
-	mesh_inst.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_DISABLED
 	parent.add_child(mesh_inst)
 
 	# Label3D текст вывески
@@ -20212,9 +20659,12 @@ func _should_process_chunk(chunk_key: String) -> bool:
 	return false
 
 ## Приоритет чанка: чем меньше значение, тем выше приоритет.
-## Чанки перед камерой получают бонус (score уменьшается), сзади — штраф.
+## Чанки в 45° конусе по вектору скорости — высший приоритет (score × 0.25).
+## Чанки впереди камеры — нормальный приоритет.
+## Чанки сзади — штраф × 4.
 var _cached_cam_pos := Vector3.ZERO
 var _cached_cam_fwd := Vector3.FORWARD
+var _cached_velocity_dir := Vector3.ZERO  # Нормализованный вектор скорости (XZ)
 func _chunk_priority_score(chunk_key: String) -> float:
 	var parts := chunk_key.split(",")
 	var cx := float(int(parts[0])) * chunk_size + chunk_size * 0.5
@@ -20222,13 +20672,21 @@ func _chunk_priority_score(chunk_key: String) -> float:
 	var dx := cx - _cached_cam_pos.x
 	var dz := cz - _cached_cam_pos.z
 	var dist_sq := dx * dx + dz * dz
-	# Направление к чанку относительно камеры: dot > 0 = впереди, < 0 = сзади
 	var dist := sqrt(dist_sq) + 0.001
-	var dot := (dx * _cached_cam_fwd.x + dz * _cached_cam_fwd.z) / dist
-	# Чанки сзади камеры (dot < 0) получают штраф ×3
-	if dot < 0.0:
-		return dist_sq * 3.0
-	return dist_sq
+	var dir_x := dx / dist
+	var dir_z := dz / dist
+	# Dot с вектором скорости (приоритет движения)
+	var vel_dot := dir_x * _cached_velocity_dir.x + dir_z * _cached_velocity_dir.z
+	# Dot с направлением камеры (fallback если стоим)
+	var cam_dot := dir_x * _cached_cam_fwd.x + dir_z * _cached_cam_fwd.z
+	# В 45° конусе по скорости (dot > 0.707) — boost ×0.25
+	if vel_dot > 0.707:
+		return dist_sq * 0.25
+	# Впереди камеры — нормально
+	if cam_dot > 0.0:
+		return dist_sq
+	# Сзади — штраф ×4
+	return dist_sq * 4.0
 
 ## Находит индекс processable чанка с наивысшим приоритетом. Возвращает -1 если все culled.
 func _pick_closest_chunk_idx(queue: Array) -> int:
@@ -21684,15 +22142,18 @@ func _process_chunk_activation() -> void:
 	# -1 = ждём финализации
 	# >= 0 = индекс следующего RS instance для активации
 	# During initial loading: activate ALL instances immediately (loading screen hides stutter)
-	# During gameplay: drip-feed 4 per frame to avoid Vulkan upload spikes
-	var rs_per_frame := 999999 if _initial_loading else 4
+	# During gameplay: budget per frame. LOD2 чанки дешёвые (1-4 RS) — активируем больше.
+	var rs_budget := 999999 if _initial_loading else 20
+	var rs_activated := 0
 
-	# Сортируем по приоритету: ближайшие к камере первыми
+	# Сортируем по приоритету: ближайшие по вектору скорости первыми
 	var activation_keys: Array = _chunk_activation_pending.keys()
 	if activation_keys.size() > 1:
 		activation_keys.sort_custom(func(a, b): return _chunk_priority_score(a) < _chunk_priority_score(b))
 
 	for chunk_key in activation_keys:
+		if rs_activated >= rs_budget:
+			break
 		var state: int = _chunk_activation_pending[chunk_key]
 		var chunk_debug_state: Dictionary = _chunk_state.get(chunk_key, {})
 		var data_loaded_ms: int = int(chunk_debug_state.get("data_loaded_ms", 0))
@@ -21721,29 +22182,68 @@ func _process_chunk_activation() -> void:
 				var cn: Node3D = _get_chunk_node(chunk_key)
 				if is_instance_valid(cn):
 					cn.visible = true
+				print("ACTIVATE: %s READY (no RS instances)" % chunk_key)
 				_chunk_activation_pending.erase(chunk_key)
 				_remove_loading_placeholder(chunk_key)
 				_chunk_culling_cooldown[chunk_key] = Time.get_ticks_msec() + 3000
 				_set_chunk_stage(chunk_key, "ready", {"node": cn})
+				_schedule_lod_transition_free(chunk_key)
 				continue
 
 			var instances: Array = _chunk_rs_instances[chunk_key]
-			var end_idx: int = mini(state + rs_per_frame, instances.size())
+			var remaining_budget: int = rs_budget - rs_activated
+			var end_idx: int = mini(state + remaining_budget, instances.size())
 			var i := state
 			while i < end_idx:
 				RenderingServer.instance_set_visible(instances[i], true)
 				i += 1
+			rs_activated += end_idx - state
 			if end_idx >= instances.size():
 				# Все RS instances активированы — включаем scene tree node
 				var cn: Node3D = _get_chunk_node(chunk_key)
 				if is_instance_valid(cn):
 					cn.visible = true
+				var lod_lvl: int = _chunk_state.get(chunk_key, {}).get("lod_level", 0)
+				print("ACTIVATE: %s READY lod=%d rs=%d" % [chunk_key, lod_lvl, instances.size()])
 				_chunk_activation_pending.erase(chunk_key)
 				_remove_loading_placeholder(chunk_key)
 				_chunk_culling_cooldown[chunk_key] = Time.get_ticks_msec() + 3000
 				_set_chunk_stage(chunk_key, "ready", {"node": cn})
+				_schedule_lod_transition_free(chunk_key)
 			else:
 				_chunk_activation_pending[chunk_key] = end_idx
+
+
+## Free old LOD RS instances immediately when new LOD chunk is ready
+func _schedule_lod_transition_free(chunk_key: String) -> void:
+	if _lod_transition_rs.has(chunk_key):
+		# Сразу скрываем старые instances, free через 1 кадр
+		var old: Dictionary = _lod_transition_rs[chunk_key]
+		for rid in old.get("rids", []):
+			RenderingServer.instance_set_visible(rid, false)
+		_lod_transition_free_at[chunk_key] = Time.get_ticks_msec() + 50
+
+## Free old LOD RS instances kept visible during LOD transition
+func _free_lod_transition_rs(chunk_key: String) -> void:
+	if not _lod_transition_rs.has(chunk_key):
+		return
+	var old: Dictionary = _lod_transition_rs[chunk_key]
+	for rid in old.get("rids", []):
+		RenderingServer.free_rid(rid)
+	_lod_transition_rs.erase(chunk_key)
+	_lod_transition_free_at.erase(chunk_key)
+
+## Process delayed LOD transition RS frees
+func _process_lod_transition_frees() -> void:
+	if _lod_transition_free_at.is_empty():
+		return
+	var now := Time.get_ticks_msec()
+	var to_free: Array[String] = []
+	for ck in _lod_transition_free_at:
+		if now >= _lod_transition_free_at[ck]:
+			to_free.append(ck)
+	for ck in to_free:
+		_free_lod_transition_rs(ck)
 
 
 ## Budgeted add_child — limits scene tree insertions per frame.
@@ -21895,10 +22395,11 @@ func _print_draw_call_stats() -> void:
 	print("=========================================\n")
 
 
-## Camera-based frustum culling для чанков
-## Использует реальные frustum planes камеры + dot product для чанков позади
+## Behind-camera culling для чанков
+## Скрывает чанки позади камеры по dot product. Никакого frustum culling —
+## LOD система уже контролирует дальность загрузки (LOD0=500m, LOD1=1000m, LOD2=2000m).
 func _update_chunk_culling() -> void:
-	if not enable_frustum_culling:
+	if not enable_behind_camera_cull:
 		_culling_visible_count = _loaded_chunks.size()
 		_culling_culled_count = 0
 		for chunk_node in _loaded_chunks.values():
@@ -21906,20 +22407,13 @@ func _update_chunk_culling() -> void:
 				chunk_node.visible = true
 		return
 
-	# Всегда получаем актуальную камеру (может смениться через CameraManager)
 	_culling_camera = get_viewport().get_camera_3d()
-	if not _culling_camera:
-		return
-
-	if not _car:
+	if not _culling_camera or not _car:
 		return
 
 	var car_pos := _car.global_position
 
-	# Получаем frustum planes камеры (left, right, top, bottom, near, far)
-	var frustum: Array[Plane] = _culling_camera.get_frustum()
-
-	# Направление камеры для дополнительного culling позади машины
+	# Направление камеры (горизонтальная проекция)
 	var cam_forward := -_culling_camera.global_transform.basis.z
 	cam_forward.y = 0
 	if cam_forward.length_squared() > 0.001:
@@ -21932,18 +22426,15 @@ func _update_chunk_culling() -> void:
 	var culled_count := 0
 	var visible_count := 0
 
-	# Высота зданий для AABB (макс ~50м)
-	var chunk_height := 60.0
-
-	var cam_pos := _culling_camera.global_position
-
 	for chunk_key in _loaded_chunks.keys():
-		# Чанки в процессе lazy activation — считаем видимыми (они уже рендерятся)
+		var chunk_lod_level: int = _chunk_state.get(chunk_key, {}).get("lod_level", 0)
+
+		# Чанки в процессе lazy activation — не трогаем visibility
 		if _chunk_activation_pending.has(chunk_key):
 			visible_count += 1
 			continue
-		# Don't cull recently activated chunks (3s cooldown to prevent appear/disappear/appear)
-		if _chunk_culling_cooldown.has(chunk_key):
+		# Cooldown для недавно активированных LOD0 чанков
+		if chunk_lod_level == 0 and _chunk_culling_cooldown.has(chunk_key):
 			if Time.get_ticks_msec() < _chunk_culling_cooldown[chunk_key]:
 				visible_count += 1
 				continue
@@ -21958,39 +22449,14 @@ func _update_chunk_culling() -> void:
 		var chunk_x := int(coords[0])
 		var chunk_z := int(coords[1])
 
-		# AABB чанка с учётом высоты и elevation
-		var elev_min := 0.0
-		var elev_max := 0.0
-		if enable_elevation:
-			var ck_elev: Dictionary = _chunk_elevation_data.get(chunk_key, {})
-			if ck_elev.has("grid"):
-				var first := true
-				for row in ck_elev.grid:
-					for h in row:
-						if h != null:
-							var hf: float = float(h)
-							if first:
-								elev_min = hf
-								elev_max = hf
-								first = false
-							else:
-								if hf < elev_min:
-									elev_min = hf
-								if hf > elev_max:
-									elev_max = hf
-				elev_min -= 10.0  # margin
-		var aabb_min := Vector3(chunk_x * chunk_size, elev_min - 5.0, chunk_z * chunk_size)
-		var aabb_max := Vector3(aabb_min.x + chunk_size, elev_max + chunk_height, aabb_min.z + chunk_size)
-		var aabb_center := (aabb_min + aabb_max) * 0.5
-		var aabb_half := (aabb_max - aabb_min) * 0.5
+		# Центр чанка (XZ)
+		var chunk_center_x := chunk_x * chunk_size + chunk_size * 0.5
+		var chunk_center_z := chunk_z * chunk_size + chunk_size * 0.5
+		var to_chunk := Vector3(chunk_center_x - car_pos.x, 0.0, chunk_center_z - car_pos.z)
+		var dist := to_chunk.length()
 
-		# Расстояние до ближнего ребра чанка
-		var nearest_x := clampf(car_pos.x, aabb_min.x, aabb_max.x)
-		var nearest_z := clampf(car_pos.z, aabb_min.z, aabb_max.z)
-		var dist_to_edge := car_pos.distance_to(Vector3(nearest_x, car_pos.y, nearest_z))
-
-		# Ближние чанки (< chunk_size до ребра) — всегда видимы
-		if dist_to_edge < chunk_size:
+		# Ближние чанки — всегда видимы
+		if dist < chunk_size * 1.5:
 			if not chunk_node.visible:
 				chunk_node.visible = true
 				if _chunk_rs_instances.has(chunk_key):
@@ -21999,34 +22465,10 @@ func _update_chunk_culling() -> void:
 			visible_count += 1
 			continue
 
-		# Тест AABB vs frustum planes
-		var inside_frustum := true
-		var failed_plane_idx := -1
-		for pi in frustum.size():
-			var plane: Plane = frustum[pi]
-			var d := aabb_center.dot(plane.normal) + plane.d
-			var r := absf(aabb_half.x * plane.normal.x) + absf(aabb_half.y * plane.normal.y) + absf(aabb_half.z * plane.normal.z)
-			if d + r < 0.0:
-				inside_frustum = false
-				failed_plane_idx = pi
-				break
-
-		var should_hide := not inside_frustum
-		var cull_reason := ""
-		if should_hide:
-			cull_reason = "frustum_plane_%d" % failed_plane_idx
-
-		# Дополнительно: скрываем далёкие чанки строго позади камеры
-		if not should_hide:
-			var to_chunk := aabb_center - car_pos
-			to_chunk.y = 0
-			var dist := to_chunk.length()
-			if dist > chunk_size * 0.5:  # Не текущий чанк
-				var dot := cam_forward.dot(to_chunk.normalized())
-				# Чанк далеко позади - скрываем
-				if dot < -0.4 and dist > chunk_size * 1.5:
-					should_hide = true
-					cull_reason = "behind(dot=%.2f,dist=%.0f)" % [dot, dist]
+		# Behind-camera test: dot product с направлением камеры
+		var dot := cam_forward.dot(to_chunk / dist)
+		var dot_threshold: float = behind_cull_dot if chunk_lod_level == 0 else lod_cull_dot
+		var should_hide := dot < dot_threshold
 
 		if should_hide:
 			culled_count += 1
@@ -22035,34 +22477,20 @@ func _update_chunk_culling() -> void:
 
 		var want_visible := not should_hide
 		if chunk_node.visible != want_visible:
+			var rs_count: int = _chunk_rs_instances.get(chunk_key, []).size()
 			if want_visible:
-				print("CULL: %s SHOW (was hidden)" % chunk_key)
+				print("CULL: %s SHOW lod=%d rs=%d dist=%.0f dot=%.2f" % [chunk_key, chunk_lod_level, rs_count, dist, dot])
 			else:
-				print("CULL: %s HIDE reason=%s aabb=(%.0f,%.0f,%.0f)-(%.0f,%.0f,%.0f) cam=(%.0f,%.0f,%.0f) fwd=(%.2f,%.2f) car=(%.0f,%.0f,%.0f)" % [
-					chunk_key, cull_reason,
-					aabb_min.x, aabb_min.y, aabb_min.z, aabb_max.x, aabb_max.y, aabb_max.z,
-					cam_pos.x, cam_pos.y, cam_pos.z,
-					cam_forward.x, cam_forward.z,
-					car_pos.x, car_pos.y, car_pos.z])
+				print("CULL: %s HIDE lod=%d rs=%d dist=%.0f dot=%.2f" % [chunk_key, chunk_lod_level, rs_count, dist, dot])
 			chunk_node.visible = want_visible
-			# Also toggle RS instances (roads, buildings, fences, terrain)
 			if _chunk_rs_instances.has(chunk_key):
 				for rid in _chunk_rs_instances[chunk_key]:
 					RenderingServer.instance_set_visible(rid, want_visible)
-			# Clean queues when chunk becomes culled — free resources for visible chunks
 			if not want_visible:
 				var can_purge := _can_purge_chunk_on_cull(chunk_key)
-				_emit_road_debug("CHUNK_CULL key=%s visible=%s purge=%s stage=%s blockers=%s" % [
-					chunk_key,
-					str(want_visible),
-					str(can_purge),
-					str(_chunk_state.get(chunk_key, {}).get("stage", "")),
-					"|".join(_collect_chunk_blockers(chunk_key))
-				])
 				if can_purge:
 					_purge_chunk_queues(chunk_key)
 
-	# Сохраняем для HUD
 	_culling_visible_count = visible_count
 	_culling_culled_count = culled_count
 

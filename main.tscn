@@ -107,7 +107,6 @@ enable_elevation = true
 load_distance = 400.0
 unload_distance = 600.0
 render_distance = 350.0
-enable_frustum_culling = false
 car_path = NodePath("../Car")
 
 [node name="Car" parent="." groups=["car", "player"] instance=ExtResource("2_car")]
