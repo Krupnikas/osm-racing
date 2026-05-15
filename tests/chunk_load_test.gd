@@ -38,6 +38,10 @@ var frame_times: PackedFloat64Array = PackedFloat64Array()
 var initial_chunk_count: int = 0
 var peak_chunk_count: int = 0
 
+# Settings panel
+var settings_panel: PanelContainer
+var settings_visible := false
+
 
 func _ready() -> void:
 	seed(12345)
@@ -502,3 +506,135 @@ func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_cancel") and test_running:
 		print("\n[ChunkLoadTest] Test aborted by user")
 		_end_test()
+
+	if event is InputEventKey and event.pressed and event.keycode == KEY_P:
+		_toggle_settings_panel()
+
+
+func _toggle_settings_panel() -> void:
+	if not settings_panel:
+		_create_settings_panel()
+	settings_visible = not settings_visible
+	settings_panel.visible = settings_visible
+
+
+func _create_settings_panel() -> void:
+	settings_panel = PanelContainer.new()
+	settings_panel.name = "LODSettingsPanel"
+	settings_panel.visible = false
+
+	# Style: semi-transparent dark background
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.1, 0.1, 0.1, 0.85)
+	style.corner_radius_top_left = 8
+	style.corner_radius_top_right = 8
+	style.corner_radius_bottom_left = 8
+	style.corner_radius_bottom_right = 8
+	style.content_margin_left = 12
+	style.content_margin_right = 12
+	style.content_margin_top = 8
+	style.content_margin_bottom = 8
+	settings_panel.add_theme_stylebox_override("panel", style)
+
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_top", 4)
+	settings_panel.add_child(margin)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 6)
+	margin.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "LOD Settings (P to close)"
+	title.add_theme_font_size_override("font_size", 16)
+	vbox.add_child(title)
+
+	# Add sliders and checkboxes
+	if osm_terrain:
+		_add_slider(vbox, "lod0_distance", 100.0, 1500.0, 50.0, "Full detail: roads, curbs, lamps, everything")
+		_add_slider(vbox, "lod1_distance", 200.0, 3000.0, 50.0, "Medium: flat grass, textured buildings, billboard trees")
+		_add_slider(vbox, "lod2_distance", 500.0, 5000.0, 100.0, "Minimal: flat grass, solid-color building boxes")
+		_add_slider(vbox, "lod_hysteresis", 0.0, 200.0, 10.0, "Extra distance before downgrading LOD (prevents oscillation)")
+		_add_separator(vbox)
+		_add_checkbox(vbox, "enable_lod", "Enable LOD1/2 chunks. Off = only full-detail LOD0")
+		_add_checkbox(vbox, "enable_behind_camera_cull", "Hide chunks behind camera (dot product test)")
+		_add_slider(vbox, "behind_cull_dot", -1.0, 0.5, 0.05, "Dot threshold for LOD0 behind-camera cull. Lower = less aggressive")
+		_add_slider(vbox, "lod_cull_dot", -1.0, 0.5, 0.05, "Dot threshold for LOD1/2 behind-camera cull. Lower = less aggressive")
+		_add_separator(vbox)
+		_add_slider(vbox, "render_distance", 100.0, 2000.0, 50.0, "Shadow/fog distance for LOD0 chunks")
+		_add_slider(vbox, "load_distance", 100.0, 3000.0, 50.0, "Max distance to start loading new chunks")
+		_add_slider(vbox, "unload_distance", 100.0, 4000.0, 100.0, "Distance at which loaded chunks get unloaded")
+
+	# Position top-left
+	settings_panel.position = Vector2(10, 10)
+
+	# Need CanvasLayer so it renders on top
+	var canvas := CanvasLayer.new()
+	canvas.layer = 100
+	add_child(canvas)
+	canvas.add_child(settings_panel)
+
+
+func _add_separator(parent: VBoxContainer) -> void:
+	var sep := HSeparator.new()
+	sep.add_theme_constant_override("separation", 4)
+	parent.add_child(sep)
+
+
+func _add_slider(parent: VBoxContainer, prop: String, min_val: float, max_val: float, step: float, hint: String = "") -> void:
+	var hbox := HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 8)
+	if hint:
+		hbox.tooltip_text = hint
+
+	var label := Label.new()
+	label.text = prop
+	label.custom_minimum_size.x = 200
+	label.add_theme_font_size_override("font_size", 13)
+	if hint:
+		label.tooltip_text = hint
+	hbox.add_child(label)
+
+	var slider := HSlider.new()
+	slider.min_value = min_val
+	slider.max_value = max_val
+	slider.step = step
+	slider.value = osm_terrain.get(prop)
+	slider.custom_minimum_size.x = 200
+	if hint:
+		slider.tooltip_text = hint
+	hbox.add_child(slider)
+
+	var value_label := Label.new()
+	value_label.text = _format_val(slider.value)
+	value_label.custom_minimum_size.x = 60
+	value_label.add_theme_font_size_override("font_size", 13)
+	if hint:
+		value_label.tooltip_text = hint
+	hbox.add_child(value_label)
+
+	slider.value_changed.connect(func(val: float):
+		osm_terrain.set(prop, val)
+		value_label.text = _format_val(val)
+	)
+
+	parent.add_child(hbox)
+
+
+func _add_checkbox(parent: VBoxContainer, prop: String, hint: String = "") -> void:
+	var check := CheckBox.new()
+	check.text = prop
+	check.button_pressed = osm_terrain.get(prop)
+	check.add_theme_font_size_override("font_size", 13)
+	if hint:
+		check.tooltip_text = hint
+	check.toggled.connect(func(pressed: bool):
+		osm_terrain.set(prop, pressed)
+	)
+	parent.add_child(check)
+
+
+func _format_val(val: float) -> String:
+	if absf(val) >= 10.0:
+		return "%.0f" % val
+	return "%.2f" % val

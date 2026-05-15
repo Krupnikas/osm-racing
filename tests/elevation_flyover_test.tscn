@@ -68,7 +68,7 @@ enable_roads = true
 enable_elevation = true
 enable_ground_plane = true
 enable_water = false
-enable_frustum_culling = false
+enable_behind_camera_cull = false
 
 [node name="Car" parent="." groups=["car", "player"] instance=ExtResource("car")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)

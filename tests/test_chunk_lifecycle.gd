@@ -71,7 +71,7 @@ func _configure_test_generator(gen: Node3D) -> void:
 	gen.enable_manholes = false
 	gen.enable_crossing_signs = false
 	gen.enable_fences = false
-	gen.enable_frustum_culling = false
+	gen.enable_behind_camera_cull = false
 	gen.load_distance = 100.0
 	gen.unload_distance = 200.0
 
