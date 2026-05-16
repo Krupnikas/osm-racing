@@ -199,9 +199,8 @@ func _setup_test() -> void:
 	print("[ChunkLoadTest] Camera stationary, profiling initial chunk load...")
 
 	# Apply CLI lat/lon — spawn position (origin is fixed globally)
-	if "spawn_lat" in osm_terrain:
-		osm_terrain.spawn_lat = test_location.x
-		osm_terrain.spawn_lon = test_location.y
+	osm_terrain.spawn_lat = test_location.x
+	osm_terrain.spawn_lon = test_location.y
 
 	var signal_connected := false
 	if osm_terrain.has_signal("initial_load_complete"):

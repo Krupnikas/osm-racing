@@ -249,9 +249,8 @@ func _setup_test() -> void:
 		print("[ElevationFlyover] Chess chunk filter: OFF (all chunks loaded)")
 
 	# Apply CLI lat/lon — set spawn position (origin is fixed globally)
-	if "spawn_lat" in osm_terrain:
-		osm_terrain.spawn_lat = test_location.x
-		osm_terrain.spawn_lon = test_location.y
+	osm_terrain.spawn_lat = test_location.x
+	osm_terrain.spawn_lon = test_location.y
 
 	# Enable elevation
 	if "enable_elevation" in osm_terrain:

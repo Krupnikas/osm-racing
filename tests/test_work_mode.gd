@@ -48,9 +48,8 @@ func _ready() -> void:
 		return
 
 	# Задаём координаты — spawn position (origin is fixed globally)
-	if "spawn_lat" in _osm_terrain:
-		_osm_terrain.spawn_lat = test_location.x
-		_osm_terrain.spawn_lon = test_location.y
+	_osm_terrain.spawn_lat = test_location.x
+	_osm_terrain.spawn_lon = test_location.y
 
 	# Запускаем камеру
 	_setup_camera()
