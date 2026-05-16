@@ -2,13 +2,14 @@
 class_name ChunkMath
 
 ## Fixed global origin — chunk (0,0) center is here.
-## All sessions use this origin so chunk grid is deterministic and cache is reusable.
-const ORIGIN_LAT := 59.150066
-const ORIGIN_LON := 37.949370
+## Must be on the 210m snap grid so chunk boundaries match legacy sessions.
+## Computed: snap(59.150066) with lat_step=210/111000, snapped to 0.0001.
+const ORIGIN_LAT := 59.1509
+const ORIGIN_LON := 37.9483
 const CHUNK_SIZE := 210.0
 
-## Lon scale at origin latitude: cos(59.150066°) * 111000
-const LON_SCALE := 56919.83  # Precomputed: cos(deg_to_rad(59.150066)) * 111000.0
+## Lon scale at origin latitude: cos(59.1509°) * 111000
+const LON_SCALE := 56918.44  # Precomputed: cos(deg_to_rad(59.1509)) * 111000.0
 
 
 ## Convert absolute lat/lon to world coordinates (meters from global origin).

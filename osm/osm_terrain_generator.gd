@@ -58,8 +58,8 @@ var _manhole_albedo: Texture2D
 var _manhole_normal: Texture2D
 var _manhole_opacity: Texture2D
 
-@export var start_lat := 59.150066  # = ChunkMath.ORIGIN_LAT (fixed global origin)
-@export var start_lon := 37.949370  # = ChunkMath.ORIGIN_LON
+@export var start_lat := 59.1509  # = ChunkMath.ORIGIN_LAT (fixed global origin)
+@export var start_lon := 37.9483  # = ChunkMath.ORIGIN_LON
 var _lon_scale := 0.0  # Cached cos(deg_to_rad(start_lat)) * 111000.0
 ## Player spawn lat/lon — converted to world offset from fixed origin.
 var spawn_lat: float = 0.0

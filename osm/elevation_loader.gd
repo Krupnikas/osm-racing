@@ -9,7 +9,7 @@ signal elevation_failed(chunk_key: String, error: String)
 
 const API_URL := "https://api.opentopodata.org/v1/srtm30m"
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 6  # v6: fixed global origin, no base_x/base_z in cache
+const CACHE_VERSION := 7  # v7: origin snapped to 210m grid (59.1509, 37.9483)
 const GRID_RES := 10  # 10×10 = 100 points, fits in 1 API request
 const GRID_STEP := 30.0  # Native SRTM30m resolution in meters
 const GRID_PADDING := GRID_STEP  # 30m overlap beyond chunk boundary each side
