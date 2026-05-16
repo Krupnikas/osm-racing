@@ -47,11 +47,10 @@ func _ready() -> void:
 		push_error("[WorkTest] No OSMTerrain found!")
 		return
 
-	# Задаём координаты
-	if "start_lat" in _osm_terrain:
-		_osm_terrain.start_lat = test_location.x
-	if "start_lon" in _osm_terrain:
-		_osm_terrain.start_lon = test_location.y
+	# Задаём координаты — spawn position (origin is fixed globally)
+	if "spawn_lat" in _osm_terrain:
+		_osm_terrain.spawn_lat = test_location.x
+		_osm_terrain.spawn_lon = test_location.y
 
 	# Запускаем камеру
 	_setup_camera()

@@ -58,8 +58,8 @@ func _ready() -> void:
 	# Создаём генератор террейна
 	_terrain_generator = OSMTerrainGeneratorScript.new()
 	_terrain_generator.name = "OSMTerrain"
-	_terrain_generator.start_lat = 59.149886
-	_terrain_generator.start_lon = 37.94937
+	_terrain_generator.spawn_lat = 59.149886
+	_terrain_generator.spawn_lon = 37.94937
 	_terrain_generator.chunk_size = 300.0
 	_terrain_generator.load_distance = 500.0
 	_terrain_generator.unload_distance = 800.0

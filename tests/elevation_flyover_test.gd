@@ -248,11 +248,10 @@ func _setup_test() -> void:
 	else:
 		print("[ElevationFlyover] Chess chunk filter: OFF (all chunks loaded)")
 
-	# Apply CLI lat/lon
-	if "start_lat" in osm_terrain:
-		osm_terrain.start_lat = test_location.x
-	if "start_lon" in osm_terrain:
-		osm_terrain.start_lon = test_location.y
+	# Apply CLI lat/lon — set spawn position (origin is fixed globally)
+	if "spawn_lat" in osm_terrain:
+		osm_terrain.spawn_lat = test_location.x
+		osm_terrain.spawn_lon = test_location.y
 
 	# Enable elevation
 	if "enable_elevation" in osm_terrain:
@@ -378,6 +377,12 @@ func _on_terrain_loaded() -> void:
 		var init_dir: Vector2 = path_local[1] - path_local[0]
 		camera_yaw = rad_to_deg(atan2(-init_dir.x, -init_dir.y))
 		camera.rotation_degrees = Vector3(camera_pitch, camera_yaw, 0)
+
+	# Position camera at spawn world offset
+	if osm_terrain and osm_terrain.has_method("get_spawn_world_position"):
+		var spawn_pos: Vector2 = osm_terrain.get_spawn_world_position()
+		camera.global_position.x = spawn_pos.x
+		camera.global_position.z = spawn_pos.y
 
 	# Set fixed camera height = spawn elevation + fly_height_above_ground
 	if osm_terrain and osm_terrain.has_method("get_spawn_elevation"):

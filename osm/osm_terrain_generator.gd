@@ -58,9 +58,12 @@ var _manhole_albedo: Texture2D
 var _manhole_normal: Texture2D
 var _manhole_opacity: Texture2D
 
-@export var start_lat := 59.150066
-@export var start_lon := 37.949370
+@export var start_lat := 59.150066  # = ChunkMath.ORIGIN_LAT (fixed global origin)
+@export var start_lon := 37.949370  # = ChunkMath.ORIGIN_LON
 var _lon_scale := 0.0  # Cached cos(deg_to_rad(start_lat)) * 111000.0
+## Player spawn lat/lon — converted to world offset from fixed origin.
+var spawn_lat: float = 0.0
+var spawn_lon: float = 0.0
 @export var chunk_size := 210.0  # Размер чанка в метрах (270м сетка - 2×30м паддинг)
 @export var load_distance := 500.0  # Дистанция подгрузки чанков
 @export var unload_distance := 700.0  # Дистанция выгрузки чанков
@@ -577,35 +580,30 @@ const BRIDGE_PILLAR_COLOR := Color(0.55, 0.53, 0.5)  # Цвет бетонных
 const BRIDGE_DECK_HEIGHT := 5.0         # Константная высота деки моста над землёй
 const BRIDGE_RAMP_LENGTH := 35.0        # Длина рампы на СВОБОДНОМ конце
 
-## Snap start_lat/start_lon to global grid so chunk boundaries are identical
-## regardless of the exact start position. Nearby starts (same city) snap to the
-## same origin, giving full cache reuse between free-roam and race sessions.
-func _snap_origin_to_grid() -> void:
-	var lat_step := chunk_size / 111000.0
-	# Snap so that chunk centers fall on n * lat_step (matching precache script).
-	# Chunk center = start_lat - lat_step/2, so start_lat must be (n+0.5)*lat_step.
-	var lat_n := roundi(start_lat / lat_step - 0.5)
-	var new_lat: float = snapped(float(lat_n) * lat_step + lat_step * 0.5, 0.0001)
-
-	# Recompute _lon_scale with snapped lat (must match precache: cos of snapped lat)
-	_lon_scale = cos(deg_to_rad(new_lat)) * 111000.0
-	var lon_step := chunk_size / _lon_scale
-	var lon_n := roundi(start_lon / lon_step - 0.5)
-	var new_lon: float = snapped(float(lon_n) * lon_step + lon_step * 0.5, 0.0001)
-
-	if absf(new_lat - start_lat) > 0.00001 or absf(new_lon - start_lon) > 0.00001:
-		print("OSM: Grid-snapped origin: lat %.6f→%.6f  lon %.6f→%.6f (Δ%.1fm, %.1fm)" % [
-			start_lat, new_lat, start_lon, new_lon,
-			absf(new_lat - start_lat) * 111000.0,
-			absf(new_lon - start_lon) * _lon_scale])
-	start_lat = new_lat
-	start_lon = new_lon
+## Enforce fixed global origin. Player spawn position is stored separately;
+## start_lat/start_lon is always the fixed ChunkMath origin.
+## Exception: test tracks that set start_lat=0 use their own coordinate system.
+func _apply_fixed_origin() -> void:
+	# Test tracks (fake_osm) use start_lat=0 — don't override
+	if start_lat == 0.0 and start_lon == 0.0:
+		return
+	if spawn_lat != 0.0 or spawn_lon != 0.0:
+		# Caller set spawn coords — keep them for spawn offset, reset origin
+		pass
+	elif start_lat != ChunkMath.ORIGIN_LAT or start_lon != ChunkMath.ORIGIN_LON:
+		# Legacy: start_lat/lon was set to player position (e.g. from menu).
+		# Store as spawn, reset origin to fixed.
+		spawn_lat = start_lat
+		spawn_lon = start_lon
+	start_lat = ChunkMath.ORIGIN_LAT
+	start_lon = ChunkMath.ORIGIN_LON
+	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
 
 
 func _ready() -> void:
 	# Cache cosine for _latlon_to_local (avoids cos() every call)
 	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
-	_snap_origin_to_grid()
+	_apply_fixed_origin()
 	_open_runtime_debug_log()
 
 	# Добавляем в группу для поиска из MiniMap
@@ -1846,9 +1844,9 @@ func _process(delta: float) -> void:
 
 # Начать загрузку карты
 func start_loading() -> void:
-	# Re-snap origin in case start_lat/start_lon were changed after _ready().
+	# Re-apply fixed origin in case start_lat/start_lon were changed after _ready().
 	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
-	_snap_origin_to_grid()
+	_apply_fixed_origin()
 	print("OSM: Starting initial loading... (generation %d)" % _load_generation)
 	print("OSM: State before start: _loaded_chunks=%d, _loading_chunks=%d" % [_loaded_chunks.size(), _loading_chunks.size()])
 
@@ -1937,13 +1935,15 @@ func start_loading() -> void:
 	_connect_to_night_mode()
 
 	# Определяем какие чанки нужны для старта
-	# Используем позицию машины если она есть, иначе Vector3.ZERO
+	# Используем позицию машины если она есть, иначе spawn world offset
 	var spawn_pos := Vector3.ZERO
 	if _car and is_instance_valid(_car):
 		spawn_pos = _car.global_position
 		print("OSM: Loading chunks around car position (%.1f, %.1f, %.1f)" % [spawn_pos.x, spawn_pos.y, spawn_pos.z])
 	else:
-		print("OSM: Loading chunks around spawn point (0, 0, 0) [_car is null or freed]")
+		var sp := get_spawn_world_position()
+		spawn_pos = Vector3(sp.x, 0, sp.y)
+		print("OSM: Loading chunks around spawn point (%.1f, %.1f)" % [sp.x, sp.y])
 
 	_initial_chunks_needed = _get_initial_chunks(spawn_pos)
 	# Начальные чанки всегда LOD0
@@ -3054,9 +3054,9 @@ func reset_terrain() -> void:
 		_loaded_chunks.size(),
 		_loading_chunks.size()
 	])
-	# Recalculate cached cosine (start_lat may have changed)
+	# Re-apply fixed origin (in case spawn coords changed for race restart)
 	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
-	_snap_origin_to_grid()
+	_apply_fixed_origin()
 	# Инкрементируем generation чтобы игнорировать callback'и от старых загрузок
 	_load_generation += 1
 	print("OSM: Load generation incremented to %d" % _load_generation)
@@ -15020,39 +15020,31 @@ func _latlon_to_local(lat: float, lon: float) -> Vector2:
 
 ## Get spawn elevation by reading the elevation cache for chunk 0,0.
 ## Returns ASL elevation at spawn point, or 0.0 if no cache.
+## Get world position offset for player spawn (from fixed origin to spawn lat/lon).
+func get_spawn_world_position() -> Vector2:
+	if spawn_lat == 0.0 and spawn_lon == 0.0:
+		return Vector2.ZERO
+	return ChunkMath.latlon_to_world(spawn_lat, spawn_lon)
+
+
 func get_spawn_elevation() -> float:
 	if not enable_elevation:
 		return 0.0
-	# Cache key includes lat/lon to be location-aware
-	# Try current version first, then fall back to in-memory data
-	var cache_key := "elev_v%d_%.4f_%.4f_0,0.json" % [ElevationLoader.CACHE_VERSION, start_lat, start_lon]
-	var cache_path := ProjectSettings.globalize_path("user://osm_cache/" + cache_key)
-	var file := FileAccess.open(cache_path, FileAccess.READ)
-	if not file:
-		cache_key = "elev_v%d_%.4f_%.4f_-1,-1.json" % [ElevationLoader.CACHE_VERSION, start_lat, start_lon]
-		cache_path = ProjectSettings.globalize_path("user://osm_cache/" + cache_key)
-		file = FileAccess.open(cache_path, FileAccess.READ)
-		if not file:
-			# Try in-memory elevation data
-			var grid_data: Dictionary = _chunk_elevation_data.get("0,0", _chunk_elevation_data.get("-1,-1", {}))
-			if not grid_data.is_empty():
-				var grid: Array = grid_data.get("grid", [])
-				var res: int = grid_data.get("grid_res", 5)
-				var center := res / 2
-				if grid.size() > center and grid[center].size() > center:
-					return float(grid[center][center])
-			return 0.0
-	var json_string := file.get_as_text()
-	file.close()
-	var json := JSON.new()
-	if json.parse(json_string) != OK:
-		return 0.0
-	var data: Dictionary = json.data
-	var grid: Array = data.get("grid", [])
-	var res: int = data.get("grid_res", 5)
-	var center := res / 2
-	if grid.size() > center and grid[center].size() > center:
-		return float(grid[center][center])
+	# Sample elevation at spawn world position
+	var spawn_pos := get_spawn_world_position()
+	var elev := _sample_elevation(spawn_pos.x, spawn_pos.y)
+	if elev > 0.1:
+		return elev
+	# Fallback: try in-memory data for spawn chunk
+	var spawn_chunk := ChunkMath.world_to_chunk(spawn_pos.x, spawn_pos.y)
+	var ck := "%d,%d" % [spawn_chunk.x, spawn_chunk.y]
+	var grid_data: Dictionary = _chunk_elevation_data.get(ck, {})
+	if not grid_data.is_empty():
+		var grid: Array = grid_data.get("grid", [])
+		var res: int = grid_data.get("grid_res", 5)
+		var center := res / 2
+		if grid.size() > center and grid[center].size() > center:
+			return float(grid[center][center])
 	return 0.0
 
 
