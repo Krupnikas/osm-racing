@@ -59,6 +59,10 @@ func _process(_delta: float) -> void:
 			_cache_result = {}
 			_cache_result_ready = false
 			if not result.is_empty():
+				# Recalculate base_x/base_z for current session — cached values
+				# are from a previous session with potentially different origin.
+				result["base_x"] = float(chunk_x) * chunk_size - GRID_PADDING
+				result["base_z"] = float(chunk_z) * chunk_size - GRID_PADDING
 				elevation_loaded.emit(chunk_key, result)
 			else:
 				# Cache load failed — fetch from network

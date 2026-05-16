@@ -50,6 +50,7 @@ var _ground_textures: Dictionary = {}
 var _normal_textures: Dictionary = {}  # Normal maps
 var _noise_textures: Dictionary = {}  # Noise textures for road shader
 var _ground_shader_material: ShaderMaterial = null  # Shared material for all grass chunks
+var _ground_shader_material_lod2: ShaderMaterial = null  # Brighter variant for LOD2 (compensates mip darkening)
 var _textures_initialized := false
 
 # Текстуры люков
@@ -915,6 +916,11 @@ func _init_textures() -> void:
 		_ground_shader_material.set_shader_parameter("noise_macro_tex", _noise_textures.get("macro"))
 		_ground_shader_material.set_shader_parameter("noise_micro_tex", _noise_textures.get("micro"))
 		print("OSM: Ground shader material created")
+		# LOD2 variant: same shader but brighter to compensate mipmap darkening at distance
+		_ground_shader_material_lod2 = _ground_shader_material.duplicate()
+		_ground_shader_material_lod2.set_shader_parameter("wet_darkening", 0.3)
+		_ground_shader_material_lod2.set_shader_parameter("macro_albedo_intensity", 0.06)
+		_ground_shader_material_lod2.set_shader_parameter("dry_roughness_base", 0.80)
 
 	# Прогрев кэша кастомных текстур зданий — загружаем все текстуры из textures/buildings/
 	# чтобы при генерации чанков не было фризов от файловых проверок
@@ -8480,12 +8486,6 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		"indices": batch["indices"]
 	})
 
-	# DEBUG: Всегда выводим информацию о созданных road batches
-	var mat_info: String = "ShaderMaterial" if material is ShaderMaterial else str(material.albedo_texture) if material is StandardMaterial3D and material.albedo_texture else "color only"
-	print("OSM: ✅ Finalized road batch %s/%s: %d vertices, %d triangles, material: %s" % [
-		chunk_key, texture_key, batch["vertices"].size(), batch["indices"].size() / 3, mat_info
-	])
-
 	# Измерить общее время финализации
 	if _profiler:
 		_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
@@ -15105,8 +15105,10 @@ func _filter_elevation_outliers(grid: Array, grid_res: int) -> void:
 				grid[iz][ix] = med
 
 
-## Upscale 10×10 elevation grid (30m step) to 55×55 (5m step) via Catmull-Rom bicubic.
-## Produces C1-continuous surface. Runs at load time, result stored in _chunk_elevation_data.
+## Upscale 10×10 elevation grid (30m step) to 43×43 (5m step) via Catmull-Rom bicubic.
+## Output covers exactly the chunk area (source indices 1-8 = positions 0-210m).
+## The 1-cell padding (indices 0,9) provides full 4-point Catmull-Rom context for all
+## interior points, so each chunk is self-sufficient — no neighbor data needed.
 func _upscale_elevation_grid(grid_data: Dictionary) -> Dictionary:
 	var src_grid: Array = grid_data.get("grid", [])
 	var src_res: int = grid_data.get("grid_res", 10)
@@ -15117,16 +15119,20 @@ func _upscale_elevation_grid(grid_data: Dictionary) -> Dictionary:
 	_filter_elevation_outliers(src_grid, src_res)
 
 	var scale := 6  # 30m / 5m = 6 sub-cells per source cell
-	var dst_res: int = (src_res - 1) * scale + 1  # 9*6+1 = 55
+	# Output only chunk interior: source indices 1..8 (padding at 0 and 9 is context only)
+	# 7 intervals × 6 + 1 = 43 output points covering exactly 210m
+	var src_start := 1
+	var src_end := src_res - 2  # = 8
+	var dst_res: int = (src_end - src_start) * scale + 1  # 43
 
 	var dst_grid: Array = []
 	for dst_iz in dst_res:
 		var row: Array = []
-		var fz: float = float(dst_iz) / float(scale)
+		var fz: float = float(src_start) + float(dst_iz) / float(scale)
 		var iz: int = mini(int(fz), src_res - 2)
 		var tz: float = fz - float(iz)
 		for dst_ix in dst_res:
-			var fx: float = float(dst_ix) / float(scale)
+			var fx: float = float(src_start) + float(dst_ix) / float(scale)
 			var ix: int = mini(int(fx), src_res - 2)
 			var tx: float = fx - float(ix)
 			# Bicubic: interpolate 4 rows along X, then interpolate results along Z
@@ -15145,7 +15151,12 @@ func _upscale_elevation_grid(grid_data: Dictionary) -> Dictionary:
 	result["grid"] = dst_grid
 	result["grid_res"] = dst_res
 	result["grid_step"] = grid_data.get("grid_step", 30.0) / float(scale)
+	# Shift base to chunk origin (was at padding, now at chunk start)
+	var src_step: float = grid_data.get("grid_step", 30.0)
+	result["base_x"] = grid_data.get("base_x", 0.0) + float(src_start) * src_step
+	result["base_z"] = grid_data.get("base_z", 0.0) + float(src_start) * src_step
 	return result
+
 
 
 ## Catmull-Rom spline interpolation (scalar) between p1 and p2 with t in [0,1].
@@ -15169,21 +15180,17 @@ func _sample_elevation(world_x: float, world_z: float) -> float:
 	var ck := "%d,%d" % [cx, cz]
 	var grid_data: Dictionary = _chunk_elevation_data.get(ck, {})
 	if grid_data.is_empty():
-		# Position at chunk boundary or slightly past edge — floor() rounded to
-		# unloaded adjacent chunk. Try previous chunk in each dimension (covers
-		# right/bottom edge boundaries and road vertices extending past edge).
-		for try_key in ["%d,%d" % [cx - 1, cz], "%d,%d" % [cx, cz - 1], "%d,%d" % [cx - 1, cz - 1]]:
-			grid_data = _chunk_elevation_data.get(try_key, {})
-			if not grid_data.is_empty():
-				break
-		if grid_data.is_empty():
-			return 0.0
+		# Chunk has no elevation data. Each chunk is self-sufficient —
+		# never use another chunk's data. Road vertices beyond chunk
+		# boundary are clipped anyway; terrain uses only own grid.
+		return 0.0
 	var grid: Array = grid_data.get("grid", [])
 	var grid_res: int = grid_data.get("grid_res", 5)
 	var base_x: float = grid_data.get("base_x", 0.0)
 	var base_z: float = grid_data.get("base_z", 0.0)
 	var step: float = grid_data.get("grid_step", 50.0)
 	if grid.size() < grid_res:
+		print("ELEV WARNING: Empty grid for chunk %s (grid_size=%d, grid_res=%d)" % [ck, grid.size(), grid_res])
 		return 0.0
 	# Normalized position within grid
 	var fx: float = clampf((world_x - base_x) / step, 0.0, float(grid_res - 1))
@@ -17491,7 +17498,7 @@ func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	# Set material on surface directly (belt-and-suspenders with RS override)
-	var mat: Material = _ground_shader_material
+	var mat: Material = _ground_shader_material_lod2 if _ground_shader_material_lod2 else _ground_shader_material
 	if mat:
 		mesh.surface_set_material(0, mat)
 	else:
@@ -17934,8 +17941,6 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 
 	if all_indices.is_empty():
 		return
-
-	print("OSM: ChunkTerrain %s: %d polys, %d verts, %d tris" % [chunk_key, terrain_polys.size(), all_vertices.size(), total_tris])
 
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -18966,6 +18971,8 @@ func set_wet_mode(enabled: bool, is_night: bool = true) -> void:
 				mat.set_shader_parameter("is_night", is_night)
 	if _ground_shader_material:
 		_ground_shader_material.set_shader_parameter("is_night", is_night)
+	if _ground_shader_material_lod2:
+		_ground_shader_material_lod2.set_shader_parameter("is_night", is_night)
 
 	# Плавный переход wetness_global за 5 секунд (один вызов RenderingServer на кадр)
 	var target := 1.0 if enabled else 0.0
@@ -19093,6 +19100,8 @@ func _on_night_mode_changed(enabled: bool) -> void:
 	# Ground shader night mode
 	if _ground_shader_material:
 		_ground_shader_material.set_shader_parameter("is_night", enabled)
+	if _ground_shader_material_lod2:
+		_ground_shader_material_lod2.set_shader_parameter("is_night", enabled)
 
 	# NEW: Update lamp night mode
 	_update_lamp_night_mode(enabled)
