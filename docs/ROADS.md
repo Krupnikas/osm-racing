@@ -119,6 +119,8 @@ _is_point_near_road_threadsafe(test_point, 3.0, road_hash)  → 3 m (dense areas
 
 `_compute_road_geometry_thread` строит `corridors` — полигоны вдоль дороги шириной = ширина + небольшой margin. Terrain ground mesh (`_create_landuse_immediate`, `_create_natural_immediate`) вычитает эти corridors через polygon clipping (Clipper2/Geometry2D). Результат: под дорогой нет зелёного terrain mesh.
 
+**Тротуары (footway/path)** terrain НЕ вырезают — по дизайну трава остаётся под ними. Тротуар выше на 1 cm (terrain = elevation + 0.22 m, footway = elevation + 0.23 m). Выравнивание обоих по одной 5m grid гарантирует 1 cm зазор в каждом треугольнике.
+
 ---
 
 ## 5. Бордюры (curbs)

@@ -8307,7 +8307,7 @@ func _add_path_polys_to_batch(filtered: Array[PackedVector2Array], validated: Pa
 		grid_polys.append_array(_split_polygon_by_grid(poly, 5.0))
 
 	for poly in grid_polys:
-		var indices := Geometry2D.triangulate_polygon(poly)
+		var indices := _triangulate_cell_nw_se(poly)
 		if indices.size() < 3:
 			continue
 		var base_idx: int = batch["vertices"].size()
@@ -17989,7 +17989,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	var total_tris := 0
 
 	for poly in grid_polys:
-		var indices := Geometry2D.triangulate_polygon(poly)
+		var indices := _triangulate_cell_nw_se(poly)
 		if indices.size() < 3:
 			continue
 		var base_idx: int = all_vertices.size()
@@ -21289,6 +21289,34 @@ func _split_polygon_by_grid(poly: PackedVector2Array, grid_step: float) -> Array
 	if result.is_empty():
 		result.append(poly)
 	return result
+
+
+## Triangulates a grid cell using a deterministic NW→SE diagonal.
+## Cells from _split_polygon_by_grid with 3-4 vertices are handled directly;
+## complex boundary shapes fall back to triangulate_polygon.
+## Using the same triangulation for overlapping meshes (terrain + footway)
+## ensures their linear interpolation agrees everywhere → 1cm margin holds.
+static func _triangulate_cell_nw_se(poly: PackedVector2Array) -> PackedInt32Array:
+	var n := poly.size()
+	if n < 3:
+		return PackedInt32Array()
+	if n == 3:
+		return PackedInt32Array([0, 1, 2])
+	if n == 4:
+		# Fan from NW vertex (min x+z) — always NW→SE diagonal regardless
+		# of CCW starting vertex, so terrain and footway cells match.
+		var nw := 0
+		var nw_sum := poly[0].x + poly[0].y
+		for i in range(1, 4):
+			var s := poly[i].x + poly[i].y
+			if s < nw_sum:
+				nw_sum = s
+				nw = i
+		var b := (nw + 1) % 4
+		var c := (nw + 2) % 4
+		var d := (nw + 3) % 4
+		return PackedInt32Array([nw, b, c, nw, c, d])
+	return Geometry2D.triangulate_polygon(poly)
 
 
 static func _subdivide_polygon_edges(poly: PackedVector2Array, max_len: float) -> PackedVector2Array:
