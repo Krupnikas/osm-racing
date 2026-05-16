@@ -4723,7 +4723,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	# Smoothing (thread-safe: pure math) — skip for tram (straight tracks, smoothing creates wobble)
 	var smoothed_points: PackedVector2Array
 	if highway_type in ["tram", "tram_rails"]:
-		smoothed_points = _subdivide_for_elevation(local_points)
+		smoothed_points = _subdivide_for_elevation(local_points, 5.0)
 	else:
 		smoothed_points = _smooth_road_corners(local_points)
 
@@ -4791,7 +4791,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		if full_validated.size() >= 2 and highway_type not in ["cycleway", "track", "steps", "tram_rails"]:
 			var corridor_delta: float = half_w + 0.1  # 10cm buffer over mesh width
 			# Subdivide centerline at grid crossings so corridor shape matches road mesh on slopes
-			var full_subdivided: PackedVector2Array = _subdivide_for_elevation(full_validated)
+			var full_subdivided: PackedVector2Array = _subdivide_for_elevation(full_validated, 5.0)
 			var clip_rect := PackedVector2Array()
 			if chunk_key != "initial" and chunk_key != "":
 				var ck_parts_c: PackedStringArray = chunk_key.split(",")
@@ -4826,7 +4826,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		# Subdivide at grid crossings so road mesh follows bilinear elevation accurately.
 		# Without this, long straight segments have only 2 vertices and the flat quad
 		# diverges from the terrain surface on slopes.
-		points = _subdivide_for_elevation(points)
+		points = _subdivide_for_elevation(points, 5.0)
 
 		# Diagnostic: for ramp-owning ways, log + record the FIRST/LAST
 		# vertex after ALL processing so the detector overlay can draw
@@ -7601,7 +7601,8 @@ func _create_road_mesh_with_texture(nodes: Array, width: float, texture_key: Str
 ## Subdivide road segments at elevation grid line crossings (every grid_step meters).
 ## Inserts vertices where the polyline crosses X or Z lines of the fixed grid,
 ## so roads follow the bilinear elevation surface accurately regardless of angle.
-func _subdivide_for_elevation(points: PackedVector2Array, grid_step: float = 10.0) -> PackedVector2Array:
+## Default 5.0 matches the upscaled elevation grid step (30m→5m bicubic).
+func _subdivide_for_elevation(points: PackedVector2Array, grid_step: float = 5.0) -> PackedVector2Array:
 	if not enable_elevation or points.size() < 2:
 		return points
 	var result := PackedVector2Array()
@@ -7767,7 +7768,7 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 			return
 
 	# Subdivide long segments so road follows terrain elevation
-	points = _subdivide_for_elevation(points)
+	points = _subdivide_for_elevation(points, 5.0)
 
 	var half_w: float = width * 0.5
 
@@ -8047,7 +8048,7 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 			return
 
 	# Subdivide long segments so road follows terrain elevation
-	points = _subdivide_for_elevation(points)
+	points = _subdivide_for_elevation(points, 5.0)
 
 	var half_w: float = width * 0.5
 
@@ -8303,7 +8304,7 @@ func _add_path_polys_to_batch(filtered: Array[PackedVector2Array], validated: Pa
 	# Split polygons into grid cells so flat triangles track bilinear elevation
 	var grid_polys: Array[PackedVector2Array] = []
 	for poly in filtered:
-		grid_polys.append_array(_split_polygon_by_grid(poly, 10.0))
+		grid_polys.append_array(_split_polygon_by_grid(poly, 5.0))
 
 	for poly in grid_polys:
 		var indices := Geometry2D.triangulate_polygon(poly)
@@ -9561,7 +9562,7 @@ func _find_parking_sign_position(parking_points: PackedVector2Array) -> Dictiona
 func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void:
 	"""Создаёт асфальтовую поверхность парковки"""
 	# Split into grid cells so parking follows terrain slope accurately
-	var grid_polys := _split_polygon_by_grid(points, 10.0)
+	var grid_polys := _split_polygon_by_grid(points, 5.0)
 
 	var mesh := MeshInstance3D.new()
 	mesh.name = "ParkingSurface"
@@ -9637,7 +9638,7 @@ func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_k
 	if not enable_roads:
 		return
 	# Split into grid cells so area follows terrain slope accurately
-	var grid_polys := _split_polygon_by_grid(points, 10.0)
+	var grid_polys := _split_polygon_by_grid(points, 5.0)
 
 	var mesh := MeshInstance3D.new()
 	mesh.name = "PedestrianArea"
@@ -22202,8 +22203,8 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 	var indices := PackedInt32Array()
 
 	for poly in polys_to_render:
-		# Split by 10m grid so each cell follows bilinear elevation
-		var grid_cells := _split_polygon_by_grid(poly, 10.0)
+		# Split by 5m grid so each cell follows bilinear elevation
+		var grid_cells := _split_polygon_by_grid(poly, 5.0)
 		for cell_poly in grid_cells:
 			var tri_idx := Geometry2D.triangulate_polygon(cell_poly)
 			if tri_idx.is_empty():
