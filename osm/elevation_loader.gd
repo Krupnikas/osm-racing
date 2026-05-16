@@ -175,7 +175,15 @@ func _save_to_cache(data: Dictionary) -> void:
 	if not file:
 		push_warning("ELEV: Failed to write cache: " + cache_path)
 		return
-	file.store_string(JSON.stringify(data))
+	# Only cache session-independent data (grid values + metadata).
+	# base_x/base_z are session-relative and must be computed on load.
+	var cache_data := {
+		"version": data.get("version", CACHE_VERSION),
+		"grid_res": data.get("grid_res", GRID_RES),
+		"grid": data.get("grid", []),
+		"grid_step": data.get("grid_step", GRID_STEP),
+	}
+	file.store_string(JSON.stringify(cache_data))
 	file.close()
 	print("ELEV: Cached %s" % _get_cache_key())
 
