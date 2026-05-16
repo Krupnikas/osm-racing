@@ -1,6 +1,41 @@
 ## ChunkMath - pure geometry helpers shared by chunk generation code.
 class_name ChunkMath
 
+## Fixed global origin — chunk (0,0) center is here.
+## Must be on the 210m snap grid so chunk boundaries match legacy sessions.
+## Computed: snap(59.150066) with lat_step=210/111000, snapped to 0.0001.
+const ORIGIN_LAT := 59.1509
+const ORIGIN_LON := 37.9483
+const CHUNK_SIZE := 210.0
+
+## Lon scale at origin latitude: cos(59.1509°) * 111000
+const LON_SCALE := 56918.44  # Precomputed: cos(deg_to_rad(59.1509)) * 111000.0
+
+
+## Convert absolute lat/lon to world coordinates (meters from global origin).
+static func latlon_to_world(lat: float, lon: float) -> Vector2:
+	var x := (lon - ORIGIN_LON) * LON_SCALE
+	var z := -(lat - ORIGIN_LAT) * 111000.0
+	return Vector2(x, z)
+
+
+## Convert world coordinates back to absolute lat/lon.
+static func world_to_latlon(world_x: float, world_z: float) -> Vector2:
+	var lat := ORIGIN_LAT - world_z / 111000.0
+	var lon := ORIGIN_LON + world_x / LON_SCALE
+	return Vector2(lat, lon)
+
+
+## Get chunk indices for a world position.
+static func world_to_chunk(world_x: float, world_z: float) -> Vector2i:
+	return Vector2i(int(floor(world_x / CHUNK_SIZE)), int(floor(world_z / CHUNK_SIZE)))
+
+
+## Get chunk indices directly from absolute lat/lon.
+static func latlon_to_chunk(lat: float, lon: float) -> Vector2i:
+	var w := latlon_to_world(lat, lon)
+	return world_to_chunk(w.x, w.y)
+
 
 static func polygon_area(poly: PackedVector2Array) -> float:
 	var area := 0.0

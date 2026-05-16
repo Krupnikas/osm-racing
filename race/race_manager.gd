@@ -157,7 +157,8 @@ func start_race(track) -> void:
 		_terrain_generator.initial_load_progress.connect(_on_load_progress)
 		_terrain_generator.initial_load_complete.connect(_on_load_complete)
 
-		# Запускаем загрузку с координат старта (origin уже установлен выше)
+		_terrain_generator.spawn_lat = track.start_lat
+		_terrain_generator.spawn_lon = track.start_lon
 		_terrain_generator.reset_terrain()
 		# Даём кадр на сброс состояния перед загрузкой
 		await get_tree().process_frame

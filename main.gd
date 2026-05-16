@@ -43,19 +43,19 @@ func _ready() -> void:
 			_terrain.enable_vegetation = false
 			_terrain.enable_street_lamps = false
 
-	# Координаты из RaceState (standalone меню уже установило)
+	# Координаты из RaceState — spawn position (origin is always fixed)
 	if _terrain:
 		if RaceState.free_roam_lat != 0.0:
-			_terrain.start_lat = RaceState.free_roam_lat
-			_terrain.start_lon = RaceState.free_roam_lon
+			_terrain.spawn_lat = RaceState.free_roam_lat
+			_terrain.spawn_lon = RaceState.free_roam_lon
 
 	# Отложенный трек для гонки (перезагрузка через "Заново")
 	if RaceState.pending_track != null:
 		_pending_race_track = RaceState.pending_track
 		RaceState.pending_track = null
 		if _terrain and _pending_race_track.get("start_lat"):
-			_terrain.start_lat = _pending_race_track.start_lat
-			_terrain.start_lon = _pending_race_track.start_lon
+			_terrain.spawn_lat = _pending_race_track.start_lat
+			_terrain.spawn_lon = _pending_race_track.start_lon
 
 	# Очищаем состояние
 	RaceState.free_roam_location = ""
@@ -80,12 +80,15 @@ func _start_loading() -> void:
 		_car_rb.linear_velocity = Vector3.ZERO
 		_car_rb.angular_velocity = Vector3.ZERO
 		_car_rb.freeze = true
+		var spawn_offset := Vector2.ZERO
+		if _terrain:
+			spawn_offset = _terrain.get_spawn_world_position()
 		var spawn_y: float = 2.0
 		if _terrain and _terrain.get("enable_elevation"):
 			var elev: float = _terrain.get_spawn_elevation()
 			if elev > 0.0:
 				spawn_y = elev + 2.0
-		_car.global_position = Vector3(0, spawn_y, 0)
+		_car.global_position = Vector3(spawn_offset.x, spawn_y, spawn_offset.y)
 		_car.rotation = Vector3.ZERO
 
 	if _terrain:

@@ -58,6 +58,32 @@ inst.position = Vector3(pos.x, ground_y + y_offset, pos.y)
 
 **Solution:** At road's first/last vertex touching a polygon vertex, replace road perpendicular with polygon outline direction. Road's leading edge becomes co-planar with polygon abutment line.
 
+### 9. Lane markings and NPC waypoints under the bridge (RESOLVED)
+
+Lane markings (дорожная разметка) and NPC waypoints on the Oktyabrskiy bridge appeared at terrain ground level — under the deck — instead of on top of it.
+
+**Root cause: ref_elev race condition**
+
+`_deck_surface_y_at_cached()` and `get_surface_y()` both rely on `_deck_polygon_ref_elev[poly_idx]` being populated. This value is computed by `_compute_and_cache_deck_ref_elev()` which requires elevation data for the axis-end chunks of the bridge polygon. That data arrives from the network (OpenTopoData API) — it's not instant.
+
+The bridge deck mesh itself handles this correctly: `_process_terrain_objects_queue` defers `"bridge_deck"` items until `ref_elev != NAN`. But three other consumers didn't wait:
+
+1. **On-deck lane markings** — created inline during road processing (`_create_on_deck_lane_markings` at line ~5126). Called before elevation arrived → `_deck_surface_y_at_cached` returned terrain Y.
+2. **On-deck footways** — same path (`_create_on_deck_footway`).
+3. **NPC traffic waypoints** — `_deferred_traffic_queue` drained in `_process_deferred_nodes`. For bridge roads, `get_surface_y` fell through to `_sample_elevation` while ref_elev was still NAN.
+
+**Why it was masked before**: cache version bump (v5→v7) invalidated all elevation caches. With a warm cache, elevation arrives from disk instantly and ref_elev is ready before any of the above run. With a cold cache, there's a multi-second network window where ref_elev is NAN.
+
+**Fix (3 parts):**
+
+1. **Lane markings** — instead of calling `_create_on_deck_lane_markings` directly, push item into `_terrain_objects_queue` as type `"on_deck_lane_markings"`. Queue processor finds the containing polygon via `Geometry2D.is_point_in_polygon` and defers until `_compute_and_cache_deck_ref_elev` returns a non-NAN value.
+
+2. **On-deck footways** — same: queued as `"on_deck_footway"`, processed only when ref_elev available.
+
+3. **NPC waypoints** — in the traffic queue drain loop, bridge roads whose midpoint is inside a deck polygon are re-pushed to the front of `_deferred_traffic_queue` if ref_elev is still NAN. They retry next frame.
+
+All three now share the same invariant as the deck mesh: **build only after ref_elev is available**.
+
 ## Remaining Issue
 
 ### Abutment lateral width mismatch

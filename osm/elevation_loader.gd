@@ -9,7 +9,7 @@ signal elevation_failed(chunk_key: String, error: String)
 
 const API_URL := "https://api.opentopodata.org/v1/srtm30m"
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 5  # v5: cache key uses chunk center lat/lon (grid-independent)
+const CACHE_VERSION := 7  # v7: origin snapped to 210m grid (59.1509, 37.9483)
 const GRID_RES := 10  # 10×10 = 100 points, fits in 1 API request
 const GRID_STEP := 30.0  # Native SRTM30m resolution in meters
 const GRID_PADDING := GRID_STEP  # 30m overlap beyond chunk boundary each side
@@ -59,6 +59,10 @@ func _process(_delta: float) -> void:
 			_cache_result = {}
 			_cache_result_ready = false
 			if not result.is_empty():
+				# Recalculate base_x/base_z for current session — cached values
+				# are from a previous session with potentially different origin.
+				result["base_x"] = float(chunk_x) * chunk_size - GRID_PADDING
+				result["base_z"] = float(chunk_z) * chunk_size - GRID_PADDING
 				elevation_loaded.emit(chunk_key, result)
 			else:
 				# Cache load failed — fetch from network
@@ -171,7 +175,15 @@ func _save_to_cache(data: Dictionary) -> void:
 	if not file:
 		push_warning("ELEV: Failed to write cache: " + cache_path)
 		return
-	file.store_string(JSON.stringify(data))
+	# Only cache session-independent data (grid values + metadata).
+	# base_x/base_z are session-relative and must be computed on load.
+	var cache_data := {
+		"version": data.get("version", CACHE_VERSION),
+		"grid_res": data.get("grid_res", GRID_RES),
+		"grid": data.get("grid", []),
+		"grid_step": data.get("grid_step", GRID_STEP),
+	}
+	file.store_string(JSON.stringify(cache_data))
 	file.close()
 	print("ELEV: Cached %s" % _get_cache_key())
 
@@ -284,29 +296,37 @@ func _on_request_completed(result: int, response_code: int,
 	elevation_loaded.emit(chunk_key, grid_data)
 
 
-## Filter out bad elevation values (zeros in areas where they shouldn't be, outliers)
+## Filter out bad elevation values (zeros that are likely data errors)
 func _filter_bad_data(grid: Array) -> void:
-	# Pass 1: detect zeros that are likely errors (surrounded by high values)
+	_repair_zeros(grid)
+
+
+## Pass 1: Replace erroneous zeros with neighbor average
+func _repair_zeros(grid: Array) -> void:
 	for iz in GRID_RES:
 		for ix in GRID_RES:
 			if absf(grid[iz][ix]) < 0.1:
-				# Check if neighbors have significantly higher values
-				var neighbor_sum := 0.0
-				var neighbor_count := 0
-				for dz in range(-1, 2):
-					for dx in range(-1, 2):
-						if dz == 0 and dx == 0:
-							continue
-						var nz := iz + dz
-						var nx := ix + dx
-						if nz >= 0 and nz < GRID_RES and nx >= 0 and nx < GRID_RES:
-							var nv: float = grid[nz][nx]
-							if absf(nv) > 0.1:
-								neighbor_sum += nv
-								neighbor_count += 1
-				if neighbor_count > 0:
-					var avg := neighbor_sum / neighbor_count
-					if absf(avg) > 50.0:
-						# Zero surrounded by high values — likely data error
-						print("ELEV: Filtered zero at [%d][%d], replaced with %.1f" % [iz, ix, avg])
-						grid[iz][ix] = avg
+				var neighbors := _get_neighbor_values(grid, ix, iz)
+				if neighbors.size() >= 3:
+					neighbors.sort()
+					var med: float = float(neighbors[neighbors.size() / 2])
+					# Replace zero if neighbors are consistent non-zero values
+					var nmin: float = neighbors[0]
+					var nmax: float = neighbors[neighbors.size() - 1]
+					if nmax - nmin < 50.0 and absf(med) > 0.5:
+						print("ELEV: Filtered zero at [%d][%d], replaced with %.1f" % [iz, ix, med])
+						grid[iz][ix] = med
+
+
+## Get up to 8 neighbor values for a grid cell
+func _get_neighbor_values(grid: Array, ix: int, iz: int) -> Array:
+	var values: Array = []
+	for dz in range(-1, 2):
+		for dx in range(-1, 2):
+			if dz == 0 and dx == 0:
+				continue
+			var nz := iz + dz
+			var nx := ix + dx
+			if nz >= 0 and nz < GRID_RES and nx >= 0 and nx < GRID_RES:
+				values.append(float(grid[nz][nx]))
+	return values

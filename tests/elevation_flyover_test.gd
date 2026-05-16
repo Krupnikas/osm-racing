@@ -51,6 +51,9 @@ var initial_chunk_count: int = 0
 var peak_chunk_count: int = 0
 var chunks_skipped: int = 0
 
+# Debug HUD
+var debug_label: Label
+
 # Settings panel
 var settings_panel: PanelContainer
 var settings_visible := false
@@ -105,6 +108,19 @@ func _ready() -> void:
 	camera.global_position = Vector3(0, fly_height_above_ground, 0)
 	camera.current = true
 	camera.far = 2000.0
+
+	# Debug HUD overlay
+	var hud_canvas := CanvasLayer.new()
+	hud_canvas.layer = 100
+	add_child(hud_canvas)
+	debug_label = Label.new()
+	debug_label.position = Vector2(10, 10)
+	debug_label.add_theme_font_size_override("font_size", 18)
+	debug_label.add_theme_color_override("font_color", Color.WHITE)
+	debug_label.add_theme_color_override("font_shadow_color", Color.BLACK)
+	debug_label.add_theme_constant_override("shadow_offset_x", 1)
+	debug_label.add_theme_constant_override("shadow_offset_y", 1)
+	hud_canvas.add_child(debug_label)
 
 	# Load logger
 	var logger_script = load("res://tests/performance_logger.gd")
@@ -211,12 +227,13 @@ func _apply_feature_flags() -> void:
 
 
 func _setup_test() -> void:
-	# Hide and freeze car
+	# Hide and freeze car — place at spawn world offset so start_loading() uses correct area
 	if car:
 		car.visible = false
 		if car is RigidBody3D:
 			car.freeze = true
-		car.global_position = Vector3(0, 0.5, 0)
+		var sp := ChunkMath.latlon_to_world(test_location.x, test_location.y)
+		car.global_position = Vector3(sp.x, 0.5, sp.y)
 		var vehicle_input = car.get_node_or_null("VehicleInput")
 		if vehicle_input:
 			vehicle_input.set_physics_process(false)
@@ -232,11 +249,9 @@ func _setup_test() -> void:
 	else:
 		print("[ElevationFlyover] Chess chunk filter: OFF (all chunks loaded)")
 
-	# Apply CLI lat/lon
-	if "start_lat" in osm_terrain:
-		osm_terrain.start_lat = test_location.x
-	if "start_lon" in osm_terrain:
-		osm_terrain.start_lon = test_location.y
+	# Apply CLI lat/lon — set spawn position (origin is fixed globally)
+	osm_terrain.spawn_lat = test_location.x
+	osm_terrain.spawn_lon = test_location.y
 
 	# Enable elevation
 	if "enable_elevation" in osm_terrain:
@@ -362,6 +377,12 @@ func _on_terrain_loaded() -> void:
 		var init_dir: Vector2 = path_local[1] - path_local[0]
 		camera_yaw = rad_to_deg(atan2(-init_dir.x, -init_dir.y))
 		camera.rotation_degrees = Vector3(camera_pitch, camera_yaw, 0)
+
+	# Position camera at spawn world offset
+	if osm_terrain and osm_terrain.has_method("get_spawn_world_position"):
+		var spawn_pos: Vector2 = osm_terrain.get_spawn_world_position()
+		camera.global_position.x = spawn_pos.x
+		camera.global_position.z = spawn_pos.y
 
 	# Set fixed camera height = spawn elevation + fly_height_above_ground
 	if osm_terrain and osm_terrain.has_method("get_spawn_elevation"):
@@ -492,6 +513,23 @@ func _process(delta: float) -> void:
 
 	if logger:
 		logger.log_frame()
+
+	# Update debug HUD
+	if debug_label and camera:
+		var pos := camera.global_position
+		var chunk_x := int(floor(pos.x / 210.0))
+		var chunk_z := int(floor(pos.z / 210.0))
+		var lat := 0.0
+		var lon := 0.0
+		if osm_terrain and "start_lat" in osm_terrain and "start_lon" in osm_terrain:
+			lat = osm_terrain.start_lat - pos.z / 111000.0
+			var lon_scale: float = cos(deg_to_rad(osm_terrain.start_lat)) * 111000.0
+			lon = osm_terrain.start_lon + pos.x / lon_scale
+		var elev := 0.0
+		if osm_terrain and osm_terrain.has_method("_sample_elevation"):
+			elev = osm_terrain._sample_elevation(pos.x, pos.z)
+		debug_label.text = "Chunk: %d, %d | World: %.0f, %.0f | Elev: %.1f\nLat: %.6f  Lon: %.6f | FPS: %d" % [
+			chunk_x, chunk_z, pos.x, pos.z, elev, lat, lon, Engine.get_frames_per_second()]
 
 	# Progress every 10s
 	if int(test_time / 10.0) != int((test_time + delta) / 10.0) or test_time < delta:

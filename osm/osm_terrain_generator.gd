@@ -50,6 +50,7 @@ var _ground_textures: Dictionary = {}
 var _normal_textures: Dictionary = {}  # Normal maps
 var _noise_textures: Dictionary = {}  # Noise textures for road shader
 var _ground_shader_material: ShaderMaterial = null  # Shared material for all grass chunks
+var _ground_shader_material_lod2: ShaderMaterial = null  # Brighter variant for LOD2 (compensates mip darkening)
 var _textures_initialized := false
 
 # Текстуры люков
@@ -57,9 +58,12 @@ var _manhole_albedo: Texture2D
 var _manhole_normal: Texture2D
 var _manhole_opacity: Texture2D
 
-@export var start_lat := 59.150066
-@export var start_lon := 37.949370
+@export var start_lat := 59.1509  # = ChunkMath.ORIGIN_LAT (fixed global origin)
+@export var start_lon := 37.9483  # = ChunkMath.ORIGIN_LON
 var _lon_scale := 0.0  # Cached cos(deg_to_rad(start_lat)) * 111000.0
+## Player spawn lat/lon — converted to world offset from fixed origin.
+var spawn_lat: float = 0.0
+var spawn_lon: float = 0.0
 @export var chunk_size := 210.0  # Размер чанка в метрах (270м сетка - 2×30м паддинг)
 @export var load_distance := 500.0  # Дистанция подгрузки чанков
 @export var unload_distance := 700.0  # Дистанция выгрузки чанков
@@ -576,35 +580,30 @@ const BRIDGE_PILLAR_COLOR := Color(0.55, 0.53, 0.5)  # Цвет бетонных
 const BRIDGE_DECK_HEIGHT := 5.0         # Константная высота деки моста над землёй
 const BRIDGE_RAMP_LENGTH := 35.0        # Длина рампы на СВОБОДНОМ конце
 
-## Snap start_lat/start_lon to global grid so chunk boundaries are identical
-## regardless of the exact start position. Nearby starts (same city) snap to the
-## same origin, giving full cache reuse between free-roam and race sessions.
-func _snap_origin_to_grid() -> void:
-	var lat_step := chunk_size / 111000.0
-	# Snap so that chunk centers fall on n * lat_step (matching precache script).
-	# Chunk center = start_lat - lat_step/2, so start_lat must be (n+0.5)*lat_step.
-	var lat_n := roundi(start_lat / lat_step - 0.5)
-	var new_lat: float = snapped(float(lat_n) * lat_step + lat_step * 0.5, 0.0001)
-
-	# Recompute _lon_scale with snapped lat (must match precache: cos of snapped lat)
-	_lon_scale = cos(deg_to_rad(new_lat)) * 111000.0
-	var lon_step := chunk_size / _lon_scale
-	var lon_n := roundi(start_lon / lon_step - 0.5)
-	var new_lon: float = snapped(float(lon_n) * lon_step + lon_step * 0.5, 0.0001)
-
-	if absf(new_lat - start_lat) > 0.00001 or absf(new_lon - start_lon) > 0.00001:
-		print("OSM: Grid-snapped origin: lat %.6f→%.6f  lon %.6f→%.6f (Δ%.1fm, %.1fm)" % [
-			start_lat, new_lat, start_lon, new_lon,
-			absf(new_lat - start_lat) * 111000.0,
-			absf(new_lon - start_lon) * _lon_scale])
-	start_lat = new_lat
-	start_lon = new_lon
+## Enforce fixed global origin. Player spawn position is stored separately;
+## start_lat/start_lon is always the fixed ChunkMath origin.
+## Exception: test tracks that set start_lat=0 use their own coordinate system.
+func _apply_fixed_origin() -> void:
+	# Test tracks (fake_osm) use start_lat=0 — don't override
+	if start_lat == 0.0 and start_lon == 0.0:
+		return
+	if spawn_lat != 0.0 or spawn_lon != 0.0:
+		# Caller set spawn coords — keep them for spawn offset, reset origin
+		pass
+	elif start_lat != ChunkMath.ORIGIN_LAT or start_lon != ChunkMath.ORIGIN_LON:
+		# Legacy: start_lat/lon was set to player position (e.g. from menu).
+		# Store as spawn, reset origin to fixed.
+		spawn_lat = start_lat
+		spawn_lon = start_lon
+	start_lat = ChunkMath.ORIGIN_LAT
+	start_lon = ChunkMath.ORIGIN_LON
+	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
 
 
 func _ready() -> void:
 	# Cache cosine for _latlon_to_local (avoids cos() every call)
 	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
-	_snap_origin_to_grid()
+	_apply_fixed_origin()
 	_open_runtime_debug_log()
 
 	# Добавляем в группу для поиска из MiniMap
@@ -915,6 +914,11 @@ func _init_textures() -> void:
 		_ground_shader_material.set_shader_parameter("noise_macro_tex", _noise_textures.get("macro"))
 		_ground_shader_material.set_shader_parameter("noise_micro_tex", _noise_textures.get("micro"))
 		print("OSM: Ground shader material created")
+		# LOD2 variant: same shader but brighter to compensate mipmap darkening at distance
+		_ground_shader_material_lod2 = _ground_shader_material.duplicate()
+		_ground_shader_material_lod2.set_shader_parameter("wet_darkening", 0.3)
+		_ground_shader_material_lod2.set_shader_parameter("macro_albedo_intensity", 0.06)
+		_ground_shader_material_lod2.set_shader_parameter("dry_roughness_base", 0.80)
 
 	# Прогрев кэша кастомных текстур зданий — загружаем все текстуры из textures/buildings/
 	# чтобы при генерации чанков не было фризов от файловых проверок
@@ -1840,9 +1844,9 @@ func _process(delta: float) -> void:
 
 # Начать загрузку карты
 func start_loading() -> void:
-	# Re-snap origin in case start_lat/start_lon were changed after _ready().
+	# Re-apply fixed origin in case start_lat/start_lon were changed after _ready().
 	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
-	_snap_origin_to_grid()
+	_apply_fixed_origin()
 	print("OSM: Starting initial loading... (generation %d)" % _load_generation)
 	print("OSM: State before start: _loaded_chunks=%d, _loading_chunks=%d" % [_loaded_chunks.size(), _loading_chunks.size()])
 
@@ -1931,13 +1935,15 @@ func start_loading() -> void:
 	_connect_to_night_mode()
 
 	# Определяем какие чанки нужны для старта
-	# Используем позицию машины если она есть, иначе Vector3.ZERO
+	# Используем позицию машины если она есть, иначе spawn world offset
 	var spawn_pos := Vector3.ZERO
 	if _car and is_instance_valid(_car):
 		spawn_pos = _car.global_position
 		print("OSM: Loading chunks around car position (%.1f, %.1f, %.1f)" % [spawn_pos.x, spawn_pos.y, spawn_pos.z])
 	else:
-		print("OSM: Loading chunks around spawn point (0, 0, 0) [_car is null or freed]")
+		var sp := get_spawn_world_position()
+		spawn_pos = Vector3(sp.x, 0, sp.y)
+		print("OSM: Loading chunks around spawn point (%.1f, %.1f)" % [sp.x, sp.y])
 
 	_initial_chunks_needed = _get_initial_chunks(spawn_pos)
 	# Начальные чанки всегда LOD0
@@ -2752,7 +2758,7 @@ func _on_elevation_loaded(chunk_key: String, grid_data: Dictionary, gen: int, lo
 	_elevation_in_flight.erase(chunk_key)
 	if gen != _load_generation:
 		return  # Stale
-	_chunk_elevation_data[chunk_key] = grid_data
+	_chunk_elevation_data[chunk_key] = _upscale_elevation_grid(grid_data)
 
 
 var _elevation_retries: Dictionary = {}  # chunk_key -> retry count
@@ -3048,9 +3054,9 @@ func reset_terrain() -> void:
 		_loaded_chunks.size(),
 		_loading_chunks.size()
 	])
-	# Recalculate cached cosine (start_lat may have changed)
+	# Re-apply fixed origin (in case spawn coords changed for race restart)
 	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
-	_snap_origin_to_grid()
+	_apply_fixed_origin()
 	# Инкрементируем generation чтобы игнорировать callback'и от старых загрузок
 	_load_generation += 1
 	print("OSM: Load generation incremented to %d" % _load_generation)
@@ -5117,9 +5123,25 @@ func _apply_road_result(result: Dictionary) -> void:
 			_detect_ramp_junction(result.nodes, smoothed_points, width)
 		var is_footway_on_deck: bool = highway_type in ["footway", "path"]
 		if not is_footway_on_deck:
-			_create_on_deck_lane_markings(smoothed_points, width, result.get("tags", {}), parent)
+			# Defer until deck ref_elev is available (same as deck mesh itself),
+			# otherwise _deck_surface_y_at_cached returns terrain Y → markings under bridge.
+			_terrain_objects_queue.append({
+				"type": "on_deck_lane_markings",
+				"points": smoothed_points,
+				"width": width,
+				"tags": result.get("tags", {}),
+				"parent": parent,
+			})
 		else:
-			_create_on_deck_footway(smoothed_points, width, result.get("tags", {}), parent, chunk_key, result.nodes)
+			_terrain_objects_queue.append({
+				"type": "on_deck_footway",
+				"points": smoothed_points,
+				"width": width,
+				"tags": result.get("tags", {}),
+				"parent": parent,
+				"chunk_key": chunk_key,
+				"nodes": result.nodes,
+			})
 	elif is_bridge:
 		_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent, int(result.get("way_id", 0)), result.get("tags", {}))
 	elif highway_type in ["footway", "path"] and smoothed_points.size() >= 2:
@@ -8479,12 +8501,6 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		"vertices": batch["vertices"],
 		"indices": batch["indices"]
 	})
-
-	# DEBUG: Всегда выводим информацию о созданных road batches
-	var mat_info: String = "ShaderMaterial" if material is ShaderMaterial else str(material.albedo_texture) if material is StandardMaterial3D and material.albedo_texture else "color only"
-	print("OSM: ✅ Finalized road batch %s/%s: %d vertices, %d triangles, material: %s" % [
-		chunk_key, texture_key, batch["vertices"].size(), batch["indices"].size() / 3, mat_info
-	])
 
 	# Измерить общее время финализации
 	if _profiler:
@@ -12428,11 +12444,27 @@ func _process_road_queue() -> void:
 			mh_done_keys.append(mh_ck)
 	for mh_ck in mh_done_keys:
 		_deferred_manhole_queue.erase(mh_ck)
+	var _traffic_deferred: Array = []
 	while not _deferred_traffic_queue.is_empty():
 		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 			break
 		var item: Dictionary = _deferred_traffic_queue.pop_front()
-		_extract_road_for_traffic_fast(item.points, item.tags, item.elevation_info)
+		# Bridge roads on deck need ref_elev for correct waypoint Y — defer until available
+		var ei: Dictionary = item.get("elevation_info", {})
+		if ei.get("is_bridge", false) and item.points.size() >= 2:
+			var mid: Vector2 = item.points[item.points.size() / 2]
+			var needs_defer := false
+			for pi in _bridge_deck_polygons.size():
+				if Geometry2D.is_point_in_polygon(mid, _bridge_deck_polygons[pi]):
+					if is_nan(_deck_polygon_ref_elev.get(pi, NAN)):
+						needs_defer = true
+					break
+			if needs_defer:
+				_traffic_deferred.append(item)
+				continue
+		_extract_road_for_traffic_fast(item.points, item.tags, ei)
+	for td in _traffic_deferred:
+		_deferred_traffic_queue.push_front(td)
 
 	# Tram network extraction
 	while not _deferred_tram_queue.is_empty():
@@ -13208,7 +13240,7 @@ func _process_terrain_objects_queue() -> void:
 		# chunk that originally queued them may already have unloaded but
 		# the deck must still build (it's per-relation, not per-chunk).
 		# Other types still require their owning chunk to be alive.
-		if obj_type != "bridge_deck" and not is_instance_valid(item.get("parent")):
+		if obj_type not in ["bridge_deck", "on_deck_lane_markings", "on_deck_footway"] and not is_instance_valid(item.get("parent")):
 			continue
 		var t0 := Time.get_ticks_usec()
 
@@ -13244,6 +13276,43 @@ func _process_terrain_objects_queue() -> void:
 				var deck_parent: Node3D = self
 				_create_bridge_deck_mesh(poly, item.get("tags", {}), deck_parent, poly)
 				_record_perf("terrain_bridge_deck", Time.get_ticks_usec() - t0)
+			"on_deck_lane_markings":
+				# Defer until any deck polygon has ref_elev (needed by _deck_surface_y_at_cached)
+				var pts: PackedVector2Array = item.get("points", PackedVector2Array())
+				if pts.size() >= 2:
+					var mid: Vector2 = pts[pts.size() / 2]
+					var has_ref := false
+					for pi in _bridge_deck_polygons.size():
+						if Geometry2D.is_point_in_polygon(mid, _bridge_deck_polygons[pi]):
+							if not is_nan(_compute_and_cache_deck_ref_elev(pi)):
+								has_ref = true
+							break
+					if not has_ref:
+						deferred.append(item)
+						continue
+				var p: Node3D = item.get("parent")
+				if not is_instance_valid(p):
+					p = self
+				_create_on_deck_lane_markings(pts, item.get("width", 7.0), item.get("tags", {}), p)
+				_record_perf("on_deck_lane_markings", Time.get_ticks_usec() - t0)
+			"on_deck_footway":
+				var pts: PackedVector2Array = item.get("points", PackedVector2Array())
+				if pts.size() >= 2:
+					var mid: Vector2 = pts[pts.size() / 2]
+					var has_ref := false
+					for pi in _bridge_deck_polygons.size():
+						if Geometry2D.is_point_in_polygon(mid, _bridge_deck_polygons[pi]):
+							if not is_nan(_compute_and_cache_deck_ref_elev(pi)):
+								has_ref = true
+							break
+					if not has_ref:
+						deferred.append(item)
+						continue
+				var p: Node3D = item.get("parent")
+				if not is_instance_valid(p):
+					p = self
+				_create_on_deck_footway(pts, item.get("width", 2.0), item.get("tags", {}), p, item.get("chunk_key", ""), item.get("nodes", []))
+				_record_perf("on_deck_footway", Time.get_ticks_usec() - t0)
 
 		processed += 1
 
@@ -15020,40 +15089,145 @@ func _latlon_to_local(lat: float, lon: float) -> Vector2:
 
 ## Get spawn elevation by reading the elevation cache for chunk 0,0.
 ## Returns ASL elevation at spawn point, or 0.0 if no cache.
+## Get world position offset for player spawn (from fixed origin to spawn lat/lon).
+func get_spawn_world_position() -> Vector2:
+	if spawn_lat == 0.0 and spawn_lon == 0.0:
+		return Vector2.ZERO
+	return ChunkMath.latlon_to_world(spawn_lat, spawn_lon)
+
+
 func get_spawn_elevation() -> float:
 	if not enable_elevation:
 		return 0.0
-	# Cache key includes lat/lon to be location-aware
-	# Try current version first, then fall back to in-memory data
-	var cache_key := "elev_v%d_%.4f_%.4f_0,0.json" % [ElevationLoader.CACHE_VERSION, start_lat, start_lon]
-	var cache_path := ProjectSettings.globalize_path("user://osm_cache/" + cache_key)
-	var file := FileAccess.open(cache_path, FileAccess.READ)
-	if not file:
-		cache_key = "elev_v%d_%.4f_%.4f_-1,-1.json" % [ElevationLoader.CACHE_VERSION, start_lat, start_lon]
-		cache_path = ProjectSettings.globalize_path("user://osm_cache/" + cache_key)
-		file = FileAccess.open(cache_path, FileAccess.READ)
-		if not file:
-			# Try in-memory elevation data
-			var grid_data: Dictionary = _chunk_elevation_data.get("0,0", _chunk_elevation_data.get("-1,-1", {}))
-			if not grid_data.is_empty():
-				var grid: Array = grid_data.get("grid", [])
-				var res: int = grid_data.get("grid_res", 5)
-				var center := res / 2
-				if grid.size() > center and grid[center].size() > center:
-					return float(grid[center][center])
-			return 0.0
-	var json_string := file.get_as_text()
-	file.close()
-	var json := JSON.new()
-	if json.parse(json_string) != OK:
-		return 0.0
-	var data: Dictionary = json.data
-	var grid: Array = data.get("grid", [])
-	var res: int = data.get("grid_res", 5)
-	var center := res / 2
-	if grid.size() > center and grid[center].size() > center:
-		return float(grid[center][center])
+	# Sample elevation at spawn world position
+	var spawn_pos := get_spawn_world_position()
+	var elev := _sample_elevation(spawn_pos.x, spawn_pos.y)
+	if elev > 0.1:
+		return elev
+	# Fallback: try in-memory data for spawn chunk
+	var spawn_chunk := ChunkMath.world_to_chunk(spawn_pos.x, spawn_pos.y)
+	var ck := "%d,%d" % [spawn_chunk.x, spawn_chunk.y]
+	var grid_data: Dictionary = _chunk_elevation_data.get(ck, {})
+	if not grid_data.is_empty():
+		var grid: Array = grid_data.get("grid", [])
+		var res: int = grid_data.get("grid_res", 5)
+		var center := res / 2
+		if grid.size() > center and grid[center].size() > center:
+			return float(grid[center][center])
 	return 0.0
+
+
+## Remove outliers from elevation grid using median-based deviation detection.
+## Runs at runtime before upscale — works on both old and new cached data.
+func _filter_elevation_outliers(grid: Array, grid_res: int) -> void:
+	const THRESHOLD_MIN := 8.0
+	const THRESHOLD_MAX := 25.0
+	const GRADIENT_FACTOR := 2.5
+
+	var outlier_mask: Array = []
+	for iz in grid_res:
+		var row: Array = []
+		for ix in grid_res:
+			var neighbors: Array = []
+			for dz in range(-1, 2):
+				for dx in range(-1, 2):
+					if dz == 0 and dx == 0:
+						continue
+					var nz := iz + dz
+					var nx := ix + dx
+					if nz >= 0 and nz < grid_res and nx >= 0 and nx < grid_res:
+						neighbors.append(float(grid[nz][nx]))
+			if neighbors.size() < 3:
+				row.append(false)
+				continue
+			neighbors.sort()
+			var med: float = neighbors[neighbors.size() / 2]
+			var dev := absf(float(grid[iz][ix]) - med)
+			var local_range: float = neighbors[neighbors.size() - 1] - neighbors[0]
+			var threshold := clampf(local_range * GRADIENT_FACTOR, THRESHOLD_MIN, THRESHOLD_MAX)
+			row.append(dev > threshold)
+		outlier_mask.append(row)
+
+	for iz in grid_res:
+		for ix in grid_res:
+			if outlier_mask[iz][ix]:
+				var neighbors: Array = []
+				for dz in range(-1, 2):
+					for dx in range(-1, 2):
+						if dz == 0 and dx == 0:
+							continue
+						var nz := iz + dz
+						var nx := ix + dx
+						if nz >= 0 and nz < grid_res and nx >= 0 and nx < grid_res:
+							neighbors.append(float(grid[nz][nx]))
+				neighbors.sort()
+				var med: float = neighbors[neighbors.size() / 2]
+				print("ELEV: Outlier at [%d][%d], was %.1f, replaced with %.1f" % [iz, ix, grid[iz][ix], med])
+				grid[iz][ix] = med
+
+
+## Upscale 10×10 elevation grid (30m step) to 43×43 (5m step) via Catmull-Rom bicubic.
+## Output covers exactly the chunk area (source indices 1-8 = positions 0-210m).
+## The 1-cell padding (indices 0,9) provides full 4-point Catmull-Rom context for all
+## interior points, so each chunk is self-sufficient — no neighbor data needed.
+func _upscale_elevation_grid(grid_data: Dictionary) -> Dictionary:
+	var src_grid: Array = grid_data.get("grid", [])
+	var src_res: int = grid_data.get("grid_res", 10)
+	if src_grid.size() < src_res or src_res < 4:
+		return grid_data  # Can't upscale, return as-is
+
+	# Filter outliers before upscaling (works on old cached data too)
+	_filter_elevation_outliers(src_grid, src_res)
+
+	var scale := 6  # 30m / 5m = 6 sub-cells per source cell
+	# Output only chunk interior: source indices 1..8 (padding at 0 and 9 is context only)
+	# 7 intervals × 6 + 1 = 43 output points covering exactly 210m
+	var src_start := 1
+	var src_end := src_res - 2  # = 8
+	var dst_res: int = (src_end - src_start) * scale + 1  # 43
+
+	var dst_grid: Array = []
+	for dst_iz in dst_res:
+		var row: Array = []
+		var fz: float = float(src_start) + float(dst_iz) / float(scale)
+		var iz: int = mini(int(fz), src_res - 2)
+		var tz: float = fz - float(iz)
+		for dst_ix in dst_res:
+			var fx: float = float(src_start) + float(dst_ix) / float(scale)
+			var ix: int = mini(int(fx), src_res - 2)
+			var tx: float = fx - float(ix)
+			# Bicubic: interpolate 4 rows along X, then interpolate results along Z
+			var col_vals: Array = []
+			for kz in range(-1, 3):
+				var sz: int = clampi(iz + kz, 0, src_res - 1)
+				var p0: float = src_grid[sz][clampi(ix - 1, 0, src_res - 1)]
+				var p1: float = src_grid[sz][ix]
+				var p2: float = src_grid[sz][mini(ix + 1, src_res - 1)]
+				var p3: float = src_grid[sz][clampi(ix + 2, 0, src_res - 1)]
+				col_vals.append(_catmull_rom_f(p0, p1, p2, p3, tx))
+			row.append(_catmull_rom_f(col_vals[0], col_vals[1], col_vals[2], col_vals[3], tz))
+		dst_grid.append(row)
+
+	var result := grid_data.duplicate()
+	result["grid"] = dst_grid
+	result["grid_res"] = dst_res
+	result["grid_step"] = grid_data.get("grid_step", 30.0) / float(scale)
+	# Shift base to chunk origin (was at padding, now at chunk start)
+	var src_step: float = grid_data.get("grid_step", 30.0)
+	result["base_x"] = grid_data.get("base_x", 0.0) + float(src_start) * src_step
+	result["base_z"] = grid_data.get("base_z", 0.0) + float(src_start) * src_step
+	return result
+
+
+
+## Catmull-Rom spline interpolation (scalar) between p1 and p2 with t in [0,1].
+static func _catmull_rom_f(p0: float, p1: float, p2: float, p3: float, t: float) -> float:
+	return 0.5 * (
+		2.0 * p1 +
+		(-p0 + p2) * t +
+		(2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t * t +
+		(-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t * t * t
+	)
 
 
 ## Sample terrain elevation at world position using bilinear interpolation.
@@ -15067,21 +15241,17 @@ func _sample_elevation(world_x: float, world_z: float) -> float:
 	var ck := "%d,%d" % [cx, cz]
 	var grid_data: Dictionary = _chunk_elevation_data.get(ck, {})
 	if grid_data.is_empty():
-		# Position at chunk boundary or slightly past edge — floor() rounded to
-		# unloaded adjacent chunk. Try previous chunk in each dimension (covers
-		# right/bottom edge boundaries and road vertices extending past edge).
-		for try_key in ["%d,%d" % [cx - 1, cz], "%d,%d" % [cx, cz - 1], "%d,%d" % [cx - 1, cz - 1]]:
-			grid_data = _chunk_elevation_data.get(try_key, {})
-			if not grid_data.is_empty():
-				break
-		if grid_data.is_empty():
-			return 0.0
+		# Chunk has no elevation data. Each chunk is self-sufficient —
+		# never use another chunk's data. Road vertices beyond chunk
+		# boundary are clipped anyway; terrain uses only own grid.
+		return 0.0
 	var grid: Array = grid_data.get("grid", [])
 	var grid_res: int = grid_data.get("grid_res", 5)
 	var base_x: float = grid_data.get("base_x", 0.0)
 	var base_z: float = grid_data.get("base_z", 0.0)
 	var step: float = grid_data.get("grid_step", 50.0)
 	if grid.size() < grid_res:
+		print("ELEV WARNING: Empty grid for chunk %s (grid_size=%d, grid_res=%d)" % [ck, grid.size(), grid_res])
 		return 0.0
 	# Normalized position within grid
 	var fx: float = clampf((world_x - base_x) / step, 0.0, float(grid_res - 1))
@@ -17352,7 +17522,7 @@ func _get_lod2_building_material(color: Color) -> StandardMaterial3D:
 
 ## Плоский террейн для LOD1/2 чанков (без вырезов дорог/зданий)
 func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void:
-	var grid_res := 20  # 10m cells to match LOD0 terrain resolution
+	var grid_res := 21  # 210/21 = 10m cells, aligned with elevation 5m grid
 	var step := chunk_size / grid_res
 	var vertices := PackedVector3Array()
 	var uvs := PackedVector2Array()
@@ -17389,7 +17559,7 @@ func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	# Set material on surface directly (belt-and-suspenders with RS override)
-	var mat: Material = _ground_shader_material
+	var mat: Material = _ground_shader_material_lod2 if _ground_shader_material_lod2 else _ground_shader_material
 	if mat:
 		mesh.surface_set_material(0, mat)
 	else:
@@ -17832,8 +18002,6 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 
 	if all_indices.is_empty():
 		return
-
-	print("OSM: ChunkTerrain %s: %d polys, %d verts, %d tris" % [chunk_key, terrain_polys.size(), all_vertices.size(), total_tris])
 
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -18864,6 +19032,8 @@ func set_wet_mode(enabled: bool, is_night: bool = true) -> void:
 				mat.set_shader_parameter("is_night", is_night)
 	if _ground_shader_material:
 		_ground_shader_material.set_shader_parameter("is_night", is_night)
+	if _ground_shader_material_lod2:
+		_ground_shader_material_lod2.set_shader_parameter("is_night", is_night)
 
 	# Плавный переход wetness_global за 5 секунд (один вызов RenderingServer на кадр)
 	var target := 1.0 if enabled else 0.0
@@ -18991,6 +19161,8 @@ func _on_night_mode_changed(enabled: bool) -> void:
 	# Ground shader night mode
 	if _ground_shader_material:
 		_ground_shader_material.set_shader_parameter("is_night", enabled)
+	if _ground_shader_material_lod2:
+		_ground_shader_material_lod2.set_shader_parameter("is_night", enabled)
 
 	# NEW: Update lamp night mode
 	_update_lamp_night_mode(enabled)
