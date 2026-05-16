@@ -14944,7 +14944,7 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 		return
 
 	# Split into grid cells for accurate elevation following on slopes
-	var grid_polys := _split_polygon_by_grid(points, 10.0)
+	var grid_polys := _split_polygon_by_grid(points, 5.0)
 
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -17971,13 +17971,14 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 		curb_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, curb_arrays)
 		_rs_add_mesh(chunk_key, curb_mesh, _curb_material)
 
-	# Split terrain polygons into grid cells for accurate elevation following.
-	# Without this, large flat triangles interpolate linearly and diverge from the
-	# bilinear elevation surface that roads/trams follow, causing terrain to poke
-	# through roads or sidewalks to sink under grass.
+	# Split terrain polygons into 5m grid cells — same as sidewalk grid.
+	# Terrain and sidewalk both sample _sample_elevation at 5m multiples, so
+	# within each 5m triangle sidewalk = terrain + height_offset exactly.
+	# Coarser terrain grid causes linear interpolation to exceed bicubic at
+	# concave points, making terrain poke through sidewalks.
 	var grid_polys: Array[PackedVector2Array] = []
 	for poly in terrain_polys:
-		grid_polys.append_array(_split_polygon_by_grid(poly, 10.0))
+		grid_polys.append_array(_split_polygon_by_grid(poly, 5.0))
 
 	# Триангулируем полигоны
 	var all_vertices := PackedVector3Array()
