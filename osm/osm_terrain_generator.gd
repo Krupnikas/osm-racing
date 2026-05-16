@@ -2752,7 +2752,7 @@ func _on_elevation_loaded(chunk_key: String, grid_data: Dictionary, gen: int, lo
 	_elevation_in_flight.erase(chunk_key)
 	if gen != _load_generation:
 		return  # Stale
-	_chunk_elevation_data[chunk_key] = grid_data
+	_chunk_elevation_data[chunk_key] = _upscale_elevation_grid(grid_data)
 
 
 var _elevation_retries: Dictionary = {}  # chunk_key -> retry count
@@ -15056,6 +15056,108 @@ func get_spawn_elevation() -> float:
 	return 0.0
 
 
+## Remove outliers from elevation grid using median-based deviation detection.
+## Runs at runtime before upscale — works on both old and new cached data.
+func _filter_elevation_outliers(grid: Array, grid_res: int) -> void:
+	const THRESHOLD_MIN := 8.0
+	const THRESHOLD_MAX := 25.0
+	const GRADIENT_FACTOR := 2.5
+
+	var outlier_mask: Array = []
+	for iz in grid_res:
+		var row: Array = []
+		for ix in grid_res:
+			var neighbors: Array = []
+			for dz in range(-1, 2):
+				for dx in range(-1, 2):
+					if dz == 0 and dx == 0:
+						continue
+					var nz := iz + dz
+					var nx := ix + dx
+					if nz >= 0 and nz < grid_res and nx >= 0 and nx < grid_res:
+						neighbors.append(float(grid[nz][nx]))
+			if neighbors.size() < 3:
+				row.append(false)
+				continue
+			neighbors.sort()
+			var med: float = neighbors[neighbors.size() / 2]
+			var dev := absf(float(grid[iz][ix]) - med)
+			var local_range: float = neighbors[neighbors.size() - 1] - neighbors[0]
+			var threshold := clampf(local_range * GRADIENT_FACTOR, THRESHOLD_MIN, THRESHOLD_MAX)
+			row.append(dev > threshold)
+		outlier_mask.append(row)
+
+	for iz in grid_res:
+		for ix in grid_res:
+			if outlier_mask[iz][ix]:
+				var neighbors: Array = []
+				for dz in range(-1, 2):
+					for dx in range(-1, 2):
+						if dz == 0 and dx == 0:
+							continue
+						var nz := iz + dz
+						var nx := ix + dx
+						if nz >= 0 and nz < grid_res and nx >= 0 and nx < grid_res:
+							neighbors.append(float(grid[nz][nx]))
+				neighbors.sort()
+				var med: float = neighbors[neighbors.size() / 2]
+				print("ELEV: Outlier at [%d][%d], was %.1f, replaced with %.1f" % [iz, ix, grid[iz][ix], med])
+				grid[iz][ix] = med
+
+
+## Upscale 10×10 elevation grid (30m step) to 55×55 (5m step) via Catmull-Rom bicubic.
+## Produces C1-continuous surface. Runs at load time, result stored in _chunk_elevation_data.
+func _upscale_elevation_grid(grid_data: Dictionary) -> Dictionary:
+	var src_grid: Array = grid_data.get("grid", [])
+	var src_res: int = grid_data.get("grid_res", 10)
+	if src_grid.size() < src_res or src_res < 4:
+		return grid_data  # Can't upscale, return as-is
+
+	# Filter outliers before upscaling (works on old cached data too)
+	_filter_elevation_outliers(src_grid, src_res)
+
+	var scale := 6  # 30m / 5m = 6 sub-cells per source cell
+	var dst_res: int = (src_res - 1) * scale + 1  # 9*6+1 = 55
+
+	var dst_grid: Array = []
+	for dst_iz in dst_res:
+		var row: Array = []
+		var fz: float = float(dst_iz) / float(scale)
+		var iz: int = mini(int(fz), src_res - 2)
+		var tz: float = fz - float(iz)
+		for dst_ix in dst_res:
+			var fx: float = float(dst_ix) / float(scale)
+			var ix: int = mini(int(fx), src_res - 2)
+			var tx: float = fx - float(ix)
+			# Bicubic: interpolate 4 rows along X, then interpolate results along Z
+			var col_vals: Array = []
+			for kz in range(-1, 3):
+				var sz: int = clampi(iz + kz, 0, src_res - 1)
+				var p0: float = src_grid[sz][clampi(ix - 1, 0, src_res - 1)]
+				var p1: float = src_grid[sz][ix]
+				var p2: float = src_grid[sz][mini(ix + 1, src_res - 1)]
+				var p3: float = src_grid[sz][clampi(ix + 2, 0, src_res - 1)]
+				col_vals.append(_catmull_rom_f(p0, p1, p2, p3, tx))
+			row.append(_catmull_rom_f(col_vals[0], col_vals[1], col_vals[2], col_vals[3], tz))
+		dst_grid.append(row)
+
+	var result := grid_data.duplicate()
+	result["grid"] = dst_grid
+	result["grid_res"] = dst_res
+	result["grid_step"] = grid_data.get("grid_step", 30.0) / float(scale)
+	return result
+
+
+## Catmull-Rom spline interpolation (scalar) between p1 and p2 with t in [0,1].
+static func _catmull_rom_f(p0: float, p1: float, p2: float, p3: float, t: float) -> float:
+	return 0.5 * (
+		2.0 * p1 +
+		(-p0 + p2) * t +
+		(2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t * t +
+		(-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t * t * t
+	)
+
+
 ## Sample terrain elevation at world position using bilinear interpolation.
 ## Returns ASL elevation. Returns 0.0 if no data.
 func _sample_elevation(world_x: float, world_z: float) -> float:
@@ -17352,7 +17454,7 @@ func _get_lod2_building_material(color: Color) -> StandardMaterial3D:
 
 ## Плоский террейн для LOD1/2 чанков (без вырезов дорог/зданий)
 func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void:
-	var grid_res := 20  # 10m cells to match LOD0 terrain resolution
+	var grid_res := 21  # 210/21 = 10m cells, aligned with elevation 5m grid
 	var step := chunk_size / grid_res
 	var vertices := PackedVector3Array()
 	var uvs := PackedVector2Array()

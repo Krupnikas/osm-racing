@@ -284,29 +284,37 @@ func _on_request_completed(result: int, response_code: int,
 	elevation_loaded.emit(chunk_key, grid_data)
 
 
-## Filter out bad elevation values (zeros in areas where they shouldn't be, outliers)
+## Filter out bad elevation values (zeros that are likely data errors)
 func _filter_bad_data(grid: Array) -> void:
-	# Pass 1: detect zeros that are likely errors (surrounded by high values)
+	_repair_zeros(grid)
+
+
+## Pass 1: Replace erroneous zeros with neighbor average
+func _repair_zeros(grid: Array) -> void:
 	for iz in GRID_RES:
 		for ix in GRID_RES:
 			if absf(grid[iz][ix]) < 0.1:
-				# Check if neighbors have significantly higher values
-				var neighbor_sum := 0.0
-				var neighbor_count := 0
-				for dz in range(-1, 2):
-					for dx in range(-1, 2):
-						if dz == 0 and dx == 0:
-							continue
-						var nz := iz + dz
-						var nx := ix + dx
-						if nz >= 0 and nz < GRID_RES and nx >= 0 and nx < GRID_RES:
-							var nv: float = grid[nz][nx]
-							if absf(nv) > 0.1:
-								neighbor_sum += nv
-								neighbor_count += 1
-				if neighbor_count > 0:
-					var avg := neighbor_sum / neighbor_count
-					if absf(avg) > 50.0:
-						# Zero surrounded by high values — likely data error
-						print("ELEV: Filtered zero at [%d][%d], replaced with %.1f" % [iz, ix, avg])
-						grid[iz][ix] = avg
+				var neighbors := _get_neighbor_values(grid, ix, iz)
+				if neighbors.size() >= 3:
+					neighbors.sort()
+					var med: float = float(neighbors[neighbors.size() / 2])
+					# Replace zero if neighbors are consistent non-zero values
+					var nmin: float = neighbors[0]
+					var nmax: float = neighbors[neighbors.size() - 1]
+					if nmax - nmin < 50.0 and absf(med) > 0.5:
+						print("ELEV: Filtered zero at [%d][%d], replaced with %.1f" % [iz, ix, med])
+						grid[iz][ix] = med
+
+
+## Get up to 8 neighbor values for a grid cell
+func _get_neighbor_values(grid: Array, ix: int, iz: int) -> Array:
+	var values: Array = []
+	for dz in range(-1, 2):
+		for dx in range(-1, 2):
+			if dz == 0 and dx == 0:
+				continue
+			var nz := iz + dz
+			var nx := ix + dx
+			if nz >= 0 and nz < GRID_RES and nx >= 0 and nx < GRID_RES:
+				values.append(float(grid[nz][nx]))
+	return values
