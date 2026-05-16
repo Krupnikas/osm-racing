@@ -227,12 +227,13 @@ func _apply_feature_flags() -> void:
 
 
 func _setup_test() -> void:
-	# Hide and freeze car
+	# Hide and freeze car — place at spawn world offset so start_loading() uses correct area
 	if car:
 		car.visible = false
 		if car is RigidBody3D:
 			car.freeze = true
-		car.global_position = Vector3(0, 0.5, 0)
+		var sp := ChunkMath.latlon_to_world(test_location.x, test_location.y)
+		car.global_position = Vector3(sp.x, 0.5, sp.y)
 		var vehicle_input = car.get_node_or_null("VehicleInput")
 		if vehicle_input:
 			vehicle_input.set_physics_process(false)

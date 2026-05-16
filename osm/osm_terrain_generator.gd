@@ -5123,9 +5123,25 @@ func _apply_road_result(result: Dictionary) -> void:
 			_detect_ramp_junction(result.nodes, smoothed_points, width)
 		var is_footway_on_deck: bool = highway_type in ["footway", "path"]
 		if not is_footway_on_deck:
-			_create_on_deck_lane_markings(smoothed_points, width, result.get("tags", {}), parent)
+			# Defer until deck ref_elev is available (same as deck mesh itself),
+			# otherwise _deck_surface_y_at_cached returns terrain Y → markings under bridge.
+			_terrain_objects_queue.append({
+				"type": "on_deck_lane_markings",
+				"points": smoothed_points,
+				"width": width,
+				"tags": result.get("tags", {}),
+				"parent": parent,
+			})
 		else:
-			_create_on_deck_footway(smoothed_points, width, result.get("tags", {}), parent, chunk_key, result.nodes)
+			_terrain_objects_queue.append({
+				"type": "on_deck_footway",
+				"points": smoothed_points,
+				"width": width,
+				"tags": result.get("tags", {}),
+				"parent": parent,
+				"chunk_key": chunk_key,
+				"nodes": result.nodes,
+			})
 	elif is_bridge:
 		_create_bridge_road(result.nodes, width, texture_key, height_offset, elevation_info, parent, int(result.get("way_id", 0)), result.get("tags", {}))
 	elif highway_type in ["footway", "path"] and smoothed_points.size() >= 2:
@@ -12428,11 +12444,27 @@ func _process_road_queue() -> void:
 			mh_done_keys.append(mh_ck)
 	for mh_ck in mh_done_keys:
 		_deferred_manhole_queue.erase(mh_ck)
+	var _traffic_deferred: Array = []
 	while not _deferred_traffic_queue.is_empty():
 		if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
 			break
 		var item: Dictionary = _deferred_traffic_queue.pop_front()
-		_extract_road_for_traffic_fast(item.points, item.tags, item.elevation_info)
+		# Bridge roads on deck need ref_elev for correct waypoint Y — defer until available
+		var ei: Dictionary = item.get("elevation_info", {})
+		if ei.get("is_bridge", false) and item.points.size() >= 2:
+			var mid: Vector2 = item.points[item.points.size() / 2]
+			var needs_defer := false
+			for pi in _bridge_deck_polygons.size():
+				if Geometry2D.is_point_in_polygon(mid, _bridge_deck_polygons[pi]):
+					if is_nan(_deck_polygon_ref_elev.get(pi, NAN)):
+						needs_defer = true
+					break
+			if needs_defer:
+				_traffic_deferred.append(item)
+				continue
+		_extract_road_for_traffic_fast(item.points, item.tags, ei)
+	for td in _traffic_deferred:
+		_deferred_traffic_queue.push_front(td)
 
 	# Tram network extraction
 	while not _deferred_tram_queue.is_empty():
@@ -13208,7 +13240,7 @@ func _process_terrain_objects_queue() -> void:
 		# chunk that originally queued them may already have unloaded but
 		# the deck must still build (it's per-relation, not per-chunk).
 		# Other types still require their owning chunk to be alive.
-		if obj_type != "bridge_deck" and not is_instance_valid(item.get("parent")):
+		if obj_type not in ["bridge_deck", "on_deck_lane_markings", "on_deck_footway"] and not is_instance_valid(item.get("parent")):
 			continue
 		var t0 := Time.get_ticks_usec()
 
@@ -13244,6 +13276,43 @@ func _process_terrain_objects_queue() -> void:
 				var deck_parent: Node3D = self
 				_create_bridge_deck_mesh(poly, item.get("tags", {}), deck_parent, poly)
 				_record_perf("terrain_bridge_deck", Time.get_ticks_usec() - t0)
+			"on_deck_lane_markings":
+				# Defer until any deck polygon has ref_elev (needed by _deck_surface_y_at_cached)
+				var pts: PackedVector2Array = item.get("points", PackedVector2Array())
+				if pts.size() >= 2:
+					var mid: Vector2 = pts[pts.size() / 2]
+					var has_ref := false
+					for pi in _bridge_deck_polygons.size():
+						if Geometry2D.is_point_in_polygon(mid, _bridge_deck_polygons[pi]):
+							if not is_nan(_compute_and_cache_deck_ref_elev(pi)):
+								has_ref = true
+							break
+					if not has_ref:
+						deferred.append(item)
+						continue
+				var p: Node3D = item.get("parent")
+				if not is_instance_valid(p):
+					p = self
+				_create_on_deck_lane_markings(pts, item.get("width", 7.0), item.get("tags", {}), p)
+				_record_perf("on_deck_lane_markings", Time.get_ticks_usec() - t0)
+			"on_deck_footway":
+				var pts: PackedVector2Array = item.get("points", PackedVector2Array())
+				if pts.size() >= 2:
+					var mid: Vector2 = pts[pts.size() / 2]
+					var has_ref := false
+					for pi in _bridge_deck_polygons.size():
+						if Geometry2D.is_point_in_polygon(mid, _bridge_deck_polygons[pi]):
+							if not is_nan(_compute_and_cache_deck_ref_elev(pi)):
+								has_ref = true
+							break
+					if not has_ref:
+						deferred.append(item)
+						continue
+				var p: Node3D = item.get("parent")
+				if not is_instance_valid(p):
+					p = self
+				_create_on_deck_footway(pts, item.get("width", 2.0), item.get("tags", {}), p, item.get("chunk_key", ""), item.get("nodes", []))
+				_record_perf("on_deck_footway", Time.get_ticks_usec() - t0)
 
 		processed += 1
 
