@@ -120,6 +120,7 @@ const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slop
 @export var enable_elevation := false  # Включить elevation из SRTM30m
 @export var enable_ground_plane := false  # Grey fallback plane at raw elevation under terrain
 @export var enable_water := true  # Включить водные объекты (реки, озера)
+@export var enable_road_smoothing := false  # Catmull-Rom сглаживание углов дорог
 @export var manhole_spacing := 100.0  # Расстояние между люками (метры)
 
 ## Фильтр чанков: Callable(cx: int, cz: int) -> bool. Если задан, чанки загружаются только если фильтр вернёт true.
@@ -4681,9 +4682,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			height_offset = 0.006
 			curb_height = 0.0
 
-	# Debug: log specific ways
-	var _debug_way_id: int = task_data.get("way_id", 0)
-	var _debug_way: bool = _debug_way_id in [60119987, 84060676]
+	var way_id: int = task_data.get("way_id", 0)
 
 	# For _link roads: shift first/last raw point from parent road center to parent road edge.
 	# Link roads start at a shared junction node (center of parent road). Their mesh overlaps
@@ -4726,27 +4725,9 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		smoothed_points = _subdivide_for_elevation(local_points, 5.0)
 	else:
 		smoothed_points = _smooth_road_corners(local_points)
-
 	# Save full smoothed points BEFORE clip — needed for corridor polygon
 	var full_smoothed_points: PackedVector2Array = smoothed_points
 
-	if _debug_way:
-		print("ROAD_DEBUG way=%d type=%s width=%.1f chunk=%s raw=%d smoothed=%d" % [_debug_way_id, highway_type, width, chunk_key, local_points.size(), smoothed_points.size()])
-		# Show raw points with angles
-		for i in range(local_points.size()):
-			var angle_info := ""
-			if i > 0 and i < local_points.size() - 1:
-				var d1: Vector2 = (local_points[i] - local_points[i-1]).normalized()
-				var d2: Vector2 = (local_points[i+1] - local_points[i]).normalized()
-				var dot_val: float = d1.dot(d2)
-				var angle_deg: float = rad_to_deg(acos(clampf(dot_val, -1.0, 1.0)))
-				angle_info = " angle=%.1f°" % angle_deg
-			print("  raw[%d] = (%.3f, %.3f)%s" % [i, local_points[i].x, local_points[i].y, angle_info])
-		# Show smoothed with distance from junction
-		var junction_pt: Vector2 = local_points[0]
-		for i in range(mini(smoothed_points.size(), 10)):
-			var dist_from_junc: float = smoothed_points[i].distance_to(junction_pt)
-			print("  smoothed[%d] = (%.3f, %.3f) dist_from_start=%.2fm" % [i, smoothed_points[i].x, smoothed_points[i].y, dist_from_junc])
 	# Клипаем smoothed_points к bbox чанка (используется для curbs, lamps)
 	var chunk_min_x := -INF
 	var chunk_max_x := INF
@@ -4832,45 +4813,30 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		# vertex after ALL processing so the detector overlay can draw
 		# them as 3D markers (visualise the gap to the bridge polygon).
 		if _ramp_detector != null \
-				and _ramp_detector.way_owns_ramp(_debug_way_id) \
+				and _ramp_detector.way_owns_ramp(way_id) \
 				and points.size() >= 2:
 			# Send to detector for overlay (deferred = main-thread safe).
 			_ramp_detector.call_deferred("record_road_endpoints",
-					_debug_way_id, chunk_key,
+					way_id, chunk_key,
 					points[0], points[points.size() - 1])
 			if OS.has_environment("BRIDGE_RAMP_APPLY_DEBUG"):
-				var pidx_log: Array = _ramp_detector.get_polygon_indices_for_way(_debug_way_id)
+				var pidx_log: Array = _ramp_detector.get_polygon_indices_for_way(way_id)
 				for pi in pidx_log:
 					if int(pi) < 0 or int(pi) >= _bridge_deck_polygons.size(): continue
 					var poly_log: PackedVector2Array = _bridge_deck_polygons[int(pi)]
 					var d_first: float = _min_dist_to_polygon_outline(points[0], poly_log)
 					var d_last: float = _min_dist_to_polygon_outline(points[points.size() - 1], poly_log)
 					print("[BridgeRamp] FINAL way=%d chunk=%s n=%d first=(%.2f,%.2f) d=%.2f last=(%.2f,%.2f) d=%.2f"
-							% [_debug_way_id, chunk_key, points.size(),
+							% [way_id, chunk_key, points.size(),
 								points[0].x, points[0].y, d_first,
 								points[points.size() - 1].x, points[points.size() - 1].y, d_last])
 
 
 
-		if _debug_way:
-			print("ROAD_DEBUG way=%d validated=%d clipped=%d chunk=%s margin=%.1f" % [_debug_way_id, validated.size(), points.size(), chunk_key, half_w + 1.0])
-			for i in range(points.size()):
-				print("  final[%d] = (%.3f, %.3f)" % [i, points[i].x, points[i].y])
-			# Show chunk boundaries and overlap zone
-			if chunk_key != "initial" and chunk_key != "":
-				var _ck_p: PackedStringArray = chunk_key.split(",")
-				var _cx := int(_ck_p[0])
-				var _cz := int(_ck_p[1])
-				var _cs := t_chunk_size
-				print("  chunk_bounds: x=[%.1f, %.1f] z=[%.1f, %.1f]" % [float(_cx) * _cs, float(_cx + 1) * _cs, float(_cz) * _cs, float(_cz + 1) * _cs])
-				print("  clip_bounds: x=[%.1f, %.1f] z=[%.1f, %.1f]" % [float(_cx) * _cs - half_w - 1.0, float(_cx + 1) * _cs + half_w + 1.0, float(_cz) * _cs - half_w - 1.0, float(_cz + 1) * _cs + half_w + 1.0])
-
 		if points.size() >= 2:
 			# Hash from ORIGINAL first point (before clip) so all chunks get same height for same road
 			var hash_val: int = int(abs(local_points[0].x * 1000 + local_points[0].y * 7919)) % 100
 			var z_offset: float = hash_val * 0.000005
-			if _debug_way:
-				print("ROAD_DEBUG way=%d height_offset=%.4f z_offset=%.5f hash=%d" % [_debug_way_id, height_offset, z_offset, hash_val])
 			var n_points: int = points.size()
 
 			# Perpendiculars
@@ -4888,10 +4854,6 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 					var dir_out: Vector2 = (points[i + 1] - points[i]).normalized()
 					perp = Vector2(-dir_out.y, dir_out.x)
 				perpendiculars[i] = perp
-
-			if _debug_way:
-				for i in range(n_points):
-					print("  perp[%d] = (%.4f, %.4f) at (%.3f, %.3f)" % [i, perpendiculars[i].x, perpendiculars[i].y, points[i].x, points[i].y])
 
 			# Pre-compute raw left/right edges and accumulated lengths
 			var uv_scale: float = 0.1
@@ -4925,7 +4887,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			# perpendicular relative to the road's natural left/right side
 			# (otherwise the first quad twists into an X and the mesh
 			# degenerates).
-			if _ramp_detector != null and _ramp_detector.way_owns_ramp(_debug_way_id) and n_points >= 2:
+			if _ramp_detector != null and _ramp_detector.way_owns_ramp(way_id) and n_points >= 2:
 				var first_n: Dictionary = nodes[0]
 				if _bridge_endpoint_touches_any(first_n.lat, first_n.lon):
 					var first_local := Vector2(
@@ -4994,10 +4956,10 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 					var uv_y1: float = accum_lens[seg + 1] * uv_scale
 					var cl_d_seg: float = accum_lens[seg]
 					var cl_d_next: float = accum_lens[seg + 1]
-					var h_l0: float = _road_sample_y_for_way(_debug_way_id, l0, cl_d_seg, height_offset + z_offset)
-					var h_r0: float = _road_sample_y_for_way(_debug_way_id, r0, cl_d_seg, height_offset + z_offset)
-					var h_l1: float = _road_sample_y_for_way(_debug_way_id, l1, cl_d_next, height_offset + z_offset)
-					var h_r1: float = _road_sample_y_for_way(_debug_way_id, r1, cl_d_next, height_offset + z_offset)
+					var h_l0: float = _road_sample_y_for_way(way_id, l0, cl_d_seg, height_offset + z_offset)
+					var h_r0: float = _road_sample_y_for_way(way_id, r0, cl_d_seg, height_offset + z_offset)
+					var h_l1: float = _road_sample_y_for_way(way_id, l1, cl_d_next, height_offset + z_offset)
+					var h_r1: float = _road_sample_y_for_way(way_id, r1, cl_d_next, height_offset + z_offset)
 					vertices.append(Vector3(l0.x, h_l0, l0.y))
 					uvs.append(Vector2(0.0, uv_y0))
 					normals.append(Vector3.UP)
@@ -8307,7 +8269,7 @@ func _add_path_polys_to_batch(filtered: Array[PackedVector2Array], validated: Pa
 		grid_polys.append_array(_split_polygon_by_grid(poly, 5.0))
 
 	for poly in grid_polys:
-		var indices := Geometry2D.triangulate_polygon(poly)
+		var indices := _triangulate_cell_nw_se(poly)
 		if indices.size() < 3:
 			continue
 		var base_idx: int = batch["vertices"].size()
@@ -14944,7 +14906,7 @@ func _create_polygon_mesh_with_texture(points: PackedVector2Array, texture_key: 
 		return
 
 	# Split into grid cells for accurate elevation following on slopes
-	var grid_polys := _split_polygon_by_grid(points, 10.0)
+	var grid_polys := _split_polygon_by_grid(points, 5.0)
 
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -15242,10 +15204,17 @@ func _sample_elevation(world_x: float, world_z: float) -> float:
 	var ck := "%d,%d" % [cx, cz]
 	var grid_data: Dictionary = _chunk_elevation_data.get(ck, {})
 	if grid_data.is_empty():
-		# Chunk has no elevation data. Each chunk is self-sufficient —
-		# never use another chunk's data. Road vertices beyond chunk
-		# boundary are clipped anyway; terrain uses only own grid.
-		return 0.0
+		# Float precision at chunk boundaries: floor() can map a position
+		# that is logically on one chunk's edge to the adjacent chunk.
+		# Try the neighbor if we're within 0.01m of a boundary.
+		var bx: float = float(cx) * chunk_size
+		var bz: float = float(cz) * chunk_size
+		if absf(world_x - bx) < 0.01:
+			grid_data = _chunk_elevation_data.get("%d,%d" % [cx - 1, cz], {})
+		if grid_data.is_empty() and absf(world_z - bz) < 0.01:
+			grid_data = _chunk_elevation_data.get("%d,%d" % [cx, cz - 1], {})
+		if grid_data.is_empty():
+			return 0.0
 	var grid: Array = grid_data.get("grid", [])
 	var grid_res: int = grid_data.get("grid_res", 5)
 	var base_x: float = grid_data.get("base_x", 0.0)
@@ -15270,6 +15239,29 @@ func _sample_elevation(world_x: float, world_z: float) -> float:
 	var h1: float = h01 * (1.0 - tx) + h11 * tx
 	var raw: float = h0 * (1.0 - tz) + h1 * tz
 	return raw
+
+
+## Sample elevation from a specific chunk's pre-fetched grid arrays.
+## Used by _finalize_terrain_mesh to avoid position-based chunk lookup
+## that can fail at chunk boundaries due to float precision.
+static func _sample_elevation_local(world_x: float, world_z: float,
+		has_elev: bool, grid: Array, grid_res: int,
+		base_x: float, base_z: float, step: float) -> float:
+	if not has_elev:
+		return 0.0
+	var fx: float = clampf((world_x - base_x) / step, 0.0, float(grid_res - 1))
+	var fz: float = clampf((world_z - base_z) / step, 0.0, float(grid_res - 1))
+	var ix: int = mini(int(fx), grid_res - 2)
+	var iz: int = mini(int(fz), grid_res - 2)
+	var tx: float = fx - float(ix)
+	var tz: float = fz - float(iz)
+	var h00: float = grid[iz][ix]
+	var h10: float = grid[iz][ix + 1]
+	var h01: float = grid[iz + 1][ix]
+	var h11: float = grid[iz + 1][ix + 1]
+	var h0: float = h00 * (1.0 - tx) + h10 * tx
+	var h1: float = h01 * (1.0 - tx) + h11 * tx
+	return h0 * (1.0 - tz) + h1 * tz
 
 
 ## Thread-safe elevation sampling from pre-fetched grid data (no instance vars).
@@ -17531,11 +17523,20 @@ func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void
 	var indices := PackedInt32Array()
 	var uv_scale := 0.25
 
+	# Use chunk's own elevation data directly (same fix as _finalize_terrain_mesh)
+	var ft_grid_data: Dictionary = _chunk_elevation_data.get(chunk_key, {})
+	var ft_grid: Array = ft_grid_data.get("grid", [])
+	var ft_grid_res: int = ft_grid_data.get("grid_res", 0)
+	var ft_base_x: float = ft_grid_data.get("base_x", 0.0)
+	var ft_base_z: float = ft_grid_data.get("base_z", 0.0)
+	var ft_step: float = ft_grid_data.get("grid_step", 5.0)
+	var ft_has_elev: bool = enable_elevation and ft_grid.size() >= ft_grid_res and ft_grid_res >= 2
+
 	for iz in range(grid_res + 1):
 		for ix in range(grid_res + 1):
 			var x := min_x + ix * step
 			var z := min_z + iz * step
-			var y := 0.22 + _sample_elevation(x, z)
+			var y := 0.22 + _sample_elevation_local(x, z, ft_has_elev, ft_grid, ft_grid_res, ft_base_x, ft_base_z, ft_step)
 			vertices.append(Vector3(x, y, z))
 			uvs.append(Vector2(x * uv_scale, z * uv_scale))
 			normals.append(Vector3.UP)
@@ -17869,6 +17870,17 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	var max_z := min_z + chunk_size
 	var sidewalk_height := 0.22
 
+	# Use this chunk's own elevation data directly to avoid float precision
+	# issues at chunk boundaries where floor(pos / chunk_size) might map
+	# a boundary vertex to an adjacent chunk that has no elevation data → y=0 spike.
+	var _te_grid_data: Dictionary = _chunk_elevation_data.get(chunk_key, {})
+	var _te_grid: Array = _te_grid_data.get("grid", [])
+	var _te_grid_res: int = _te_grid_data.get("grid_res", 0)
+	var _te_base_x: float = _te_grid_data.get("base_x", 0.0)
+	var _te_base_z: float = _te_grid_data.get("base_z", 0.0)
+	var _te_step: float = _te_grid_data.get("grid_step", 5.0)
+	var _te_has_elev: bool = enable_elevation and _te_grid.size() >= _te_grid_res and _te_grid_res >= 2
+
 	# Бордюры по внутренним краям (где террейн граничит с дорогой)
 	var curb_verts := PackedVector3Array()
 	var curb_norms := PackedVector3Array()
@@ -17925,8 +17937,8 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 				p1 -= dir * curb_w
 			if not p2_on_boundary:
 				p2 += dir * curb_w
-			var e1 := _sample_elevation(p1.x, p1.y)
-			var e2 := _sample_elevation(p2.x, p2.y)
+			var e1 := _sample_elevation_local(p1.x, p1.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
+			var e2 := _sample_elevation_local(p2.x, p2.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
 			var top1 := top + e1
 			var top2 := top + e2
 			var bot1 := bot + e1
@@ -17971,13 +17983,14 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 		curb_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, curb_arrays)
 		_rs_add_mesh(chunk_key, curb_mesh, _curb_material)
 
-	# Split terrain polygons into grid cells for accurate elevation following.
-	# Without this, large flat triangles interpolate linearly and diverge from the
-	# bilinear elevation surface that roads/trams follow, causing terrain to poke
-	# through roads or sidewalks to sink under grass.
+	# Split terrain polygons into 5m grid cells — same as sidewalk grid.
+	# Terrain and sidewalk both sample _sample_elevation at 5m multiples, so
+	# within each 5m triangle sidewalk = terrain + height_offset exactly.
+	# Coarser terrain grid causes linear interpolation to exceed bicubic at
+	# concave points, making terrain poke through sidewalks.
 	var grid_polys: Array[PackedVector2Array] = []
 	for poly in terrain_polys:
-		grid_polys.append_array(_split_polygon_by_grid(poly, 10.0))
+		grid_polys.append_array(_split_polygon_by_grid(poly, 5.0))
 
 	# Триангулируем полигоны
 	var all_vertices := PackedVector3Array()
@@ -17988,12 +18001,12 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	var total_tris := 0
 
 	for poly in grid_polys:
-		var indices := Geometry2D.triangulate_polygon(poly)
+		var indices := _triangulate_cell_nw_se(poly)
 		if indices.size() < 3:
 			continue
 		var base_idx: int = all_vertices.size()
 		for p in poly:
-			var h := sidewalk_height + _sample_elevation(p.x, p.y)
+			var h := sidewalk_height + _sample_elevation_local(p.x, p.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
 			all_vertices.append(Vector3(p.x, h, p.y))
 			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
 			all_normals.append(Vector3.UP)
@@ -20798,13 +20811,6 @@ func _find_closest_wall_to_point(building_points: PackedVector2Array, target_poi
 	return closest_wall
 
 
-# ============ ROAD SMOOTHING ============
-
-## Catmull-Rom spline interpolation
-func _catmull_rom(p0: Vector2, p1: Vector2, p2: Vector2, p3: Vector2, t: float) -> Vector2:
-	var t2: float = t * t
-	var t3: float = t2 * t
-	return (p1 * 2.0 + (-p0 + p2) * t + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2 + (-p0 + p1 * 3.0 - p2 * 3.0 + p3) * t3) * 0.5
 
 
 ## Проверяет, стоит ли обрабатывать чанк (не culled). Culled чанки пропускаются.
@@ -21001,133 +21007,9 @@ func _clip_segment_to_rect(a: Vector2, b: Vector2, min_x: float, max_x: float, m
 
 
 func _smooth_road_corners(raw_points: PackedVector2Array) -> PackedVector2Array:
-	var smoothed := _smooth_points_adaptive(raw_points, 1.0)
-	return _remove_polyline_loops(smoothed)
-
-
-## Адаптивное сглаживание: мало точек на прямых, много на поворотах
-## min_dist — минимальное расстояние между точками (для дорог 1м, для бордюров 2м)
-func _smooth_points_adaptive(raw_points: PackedVector2Array, min_dist: float) -> PackedVector2Array:
-	if raw_points.size() < 3:
+	if not enable_road_smoothing:
 		return raw_points
-
-	var result: PackedVector2Array = PackedVector2Array()
-
-	# Always add first point
-	result.append(raw_points[0])
-
-	for i in range(raw_points.size() - 1):
-		var p0: Vector2 = raw_points[maxi(0, i - 1)]
-		var p1: Vector2 = raw_points[i]
-		var p2: Vector2 = raw_points[mini(raw_points.size() - 1, i + 1)]
-		var p3: Vector2 = raw_points[mini(raw_points.size() - 1, i + 2)]
-
-		var seg_length: float = p1.distance_to(p2)
-		if seg_length < 0.01:
-			continue  # Skip degenerate zero-length segments
-
-		# Measure angle sharpness at both ends of the segment
-		var sharpness_at_p1: float = 0.0
-		if i > 0:
-			var d1: Vector2 = (p1 - p0).normalized()
-			var d2: Vector2 = (p2 - p1).normalized()
-			sharpness_at_p1 = (1.0 - d1.dot(d2)) * 0.5
-
-		var sharpness_at_p2: float = 0.0
-		if i + 2 < raw_points.size():
-			var d1: Vector2 = (p2 - p1).normalized()
-			var d2: Vector2 = (p3 - p2).normalized()
-			sharpness_at_p2 = (1.0 - d1.dot(d2)) * 0.5
-
-		var sharpness: float = maxf(sharpness_at_p1, sharpness_at_p2)
-
-		# Also check curvature via Catmull-Rom midpoint deviation from straight line
-		# This catches gradual curves where each angle is small but the arc is significant
-		var mid_interp: Vector2 = _catmull_rom(p0, p1, p2, p3, 0.5)
-		var mid_straight: Vector2 = (p1 + p2) * 0.5
-		var deviation: float = mid_interp.distance_to(mid_straight)
-		# Normalize deviation by segment length to get relative curvature
-		var rel_curvature: float = deviation / maxf(seg_length, 0.1)
-
-		# Combine: use whichever indicates more curvature
-		# rel_curvature 0.006 → sharpness 0.05 (gentle), 0.019 → 0.15 (medium)
-		if rel_curvature > 0.005:
-			sharpness = maxf(sharpness, rel_curvature * 8.0)
-
-		# Adaptive subdivisions based on sharpness:
-		# Straight (sharpness < 0.05): 1 subdivision (no intermediate points)
-		# Gentle curve (0.05-0.15): 2 subdivisions
-		# Medium curve (0.15-0.3): 3-4 subdivisions based on segment length
-		# Sharp turn (0.3-0.5): 4-6 subdivisions
-		# Very sharp (>0.5): 6-8 subdivisions
-		var subdivisions: int
-		if sharpness < 0.05:
-			subdivisions = 1
-		elif sharpness < 0.15:
-			subdivisions = 2
-		elif sharpness < 0.3:
-			subdivisions = maxi(3, mini(4, int(seg_length / 8.0)))
-		elif sharpness < 0.5:
-			subdivisions = maxi(4, mini(6, int(seg_length / 5.0)))
-		else:
-			subdivisions = maxi(6, mini(8, int(seg_length / 3.0)))
-
-		# Interpolate from p1 to p2
-		for j in range(1, subdivisions):
-			var t: float = float(j) / float(subdivisions)
-			var interp: Vector2 = _catmull_rom(p0, p1, p2, p3, t)
-
-			if result[result.size() - 1].distance_to(interp) > min_dist:
-				result.append(interp)
-
-		# Add the endpoint of this segment (p2) unless it's the last point
-		if i < raw_points.size() - 2:
-			if result[result.size() - 1].distance_to(p2) > min_dist:
-				result.append(p2)
-
-	# Always add last point
-	var last_point: Vector2 = raw_points[raw_points.size() - 1]
-	if result[result.size() - 1].distance_to(last_point) > 0.1:
-		result.append(last_point)
-
-	return result
-
-
-## Убирает петли (self-intersection) из полилинии.
-## Проверяет каждый новый сегмент на пересечение со всеми предыдущими.
-## При обнаружении петли — вырезает все точки внутри петли и заменяет на точку пересечения.
-func _remove_polyline_loops(points: PackedVector2Array) -> PackedVector2Array:
-	if points.size() < 4:
-		return points
-	var result := PackedVector2Array()
-	result.append(points[0])
-	var i := 1
-	while i < points.size():
-		var a: Vector2 = result[result.size() - 1]
-		var b: Vector2 = points[i]
-		# Проверяем сегмент a→b на пересечение с предыдущими сегментами result
-		# Пропускаем последний сегмент result (он смежный — всегда «пересекается» в общей точке)
-		var loop_found := false
-		if result.size() >= 3:
-			var j := 0
-			while j < result.size() - 2:
-				var c: Vector2 = result[j]
-				var d: Vector2 = result[j + 1]
-				var ix := _segment_intersect(a, b, c, d)
-				if ix != Vector2.INF:
-					# Петля: вырезаем точки result[j+1..end], заменяем на точку пересечения
-					var new_result := PackedVector2Array()
-					for k in range(j + 1):
-						new_result.append(result[k])
-					new_result.append(ix)
-					result = new_result
-					loop_found = true
-					break
-				j += 1
-		if not loop_found:
-			result.append(b)
-		i += 1
-	return result
+	return ChunkMath.smooth_road_corners(raw_points)
 
 
 func _is_closed_polyline(points: PackedVector2Array, tolerance: float = 0.5) -> bool:
@@ -21193,21 +21075,6 @@ func _build_terrain_corridors_for_polyline(points: PackedVector2Array, delta: fl
 			if cp.size() >= 3 and _polygon_area(cp) > 0.001:
 				result.append(cp)
 	return result
-
-
-## Пересечение двух отрезков. Возвращает Vector2.INF если не пересекаются.
-func _segment_intersect(a: Vector2, b: Vector2, c: Vector2, d: Vector2) -> Vector2:
-	var ab: Vector2 = b - a
-	var cd: Vector2 = d - c
-	var denom: float = ab.x * cd.y - ab.y * cd.x
-	if absf(denom) < 1e-10:
-		return Vector2.INF  # Параллельные
-	var ac: Vector2 = c - a
-	var t: float = (ac.x * cd.y - ac.y * cd.x) / denom
-	var u: float = (ac.x * ab.y - ac.y * ab.x) / denom
-	if t > 0.01 and t < 0.99 and u > 0.01 and u < 0.99:
-		return a + ab * t
-	return Vector2.INF
 
 
 ## Удаляет zigzag-точки из полилинии: точки слишком близкие к предыдущему сегменту
@@ -21288,6 +21155,34 @@ func _split_polygon_by_grid(poly: PackedVector2Array, grid_step: float) -> Array
 	if result.is_empty():
 		result.append(poly)
 	return result
+
+
+## Triangulates a grid cell using a deterministic NW→SE diagonal.
+## Cells from _split_polygon_by_grid with 3-4 vertices are handled directly;
+## complex boundary shapes fall back to triangulate_polygon.
+## Using the same triangulation for overlapping meshes (terrain + footway)
+## ensures their linear interpolation agrees everywhere → 1cm margin holds.
+static func _triangulate_cell_nw_se(poly: PackedVector2Array) -> PackedInt32Array:
+	var n := poly.size()
+	if n < 3:
+		return PackedInt32Array()
+	if n == 3:
+		return PackedInt32Array([0, 1, 2])
+	if n == 4:
+		# Fan from NW vertex (min x+z) — always NW→SE diagonal regardless
+		# of CCW starting vertex, so terrain and footway cells match.
+		var nw := 0
+		var nw_sum := poly[0].x + poly[0].y
+		for i in range(1, 4):
+			var s := poly[i].x + poly[i].y
+			if s < nw_sum:
+				nw_sum = s
+				nw = i
+		var b := (nw + 1) % 4
+		var c := (nw + 2) % 4
+		var d := (nw + 3) % 4
+		return PackedInt32Array([nw, b, c, nw, c, d])
+	return Geometry2D.triangulate_polygon(poly)
 
 
 static func _subdivide_polygon_edges(poly: PackedVector2Array, max_len: float) -> PackedVector2Array:
@@ -21443,7 +21338,7 @@ func _add_boundary_slit(corridor: PackedVector2Array, ch_x0: float, ch_x1: float
 ## Removes points where the direction changes by more than 75 degrees
 ## Also removes backtracking points (where road reverses direction)
 func _validate_road_direction(points: PackedVector2Array) -> PackedVector2Array:
-	if points.size() < 3:
+	if points.size() < 3 or not enable_road_smoothing:
 		return points
 
 	var result: PackedVector2Array = PackedVector2Array()

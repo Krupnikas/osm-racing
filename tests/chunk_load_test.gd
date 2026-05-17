@@ -102,6 +102,7 @@ func _find_nodes() -> void:
 
 func _apply_render_flags() -> void:
 	var args := OS.get_cmdline_args()
+	args.append_array(OS.get_cmdline_user_args())
 	var disabled: PackedStringArray = []
 
 	# Render flags (Environment)
@@ -164,6 +165,9 @@ func _apply_render_flags() -> void:
 			elif arg == "--no-fences":
 				osm_terrain.enable_fences = false
 				disabled.append("Fences")
+			elif arg == "--no-road-smoothing":
+				osm_terrain.enable_road_smoothing = false
+				disabled.append("RoadSmoothing")
 
 	# Traffic flags
 	var traffic_mgr := get_node_or_null("TrafficManager")

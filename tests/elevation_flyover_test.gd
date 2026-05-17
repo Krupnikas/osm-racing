@@ -190,6 +190,9 @@ func _apply_feature_flags() -> void:
 		elif arg == "--with-fences":
 			osm_terrain.enable_fences = true
 			enabled.append("Fences")
+		elif arg == "--no-road-smoothing":
+			osm_terrain.enable_road_smoothing = false
+			enabled.append("-RoadSmoothing")
 		elif arg == "--no-roads":
 			osm_terrain.enable_roads = false
 			enabled.append("-Roads")
