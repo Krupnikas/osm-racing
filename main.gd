@@ -144,21 +144,30 @@ func _start_game() -> void:
 func _spawn_car_on_road() -> void:
 	if not _car:
 		return
+
+	# Get elevation from loaded data (available after initial_load_complete)
+	var spawn_elev := 0.0
+	if _terrain and _terrain.get("enable_elevation"):
+		spawn_elev = _terrain.get_spawn_elevation()
+
 	var traffic_manager = find_child("TrafficManager", true, false)
 	if not traffic_manager or not traffic_manager.has_method("get_road_network"):
+		_set_car_spawn_y(spawn_elev)
 		return
 	var road_network = traffic_manager.get_road_network()
 	if road_network == null or road_network.all_waypoints.is_empty():
+		_set_car_spawn_y(spawn_elev)
 		return
 
 	var nearest_wp = road_network.get_nearest_waypoint(_car.global_position)
 	if nearest_wp == null:
+		_set_car_spawn_y(spawn_elev)
 		return
 
 	var road_pos: Vector3 = nearest_wp.position
 	var road_dir: Vector3 = nearest_wp.direction
 	if not road_pos.is_finite():
-		road_pos = Vector3(0, 2, 0)
+		road_pos = Vector3(_car.global_position.x, spawn_elev + 0.5, _car.global_position.z)
 	if not road_dir.is_finite():
 		road_dir = Vector3(0, 0, 1)
 
@@ -172,6 +181,8 @@ func _spawn_car_on_road() -> void:
 		var ray_result := space_state.intersect_ray(ray_query)
 		if not ray_result.is_empty():
 			road_pos.y = ray_result.position.y + 0.1
+		elif spawn_elev > 0.1:
+			road_pos.y = spawn_elev + 0.5
 		else:
 			road_pos.y += 0.1
 	else:
@@ -204,6 +215,15 @@ func _spawn_car_on_road() -> void:
 		_car_rb.current_gear = 1
 		if _car_rb.get("automatic_transmission") != null:
 			_car_rb.automatic_transmission = true
+
+
+func _set_car_spawn_y(elev: float) -> void:
+	if not _car or not (_car_rb is RigidBody3D):
+		return
+	var y: float = elev + 0.5 if elev > 0.1 else 2.0
+	_car.global_position.y = y
+	_car_rb.linear_velocity = Vector3.ZERO
+	_car_rb.angular_velocity = Vector3.ZERO
 
 
 func _hide_world() -> void:
