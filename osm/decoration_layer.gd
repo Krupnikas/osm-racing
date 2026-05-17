@@ -305,9 +305,10 @@ func get_billboards_in_chunk(chunk_min: Vector2, chunk_max: Vector2) -> Array:
 
 	var start_lat: float = _terrain_generator.start_lat
 	var start_lon: float = _terrain_generator.start_lon
+	var wo: Vector2 = _terrain_generator._world_offset if "_world_offset" in _terrain_generator else Vector2.ZERO
 
 	for billboard in _billboards:
-		var pos: Vector2 = billboard.get_local_position(start_lat, start_lon)
+		var pos: Vector2 = billboard.get_local_position(start_lat, start_lon) - wo
 		if pos.x >= chunk_min.x and pos.x <= chunk_max.x and \
 		   pos.y >= chunk_min.y and pos.y <= chunk_max.y:
 			result.append(billboard)
@@ -325,7 +326,8 @@ func create_billboard_mesh(billboard, elevation: float) -> Node3D:
 
 	var start_lat: float = _terrain_generator.start_lat
 	var start_lon: float = _terrain_generator.start_lon
-	var pos: Vector2 = billboard.get_local_position(start_lat, start_lon)
+	var wo: Vector2 = _terrain_generator._world_offset if "_world_offset" in _terrain_generator else Vector2.ZERO
+	var pos: Vector2 = billboard.get_local_position(start_lat, start_lon) - wo
 
 	# Позиционируем
 	root.position = Vector3(pos.x, elevation, pos.y)

@@ -64,6 +64,10 @@ var _lon_scale := 0.0  # Cached cos(deg_to_rad(start_lat)) * 111000.0
 ## Player spawn lat/lon — converted to world offset from fixed origin.
 var spawn_lat: float = 0.0
 var spawn_lon: float = 0.0
+## World offset for float precision: subtracted from all coordinates so player stays near origin.
+## Snapped to chunk grid so chunk indices shift by integer amounts.
+var _world_offset := Vector2.ZERO
+var _world_offset_chunks := Vector2i.ZERO
 @export var chunk_size := 210.0  # Размер чанка в метрах (270м сетка - 2×30м паддинг)
 @export var load_distance := 500.0  # Дистанция подгрузки чанков
 @export var unload_distance := 700.0  # Дистанция выгрузки чанков
@@ -599,6 +603,11 @@ func _apply_fixed_origin() -> void:
 	start_lat = ChunkMath.ORIGIN_LAT
 	start_lon = ChunkMath.ORIGIN_LON
 	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
+	# Compute world offset to keep coordinates near origin (avoids float32 jitter)
+	if spawn_lat != 0.0 or spawn_lon != 0.0:
+		var spawn_w := ChunkMath.latlon_to_world(spawn_lat, spawn_lon)
+		_world_offset_chunks = Vector2i(roundi(spawn_w.x / chunk_size), roundi(spawn_w.y / chunk_size))
+		_world_offset = Vector2(float(_world_offset_chunks.x) * chunk_size, float(_world_offset_chunks.y) * chunk_size)
 
 
 func _ready() -> void:
@@ -1935,16 +1944,11 @@ func start_loading() -> void:
 	# Reconnect night mode after reset
 	_connect_to_night_mode()
 
-	# Определяем какие чанки нужны для старта
-	# Используем позицию машины если она есть, иначе spawn world offset
-	var spawn_pos := Vector3.ZERO
-	if _car and is_instance_valid(_car):
-		spawn_pos = _car.global_position
-		print("OSM: Loading chunks around car position (%.1f, %.1f, %.1f)" % [spawn_pos.x, spawn_pos.y, spawn_pos.z])
-	else:
-		var sp := get_spawn_world_position()
-		spawn_pos = Vector3(sp.x, 0, sp.y)
-		print("OSM: Loading chunks around spawn point (%.1f, %.1f)" % [sp.x, sp.y])
+	# Use spawn world position (shifted by world offset) for initial chunks.
+	# Car may not be positioned in shifted coords yet at this point.
+	var sp := get_spawn_world_position()
+	var spawn_pos := Vector3(sp.x, 0, sp.y)
+	print("OSM: Loading chunks around spawn (%.1f, %.1f), world_offset=(%.0f, %.0f)" % [sp.x, sp.y, _world_offset.x, _world_offset.y])
 
 	_initial_chunks_needed = _get_initial_chunks(spawn_pos)
 	# Начальные чанки всегда LOD0
@@ -2688,9 +2692,11 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 	# Create visible placeholder box while chunk loads
 	_create_loading_placeholder(chunk_key, chunk_x, chunk_z)
 
-	# Вычисляем центр чанка в координатах lat/lon
-	var center_x := chunk_x * chunk_size + chunk_size / 2
-	var center_z := chunk_z * chunk_size + chunk_size / 2
+	# Use absolute chunk indices (with world offset) for lat/lon conversion
+	var abs_cx := chunk_x + _world_offset_chunks.x
+	var abs_cz := chunk_z + _world_offset_chunks.y
+	var center_x := float(abs_cx) * chunk_size + chunk_size / 2
+	var center_z := float(abs_cz) * chunk_size + chunk_size / 2
 
 	# Конвертируем локальные координаты обратно в lat/lon
 	# Z инвертирован в системе координат, поэтому вычитаем
@@ -2750,7 +2756,7 @@ func _request_elevation(chunk_key: String, cx: int, cz: int) -> void:
 	var gen := _load_generation
 	loader.elevation_loaded.connect(_on_elevation_loaded.bind(gen, loader))
 	loader.elevation_failed.connect(_on_elevation_failed.bind(gen, loader))
-	loader.load_elevation(chunk_key, cx, cz, chunk_size, start_lat, start_lon)
+	loader.load_elevation(chunk_key, cx + _world_offset_chunks.x, cz + _world_offset_chunks.y, chunk_size, start_lat, start_lon)
 
 
 func _on_elevation_loaded(chunk_key: String, grid_data: Dictionary, gen: int, loader: Node) -> void:
@@ -2759,7 +2765,12 @@ func _on_elevation_loaded(chunk_key: String, grid_data: Dictionary, gen: int, lo
 	_elevation_in_flight.erase(chunk_key)
 	if gen != _load_generation:
 		return  # Stale
-	_chunk_elevation_data[chunk_key] = _upscale_elevation_grid(grid_data)
+	var upscaled := _upscale_elevation_grid(grid_data)
+	# Convert base_x/base_z from absolute to shifted coordinate system
+	if _world_offset != Vector2.ZERO:
+		upscaled["base_x"] = upscaled.get("base_x", 0.0) - _world_offset.x
+		upscaled["base_z"] = upscaled.get("base_z", 0.0) - _world_offset.y
+	_chunk_elevation_data[chunk_key] = upscaled
 
 
 var _elevation_retries: Dictionary = {}  # chunk_key -> retry count
@@ -3396,6 +3407,8 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		"start_lon": start_lon,
 		"lon_scale": _lon_scale,
 		"chunk_size": chunk_size,
+		"world_offset_x": _world_offset.x,
+		"world_offset_y": _world_offset.y,
 	}
 
 	_pending_terrain_gen_tasks += 1
@@ -3417,6 +3430,8 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 	var t_start_lon: float = task_data.start_lon
 	var t_lon_scale: float = task_data.lon_scale
 	var t_chunk_size: float = task_data.chunk_size
+	var t_wo_x: float = task_data.get("world_offset_x", 0.0)
+	var t_wo_y: float = task_data.get("world_offset_y", 0.0)
 
 	var ways: Array = osm_data.get("ways", [])
 
@@ -3424,7 +3439,7 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 	var _ll := func(lat: float, lon: float) -> Vector2:
 		var dx: float = (lon - t_start_lon) * t_lon_scale
 		var dz: float = (lat - t_start_lat) * 111000.0
-		return Vector2(dx, -dz)
+		return Vector2(dx - t_wo_x, -dz - t_wo_y)
 
 	# Chunk bounds
 	var coords: Array = chunk_key.split(",")
@@ -3557,7 +3572,7 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 		for node in ped_nodes:
 			var dx: float = (node["lon"] - t_start_lon) * t_lon_scale
 			var dz: float = (node["lat"] - t_start_lat) * 111000.0
-			ped_pts.append(Vector2(dx, -dz))
+			ped_pts.append(Vector2(dx - t_wo_x, -dz - t_wo_y))
 		var pp_min_x: float = ped_pts[0].x
 		var pp_max_x: float = ped_pts[0].x
 		var pp_min_y: float = ped_pts[0].y
@@ -4595,6 +4610,8 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	var t_start_lat: float = task_data.start_lat
 	var t_start_lon: float = task_data.start_lon
 	var t_lon_scale: float = task_data.lon_scale
+	var t_wo_x: float = task_data.get("world_offset_x", 0.0)
+	var t_wo_y: float = task_data.get("world_offset_y", 0.0)
 	var chunk_key: String = task_data.chunk_key
 
 	var highway_type: String = tags.get("highway", "residential")
@@ -4606,7 +4623,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	for i in range(nodes.size()):
 		var dx: float = (nodes[i].lon - t_start_lon) * t_lon_scale
 		var dz: float = (nodes[i].lat - t_start_lat) * 111000.0
-		local_points[i] = Vector2(dx, -dz)
+		local_points[i] = Vector2(dx - t_wo_x, -dz - t_wo_y)
 
 	# Road length
 	var road_length := 0.0
@@ -4891,8 +4908,8 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				var first_n: Dictionary = nodes[0]
 				if _bridge_endpoint_touches_any(first_n.lat, first_n.lon):
 					var first_local := Vector2(
-							(first_n.lon - t_start_lon) * t_lon_scale,
-							-(first_n.lat - t_start_lat) * 111000.0)
+							(first_n.lon - t_start_lon) * t_lon_scale - t_wo_x,
+							-(first_n.lat - t_start_lat) * 111000.0 - t_wo_y)
 					if points[0].distance_to(first_local) < 0.5:
 						var d_first := _polygon_abutment_dir_at_local(first_local)
 						if d_first != Vector2.ZERO:
@@ -4904,8 +4921,8 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 				var last_n: Dictionary = nodes[nodes.size() - 1]
 				if _bridge_endpoint_touches_any(last_n.lat, last_n.lon):
 					var last_local := Vector2(
-							(last_n.lon - t_start_lon) * t_lon_scale,
-							-(last_n.lat - t_start_lat) * 111000.0)
+							(last_n.lon - t_start_lon) * t_lon_scale - t_wo_x,
+							-(last_n.lat - t_start_lat) * 111000.0 - t_wo_y)
 					var li: int = n_points - 1
 					if points[li].distance_to(last_local) < 0.5:
 						var d_last := _polygon_abutment_dir_at_local(last_local)
@@ -12500,7 +12517,9 @@ func _process_road_queue() -> void:
 				"start_lat": start_lat,
 				"start_lon": start_lon,
 				"lon_scale": _lon_scale,
-				"way_id": item.get("way_id", 0)
+				"way_id": item.get("way_id", 0),
+				"world_offset_x": _world_offset.x,
+				"world_offset_y": _world_offset.y,
 			}
 			_road_mutex.lock()
 			_pending_road_tasks += 1
@@ -15047,7 +15066,7 @@ func _latlon_to_local(lat: float, lon: float) -> Vector2:
 		_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
 	var dx := (lon - start_lon) * _lon_scale
 	var dz := (lat - start_lat) * 111000.0
-	return Vector2(dx, -dz)  # Инвертируем Z для корректной ориентации карты
+	return Vector2(dx - _world_offset.x, -dz - _world_offset.y)
 
 
 ## Get spawn elevation by reading the elevation cache for chunk 0,0.
@@ -15056,7 +15075,11 @@ func _latlon_to_local(lat: float, lon: float) -> Vector2:
 func get_spawn_world_position() -> Vector2:
 	if spawn_lat == 0.0 and spawn_lon == 0.0:
 		return Vector2.ZERO
-	return ChunkMath.latlon_to_world(spawn_lat, spawn_lon)
+	return ChunkMath.latlon_to_world(spawn_lat, spawn_lon) - _world_offset
+
+
+func get_world_offset() -> Vector2:
+	return _world_offset
 
 
 func get_spawn_elevation() -> float:

@@ -230,13 +230,11 @@ func _apply_feature_flags() -> void:
 
 
 func _setup_test() -> void:
-	# Hide and freeze car — place at spawn world offset so start_loading() uses correct area
+	# Hide and freeze car — position after start_loading computes world offset
 	if car:
 		car.visible = false
 		if car is RigidBody3D:
 			car.freeze = true
-		var sp := ChunkMath.latlon_to_world(test_location.x, test_location.y)
-		car.global_position = Vector3(sp.x, 0.5, sp.y)
 		var vehicle_input = car.get_node_or_null("VehicleInput")
 		if vehicle_input:
 			vehicle_input.set_physics_process(false)
@@ -275,6 +273,11 @@ func _setup_test() -> void:
 		osm_terrain.set_initial_position(test_location)
 	if osm_terrain.has_method("start_loading"):
 		osm_terrain.start_loading()
+
+	# Position car in shifted coordinates (after start_loading computes world offset)
+	if car:
+		var sp := osm_terrain.get_spawn_world_position() if osm_terrain.has_method("get_spawn_world_position") else ChunkMath.latlon_to_world(test_location.x, test_location.y)
+		car.global_position = Vector3(sp.x, 0.5, sp.y)
 
 	# Fallback timeout
 	if signal_connected:

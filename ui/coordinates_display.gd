@@ -19,8 +19,11 @@ func _ready() -> void:
 		_chunk_size = _terrain_gen.chunk_size
 
 func _process(_delta: float) -> void:
-	if not _car:
-		return
+	if not is_instance_valid(_car):
+		if car_path:
+			_car = get_node_or_null(car_path)
+		if not _car:
+			return
 
 	# Синхронизируем координаты с terrain generator (могут обновиться после загрузки)
 	if _terrain_gen and _terrain_gen.get_script():
@@ -37,9 +40,13 @@ func _process(_delta: float) -> void:
 	text = "Lat: %.6f  Lon: %.6f\nChunk: %d,%d  Alt: %.1fm" % [coords.x, coords.y, chunk_x, chunk_z, pos.y]
 
 func local_to_latlon(x: float, z: float) -> Vector2:
-	# Обратная конвертация из локальных метров в lat/lon
-	# В _generate_terrain: dz = (lat - start_lat) * 111000.0, возвращается -dz
-	# Значит z = -(lat - start_lat) * 111000, lat = start_lat - z / 111000
-	var lat := start_lat - z / 111000.0
-	var lon := start_lon + x / (111000.0 * cos(deg_to_rad(start_lat)))
+	# Add world offset to get absolute coords before converting to lat/lon
+	var abs_x := x
+	var abs_z := z
+	if _terrain_gen and _terrain_gen.has_method("get_world_offset"):
+		var wo: Vector2 = _terrain_gen.get_world_offset()
+		abs_x += wo.x
+		abs_z += wo.y
+	var lat := start_lat - abs_z / 111000.0
+	var lon := start_lon + abs_x / (111000.0 * cos(deg_to_rad(start_lat)))
 	return Vector2(lat, lon)

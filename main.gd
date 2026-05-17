@@ -80,21 +80,24 @@ func _start_loading() -> void:
 		_car_rb.linear_velocity = Vector3.ZERO
 		_car_rb.angular_velocity = Vector3.ZERO
 		_car_rb.freeze = true
-		var spawn_offset := Vector2.ZERO
-		if _terrain:
-			spawn_offset = _terrain.get_spawn_world_position()
+
+	# Start terrain loading first — this computes the world offset for float precision.
+	# Car positioning must happen AFTER so coordinates are in the shifted system.
+	if _terrain:
+		_terrain.start_loading()
+	else:
+		_start_game()
+		return
+
+	if _car_rb:
+		var spawn_offset: Vector2 = _terrain.get_spawn_world_position()
 		var spawn_y: float = 2.0
-		if _terrain and _terrain.get("enable_elevation"):
+		if _terrain.get("enable_elevation"):
 			var elev: float = _terrain.get_spawn_elevation()
 			if elev > 0.0:
 				spawn_y = elev + 2.0
 		_car.global_position = Vector3(spawn_offset.x, spawn_y, spawn_offset.y)
 		_car.rotation = Vector3.ZERO
-
-	if _terrain:
-		_terrain.start_loading()
-	else:
-		_start_game()
 
 
 func _on_load_started() -> void:
