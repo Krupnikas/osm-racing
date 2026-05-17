@@ -17863,6 +17863,7 @@ func _process_lod_chunk_queue() -> void:
 		# Пометить чанк как загруженный
 		_loading_chunks.erase(chunk_key)
 		_loaded_chunks[chunk_key] = parent
+		_initial_chunks_completed[chunk_key] = true
 		parent.visible = false
 		_chunk_activation_pending[chunk_key] = -1
 		_set_chunk_stage(chunk_key, "activating")

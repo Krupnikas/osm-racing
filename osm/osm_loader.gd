@@ -353,14 +353,25 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 	var parse_result := json.parse(json_string)
 
 	if parse_result != OK:
-		load_failed.emit("JSON parse error: " + json.get_error_message())
+		var now := Time.get_ticks_msec()
+		_server_cooldown_until[current_server_index] = now + RATE_LIMIT_COOLDOWN_MS
+		_try_next_server("JSON parse error: " + json.get_error_message())
 		return
 
 	var data: Dictionary = json.data
 	var parsed := _parse_osm_data(data)
 
-	# Сохраняем в кеш
-	if use_cache and current_cache_key != "":
+	# Если сервер вернул 0 ways — возможно неполная БД, пробуем следующий
+	if parsed.get("ways", []).size() == 0 and retry_count < max_retries - 1:
+		var srv_name: String = OVERPASS_SERVERS[current_server_index].split("/")[2]
+		print("OSM: Server %s returned 0 ways, cooldown + trying next" % srv_name)
+		var now := Time.get_ticks_msec()
+		_server_cooldown_until[current_server_index] = now + RATE_LIMIT_COOLDOWN_MS
+		_try_next_server("0 ways returned (incomplete data)")
+		return
+
+	# Сохраняем в кеш (только если есть данные — не кешируем пустые ответы)
+	if use_cache and current_cache_key != "" and parsed.get("ways", []).size() > 0:
 		_save_to_cache(current_cache_key, parsed)
 
 	data_loaded.emit(parsed)
