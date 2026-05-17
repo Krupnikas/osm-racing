@@ -15204,10 +15204,17 @@ func _sample_elevation(world_x: float, world_z: float) -> float:
 	var ck := "%d,%d" % [cx, cz]
 	var grid_data: Dictionary = _chunk_elevation_data.get(ck, {})
 	if grid_data.is_empty():
-		# Chunk has no elevation data. Each chunk is self-sufficient —
-		# never use another chunk's data. Road vertices beyond chunk
-		# boundary are clipped anyway; terrain uses only own grid.
-		return 0.0
+		# Float precision at chunk boundaries: floor() can map a position
+		# that is logically on one chunk's edge to the adjacent chunk.
+		# Try the neighbor if we're within 0.01m of a boundary.
+		var bx: float = float(cx) * chunk_size
+		var bz: float = float(cz) * chunk_size
+		if absf(world_x - bx) < 0.01:
+			grid_data = _chunk_elevation_data.get("%d,%d" % [cx - 1, cz], {})
+		if grid_data.is_empty() and absf(world_z - bz) < 0.01:
+			grid_data = _chunk_elevation_data.get("%d,%d" % [cx, cz - 1], {})
+		if grid_data.is_empty():
+			return 0.0
 	var grid: Array = grid_data.get("grid", [])
 	var grid_res: int = grid_data.get("grid_res", 5)
 	var base_x: float = grid_data.get("base_x", 0.0)
@@ -15232,6 +15239,29 @@ func _sample_elevation(world_x: float, world_z: float) -> float:
 	var h1: float = h01 * (1.0 - tx) + h11 * tx
 	var raw: float = h0 * (1.0 - tz) + h1 * tz
 	return raw
+
+
+## Sample elevation from a specific chunk's pre-fetched grid arrays.
+## Used by _finalize_terrain_mesh to avoid position-based chunk lookup
+## that can fail at chunk boundaries due to float precision.
+static func _sample_elevation_local(world_x: float, world_z: float,
+		has_elev: bool, grid: Array, grid_res: int,
+		base_x: float, base_z: float, step: float) -> float:
+	if not has_elev:
+		return 0.0
+	var fx: float = clampf((world_x - base_x) / step, 0.0, float(grid_res - 1))
+	var fz: float = clampf((world_z - base_z) / step, 0.0, float(grid_res - 1))
+	var ix: int = mini(int(fx), grid_res - 2)
+	var iz: int = mini(int(fz), grid_res - 2)
+	var tx: float = fx - float(ix)
+	var tz: float = fz - float(iz)
+	var h00: float = grid[iz][ix]
+	var h10: float = grid[iz][ix + 1]
+	var h01: float = grid[iz + 1][ix]
+	var h11: float = grid[iz + 1][ix + 1]
+	var h0: float = h00 * (1.0 - tx) + h10 * tx
+	var h1: float = h01 * (1.0 - tx) + h11 * tx
+	return h0 * (1.0 - tz) + h1 * tz
 
 
 ## Thread-safe elevation sampling from pre-fetched grid data (no instance vars).
@@ -17493,11 +17523,20 @@ func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void
 	var indices := PackedInt32Array()
 	var uv_scale := 0.25
 
+	# Use chunk's own elevation data directly (same fix as _finalize_terrain_mesh)
+	var ft_grid_data: Dictionary = _chunk_elevation_data.get(chunk_key, {})
+	var ft_grid: Array = ft_grid_data.get("grid", [])
+	var ft_grid_res: int = ft_grid_data.get("grid_res", 0)
+	var ft_base_x: float = ft_grid_data.get("base_x", 0.0)
+	var ft_base_z: float = ft_grid_data.get("base_z", 0.0)
+	var ft_step: float = ft_grid_data.get("grid_step", 5.0)
+	var ft_has_elev: bool = enable_elevation and ft_grid.size() >= ft_grid_res and ft_grid_res >= 2
+
 	for iz in range(grid_res + 1):
 		for ix in range(grid_res + 1):
 			var x := min_x + ix * step
 			var z := min_z + iz * step
-			var y := 0.22 + _sample_elevation(x, z)
+			var y := 0.22 + _sample_elevation_local(x, z, ft_has_elev, ft_grid, ft_grid_res, ft_base_x, ft_base_z, ft_step)
 			vertices.append(Vector3(x, y, z))
 			uvs.append(Vector2(x * uv_scale, z * uv_scale))
 			normals.append(Vector3.UP)
@@ -17831,6 +17870,17 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	var max_z := min_z + chunk_size
 	var sidewalk_height := 0.22
 
+	# Use this chunk's own elevation data directly to avoid float precision
+	# issues at chunk boundaries where floor(pos / chunk_size) might map
+	# a boundary vertex to an adjacent chunk that has no elevation data → y=0 spike.
+	var _te_grid_data: Dictionary = _chunk_elevation_data.get(chunk_key, {})
+	var _te_grid: Array = _te_grid_data.get("grid", [])
+	var _te_grid_res: int = _te_grid_data.get("grid_res", 0)
+	var _te_base_x: float = _te_grid_data.get("base_x", 0.0)
+	var _te_base_z: float = _te_grid_data.get("base_z", 0.0)
+	var _te_step: float = _te_grid_data.get("grid_step", 5.0)
+	var _te_has_elev: bool = enable_elevation and _te_grid.size() >= _te_grid_res and _te_grid_res >= 2
+
 	# Бордюры по внутренним краям (где террейн граничит с дорогой)
 	var curb_verts := PackedVector3Array()
 	var curb_norms := PackedVector3Array()
@@ -17887,8 +17937,8 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 				p1 -= dir * curb_w
 			if not p2_on_boundary:
 				p2 += dir * curb_w
-			var e1 := _sample_elevation(p1.x, p1.y)
-			var e2 := _sample_elevation(p2.x, p2.y)
+			var e1 := _sample_elevation_local(p1.x, p1.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
+			var e2 := _sample_elevation_local(p2.x, p2.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
 			var top1 := top + e1
 			var top2 := top + e2
 			var bot1 := bot + e1
@@ -17956,7 +18006,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 			continue
 		var base_idx: int = all_vertices.size()
 		for p in poly:
-			var h := sidewalk_height + _sample_elevation(p.x, p.y)
+			var h := sidewalk_height + _sample_elevation_local(p.x, p.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
 			all_vertices.append(Vector3(p.x, h, p.y))
 			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
 			all_normals.append(Vector3.UP)
