@@ -9359,6 +9359,16 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	# Custom 3D model — полностью заменяет геометрию здания
 	if building_override and building_override.custom_model_path != "":
 		_place_custom_building_model(building_override, center, parent, base_elev)
+	elif way_id == Facade111_125.TARGET_WAY_ID and building_override and building_override.wall_texture_path != "":
+		# Северное Шоссе 39 — building-specific 111-125 atom facade prototype.
+		# Reuse the existing custom-texture function for roof / parapet /
+		# foundation / pediment (skip_walls=true), then build modular walls
+		# from atom textures on top of the same Y range.
+		_create_3d_building_with_custom_texture(points, building_height, building_override, parent, base_elev, debug_name, true)
+		var fnd_h: float = 0.0 if building_override.no_foundation else _get_foundation_height(points)
+		var facade := Facade111_125.new()
+		facade.build(points, building_height, base_elev, parent, fnd_h, way_id)
+		print("OSM: 111-125 atom facade applied for way %d" % way_id)
 	elif building_override and building_override.wall_texture_path != "":
 		# Кастомная текстура с опциональным normal map
 		_create_3d_building_with_custom_texture(points, building_height, building_override, parent, base_elev, debug_name)
@@ -13936,8 +13946,10 @@ func _load_texture_map(explicit_path: String, auto_path: String) -> Texture2D:
 	return tex
 
 
-func _create_3d_building_with_custom_texture(points: PackedVector2Array, building_height: float, building_override, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "") -> void:
-	"""Создаёт здание с кастомной текстурой и normal map из файла"""
+func _create_3d_building_with_custom_texture(points: PackedVector2Array, building_height: float, building_override, parent: Node3D, base_elev: float = 0.0, _debug_name: String = "", skip_walls: bool = false) -> void:
+	"""Создаёт здание с кастомной текстурой и normal map из файла.
+	skip_walls=true skips wall mesh emission (roof/parapet/foundation still
+	built) so a caller can substitute a custom wall builder (see Facade111_125)."""
 	var texture_path: String = building_override.wall_texture_path
 	var texture_repeat_y: float = building_override.texture_repeat_y if building_override.texture_repeat_y > 0 else 2.0
 	# Минимум 4 точки для нормального здания
@@ -14151,6 +14163,8 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 
 	var accumulated_width := 0.0
 	for i in range(points.size()):
+		if skip_walls:
+			continue
 		var p1 := points[i]
 		var p2 := points[(i + 1) % points.size()]
 
@@ -14248,7 +14262,8 @@ func _create_3d_building_with_custom_texture(points: PackedVector2Array, buildin
 	wall_arrays[Mesh.ARRAY_INDEX] = wall_indices
 
 	var wall_mesh := ArrayMesh.new()
-	wall_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, wall_arrays)
+	if wall_vertices.size() > 0:
+		wall_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, wall_arrays)
 
 	var wall_mesh_instance := MeshInstance3D.new()
 	wall_mesh_instance.mesh = wall_mesh
