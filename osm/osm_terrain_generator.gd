@@ -9366,8 +9366,17 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		# from atom textures on top of the same Y range.
 		_create_3d_building_with_custom_texture(points, building_height, building_override, parent, base_elev, debug_name, true)
 		var fnd_h: float = 0.0 if building_override.no_foundation else _get_foundation_height(points)
+		# Pre-compute existing OSM-entrance positions in local XZ — used by
+		# the facade to dedup against override.entrances when it considers
+		# spawning extra ResidentialEntrance groups at facade slots.
+		var entr_local: Array = []
+		for e in building_override.entrances:
+			var lat: float = e.get("lat", 0.0) if e is Dictionary else 0.0
+			var lon: float = e.get("lon", 0.0) if e is Dictionary else 0.0
+			if lat != 0.0 or lon != 0.0:
+				entr_local.append(_latlon_to_local(lat, lon))
 		var facade := Facade111_125.new()
-		facade.build(points, building_height, base_elev, parent, fnd_h, way_id)
+		facade.build(points, building_height, base_elev, parent, fnd_h, way_id, self, entr_local)
 		print("OSM: 111-125 atom facade applied for way %d" % way_id)
 	elif building_override and building_override.wall_texture_path != "":
 		# Кастомная текстура с опциональным normal map
@@ -18445,6 +18454,11 @@ func _create_manhole_decal(pos: Vector2, elevation: float, rotation: float, pare
 
 func _add_residential_entrances(points: PackedVector2Array, parent: Node3D, base_elev: float, way_id: int) -> void:
 	"""Добавляет подъезды для здания если они есть в building_overrides"""
+	# Facade-driven buildings own their entrances — skip the OSM lat/lon
+	# system here so the full ResidentialEntrance group (with doors, green
+	# wall, canopy etc.) doesn't spawn alongside the facade's bare stairs.
+	if way_id == Facade111_125.TARGET_WAY_ID:
+		return
 	var override = _decoration_layer.get_building_override_for_way(way_id)
 	if not override or override.entrances.is_empty():
 		return
@@ -18455,16 +18469,6 @@ func _add_residential_entrances(points: PackedVector2Array, parent: Node3D, base
 		var cx := int(floor(center.x / chunk_size))
 		var cz := int(floor(center.y / chunk_size))
 		chunk_key = "%d,%d" % [cx, cz]
-
-	# Инициализируем batch
-	if not _entrance_batch.has(chunk_key):
-		_entrance_batch[chunk_key] = {"parent": parent, "collisions": [], "lights": []}
-		for key in ResidentialEntranceScript.MATERIAL_KEYS:
-			_entrance_batch[chunk_key][key] = {
-				"vertices": PackedVector3Array(),
-				"normals": PackedVector3Array(),
-				"indices": PackedInt32Array()
-			}
 
 	for entrance_data in override.entrances:
 		var lat: float = entrance_data.get("lat", 0.0)
@@ -18482,31 +18486,43 @@ func _add_residential_entrances(points: PackedVector2Array, parent: Node3D, base
 		var world_pos := Vector3(wall.closest_point.x, elev, wall.closest_point.y)
 		var rotation_y: float = atan2(wall.normal.x, wall.normal.z)
 
-		# Генерируем геометрию
-		var geo := ResidentialEntranceScript.generate_entrance_geometry(world_pos, rotation_y)
+		_add_residential_entrance_at_world_pos(world_pos, rotation_y, parent, chunk_key, way_id)
 
-		# Мержим в batch
-		var batch: Dictionary = _entrance_batch[chunk_key]
+
+# Drops a single residential-entrance group at an explicit world position.
+# Used by both the OSM lat/lon-driven _add_residential_entrances and the
+# facade-slot-driven Facade111_125._spawn_facade_entrance_if_needed.
+# Initializes the per-chunk batch lazily — safe to call from either path.
+func _add_residential_entrance_at_world_pos(world_pos: Vector3, rotation_y: float, parent: Node3D, chunk_key: String, way_id_for_log: int = 0) -> void:
+	if not _entrance_batch.has(chunk_key):
+		_entrance_batch[chunk_key] = {"parent": parent, "collisions": [], "lights": []}
 		for key in ResidentialEntranceScript.MATERIAL_KEYS:
-			var src: Dictionary = geo[key]
-			var dst: Dictionary = batch[key]
-			if src["vertices"].size() == 0:
-				continue
-			var offset: int = dst["vertices"].size()
-			dst["vertices"].append_array(src["vertices"])
-			dst["normals"].append_array(src["normals"])
-			# Смещаем индексы
-			for idx in src["indices"]:
-				dst["indices"].append(idx + offset)
+			_entrance_batch[chunk_key][key] = {
+				"vertices": PackedVector3Array(),
+				"normals": PackedVector3Array(),
+				"indices": PackedInt32Array()
+			}
 
-		# Коллизии
-		batch["collisions"].append_array(geo["collisions"])
+	var geo := ResidentialEntranceScript.generate_entrance_geometry(world_pos, rotation_y)
 
-		# Позиции светильников
-		if geo.has("lights"):
-			batch["lights"].append_array(geo["lights"])
+	var batch: Dictionary = _entrance_batch[chunk_key]
+	for key in ResidentialEntranceScript.MATERIAL_KEYS:
+		var src: Dictionary = geo[key]
+		var dst: Dictionary = batch[key]
+		if src["vertices"].size() == 0:
+			continue
+		var offset: int = dst["vertices"].size()
+		dst["vertices"].append_array(src["vertices"])
+		dst["normals"].append_array(src["normals"])
+		for idx in src["indices"]:
+			dst["indices"].append(idx + offset)
 
-		print("OSM Entrances: added entrance at (%.1f, %.1f) for way %d, chunk_key=%s" % [wall.closest_point.x, wall.closest_point.y, way_id, chunk_key])
+	batch["collisions"].append_array(geo["collisions"])
+
+	if geo.has("lights"):
+		batch["lights"].append_array(geo["lights"])
+
+	print("OSM Entrances: added entrance at (%.1f, %.1f) for way %d, chunk_key=%s" % [world_pos.x, world_pos.z, way_id_for_log, chunk_key])
 
 
 func _finalize_entrance_batch(chunk_key: String) -> void:

@@ -14,6 +14,37 @@ class_name Facade111_125
 const ATOM_DIR := "res://decorations/russia/cherepovets/111-125_atoms/"
 const FACADE_SHADER := preload("res://osm/facade_111_125.gdshader")
 
+# Porch (concrete stair) shape constants.
+const PORCH_RISER_M := 0.17                # one step
+const PORCH_TREAD_M := 0.30                # step depth
+const PORCH_LANDING_M := 0.40              # extra top-platform depth
+const PORCH_SAMPLES := 5                   # terrain-sample points along slot width
+const PORCH_SAMPLE_OUTWARD_M := 0.4        # sample this far in front of the wall
+const PORCH_SEAT_INTO_GROUND_M := 0.05     # bottom step buried into terrain
+const PORCH_MIN_HEIGHT_M := 0.05           # below this, don't bother
+const PORCH_WIDTH_INSET_M := 0.15          # narrow the porch slightly vs the slot
+const PORCH_ATOM := "small-wall-1"         # concrete texture reuse
+
+# Railing shape — slim metal handrail on each side of the stair stack.
+const RAIL_HEIGHT_M := 0.9
+const RAIL_THICKNESS_M := 0.04
+const RAIL_COLOR := Color(0.25, 0.25, 0.28)
+
+# Entrance light placed near the top of the entrance overlay.
+const ENTRANCE_LIGHT_COLOR := Color(1.0, 0.9, 0.72)
+const ENTRANCE_LIGHT_ENERGY := 4.0
+const ENTRANCE_LIGHT_RANGE := 6.0
+const ENTRANCE_LIGHT_OFFSET_DOWN_M := 0.25 # below floor top (just under the lintel)
+const ENTRANCE_LIGHT_OFFSET_OUT_M := 0.3   # in front of the wall
+
+# Canopy (козырёк) — flat concrete slab above the entrance texture.
+const CANOPY_THICKNESS_M := 0.2
+const CANOPY_DEPTH_M := 1.4
+const CANOPY_OVERHANG_M := 0.15            # canopy extends past slot edges
+const CANOPY_ATOM := PORCH_ATOM            # reuse concrete
+
+const ENTRANCE_LAMP_SCRIPT := preload("res://osm/entrance_lamp.gd")
+
 # Px/m scales: 512 px wall = 3.2 m bay (horizontal); 512 px wall = 1 floor
 # (vertical). 1 floor height is derived per-building from
 # (roof_y - foundation_y) / 12 — so vertical scale is dynamic.
@@ -36,6 +67,17 @@ const LONG_SIDE_THRESHOLD_M := 30.0
 
 # OSM way id of Северное Шоссе 39 — used both for selection and as RNG seed.
 const TARGET_WAY_ID := 45836637
+
+# Slot's world-XZ centre is deduped against `override.entrances` lat/lon
+# (converted to local XZ by the caller). If the slot centre is within this
+# radius of an OSM-defined entrance, the facade does NOT spawn an extra
+# ResidentialEntrance — the existing _add_residential_entrances path already
+# handles that location. 6 m is chosen because OSM lat/lon snap to the
+# closest wall *point*, not to a slot centre, so the actual offset between
+# the snapped OSM position and the facade slot centre is ~5 m on the front
+# of 111-125 buildings — anything tighter than 6 m fails to dedup and we
+# end up with two entrance groups at the same spot.
+const NEARBY_ENTRANCE_RADIUS_M := 6.0
 
 # ── Recipes ────────────────────────────────────────────────────────────────
 
@@ -205,6 +247,11 @@ static var _tex_cache: Dictionary = {}
 # Per-build accumulators: atom_id -> { "verts": PackedVector3Array, ... }
 var _batches: Dictionary = {}
 var _seed: int = 0
+# Stash for entrance spawn: filled by `build()`, used by `_build_side` when
+# it encounters a `mid-wall-entrance` slot.
+var _terrain_gen: Node3D = null
+var _override_entrances_local: Array = []  # Array[Vector2] in local XZ
+var _parent_node: Node3D = null
 
 
 # ── Public API ─────────────────────────────────────────────────────────────
@@ -213,12 +260,21 @@ var _seed: int = 0
 ## Adds one or more MeshInstance3D children to `parent` (one per unique texture).
 ## Does NOT generate roof, parapet, foundation, pediment — caller (the existing
 ## _create_3d_building_with_custom_texture with skip_walls=true) handles those.
-func build(points: PackedVector2Array, building_height: float, base_elev: float, parent: Node3D, foundation_h: float, way_id: int) -> void:
+##
+## `terrain_gen` is the OSMTerrainGenerator; used to spawn ResidentialEntrance
+## groups at facade `mid-wall-entrance` slots. `override_entrances_local` is
+## the list of OSM override entrances in local XZ — used to dedup so the
+## facade doesn't add a duplicate group on top of one already spawned by
+## OSMTerrainGenerator._add_residential_entrances.
+func build(points: PackedVector2Array, building_height: float, base_elev: float, parent: Node3D, foundation_h: float, way_id: int, terrain_gen: Node3D = null, override_entrances_local: Array = []) -> void:
 	if points.size() < 3:
 		return
 
 	_seed = way_id
 	_batches.clear()
+	_terrain_gen = terrain_gen
+	_override_entrances_local = override_entrances_local
+	_parent_node = parent
 
 	var foundation_y: float = base_elev + foundation_h
 	var roof_y: float = base_elev + building_height
@@ -336,6 +392,13 @@ func _build_side(p1: Vector2, p2: Vector2, edge_length: float, foundation_y: flo
 				var ov_y_bot: float = ov_y_top - ov_h_m
 				_emit_quad(p1, edge_dir, outward_2d, normal_3d, ov_left_t, ov_right_t, ov_y_bot, ov_y_top, Z_OVERLAY, ov_id, true, is_ccw)
 
+			# Spawn a bare porch (stairs + railings + entrance light) at
+			# each ground-floor mid-wall-entrance slot. OSM lat/lon
+			# residential entrances are explicitly disabled for this
+			# building in osm_terrain_generator.gd, so no dedup needed.
+			if is_ground and role == "mid-wall-entrance":
+				_spawn_facade_porch(p1, edge_dir, outward_2d, normal_3d, t, t_next, y_bot, y_top, is_ccw)
+
 			t = t_next
 
 	# 2. Horizontal seams: one per inter-floor boundary, segmented along the
@@ -420,6 +483,301 @@ func _build_side(p1: Vector2, p2: Vector2, edge_length: float, foundation_y: flo
 		_emit_quad(p1, edge_dir, outward_2d, normal_3d, t_seam - seam_w_m * 0.5, t_seam + seam_w_m * 0.5, y_bot, y_top, Z_VSEAM, seam_id, true, is_ccw)
 
 
+# ── Entrance porch (stairs + railings + lamp) ──────────────────────────────
+
+# At each ground-floor mid-wall-entrance slot we build a minimal concrete
+# porch: multi-step stairs from sampled terrain to the bottom of the
+# entrance texture (= foundation_y / floor y_bot for the ground row), two
+# slim metal handrails on the sides, and a warm OmniLight3D just under the
+# top of the door texture. No doors / canopy / coloured wall — the
+# entrance overlay PNG already supplies that visual.
+func _spawn_facade_porch(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2, normal_3d: Vector3, t_left: float, t_right: float, foundation_y: float, y_top: float, is_ccw: bool) -> void:
+	if _parent_node == null:
+		return
+
+	var slot_w: float = t_right - t_left
+	var porch_w: float = maxf(0.3, slot_w - 2.0 * PORCH_WIDTH_INSET_M)
+	var t_centre: float = (t_left + t_right) * 0.5
+	var porch_t_left: float = t_centre - porch_w * 0.5
+	var porch_t_right: float = t_centre + porch_w * 0.5
+
+	# Sample terrain at multiple points across the porch front face to
+	# capture sloping ground.
+	var ground_min: float = INF
+	if _terrain_gen != null and _terrain_gen.has_method("_sample_elevation"):
+		for i in range(PORCH_SAMPLES):
+			var t_n: float = float(i) / float(PORCH_SAMPLES - 1)
+			var t_along: float = lerpf(porch_t_left, porch_t_right, t_n)
+			var sample_pt: Vector2 = p1 + edge_dir * t_along + outward_2d * PORCH_SAMPLE_OUTWARD_M
+			var e: float = _terrain_gen._sample_elevation(sample_pt.x, sample_pt.y)
+			if e < ground_min:
+				ground_min = e
+	if ground_min == INF:
+		ground_min = foundation_y  # safe fallback — produces no stairs
+
+	var porch_top_y: float = foundation_y
+	var porch_bot_y: float = ground_min - PORCH_SEAT_INTO_GROUND_M
+	var height: float = porch_top_y - porch_bot_y
+
+	# Stairs (only if the drop is meaningful).
+	var n_steps: int = 0
+	var actual_riser: float = 0.0
+	if height >= PORCH_MIN_HEIGHT_M:
+		n_steps = maxi(1, int(ceilf(height / PORCH_RISER_M)))
+		actual_riser = height / float(n_steps)
+		for i in range(n_steps):
+			# i=0 is the TOP step (against the wall); i=n_steps-1 is the
+			# bottom (furthest from wall).
+			var step_top: float = porch_top_y - i * actual_riser
+			var step_bot: float = step_top - actual_riser
+			var out_inner: float = i * PORCH_TREAD_M
+			var out_outer: float = out_inner + PORCH_TREAD_M
+			if i == 0:
+				out_outer += PORCH_LANDING_M
+			_emit_porch_tread(p1, edge_dir, outward_2d, porch_t_left, porch_t_right, out_inner, out_outer, step_top)
+			_emit_porch_riser(p1, edge_dir, outward_2d, normal_3d, porch_t_left, porch_t_right, out_outer, step_bot, step_top, is_ccw)
+
+	# Railings — one on each side, running from the wall along the side of
+	# the stair stack. Built as standalone MeshInstance3D children of the
+	# building parent (separate dark metal material).
+	var n_steps_for_rail: int = maxi(n_steps, 1)
+	var total_depth: float = float(n_steps_for_rail) * PORCH_TREAD_M + PORCH_LANDING_M
+	_emit_porch_railing(p1, edge_dir, outward_2d, porch_t_left,  porch_top_y, porch_bot_y, total_depth)
+	_emit_porch_railing(p1, edge_dir, outward_2d, porch_t_right, porch_top_y, porch_bot_y, total_depth)
+
+	# Box collision for the two railings + the stair stack. Single
+	# StaticBody3D for the whole porch so the car bumps into the rails
+	# and can't drive through the stairs.
+	_emit_porch_collision(p1, edge_dir, outward_2d, porch_t_left, porch_t_right, porch_top_y, porch_bot_y, total_depth)
+
+	# Canopy (козырёк) — concrete slab above the entrance texture,
+	# extending outward over the porch.
+	_emit_porch_canopy(p1, edge_dir, outward_2d, normal_3d, t_left, t_right, y_top, is_ccw)
+
+	# Entrance lamp — OmniLight3D that lights only at night
+	# (EntranceLamp listens to NightModeManager.night_mode_changed).
+	var lamp_t: float = t_centre
+	var lamp_anchor: Vector2 = p1 + edge_dir * lamp_t + outward_2d * ENTRANCE_LIGHT_OFFSET_OUT_M
+	var lamp: OmniLight3D = ENTRANCE_LAMP_SCRIPT.new()
+	lamp.position = Vector3(lamp_anchor.x, y_top - ENTRANCE_LIGHT_OFFSET_DOWN_M, lamp_anchor.y)
+	lamp.light_color = ENTRANCE_LIGHT_COLOR
+	lamp.light_energy = ENTRANCE_LIGHT_ENERGY
+	lamp.omni_range = ENTRANCE_LIGHT_RANGE
+	lamp.omni_attenuation = 1.5
+	lamp.shadow_enabled = false
+	_parent_node.add_child(lamp)
+
+
+# Horizontal step top — a quad with normal pointing +Y.
+func _emit_porch_tread(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2, t_l: float, t_r: float, out_inner: float, out_outer: float, y: float) -> void:
+	var p_bl: Vector2 = p1 + edge_dir * t_l + outward_2d * out_inner   # back-left (closer to wall)
+	var p_br: Vector2 = p1 + edge_dir * t_r + outward_2d * out_inner
+	var p_fr: Vector2 = p1 + edge_dir * t_r + outward_2d * out_outer   # front-right (outer edge)
+	var p_fl: Vector2 = p1 + edge_dir * t_l + outward_2d * out_outer
+	var v_bl := Vector3(p_bl.x, y, p_bl.y)
+	var v_br := Vector3(p_br.x, y, p_br.y)
+	var v_fr := Vector3(p_fr.x, y, p_fr.y)
+	var v_fl := Vector3(p_fl.x, y, p_fl.y)
+	# Winding bl → fl → fr → br gives geometric face normal +Y (face up).
+	_emit_quad_corners(PORCH_ATOM, v_bl, v_fl, v_fr, v_br, Vector3.UP)
+
+
+# Vertical step front — same orientation as a wall quad (faces outward).
+func _emit_porch_riser(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2, normal_3d: Vector3, t_l: float, t_r: float, out_face: float, y_bot: float, y_top: float, is_ccw: bool) -> void:
+	_emit_quad(p1, edge_dir, outward_2d, normal_3d, t_l, t_r, y_bot, y_top, out_face, PORCH_ATOM, false, is_ccw)
+
+
+# Slim dark-metal railing on one side of the stair stack. Drawn as a single
+# thin vertical quad rising from the bottom step's outer edge to the top
+# platform's wall edge, sloping along the stair angle.
+func _emit_porch_railing(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2, t_along: float, porch_top_y: float, porch_bot_y: float, total_depth: float) -> void:
+	# 4 corners of the railing quad (viewed from outside the building):
+	#   tw = top corner against wall
+	#   to = top corner at outer edge of platform
+	#   bo = bottom corner at outer edge of platform (sloping handrail end)
+	# We draw the railing as a TRAPEZOID: high near wall, sloping down to
+	# the outer end where it meets the bottom step.
+	var anchor_wall: Vector2 = p1 + edge_dir * t_along
+	var anchor_outer: Vector2 = anchor_wall + outward_2d * total_depth
+	var rail_top_wall_y: float = porch_top_y + RAIL_HEIGHT_M
+	var rail_top_outer_y: float = porch_bot_y + RAIL_HEIGHT_M
+	# Build a thin box: extrude the trapezoid by RAIL_THICKNESS_M along the
+	# horizontal in-edge direction. To keep things simple and one-sided we
+	# emit two faces (front + back).
+	var thick_dir: Vector2 = edge_dir * RAIL_THICKNESS_M * 0.5
+	var p_outer_a: Vector2 = anchor_wall - thick_dir
+	var p_outer_b: Vector2 = anchor_wall + thick_dir
+	var p_far_a: Vector2 = anchor_outer - thick_dir
+	var p_far_b: Vector2 = anchor_outer + thick_dir
+	# Two facing quads. Each is a vertical trapezoid in world space.
+	# Quad A (facing edge_dir-positive side):
+	var v_tl_a := Vector3(p_outer_b.x, rail_top_wall_y,  p_outer_b.y)
+	var v_tr_a := Vector3(p_far_b.x,   rail_top_outer_y, p_far_b.y)
+	var v_br_a := Vector3(p_far_b.x,   porch_bot_y,      p_far_b.y)
+	var v_bl_a := Vector3(p_outer_b.x, porch_top_y,      p_outer_b.y)
+	# Quad B (facing edge_dir-negative side):
+	var v_tl_b := Vector3(p_outer_a.x, rail_top_wall_y,  p_outer_a.y)
+	var v_tr_b := Vector3(p_far_a.x,   rail_top_outer_y, p_far_a.y)
+	var v_br_b := Vector3(p_far_a.x,   porch_bot_y,      p_far_a.y)
+	var v_bl_b := Vector3(p_outer_a.x, porch_top_y,      p_outer_a.y)
+	# Use a separate batch keyed "porch-rail" with a dark metal material.
+	# Normals approximate — direction-disagnostic since the railing is
+	# viewed from both sides via cull_disabled.
+	var n_a := Vector3(edge_dir.x, 0.0, edge_dir.y)
+	var n_b := -n_a
+	_emit_quad_corners("__porch_rail__", v_bl_a, v_tl_a, v_tr_a, v_br_a, n_a)
+	_emit_quad_corners("__porch_rail__", v_br_b, v_tr_b, v_tl_b, v_bl_b, n_b)
+
+
+# Concrete canopy (козырёк) above the entrance overlay. Thin horizontal
+# slab at the door's top, extending outward over the porch. Built as a
+# closed 6-face box; back face omitted (it's flush with the wall and
+# would only ever be seen from inside the building).
+func _emit_porch_canopy(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2, normal_3d: Vector3, slot_t_left: float, slot_t_right: float, y_door_top: float, is_ccw: bool) -> void:
+	var c_t_l: float = slot_t_left - CANOPY_OVERHANG_M
+	var c_t_r: float = slot_t_right + CANOPY_OVERHANG_M
+	var y_bot: float = y_door_top
+	var y_top: float = y_door_top + CANOPY_THICKNESS_M
+	var out_far: float = CANOPY_DEPTH_M  # outward from wall
+
+	# Front-face anchors (along outward at out_far).
+	# We'll express positions via the wall+outward parameterisation and
+	# rely on _emit_quad_corners for the freely-oriented faces.
+
+	# Helper: anchor of a point at (t_along, outward_d, y).
+	# (declared inline as small closures via local funcs would be heavy in
+	#  GDScript — just compute Vector3 directly here.)
+
+	# Top face (normal +Y) — bl=back-left, fl=front-left, fr=front-right, br=back-right.
+	var p_bl_top: Vector2 = p1 + edge_dir * c_t_l
+	var p_br_top: Vector2 = p1 + edge_dir * c_t_r
+	var p_fl_top: Vector2 = p_bl_top + outward_2d * out_far
+	var p_fr_top: Vector2 = p_br_top + outward_2d * out_far
+	_emit_quad_corners(CANOPY_ATOM,
+		Vector3(p_bl_top.x, y_top, p_bl_top.y),
+		Vector3(p_fl_top.x, y_top, p_fl_top.y),
+		Vector3(p_fr_top.x, y_top, p_fr_top.y),
+		Vector3(p_br_top.x, y_top, p_br_top.y),
+		Vector3.UP)
+
+	# Bottom face (normal -Y) — reverse winding so geometric face normal
+	# points down (visible from below where the user stands).
+	_emit_quad_corners(CANOPY_ATOM,
+		Vector3(p_bl_top.x, y_bot, p_bl_top.y),
+		Vector3(p_br_top.x, y_bot, p_br_top.y),
+		Vector3(p_fr_top.x, y_bot, p_fr_top.y),
+		Vector3(p_fl_top.x, y_bot, p_fl_top.y),
+		Vector3.DOWN)
+
+	# Front face (normal outward).
+	_emit_quad(p1, edge_dir, outward_2d, normal_3d, c_t_l, c_t_r, y_bot, y_top, out_far, CANOPY_ATOM, false, is_ccw)
+
+	# Left side (normal -edge_dir) — connects wall edge to front edge on the
+	# t=c_t_l plane.
+	var n_left := Vector3(-edge_dir.x, 0.0, -edge_dir.y)
+	var p_wall_l: Vector2 = p1 + edge_dir * c_t_l
+	var p_front_l: Vector2 = p_wall_l + outward_2d * out_far
+	_emit_quad_corners(CANOPY_ATOM,
+		Vector3(p_wall_l.x,  y_bot, p_wall_l.y),
+		Vector3(p_front_l.x, y_bot, p_front_l.y),
+		Vector3(p_front_l.x, y_top, p_front_l.y),
+		Vector3(p_wall_l.x,  y_top, p_wall_l.y),
+		n_left)
+
+	# Right side (normal +edge_dir).
+	var n_right := Vector3(edge_dir.x, 0.0, edge_dir.y)
+	var p_wall_r: Vector2 = p1 + edge_dir * c_t_r
+	var p_front_r: Vector2 = p_wall_r + outward_2d * out_far
+	_emit_quad_corners(CANOPY_ATOM,
+		Vector3(p_wall_r.x,  y_bot, p_wall_r.y),
+		Vector3(p_wall_r.x,  y_top, p_wall_r.y),
+		Vector3(p_front_r.x, y_top, p_front_r.y),
+		Vector3(p_front_r.x, y_bot, p_front_r.y),
+		n_right)
+
+
+# StaticBody3D with box collision shapes for the porch railings and stairs,
+# attached as a child of the building parent so the car bumps off rails
+# and can't drive through the stair stack.
+func _emit_porch_collision(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2, t_left: float, t_right: float, porch_top_y: float, porch_bot_y: float, total_depth: float) -> void:
+	if _parent_node == null:
+		return
+	var body := StaticBody3D.new()
+	body.collision_layer = 2
+	body.collision_mask = 0
+
+	# Wall-tangent and outward direction vectors in 3D.
+	var t_dir := Vector3(edge_dir.x, 0.0, edge_dir.y)
+	var out_dir := Vector3(outward_2d.x, 0.0, outward_2d.y)
+
+	# Rail height max y (approx): the higher edge of the trapezoid sits at
+	# porch_top_y + RAIL_HEIGHT_M.
+	var rail_top_y: float = porch_top_y + RAIL_HEIGHT_M
+	var rail_height: float = rail_top_y - porch_bot_y
+	var rail_centre_y: float = (rail_top_y + porch_bot_y) * 0.5
+
+	# Two railings (left + right).
+	for t_along in [t_left, t_right]:
+		var anchor_wall: Vector2 = p1 + edge_dir * t_along
+		var centre_2d: Vector2 = anchor_wall + outward_2d * (total_depth * 0.5)
+		var rail_centre := Vector3(centre_2d.x, rail_centre_y, centre_2d.y)
+		var rail_shape := BoxShape3D.new()
+		rail_shape.size = Vector3(RAIL_THICKNESS_M, rail_height, total_depth)
+		var rail_collider := CollisionShape3D.new()
+		rail_collider.shape = rail_shape
+		# Orient the box: local +X along edge_dir, local +Z along outward.
+		var basis := Basis(t_dir, Vector3.UP, out_dir)
+		rail_collider.transform = Transform3D(basis, rail_centre)
+		body.add_child(rail_collider)
+
+	# One big block under the whole stair stack so the car doesn't drive
+	# through it. Box covers from the wall to the porch's outer edge,
+	# width = (t_right - t_left), height = porch top - porch bot.
+	if porch_top_y > porch_bot_y:
+		var slot_centre: Vector2 = p1 + edge_dir * ((t_left + t_right) * 0.5) + outward_2d * (total_depth * 0.5)
+		var stair_centre := Vector3(slot_centre.x, (porch_top_y + porch_bot_y) * 0.5, slot_centre.y)
+		var stair_shape := BoxShape3D.new()
+		stair_shape.size = Vector3(t_right - t_left, porch_top_y - porch_bot_y, total_depth)
+		var stair_collider := CollisionShape3D.new()
+		stair_collider.shape = stair_shape
+		var stair_basis := Basis(t_dir, Vector3.UP, out_dir)
+		stair_collider.transform = Transform3D(stair_basis, stair_centre)
+		body.add_child(stair_collider)
+
+	_parent_node.add_child(body)
+
+
+# Generic 4-corner quad emitter. Vertices v0..v3 must be wound CCW viewed
+# from the face's FRONT (`normal` direction). Triangulation 0,1,2 + 0,2,3.
+func _emit_quad_corners(atom_id: String, v0: Vector3, v1: Vector3, v2: Vector3, v3: Vector3, normal: Vector3) -> void:
+	if not _batches.has(atom_id):
+		_batches[atom_id] = {
+			"verts": PackedVector3Array(),
+			"uvs": PackedVector2Array(),
+			"normals": PackedVector3Array(),
+			"indices": PackedInt32Array(),
+			"alpha": false,
+		}
+	var batch: Dictionary = _batches[atom_id]
+	var verts: PackedVector3Array = batch["verts"]
+	var uvs: PackedVector2Array = batch["uvs"]
+	var normals: PackedVector3Array = batch["normals"]
+	var indices: PackedInt32Array = batch["indices"]
+	var idx: int = verts.size()
+	verts.append(v0); verts.append(v1); verts.append(v2); verts.append(v3)
+	uvs.append(Vector2(0.0, 1.0))
+	uvs.append(Vector2(0.0, 0.0))
+	uvs.append(Vector2(1.0, 0.0))
+	uvs.append(Vector2(1.0, 1.0))
+	normals.append(normal); normals.append(normal); normals.append(normal); normals.append(normal)
+	indices.append(idx); indices.append(idx + 1); indices.append(idx + 2)
+	indices.append(idx); indices.append(idx + 2); indices.append(idx + 3)
+	batch["verts"] = verts
+	batch["uvs"] = uvs
+	batch["normals"] = normals
+	batch["indices"] = indices
+
+
 # ── Emission helpers ───────────────────────────────────────────────────────
 
 func _emit_quad(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2, normal_3d: Vector3, t_left: float, t_right: float, y_bot: float, y_top: float, z_offset: float, atom_id: String, alpha: bool, is_ccw: bool) -> void:
@@ -484,7 +842,16 @@ func _emit_quad(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2, normal_3d: 
 	batch["indices"] = indices
 
 
-func _make_material(atom_id: String, _alpha: bool) -> ShaderMaterial:
+func _make_material(atom_id: String, _alpha: bool) -> Material:
+	# Porch railings use a plain dark metal — no texture, no facade shader.
+	if atom_id == "__porch_rail__":
+		var rail_mat := StandardMaterial3D.new()
+		rail_mat.albedo_color = RAIL_COLOR
+		rail_mat.metallic = 0.5
+		rail_mat.roughness = 0.5
+		rail_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		return rail_mat
+
 	# Use the facade-specific shader (mirrors building_wall_custom convention:
 	# cull_disabled + diffuse_lambert_wrap + back-face NORMAL flip).
 	# StandardMaterial3D's plain Lambert leaves vertical walls black under
