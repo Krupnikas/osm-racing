@@ -94,6 +94,8 @@ func _physics_process(delta: float) -> void:
 
 
 func _handle_input() -> void:
+	if force_stop:
+		return
 	# Газ/тормоз
 	var accel := Input.get_action_strength("ui_up")
 	var decel := Input.get_action_strength("ui_down")

@@ -153,9 +153,12 @@ static func build_from_road_network(start_pos: Vector3, finish_pos: Vector3,
 
 			current = best_next
 
+		# Помечаем все waypoints сегмента как посещённые глобально
+		for wp_key in visited:
+			visited_global[wp_key] = true
+
 		# Добавляем позиции сегмента (без дубликатов)
 		for pos in path:
-			visited_global[current] = true
 			if all_positions.is_empty() or all_positions[-1].distance_to(pos) > 1.0:
 				all_positions.append(pos)
 

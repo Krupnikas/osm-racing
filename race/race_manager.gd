@@ -42,6 +42,10 @@ var _car: Node3D
 var _car_rigidbody: RigidBody3D
 var _camera: Camera3D
 var _finish_line: Area3D
+var _finish_pos_2d := Vector2.ZERO  # XZ позиция финиша для distance check
+const FINISH_ARRIVE_DIST := 15.0  # 2D дистанция для срабатывания финиша (как pickup в work mode)
+var _finish_elevation_fixed := false  # Починили ли высоту финиша
+var _finish_check_timer := 0.0  # Таймер проверки финиша/высоты (раз в секунду)
 var _countdown_timer: float = 0.0
 var _countdown_current: int = 0
 
@@ -53,6 +57,8 @@ var _checkpoint_areas: Array = []  # Array[Area3D]
 var _checkpoint_local_positions: Array = []  # Array[Vector3] для minimap
 var _minimap: Control  # Ссылка на мини-карту
 var _barriers = null  # Визуальные барьеры вдоль маршрута
+var _route_rebuild_timer := 0.0  # Таймер перестроения маршрута при загрузке новых чанков
+const ROUTE_REBUILD_INTERVAL := 5.0  # Перестроение каждые 5 секунд
 
 # AI соперники
 var _race_route: RaceRoute  # Маршрут для AI
@@ -80,6 +86,15 @@ func _process(delta: float) -> void:
 			race_time += delta
 			if _checkpoint_mode:
 				_process_checkpoint_timer(delta)
+			_finish_check_timer -= delta
+			if _finish_check_timer <= 0.0:
+				_finish_check_timer = 1.0
+				_check_finish_distance()
+				_fix_finish_elevation()
+			_route_rebuild_timer -= delta
+			if _route_rebuild_timer <= 0.0:
+				_route_rebuild_timer = ROUTE_REBUILD_INTERVAL
+				_update_minimap_route()
 
 
 func _process_countdown(delta: float) -> void:
@@ -204,7 +219,12 @@ func _on_race_ready() -> void:
 	if _checkpoint_mode:
 		_create_checkpoints()
 
-	# Отправляем маршрут на мини-карту для визуализации
+	# Строим маршрут и спавним AI соперников (только в Sprint mode)
+	if not is_checkpoint_mode():
+		_build_race_route()
+		_spawn_opponents()
+
+	# Отправляем маршрут на мини-карту для визуализации (после _build_race_route)
 	_update_minimap_route()
 
 	# Создаём визуальные барьеры вдоль маршрута
@@ -212,11 +232,6 @@ func _on_race_ready() -> void:
 
 	# Показываем чекпоинты/финиш на миникарте (универсально для всех режимов)
 	_update_minimap_markers()
-
-	# Строим маршрут и спавним AI соперников (только в Sprint mode)
-	if not is_checkpoint_mode():
-		_build_race_route()
-		_spawn_opponents()
 
 	race_ready.emit()
 
@@ -627,9 +642,17 @@ func _create_finish_line() -> void:
 		pole.position = Vector3(side * 6.5, 2.0, 0)  # Столбы от земли вверх
 		_finish_line.add_child(pole)
 
-	# Высота финиша через raycast
+	# Сохраняем 2D позицию финиша для distance check
+	_finish_pos_2d = Vector2(finish_pos.x, finish_pos.z)
+	_finish_elevation_fixed = false
+
+	# Высота финиша — при старте гонки чанк финиша может быть ещё не загружен
 	var gy := _get_ground_y(finish_pos.x, finish_pos.z)
-	print("RaceManager: Finish ground_y=%.2f (raycast) at world(%.1f, %.1f)" % [gy, finish_pos.x, finish_pos.z])
+	if gy == 0.0:
+		# Нет данных о высоте, поставим на 0 — починим позже в _fix_finish_elevation
+		print("RaceManager: Finish elevation unknown, will fix later")
+	else:
+		_finish_elevation_fixed = true
 	finish_pos.y = gy
 	_finish_line.global_position = finish_pos
 	add_child(_finish_line)
@@ -686,6 +709,29 @@ func _on_finish_line_entered(body: Node3D) -> void:
 			if opponent.has_method("finish_race"):
 				opponent.finish_race()
 			return
+
+
+func _check_finish_distance() -> void:
+	"""Проверка финиша по 2D дистанции (как pickup в work mode) — не зависит от высоты"""
+	if not _car or _finish_pos_2d == Vector2.ZERO:
+		return
+	var car_2d := Vector2(_car.global_position.x, _car.global_position.z)
+	if car_2d.distance_to(_finish_pos_2d) <= FINISH_ARRIVE_DIST:
+		# Имитируем body_entered для игрока
+		_on_finish_line_entered(_car)
+
+
+func _fix_finish_elevation() -> void:
+	"""Чинит высоту финиша когда чанк загрузится"""
+	if _finish_elevation_fixed or not _finish_line:
+		return
+	var gy := _get_ground_y(_finish_pos_2d.x, _finish_pos_2d.y)
+	if gy != 0.0:
+		var pos := _finish_line.global_position
+		pos.y = gy
+		_finish_line.global_position = pos
+		_finish_elevation_fixed = true
+		print("RaceManager: Fixed finish elevation to %.2f" % gy)
 
 
 func _finish_race() -> void:
@@ -896,6 +942,145 @@ func _latlon_to_local(lat: float, lon: float) -> Vector3:
 	return Vector3(x, 0, z)
 
 
+func _get_road_network():
+	"""Получить RoadNetwork из TrafficManager"""
+	var traffic_manager = get_tree().current_scene.find_child("TrafficManager", true, false)
+	if traffic_manager and traffic_manager.has_method("get_road_network"):
+		return traffic_manager.get_road_network()
+	return null
+
+
+func _build_minimap_route_via_roads(road_network) -> Array:
+	"""Строит маршрут по дорогам между sparse waypoints для миникарты.
+	Использует A* по RoadNetwork (как work mode). Возвращает Array[Vector2]."""
+	if not current_track or current_track.route_points.size() < 2:
+		return []
+
+	# Конвертируем waypoints в 3D позиции
+	var targets: Array[Vector3] = []
+	for latlon in current_track.route_points:
+		targets.append(_latlon_to_local(latlon.x, latlon.y))
+
+	# Для каждого сегмента строим A* путь
+	var result: Array = []
+	for i in range(targets.size() - 1):
+		var seg_path := _astar_between(road_network, targets[i], targets[i + 1])
+		# Добавляем без дубликатов
+		for pt in seg_path:
+			if result.is_empty() or result[-1].distance_to(pt) > 3.0:
+				result.append(pt)
+
+	# Добавляем конечную точку
+	var last_2d := Vector2(targets[-1].x, targets[-1].z)
+	if result.is_empty() or result[-1].distance_to(last_2d) > 3.0:
+		result.append(last_2d)
+
+	return result
+
+
+const _ASTAR_MAX_ITER := 3000
+
+func _astar_between(road_network, from_pos: Vector3, to_pos: Vector3) -> Array:
+	"""A* между двумя 3D точками по RoadNetwork. Возвращает Array[Vector2].
+	Ограничен коридором вдоль прямой линии чтобы избежать зигзагов по боковым улицам."""
+	var start_wp = road_network.get_nearest_waypoint(from_pos)
+	if not start_wp or start_wp.position.distance_to(from_pos) > 150.0:
+		return [Vector2(from_pos.x, from_pos.z), Vector2(to_pos.x, to_pos.z)]
+
+	var end_wp = road_network.get_nearest_waypoint(to_pos)
+
+	# Коридор: отсекаем waypoints далеко от прямой линии start→end
+	var from_2d := Vector2(from_pos.x, from_pos.z)
+	var to_2d := Vector2(to_pos.x, to_pos.z)
+	var seg_dir := to_2d - from_2d
+	var seg_len := seg_dir.length()
+	var seg_norm := seg_dir / seg_len if seg_len > 1.0 else Vector2.ZERO
+	var corridor_half := 60.0  # Макс отклонение от прямой линии (метры)
+
+	var open: Array = [[start_wp.position.distance_to(to_pos), 0.0, start_wp]]
+	var g_score := {start_wp: 0.0}
+	var came_from := {}
+	var closed := {}
+	var best_wp = start_wp
+	var best_dist: float = start_wp.position.distance_to(to_pos)
+
+	for _iter in range(_ASTAR_MAX_ITER):
+		if open.is_empty():
+			break
+		var best_idx := 0
+		for j in range(1, open.size()):
+			if open[j][0] < open[best_idx][0]:
+				best_idx = j
+		var entry: Array = open[best_idx]
+		open.remove_at(best_idx)
+		var current = entry[2]
+		var g: float = entry[1]
+
+		if closed.has(current):
+			continue
+		closed[current] = true
+
+		var dist_to_target: float = current.position.distance_to(to_pos)
+		if dist_to_target < best_dist:
+			best_dist = dist_to_target
+			best_wp = current
+
+		if current == end_wp or dist_to_target < 30.0:
+			best_wp = current
+			break
+
+		# Раскрываем соседей (оба направления)
+		for next_wp in current.next_waypoints:
+			if closed.has(next_wp):
+				continue
+			# Проверка коридора
+			var wp_2d := Vector2(next_wp.position.x, next_wp.position.z)
+			var offset := wp_2d - from_2d
+			var cross := absf(offset.x * seg_norm.y - offset.y * seg_norm.x)
+			if cross > corridor_half:
+				continue
+			var edge_cost: float = current.position.distance_to(next_wp.position)
+			var new_g: float = g + edge_cost
+			if new_g < g_score.get(next_wp, INF):
+				g_score[next_wp] = new_g
+				came_from[next_wp] = current
+				open.append([new_g + next_wp.position.distance_to(to_pos), new_g, next_wp])
+
+		for prev_wp in current.prev_waypoints:
+			if closed.has(prev_wp):
+				continue
+			var wp_2d := Vector2(prev_wp.position.x, prev_wp.position.z)
+			var offset := wp_2d - from_2d
+			var cross := absf(offset.x * seg_norm.y - offset.y * seg_norm.x)
+			if cross > corridor_half:
+				continue
+			var edge_cost: float = current.position.distance_to(prev_wp.position)
+			var new_g: float = g + edge_cost
+			if new_g < g_score.get(prev_wp, INF):
+				g_score[prev_wp] = new_g
+				came_from[prev_wp] = current
+				open.append([new_g + prev_wp.position.distance_to(to_pos), new_g, prev_wp])
+
+	# Реконструируем путь
+	if best_wp == start_wp and best_dist > 50.0:
+		return [Vector2(from_pos.x, from_pos.z)]
+
+	var wp_path: Array = []
+	var n = best_wp
+	while came_from.has(n):
+		wp_path.insert(0, Vector2(n.position.x, n.position.z))
+		n = came_from[n]
+	wp_path.insert(0, Vector2(n.position.x, n.position.z))
+
+	# Начинаем от from_pos
+	var path: Array = [Vector2(from_pos.x, from_pos.z)]
+	for pt in wp_path:
+		if path[-1].distance_to(pt) > 3.0:
+			path.append(pt)
+	print("RaceManager: A* segment %.0fm -> %d waypoints" % [seg_len, path.size()])
+	return path
+
+
 # ============= Checkpoint Mode =============
 
 func _create_checkpoints() -> void:
@@ -993,17 +1178,36 @@ func _update_minimap_route() -> void:
 	if not _minimap or not _minimap.has_method("set_route_points"):
 		return
 
+	# Используем _race_route только если он построен из dense waypoints (не из RoadNetwork,
+	# который неполон при старте гонки — загружены только начальные чанки)
+	var use_race_route := false
+	if _race_route and _race_route.points.size() > 2:
+		if current_track and current_track.route_points.size() > 10:
+			# Dense route_points → _race_route построен из build_from_track_waypoints → надёжен
+			use_race_route = true
+
+	if use_race_route:
+		var local_points: Array = []
+		for rp in _race_route.points:
+			local_points.append(Vector2(rp.position.x, rp.position.z))
+		_minimap.set_route_points(local_points)
+		print("RaceManager: Sent %d route points to minimap (from race_route)" % local_points.size())
+		return
+
 	if not current_track or current_track.route_points.is_empty():
 		return
 
-	# Конвертируем lat/lon в локальные координаты (Vector2: x, z)
-	var local_points: Array = []
-	for latlon in current_track.route_points:
-		var pos3d := _latlon_to_local(latlon.x, latlon.y)  # latlon = Vector2(lat, lon)
-		local_points.append(Vector2(pos3d.x, pos3d.z))
+	# Sparse route_points — строим маршрут по дорогам через RoadNetwork A*
+	var road_network = _get_road_network()
+	if road_network and not road_network.all_waypoints.is_empty():
+		var road_path := _build_minimap_route_via_roads(road_network)
+		if road_path.size() >= 2:
+			_minimap.set_route_points(road_path)
+			print("RaceManager: Sent %d route points to minimap (A* road path)" % road_path.size())
+			return
 
-	_minimap.set_route_points(local_points)
-	print("RaceManager: Sent %d route points to minimap" % local_points.size())
+	# Нет дорожных данных — не показываем маршрут (прямые линии подсвечивают не те дороги)
+	print("RaceManager: No road network available, skipping minimap route")
 
 
 func _create_barriers() -> void:

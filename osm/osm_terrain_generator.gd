@@ -547,7 +547,7 @@ const ROAD_WIDTHS := {
 	"tertiary": 8.0,
 	"residential": 6.0,
 	"unclassified": 5.0,
-	"service": 4.0,
+	"service": 4.8,
 	"footway": 2.0,
 	"path": 1.5,
 	"cycleway": 2.5,
@@ -762,6 +762,10 @@ func _init_textures() -> void:
 	# Разметка — общие (без полосовой разметки)
 	_road_textures["marking_residential"] = TextureGeneratorScript.create_residential_markings(256)
 	_road_textures["marking_crossing"] = TextureGeneratorScript.create_crossing_markings(256)
+
+	# Service roads: асфальт без разметки (null marking предотвращает генерацию в _ensure_lane_textures)
+	_road_textures["service"] = _cached_road_albedo
+	_road_textures["marking_service"] = null
 
 	# Текстуры люков
 	_manhole_albedo = load("res://textures/road/manhole/color_alpha.png")
@@ -3516,6 +3520,7 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 					"width": road_w,
 					"way_id": rseg_way_id,
 					"bridge": rseg_is_bridge,
+					"highway": highway_type,
 				}
 				var p1: Vector2 = rseg.p1
 				var p2: Vector2 = rseg.p2
@@ -4679,7 +4684,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			height_offset = 0.006
 			curb_height = 0.0
 		"service":
-			texture_key = "residential"
+			texture_key = "service"
 			height_offset = 0.004
 			curb_height = 0.0
 		"tram":
@@ -17856,7 +17861,10 @@ func _process_lod_chunk_queue() -> void:
 		# 2. Здания
 		_generate_lod2_buildings(chunk_key, osm_data, min_x, min_z)
 
-		# 3. Деревья (только LOD1)
+		# 3. Дороги → RoadNetwork (для A* маршрутизации в race/work mode)
+		_extract_lod2_roads_for_traffic(osm_data)
+
+		# 4. Деревья (только LOD1)
 		if lod_level == 1:
 			_create_lod1_trees(chunk_key, osm_data, min_x, min_z)
 
@@ -19002,6 +19010,21 @@ func _extract_road_for_traffic(nodes: Array, tags: Dictionary, bridge_info: Dict
 	# Добавляем дорожный сегмент в RoadNetwork (с информацией о мосте если есть)
 	var oneway: String = tags.get("oneway", "")
 	road_network.add_road_segment(local_points, highway_type, chunk_key, bridge_info, oneway, tags)
+
+
+func _extract_lod2_roads_for_traffic(osm_data: Dictionary) -> void:
+	var ways: Array = osm_data.get("ways", [])
+	for way in ways:
+		var tags: Dictionary = way.get("tags", {})
+		if not tags.has("highway"):
+			continue
+		var nodes: Array = way.get("nodes", [])
+		if nodes.size() < 2:
+			continue
+		var local_points := PackedVector2Array()
+		for node in nodes:
+			local_points.append(_latlon_to_local(node.lat, node.lon))
+		_extract_road_for_traffic_fast(local_points, tags)
 
 
 # Fast variant: accepts pre-computed local_points
