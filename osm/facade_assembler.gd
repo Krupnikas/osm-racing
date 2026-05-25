@@ -58,6 +58,10 @@ static var _tex_cache: Dictionary = {}
 var _batches: Dictionary = {}
 var _seed: int = 0
 
+# Materials with emission textures created during the last build() call.
+# Caller should append these to its night-mode tracking array.
+var emission_materials: Array[ShaderMaterial] = []
+
 
 # ── Archetype selection ────────────────────────────────────────────────────
 
@@ -115,6 +119,7 @@ func build(
 	if points.size() < 3 or archetype.is_empty():
 		return
 	_batches.clear()
+	emission_materials.clear()
 	_seed = way_id
 
 	var foundation_y := base_elev + foundation_h
@@ -164,6 +169,7 @@ func build(
 		arrays[Mesh.ARRAY_VERTEX]  = verts
 		arrays[Mesh.ARRAY_TEX_UV]  = batch["uvs"]
 		arrays[Mesh.ARRAY_NORMAL]  = batch["normals"]
+		arrays[Mesh.ARRAY_COLOR]   = batch["colors"]
 		arrays[Mesh.ARRAY_INDEX]   = batch["indices"]
 		var mesh := ArrayMesh.new()
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
@@ -231,9 +237,10 @@ func _build_edge(p1: Vector2, p2: Vector2, edge_len: float,
 						var centre_t := (t_l + t_r) * 0.5
 						var ov_y_top := y_top - ov_off
 						var ov_y_bot := ov_y_top - ov_h_m
+						var glow_r := _glow_chance(floor_idx, edge_idx, slot["slot_idx"]) if not _emission_path_for(ov_path).is_empty() else 1.0
 						_emit_quad(p1, edge_dir, outward_2d, normal_3d,
 								centre_t - ov_w_m * 0.5, centre_t + ov_w_m * 0.5,
-								ov_y_bot, ov_y_top, Z_OVERLAY, ov_path, true)
+								ov_y_bot, ov_y_top, Z_OVERLAY, ov_path, true, glow_r)
 
 	# 2. Roofbottom crown band (if the archetype has it).
 	if crown_h > 0.001:
@@ -429,12 +436,13 @@ func _pick_atom(category: String, floor_idx: int, edge_idx: int, slot_idx: int, 
 func _emit_quad(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2,
 		normal_3d: Vector3, t_left: float, t_right: float,
 		y_bot: float, y_top: float, z_offset: float,
-		atom_path: String, alpha: bool) -> void:
+		atom_path: String, alpha: bool, glow_r: float = 1.0) -> void:
 	if not _batches.has(atom_path):
 		_batches[atom_path] = {
 			"verts":   PackedVector3Array(),
 			"uvs":     PackedVector2Array(),
 			"normals": PackedVector3Array(),
+			"colors":  PackedColorArray(),
 			"indices": PackedInt32Array(),
 			"alpha":   alpha,
 		}
@@ -444,6 +452,7 @@ func _emit_quad(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2,
 	var verts: PackedVector3Array   = batch["verts"]
 	var uvs: PackedVector2Array     = batch["uvs"]
 	var normals: PackedVector3Array = batch["normals"]
+	var colors: PackedColorArray    = batch["colors"]
 	var indices: PackedInt32Array   = batch["indices"]
 	var idx := verts.size()
 	verts.append(Vector3(anchor_l.x, y_bot, anchor_l.y))
@@ -454,12 +463,25 @@ func _emit_quad(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2,
 	uvs.append(Vector2(1.0, 0.0)); uvs.append(Vector2(0.0, 0.0))
 	normals.append(normal_3d); normals.append(normal_3d)
 	normals.append(normal_3d); normals.append(normal_3d)
+	var c := Color(glow_r, 1.0, 1.0, 1.0)
+	colors.append(c); colors.append(c); colors.append(c); colors.append(c)
 	indices.append(idx);     indices.append(idx + 1); indices.append(idx + 2)
 	indices.append(idx);     indices.append(idx + 2); indices.append(idx + 3)
 	batch["verts"]   = verts
 	batch["uvs"]     = uvs
 	batch["normals"] = normals
+	batch["colors"]  = colors
 	batch["indices"] = indices
+
+
+# Returns 1.0 (glow) with ~30% probability, deterministically per window instance.
+func _glow_chance(floor_idx: int, edge_idx: int, slot_idx: int) -> float:
+	var h: int = _seed
+	h = h * 1103515245 + 12345 + floor_idx * 7919
+	h = h * 1103515245 + 12345 + edge_idx  * 6151
+	h = h * 1103515245 + 12345 + slot_idx  * 4093
+	h = h & 0x7FFFFFFF
+	return 1.0 if (h % 100) < 30 else 0.0
 
 
 # ── Material ───────────────────────────────────────────────────────────────
@@ -469,7 +491,32 @@ func _make_material(atom_path: String, _alpha: bool) -> Material:
 	mat.shader = WALL_SHADER
 	mat.set_shader_parameter("albedo_texture", _load_tex(atom_path))
 	mat.set_shader_parameter("roughness_base", 0.78)
+	var emit_path := _emission_path_for(atom_path)
+	if not emit_path.is_empty():
+		mat.set_shader_parameter("emission_texture", _load_tex(emit_path))
+		mat.set_shader_parameter("night_factor", 0.0)
+		emission_materials.append(mat)
 	return mat
+
+
+# Returns the emission mask path for an atom, or "" if none exists.
+# Convention: "window-1.png" → "window-emission-1.png" in the same dir.
+func _emission_path_for(atom_path: String) -> String:
+	var dir  := atom_path.get_base_dir() + "/"
+	var file := atom_path.get_file()          # e.g. "window-1.png"
+	var base := file.get_basename()           # e.g. "window-1"
+	# Strip trailing -N digit(s) from base name, insert "-emission-N"
+	var dash := base.rfind("-")
+	if dash < 0:
+		return ""
+	var prefix := base.substr(0, dash)        # e.g. "window"
+	var suffix := base.substr(dash + 1)       # e.g. "1"
+	var emit_path := dir + prefix + "-emission-" + suffix + ".png"
+	if not _tex_cache.has(emit_path):
+		_tex_cache[emit_path] = ResourceLoader.exists(emit_path)
+	if _tex_cache[emit_path]:
+		return emit_path
+	return ""
 
 
 func _load_tex(path: String) -> Texture2D:

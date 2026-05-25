@@ -65,8 +65,29 @@ const TOTAL_FLOORS := 12
 # Edge classification threshold (m). 111-125 long sides ~60–70m, short sides ~12m.
 const LONG_SIDE_THRESHOLD_M := 30.0
 
-# OSM way id of Северное Шоссе 39 — used both for selection and as RNG seed.
-const TARGET_WAY_ID := 45836637
+# Архетип "111-125-12" — серия 111-125, 12 этажей.
+# Все дома этого архетипа собираются по одному и тому же рецепту с
+# фиксированным RNG-seed, поэтому варианты атомов (wall-1/2/3,
+# mid-balcony-1..5, window-1..6 и т.д.) выпадают в одинаковых местах у
+# всех домов серии — они выглядят идентично, отличаясь только размером и
+# ориентацией полигона.
+const ARCHETYPE_ID := "111-125-12"
+
+# Фиксированный RNG-seed для выбора вариантов атомов. Использован
+# way_id Северного Шоссе 39 — каноничный дом, по которому отлажен рецепт.
+const ARCHETYPE_SEED := 45836637
+
+# OSM way ids, относящиеся к этому архетипу.
+#   45836637 — Северное Шоссе 39
+#   45836638 — Северное Шоссе 37
+#   45836639 — Северное Шоссе 35
+const ARCHETYPE_WAY_IDS: Array = [45836637, 45836638, 45836639]
+
+# Сохранено для обратной совместимости со старыми ссылками в коде.
+const TARGET_WAY_ID := ARCHETYPE_SEED
+
+static func is_target_way(way_id: int) -> bool:
+	return way_id in ARCHETYPE_WAY_IDS
 
 # Slot's world-XZ centre is deduped against `override.entrances` lat/lon
 # (converted to local XZ by the caller). If the slot centre is within this
@@ -270,7 +291,10 @@ func build(points: PackedVector2Array, building_height: float, base_elev: float,
 	if points.size() < 3:
 		return
 
-	_seed = way_id
+	# All buildings of this archetype use the SAME RNG seed so they pick
+	# identical atom variants. `way_id` is still threaded through for
+	# logs / future per-building overrides.
+	_seed = ARCHETYPE_SEED
 	_batches.clear()
 	_terrain_gen = terrain_gen
 	_override_entrances_local = override_entrances_local
@@ -308,7 +332,7 @@ func build(points: PackedVector2Array, building_height: float, base_elev: float,
 			n_long += 1
 		elif l >= 1.0:
 			n_short += 1
-	print("[Facade111_125] way=%d edges=%d long=%d short=%d is_ccw=%s avail_h=%.1fm floor_h=%.2fm" % [way_id, points.size(), n_long, n_short, str(is_ccw), avail_h, floor_h])
+	print("[Facade111_125] archetype=%s way=%d edges=%d long=%d short=%d is_ccw=%s avail_h=%.1fm floor_h=%.2fm" % [ARCHETYPE_ID, way_id, points.size(), n_long, n_short, str(is_ccw), avail_h, floor_h])
 
 	# Commit batches as MeshInstance3D children.
 	for atom_id in _batches.keys():

@@ -271,6 +271,7 @@ var _chunk_pending_deferred: Dictionary = {}  # chunk_key → int — счётч
 # Window batching system - ONE MultiMesh per chunk instead of per-building
 var _window_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], colors: Array[Color], parent: Node3D}
 var _window_batch_materials: Array[ShaderMaterial] = []  # Материалы всех window batches для обновления is_night параметра
+var _facade_emission_materials: Array[ShaderMaterial] = []  # FacadeAssembler материалы с emission texture (night_factor обновляется при смене дня/ночи)
 
 # BUILDING GEOMETRY MERGE: объединяем все стены/крыши чанка в один ArrayMesh для снижения draw calls
 var _building_geo_batch: Dictionary = {}  # chunk_key -> {parent, panel_walls: {verts,uvs,normals,indices}, brick_walls, wall_walls, roofs, collisions, decorations}
@@ -8777,6 +8778,19 @@ func update_window_night_mode(is_night: bool) -> void:
 			valid_mats.append(m)
 	_window_batch_materials = valid_mats
 
+	# FacadeAssembler emission materials (brick/panel windows with emission masks)
+	var night_factor := 1.0 if is_night else 0.0
+	var emit_count := 0
+	for mat in _facade_emission_materials:
+		if is_instance_valid(mat):
+			mat.set_shader_parameter("night_factor", night_factor)
+			emit_count += 1
+	var valid_emit: Array[ShaderMaterial] = []
+	for m in _facade_emission_materials:
+		if is_instance_valid(m):
+			valid_emit.append(m)
+	_facade_emission_materials = valid_emit
+
 	# Переключаем светильники подъездов
 	var light_count := 0
 	for light in _entrance_lights:
@@ -8785,8 +8799,8 @@ func update_window_night_mode(is_night: bool) -> void:
 			light_count += 1
 
 	var icon := "🌙" if is_night else "☀️"
-	print("OSM: %s Updated %d window batch materials, %d entrance lights: is_night=%s (pruned %d stale)" % [
-		icon, updated_count, light_count, is_night, before_size - _window_batch_materials.size()
+	print("OSM: %s Updated %d window batch materials, %d facade emission materials, %d entrance lights: is_night=%s (pruned %d stale)" % [
+		icon, updated_count, emit_count, light_count, is_night, before_size - _window_batch_materials.size()
 	])
 
 
@@ -9433,7 +9447,9 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 					if FacadeAssembler.has_atoms(fa_arch):
 						var fnd_h: float = 0.0 if (building_override and building_override.no_foundation) else _get_foundation_height(points)
 						_create_3d_building_with_custom_texture(points, building_height, BuildingOverride.new(), parent, base_elev, debug_name, true)
-						FacadeAssembler.new().build(points, building_height, base_elev, parent, fnd_h, way_id, fa_arch, fa_floors)
+						var _fa := FacadeAssembler.new()
+						_fa.build(points, building_height, base_elev, parent, fnd_h, way_id, fa_arch, fa_floors)
+						_facade_emission_materials.append_array(_fa.emission_materials)
 						fa_handled = true
 						print("[FacadeAssembler] archetype=%s way=%d floors=%d" % [fa_arch.get("id", "?"), way_id, fa_floors])
 
