@@ -60,7 +60,7 @@ var tram_stop_positions: Array[Vector3] = []
 
 # Константы
 const WAYPOINT_SPACING := 8.0  # Расстояние между waypoints в метрах
-const INTERSECTION_THRESHOLD := 8.0  # Расстояние для определения пересечений
+const INTERSECTION_THRESHOLD := 9.0  # Расстояние для определения пересечений (> WAYPOINT_SPACING чтобы не было пробелов на T-пересечениях)
 const RIGHT_SIDE_OFFSET := 0.75  # Смещение вправо (75% от половины ширины дороги для встречного движения)
 const CHUNK_SIZE := 300.0  # Размер чанка в метрах (должен совпадать с osm_terrain_generator)
 const LANE_WIDTH := 3.5  # Стандартная ширина полосы (метры)
