@@ -30,6 +30,19 @@ var ai_state := AIState.DRIVING
 var update_timer := 0.0
 var stuck_timer := 0.0  # Таймер застревания (не движемся > 10 сек = despawn)
 var off_road_timer := 0.0  # Таймер езды по траве (> 1 сек = despawn)
+var _waiting_for_chunk := false   # Стоим у границы чанка, ждём когда появятся next_waypoints
+var _chunk_retry_timer := 0.0    # Таймер повторной проверки next_waypoints
+var _chunk_wait_elapsed := 0.0   # Суммарное время ожидания чанка
+const CHUNK_RETRY_INTERVAL := 1.0
+const CHUNK_WAIT_MAX := 8.0      # Через 8 сек — настоящий тупик, разворачиваемся
+
+# Штраф за повторные дороги: предпочитаем дороги, по которым давно не ехали
+var _recent_road_ids: Dictionary = {}  # road_id → timestamp (сек), для штрафа повторов
+var _known_road_ids: Dictionary = {}   # road_id → true, никогда не истекает, для детектора петли
+const ROAD_REPEAT_TTL := 45.0
+var _stale_extend_count := 0   # Сколько extend подряд не добавили новых road_id
+var _loop_braking := false     # Плавно тормозим перед деспавном из петли
+var _loop_stop_timer := 0.0    # Время стояния после остановки из петли
 
 # Raycast для obstacle detection
 var obstacle_check_ray: RayCast3D
@@ -115,8 +128,29 @@ func _physics_process(delta: float) -> void:
 	# Обновляем стоп-сигналы и задний ход
 	_update_light_states()
 
-	# Despawn если не движемся больше 10 секунд
-	if current_speed_kmh < 3.0:
+	# Плавная остановка из петли → деспавн
+	if _loop_braking:
+		if current_speed_kmh < 1.0:
+			_loop_stop_timer += delta
+			if _loop_stop_timer > 1.5:
+				request_despawn.emit()
+		stuck_timer = 0.0
+		return
+
+	# Если ждём загрузки соседнего чанка — тихо перепроверяем раз в секунду
+	if _waiting_for_chunk:
+		_chunk_wait_elapsed += delta
+		if _chunk_wait_elapsed >= CHUNK_WAIT_MAX:
+			# Чанк так и не загрузился — настоящий тупик, разворачиваемся
+			_do_uturn()
+		else:
+			_chunk_retry_timer -= delta
+			if _chunk_retry_timer <= 0.0:
+				_chunk_retry_timer = CHUNK_RETRY_INTERVAL
+				_extend_path()
+		stuck_timer = 0.0  # Не считать ожидание чанка за застревание
+	# Despawn если не движемся больше 10 секунд (исключая ожидание чанка)
+	elif current_speed_kmh < 3.0:
 		stuck_timer += delta
 		if stuck_timer > 10.0:
 			request_despawn.emit()
@@ -153,8 +187,8 @@ func _get_brake_input() -> float:
 
 func _update_ai_driver() -> void:
 	"""Основная логика AI водителя"""
-	if waypoint_path.is_empty():
-		# Нет пути - стоим
+	if waypoint_path.is_empty() or _waiting_for_chunk or _loop_braking:
+		# Нет пути / ждём чанк / тормозим из петли — стоим ровно
 		ai_state = AIState.STOPPED
 		throttle_input = 0.0
 		brake_input = 1.0
@@ -470,16 +504,62 @@ func _is_off_road() -> bool:
 	return true
 
 
+func _do_uturn() -> void:
+	"""Разворачивается по prev_waypoints когда впереди настоящий тупик."""
+	_waiting_for_chunk = false
+	_chunk_wait_elapsed = 0.0
+	if waypoint_path.is_empty():
+		request_despawn.emit()
+		return
+	# Штампуем road_id тупика как «недавно посещённый» с запасом,
+	# чтобы _choose_next_waypoint избегал его на следующем перекрёстке.
+	var dead_end_road_id: int = waypoint_path[-1].road_id
+	_recent_road_ids[dead_end_road_id] = Time.get_ticks_msec() / 1000.0
+	var cur = waypoint_path[-1]
+	var reversed: Array = []
+	for i in range(20):
+		if cur.prev_waypoints.is_empty():
+			break
+		cur = cur.prev_waypoints[0]
+		reversed.append(cur)
+	if reversed.size() < 3:
+		request_despawn.emit()
+		return
+	waypoint_path.append_array(reversed)
+
+
+func _resync_waypoint_index() -> void:
+	"""После ожидания чанка NPC мог физически уехать вперёд.
+	Находим ближайший вейпоинт к текущей позиции и ставим индекс на него."""
+	if waypoint_path.is_empty():
+		return
+	var best_dist := INF
+	var best_idx := current_waypoint_index
+	var search_end := mini(waypoint_path.size(), current_waypoint_index + 30)
+	for i in range(current_waypoint_index, search_end):
+		var d := global_position.distance_to(waypoint_path[i].position)
+		if d < best_dist:
+			best_dist = d
+			best_idx = i
+	current_waypoint_index = best_idx
+
+
 func _extend_path() -> void:
 	"""Продлевает путь когда машина приближается к концу"""
+	_waiting_for_chunk = false  # Сбрасываем; переставим если снова тупик
+	_chunk_wait_elapsed = 0.0
 	if waypoint_path.is_empty():
 		return
 
 	# Берём последний waypoint в текущем пути
 	var last_wp = waypoint_path[waypoint_path.size() - 1]
 
-	# Если у него нет следующих waypoints - всё, тупик
+	# Если у него нет следующих waypoints — возможно, соседний чанк ещё не загружен.
+	# Ставим флаг и ждём: process_pending_connections() наполнит next_waypoints
+	# как только чанк появится, и мы подхватим это при следующей проверке.
 	if last_wp.next_waypoints.is_empty():
+		_waiting_for_chunk = true
+		_chunk_retry_timer = CHUNK_RETRY_INTERVAL
 		return
 
 	# Строим продолжение пути на 15 waypoints вперёд
@@ -503,6 +583,7 @@ func _extend_path() -> void:
 			is_turning = true
 
 		visited[next] = true
+		_recent_road_ids[next.road_id] = Time.get_ticks_msec() / 1000.0
 		new_waypoints.append(next)
 		current = next
 
@@ -512,7 +593,35 @@ func _extend_path() -> void:
 		_choose_random_lane(new_road_wp)
 
 	# Добавляем новые waypoints к существующему пути
+	var was_waiting := _chunk_wait_elapsed > 0.0 or _chunk_retry_timer < CHUNK_RETRY_INTERVAL
 	waypoint_path.append_array(new_waypoints)
+
+	# Если NPC ждал пока соединение появится, он мог физически уехать вперёд
+	# пока current_waypoint_index стоял на месте. Ресинхронизируем индекс
+	# к ближайшему вейпоинту чтобы lookahead не указывал назад.
+	if was_waiting:
+		_resync_waypoint_index()
+
+	# Детектор петли: если все road_id в этом extend уже были известны — NPC в замкнутом кольце.
+	# Используем _known_road_ids (никогда не истекает) как эталон «уже видели».
+	var all_known := true
+	for wp in new_waypoints:
+		if not _known_road_ids.has(wp.road_id):
+			all_known = false
+			_known_road_ids[wp.road_id] = true
+
+	if new_waypoints.is_empty() or all_known:
+		_stale_extend_count += 1
+		if _stale_extend_count >= 3:
+			_loop_braking = true
+	else:
+		_stale_extend_count = 0
+
+	# Чистим устаревшие записи road_ids
+	var now_sec := Time.get_ticks_msec() / 1000.0
+	for rid in _recent_road_ids.keys():
+		if now_sec - _recent_road_ids[rid] > ROAD_REPEAT_TTL:
+			_recent_road_ids.erase(rid)
 
 
 func _choose_next_waypoint(current, exclude: Dictionary = {}) -> Variant:
@@ -532,12 +641,25 @@ func _choose_next_waypoint(current, exclude: Dictionary = {}) -> Variant:
 	if candidates.size() == 1:
 		return candidates[0]
 
-	# Находим waypoint с наиболее близким направлением (прямо)
+	# Разделяем кандидатов на свежих (давно не ехали) и недавних (были < ROAD_REPEAT_TTL сек)
+	var now_c := Time.get_ticks_msec() / 1000.0
+	var fresh: Array = []
+	var stale: Array = []
+	for wp in candidates:
+		var last_visit: float = _recent_road_ids.get(wp.road_id, -INF)
+		if now_c - last_visit < ROAD_REPEAT_TTL:
+			stale.append(wp)
+		else:
+			fresh.append(wp)
+	# Предпочитаем свежие дороги; если их нет — используем недавние (деваться некуда)
+	var pool := fresh if not fresh.is_empty() else stale
+
+	# Находим waypoint с наиболее близким направлением (прямо) в пуле
 	var straight_wp = null
 	var best_dot := -INF
 	var turn_candidates := []
 
-	for wp in candidates:
+	for wp in pool:
 		var dir_dot: float = current.direction.dot(wp.direction)
 		if dir_dot > best_dot:
 			best_dot = dir_dot
