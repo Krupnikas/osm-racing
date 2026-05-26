@@ -42,7 +42,7 @@ const LOCATIONS := {
 signal back_to_main_menu
 
 var _profile_panel: Control
-var _hub_panel: Panel
+var _hub_panel: Control
 var _garage_panel: Panel
 var _garage_carsel: Control = null
 var _shop_panel: Control
@@ -68,8 +68,8 @@ var _hub_profile_label: Label
 var _hub_balance_label: Label
 var _hub_stats_label: Label
 var _hub_car_label: Label
-var _hub_freeroam_btn: Button
-var _hub_challenges_btn: Button
+var _hub_freeroam_btn: HBoxContainer
+var _hub_challenges_btn: HBoxContainer
 var _garage_cars_container: VBoxContainer
 var _shop_balance_label: Label
 var _shop_cars_container: VBoxContainer
@@ -272,9 +272,6 @@ func _build_cell(label_text: String, value_text: String, value_color: Color = UI
 func _build_profile_row(profile_name: String, focused: bool) -> Control:
 	var meta := _get_profile_meta(profile_name)
 
-	# Plain Panel so we can place the sidebar with explicit full-height
-	# anchors (PanelContainer would otherwise force its inner HBox to be the
-	# size source, leaving a gap at the bottom).
 	var row := Panel.new()
 	row.custom_minimum_size = Vector2(0, 96)
 	var sb: NeonStyleBox = NeonStyleBoxScript.new()
@@ -290,37 +287,30 @@ func _build_profile_row(profile_name: String, focused: bool) -> Control:
 	row.focus_mode = Control.FOCUS_ALL
 	row.gui_input.connect(_on_row_gui_input.bind(profile_name))
 
-	# Side bar — full-height, anchored left.
+	# Side bar
 	var bar := ColorRect.new()
+	bar.name = "SideBar"
 	bar.color = UI.NEON_CYAN if focused else UI.INK_400
 	bar.set_anchors_preset(Control.PRESET_LEFT_WIDE)
-	bar.offset_left = 0.0
-	bar.offset_top = 0.0
 	bar.offset_right = 6.0
-	bar.offset_bottom = 0.0
 	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(bar)
 	if focused:
 		_focused_sidebar = bar
 
-	# Content HBox — anchored to fill the row to the right of the bar.
+	# Content HBox
 	var hbox := HBoxContainer.new()
 	hbox.set_anchors_preset(Control.PRESET_FULL_RECT)
 	hbox.offset_left = 6.0
-	hbox.offset_top = 0.0
-	hbox.offset_right = 0.0
-	hbox.offset_bottom = 0.0
 	hbox.add_theme_constant_override("separation", 0)
 	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(hbox)
 
-	# Left padding spacer.
 	var spacer_left := Control.new()
 	spacer_left.custom_minimum_size = Vector2(28, 0)
 	spacer_left.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hbox.add_child(spacer_left)
 
-	# Name + sub, vertically centered in the row.
 	var name_box := VBoxContainer.new()
 	name_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	name_box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
@@ -328,6 +318,7 @@ func _build_profile_row(profile_name: String, focused: bool) -> Control:
 	hbox.add_child(name_box)
 
 	var name_label := Label.new()
+	name_label.name = "NameLabel"
 	name_label.text = profile_name.to_upper()
 	name_label.theme_type_variation = "DisplayLabel"
 	name_label.add_theme_font_override("font", _get_fira_tight())
@@ -342,13 +333,13 @@ func _build_profile_row(profile_name: String, focused: bool) -> Control:
 	sub.modulate = UI.INK_500
 	name_box.add_child(sub)
 
-	# Stat cells
 	hbox.add_child(_build_cell("БАЛАНС", CareerState.format_money(int(meta["balance"]))))
 	hbox.add_child(_build_cell("МАШИН", str(int(meta["cars"]))))
 	hbox.add_child(_build_cell("ГОНОК", str(int(meta["races"]))))
 
-	# Action column — full-height pseudo cell with left border
+	# Action column
 	var action_cell := PanelContainer.new()
+	action_cell.name = "ActionCell"
 	action_cell.custom_minimum_size = Vector2(140, 0)
 	var action_sb := StyleBoxFlat.new()
 	action_sb.bg_color = Color(0, 0, 0, 0)
@@ -357,25 +348,64 @@ func _build_profile_row(profile_name: String, focused: bool) -> Control:
 	action_cell.add_theme_stylebox_override("panel", action_sb)
 	hbox.add_child(action_cell)
 
-	if focused:
-		var enter := Label.new()
-		enter.text = "↵ ВОЙТИ"
-		enter.theme_type_variation = "MonoLabel"
-		enter.add_theme_font_size_override("font_size", 12)
-		enter.modulate = UI.NEON_CYAN
-		enter.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		enter.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		action_cell.add_child(enter)
-	else:
-		var x_btn := Button.new()
-		x_btn.text = "✕"
-		x_btn.flat = true
-		x_btn.add_theme_color_override("font_color", UI.NEON_RED)
-		x_btn.add_theme_font_size_override("font_size", 18)
-		x_btn.pressed.connect(_on_delete_profile_pressed.bind(profile_name))
-		action_cell.add_child(x_btn)
+	var enter := Label.new()
+	enter.name = "EnterLabel"
+	enter.text = "↵ ВОЙТИ"
+	enter.theme_type_variation = "MonoLabel"
+	enter.add_theme_font_size_override("font_size", 12)
+	enter.modulate = UI.NEON_CYAN
+	enter.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	enter.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	enter.visible = focused
+	action_cell.add_child(enter)
+
+	var x_btn := Button.new()
+	x_btn.name = "DeleteBtn"
+	x_btn.text = "✕"
+	x_btn.flat = true
+	x_btn.add_theme_color_override("font_color", UI.NEON_RED)
+	x_btn.add_theme_font_size_override("font_size", 18)
+	x_btn.pressed.connect(_on_delete_profile_pressed.bind(profile_name))
+	x_btn.visible = not focused
+	action_cell.add_child(x_btn)
+
+	# Dynamic focus highlight
+	row.focus_entered.connect(_on_profile_row_focus.bind(row, true))
+	row.focus_exited.connect(_on_profile_row_focus.bind(row, false))
+	row.mouse_entered.connect(func(): row.grab_focus())
 
 	return row
+
+
+func _on_profile_row_focus(row: Panel, is_focused: bool) -> void:
+	# Outline
+	var sb: NeonStyleBox = row.get_theme_stylebox("panel") as NeonStyleBox
+	if sb:
+		sb.outline_color = UI.NEON_CYAN if is_focused else UI.INK_300
+		row.queue_redraw()
+	# Sidebar
+	var bar: ColorRect = row.get_node_or_null("SideBar")
+	if bar:
+		bar.color = UI.NEON_CYAN if is_focused else UI.INK_400
+		if is_focused:
+			_focused_sidebar = bar
+			_start_sidebar_pulse(bar)
+		elif _focused_sidebar == bar:
+			if _focused_sidebar_tween and _focused_sidebar_tween.is_valid():
+				_focused_sidebar_tween.kill()
+			bar.modulate.a = 1.0
+			_focused_sidebar = null
+	# Name label color
+	var name_lbl: Label = row.find_child("NameLabel", true, false) as Label
+	if name_lbl:
+		name_lbl.add_theme_color_override("font_color", UI.NEON_CYAN if is_focused else UI.INK_900)
+	# Action cell: show enter / delete
+	var enter_lbl: Label = row.find_child("EnterLabel", true, false) as Label
+	var del_btn: Button = row.find_child("DeleteBtn", true, false) as Button
+	if enter_lbl:
+		enter_lbl.visible = is_focused
+	if del_btn:
+		del_btn.visible = not is_focused
 
 
 func _build_new_profile_row() -> Control:
@@ -570,88 +600,210 @@ func _build_delete_confirm_panel() -> void:
 
 
 func _build_hub_panel() -> void:
-	_hub_panel = _create_centered_panel("HubPanel", Vector2(550, 550))
+	_hub_panel = Control.new()
+	_hub_panel.name = "HubScreen"
+	_hub_panel.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_hub_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hub_panel.visible = false
 	add_child(_hub_panel)
 
-	var vbox := _create_inner_vbox(_hub_panel)
+	var bg := MenuBackdropScene.instantiate()
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_hub_panel.add_child(bg)
 
+	# Brand mark top-left
+	var brand := BrandMarkScene.instantiate() as Control
+	brand.scale = Vector2(0.85, 0.85)
+	brand.position = Vector2(90, 80)
+	brand.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hub_panel.add_child(brand)
+
+	# Title block top-right
+	var title_box := VBoxContainer.new()
+	title_box.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	title_box.offset_left = -1100.0
+	title_box.offset_right = -90.0
+	title_box.offset_top = 80.0
+	title_box.offset_bottom = 360.0
+	title_box.alignment = BoxContainer.ALIGNMENT_BEGIN
+	title_box.add_theme_constant_override("separation", 8)
+	title_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hub_panel.add_child(title_box)
+
+	var t_kicker := Label.new()
+	t_kicker.text = "// 01 / CAREER · КАРЬЕРА"
+	t_kicker.theme_type_variation = "MonoLabel"
+	t_kicker.add_theme_font_size_override("font_size", 12)
+	t_kicker.modulate = UI.NEON_MAGENTA
+	t_kicker.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	title_box.add_child(t_kicker)
+
+	var h2_stack := VBoxContainer.new()
+	h2_stack.add_theme_constant_override("separation", -54)
+	h2_stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	title_box.add_child(h2_stack)
+
+	var t1 := Label.new()
+	t1.text = "КАРЬЕРА"
+	t1.theme_type_variation = "DisplayLabel"
+	t1.add_theme_font_size_override("font_size", 96)
+	t1.add_theme_color_override("font_color", UI.INK_900)
+	t1.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	h2_stack.add_child(t1)
+
+	# Profile name (dynamic, set in _update_hub)
 	_hub_profile_label = Label.new()
-	_hub_profile_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_hub_profile_label.add_theme_font_size_override("font_size", 36)
-	vbox.add_child(_hub_profile_label)
+	_hub_profile_label.text = ""
+	_hub_profile_label.theme_type_variation = "DisplayLabel"
+	_hub_profile_label.add_theme_font_size_override("font_size", 96)
+	_hub_profile_label.add_theme_color_override("font_color", Color(0, 0, 0, 0))
+	_hub_profile_label.add_theme_color_override("font_outline_color", UI.NEON_MAGENTA)
+	_hub_profile_label.add_theme_constant_override("outline_size", 2)
+	_hub_profile_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	h2_stack.add_child(_hub_profile_label)
 
-	_add_spacer(vbox, 5)
+	# Stats row below title
+	var stats_row := HBoxContainer.new()
+	stats_row.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	stats_row.offset_left = -900.0
+	stats_row.offset_right = -90.0
+	stats_row.offset_top = 300.0
+	stats_row.offset_bottom = 380.0
+	stats_row.add_theme_constant_override("separation", 0)
+	stats_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hub_panel.add_child(stats_row)
 
 	_hub_balance_label = Label.new()
-	_hub_balance_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_hub_balance_label.add_theme_font_size_override("font_size", 28)
-	_hub_balance_label.add_theme_color_override("font_color", Color(0.2, 1, 0.2))
-	vbox.add_child(_hub_balance_label)
+	_hub_balance_label.theme_type_variation = "MonoLabel"
+	_hub_balance_label.add_theme_font_size_override("font_size", 13)
+	_hub_balance_label.modulate = UI.NEON_LIME
+	stats_row.add_child(_hub_balance_label)
 
-	_add_spacer(vbox, 5)
+	var sep1 := Label.new()
+	sep1.text = "  ·  "
+	sep1.theme_type_variation = "MonoLabel"
+	sep1.add_theme_font_size_override("font_size", 13)
+	sep1.modulate = UI.INK_500
+	stats_row.add_child(sep1)
 
 	_hub_stats_label = Label.new()
-	_hub_stats_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_hub_stats_label.add_theme_font_size_override("font_size", 20)
-	_hub_stats_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
-	vbox.add_child(_hub_stats_label)
+	_hub_stats_label.theme_type_variation = "MonoLabel"
+	_hub_stats_label.add_theme_font_size_override("font_size", 13)
+	_hub_stats_label.modulate = UI.INK_500
+	stats_row.add_child(_hub_stats_label)
 
-	_add_spacer(vbox, 5)
+	var sep2 := Label.new()
+	sep2.text = "  ·  "
+	sep2.theme_type_variation = "MonoLabel"
+	sep2.add_theme_font_size_override("font_size", 13)
+	sep2.modulate = UI.INK_500
+	stats_row.add_child(sep2)
 
 	_hub_car_label = Label.new()
-	_hub_car_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_hub_car_label.add_theme_font_size_override("font_size", 22)
-	vbox.add_child(_hub_car_label)
+	_hub_car_label.theme_type_variation = "MonoLabel"
+	_hub_car_label.add_theme_font_size_override("font_size", 13)
+	_hub_car_label.modulate = UI.INK_500
+	stats_row.add_child(_hub_car_label)
 
-	_add_spacer(vbox, 15)
+	# Menu items — right-aligned, same style as main menu
+	var menu_vbox := VBoxContainer.new()
+	menu_vbox.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
+	menu_vbox.offset_left = -840.0
+	menu_vbox.offset_right = -120.0
+	menu_vbox.offset_top = 420.0
+	menu_vbox.offset_bottom = -120.0
+	menu_vbox.add_theme_constant_override("separation", 4)
+	menu_vbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hub_panel.add_child(menu_vbox)
 
-	# Работать (такси/доставка)
-	_hub_freeroam_btn = Button.new()
-	_hub_freeroam_btn.text = "РАБОТАТЬ"
-	_hub_freeroam_btn.custom_minimum_size = Vector2(0, 65)
-	_hub_freeroam_btn.add_theme_font_size_override("font_size", 30)
-	_hub_freeroam_btn.add_theme_color_override("font_color", Color(1, 1, 0.5))
-	_hub_freeroam_btn.pressed.connect(_on_work_pressed)
-	vbox.add_child(_hub_freeroam_btn)
+	# РАБОТАТЬ
+	_hub_freeroam_btn = _build_hub_menu_row("РАБОТАТЬ", "01 / WORK", "Taxi & delivery")
+	_hub_freeroam_btn.get_node("Btn").pressed.connect(_on_work_pressed)
+	menu_vbox.add_child(_hub_freeroam_btn)
 
-	# Гонки
-	_hub_challenges_btn = Button.new()
-	_hub_challenges_btn.text = "ГОНЯТЬСЯ"
-	_hub_challenges_btn.custom_minimum_size = Vector2(0, 65)
-	_hub_challenges_btn.add_theme_font_size_override("font_size", 30)
-	_hub_challenges_btn.add_theme_color_override("font_color", Color(1, 0.5, 0.5))
-	_hub_challenges_btn.pressed.connect(_on_challenges_pressed)
-	vbox.add_child(_hub_challenges_btn)
+	# ГОНЯТЬСЯ
+	_hub_challenges_btn = _build_hub_menu_row("ГОНЯТЬСЯ", "02 / RACES", "Underground challenges")
+	_hub_challenges_btn.get_node("Btn").pressed.connect(_on_challenges_pressed)
+	menu_vbox.add_child(_hub_challenges_btn)
 
-	var garage_btn := Button.new()
-	garage_btn.text = "ГАРАЖ"
-	garage_btn.custom_minimum_size = Vector2(0, 55)
-	garage_btn.add_theme_font_size_override("font_size", 26)
-	garage_btn.add_theme_color_override("font_color", Color(0.5, 0.8, 1))
-	garage_btn.pressed.connect(_on_garage_pressed)
-	vbox.add_child(garage_btn)
+	# ГАРАЖ
+	var garage_row := _build_hub_menu_row("ГАРАЖ", "03 / GARAGE", "Your cars")
+	garage_row.get_node("Btn").pressed.connect(_on_garage_pressed)
+	menu_vbox.add_child(garage_row)
 
-	var shop_btn := Button.new()
-	shop_btn.text = "АВТОСАЛОН"
-	shop_btn.custom_minimum_size = Vector2(0, 55)
-	shop_btn.add_theme_font_size_override("font_size", 26)
-	shop_btn.add_theme_color_override("font_color", Color(1, 0.8, 0.2))
-	shop_btn.pressed.connect(_on_shop_pressed)
-	vbox.add_child(shop_btn)
+	# АВТОСАЛОН
+	var shop_row := _build_hub_menu_row("АВТОСАЛОН", "04 / SHOP", "Buy new cars")
+	shop_row.get_node("Btn").pressed.connect(_on_shop_pressed)
+	menu_vbox.add_child(shop_row)
 
-	_add_expand_spacer(vbox)
+	# ГЛАВНОЕ МЕНЮ
+	var back_row := _build_hub_menu_row("← ГЛАВНОЕ МЕНЮ", "05 / MAIN MENU", "Back to main menu")
+	back_row.get_node("Btn").pressed.connect(_on_hub_back)
+	menu_vbox.add_child(back_row)
 
-	var switch_btn := Button.new()
-	switch_btn.text = "Сменить профиль"
-	switch_btn.custom_minimum_size = Vector2(0, 40)
-	switch_btn.add_theme_font_size_override("font_size", 20)
-	switch_btn.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
-	switch_btn.pressed.connect(_on_switch_profile)
-	vbox.add_child(switch_btn)
+	# Wire focus highlights
+	_wire_hub_focus(menu_vbox)
 
-	var back_btn := _create_back_button()
-	back_btn.pressed.connect(_on_hub_back)
-	vbox.add_child(back_btn)
+	# Corner chrome
+	var chrome := Control.new()
+	chrome.set_script(CornerChromeScript)
+	chrome.set_anchors_preset(Control.PRESET_FULL_RECT)
+	chrome.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_hub_panel.add_child(chrome)
+
+
+func _build_hub_menu_row(label_text: String, kicker_text: String, hint_text: String) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.custom_minimum_size = Vector2(0, 70)
+	row.add_theme_constant_override("separation", 24)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var btn := Button.new()
+	btn.name = "Btn"
+	btn.text = label_text
+	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn.theme_type_variation = "MenuRow"
+	btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	row.add_child(btn)
+
+	var stack := VBoxContainer.new()
+	stack.name = "KickerStack"
+	stack.custom_minimum_size = Vector2(180, 0)
+	stack.size_flags_vertical = Control.SIZE_SHRINK_END
+	stack.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stack.add_theme_constant_override("separation", 4)
+	row.add_child(stack)
+
+	var kicker := Label.new()
+	kicker.name = "Kicker"
+	kicker.text = kicker_text
+	kicker.theme_type_variation = "MonoLabel"
+	kicker.add_theme_font_size_override("font_size", 11)
+	kicker.modulate = UI.INK_500
+	kicker.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	stack.add_child(kicker)
+
+	var hint := Label.new()
+	hint.text = hint_text
+	hint.theme_type_variation = "MonoLabel"
+	hint.add_theme_font_size_override("font_size", 10)
+	hint.modulate = Color(UI.INK_500.r, UI.INK_500.g, UI.INK_500.b, 0.75)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	stack.add_child(hint)
+
+	return row
+
+
+func _wire_hub_focus(vbox: VBoxContainer) -> void:
+	for row in vbox.get_children():
+		if not (row is HBoxContainer):
+			continue
+		var btn: Button = row.get_node_or_null("Btn")
+		var kicker: Label = row.get_node_or_null("KickerStack/Kicker")
+		if btn and kicker:
+			btn.focus_entered.connect(func(): kicker.modulate = UI.NEON_MAGENTA)
+			btn.focus_exited.connect(func(): kicker.modulate = UI.INK_500)
+			btn.mouse_entered.connect(func(): btn.grab_focus())
 
 
 func _build_location_panel() -> void:
@@ -1059,6 +1211,9 @@ func _show_hub() -> void:
 	_hide_all()
 	_hub_panel.visible = true
 	_update_hub()
+	var first_btn: Button = _hub_freeroam_btn.get_node_or_null("Btn")
+	if first_btn:
+		first_btn.call_deferred("grab_focus")
 
 
 func _show_garage() -> void:
@@ -1104,18 +1259,51 @@ func _populate_profiles() -> void:
 		child.queue_free()
 
 	var profiles := CareerState.get_profile_names()
-	var first_row: Control = null
+	var rows: Array[Control] = []
 	for i in range(profiles.size()):
 		var row := _build_profile_row(profiles[i], i == 0)
 		_profiles_container.add_child(row)
-		if i == 0:
-			first_row = row
+		rows.append(row)
+
+	# The "new profile" row sits in the parent list VBox, right after _profiles_container.
+	var new_row: Control = _profile_panel.get_node_or_null("ProfileScreen") if false else null
+	# Find NewProfileRow — it's a sibling of _profiles_container in the list VBox.
+	var list_vbox := _profiles_container.get_parent()
+	for child in list_vbox.get_children():
+		if child.name == "NewProfileRow":
+			new_row = child
+			break
+
+	# Back button is a direct child of _profile_panel.
+	var back_btn: Control = null
+	for child in _profile_panel.get_children():
+		if child is Button and child.text == "← НАЗАД":
+			back_btn = child
+			break
+
+	# Build the full focusable list: profile rows + new profile + back.
+	var focusables: Array[Control] = []
+	focusables.append_array(rows)
+	if new_row:
+		focusables.append(new_row)
+	if back_btn:
+		focusables.append(back_btn)
+
+	# Wire up/down focus neighbors so arrow keys navigate between them.
+	for i in range(focusables.size()):
+		var node := focusables[i]
+		var prev := focusables[i - 1] if i > 0 else focusables[focusables.size() - 1]
+		var next := focusables[i + 1] if i < focusables.size() - 1 else focusables[0]
+		node.focus_neighbor_top = prev.get_path()
+		node.focus_neighbor_bottom = next.get_path()
+		node.focus_previous = prev.get_path()
+		node.focus_next = next.get_path()
 
 	if _focused_sidebar:
 		_start_sidebar_pulse(_focused_sidebar)
 
-	if first_row:
-		first_row.call_deferred("grab_focus")
+	if not rows.is_empty():
+		rows[0].call_deferred("grab_focus")
 
 
 func _start_sidebar_pulse(bar: ColorRect) -> void:
@@ -1186,22 +1374,24 @@ func _on_profile_back() -> void:
 # === Хаб карьеры ===
 
 func _update_hub() -> void:
-	_hub_profile_label.text = CareerState.active_profile
+	_hub_profile_label.text = CareerState.active_profile.to_upper()
 	_hub_balance_label.text = CareerState.format_money(CareerState.balance)
-	_hub_stats_label.text = "Побед: %d / Гонок: %d | Заказов: %d" % [
+	_hub_stats_label.text = "ПОБЕД: %d / ГОНОК: %d / ЗАКАЗОВ: %d" % [
 		CareerState.races_won, CareerState.total_races, CareerState.orders_completed]
 
 	var has_car := _has_car()
 	if has_car:
 		var car_name := CarSettings.get_car_name(CareerState.selected_car)
-		_hub_car_label.text = "Машина: %s" % car_name
-		_hub_car_label.remove_theme_color_override("font_color")
+		_hub_car_label.text = "МАШИНА: %s" % car_name.to_upper()
+		_hub_car_label.modulate = UI.INK_500
 	else:
-		_hub_car_label.text = "Сначала купите машину!"
-		_hub_car_label.add_theme_color_override("font_color", Color(1, 0.4, 0.4))
+		_hub_car_label.text = "СНАЧАЛА КУПИТЕ МАШИНУ!"
+		_hub_car_label.modulate = UI.NEON_RED
 
-	_hub_freeroam_btn.disabled = not has_car
-	_hub_challenges_btn.disabled = not has_car
+	var work_btn: Button = _hub_freeroam_btn.get_node("Btn")
+	var race_btn: Button = _hub_challenges_btn.get_node("Btn")
+	work_btn.disabled = not has_car
+	race_btn.disabled = not has_car
 
 
 func _on_work_pressed() -> void:
@@ -1225,10 +1415,6 @@ func _on_garage_pressed() -> void:
 
 func _on_shop_pressed() -> void:
 	_show_shop()
-
-
-func _on_switch_profile() -> void:
-	_show_profile_screen()
 
 
 func _on_hub_back() -> void:
