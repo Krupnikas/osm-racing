@@ -75,7 +75,7 @@ var _world_offset_chunks := Vector2i.ZERO
 
 # LOD system — 3 уровня детализации чанков
 @export_group("LOD System")
-@export var lod0_distance := 500.0   ## Полная детализация (дороги, бордюры, фонари, всё)
+@export var lod0_distance := 250.0   ## Полная детализация (дороги, бордюры, фонари, всё)
 @export var lod1_distance := 500.0   ## Средняя (=LOD0, LOD1 временно отключён — фризы)
 @export var lod2_distance := 1000.0  ## Минимальная (трава без вырезов, здания-коробки без текстур)
 @export var lod_hysteresis := 50.0   ## Гистерезис для предотвращения осцилляции на границах LOD
@@ -9945,7 +9945,7 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Лицевая сторона знака (текстура парковки)
@@ -9956,7 +9956,7 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	sign_front.material_override = _parking_sign_front_mat
 	sign_front.position = Vector3(0, 2.3, -0.051)
 	sign_front.rotation.y = PI
-	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_front)
 
 	# Обратная сторона (серый изношенный металл)
@@ -9966,7 +9966,7 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	sign_back.mesh = back_mesh
 	sign_back.material_override = _crossing_sign_back_mat
 	sign_back.position = Vector3(0, 2.3, -0.029)
-	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_back)
 
 	if _draw_call_logging_enabled:
@@ -10093,7 +10093,7 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Лицевая сторона знака (текстура пешеходного перехода)
@@ -10103,7 +10103,7 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 	sign_front.mesh = front_mesh
 	sign_front.material_override = _crossing_sign_front_mat
 	sign_front.position = Vector3(0, 2.3, 0.051)
-	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_front)
 
 	# Обратная сторона (серый изношенный металл)
@@ -10114,7 +10114,7 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 	sign_back.material_override = _crossing_sign_back_mat
 	sign_back.position = Vector3(0, 2.3, 0.029)
 	sign_back.rotation.y = PI
-	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_back)
 
 	if _draw_call_logging_enabled:
@@ -10205,7 +10205,7 @@ func _create_tram_stop_sign_immediate(pos: Vector2, elevation: float, rotation_y
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Лицевая сторона знака (текстура трамвайной остановки)
@@ -10215,7 +10215,7 @@ func _create_tram_stop_sign_immediate(pos: Vector2, elevation: float, rotation_y
 	sign_front.mesh = front_mesh
 	sign_front.material_override = _tram_stop_sign_front_mat
 	sign_front.position = Vector3(0, 2.3, 0.051)
-	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_front)
 
 	# Обратная сторона (серый изношенный металл)
@@ -10226,7 +10226,7 @@ func _create_tram_stop_sign_immediate(pos: Vector2, elevation: float, rotation_y
 	sign_back.material_override = _crossing_sign_back_mat
 	sign_back.position = Vector3(0, 2.3, 0.029)
 	sign_back.rotation.y = PI
-	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_back)
 
 	if _draw_call_logging_enabled:
@@ -16065,7 +16065,7 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 	for i in range(lamp_count):
 		mm.set_instance_transform(i, batch.transforms[i])
 	mm_inst.multimesh = mm
-	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	lamp_container.add_child(mm_inst)
 
 	# Collision bodies for each lamp pole
@@ -16470,7 +16470,7 @@ func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, pare
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Знак - красный/белый диск
@@ -16496,7 +16496,7 @@ func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, pare
 	sign_plate.material_override = sign_mat
 	sign_plate.position.y = 2.3
 	sign_plate.rotation.x = PI / 2  # Повернуть горизонтально
-	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_plate)
 
 	parent.add_child(body)
@@ -16546,7 +16546,7 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 
 	var mm_inst := MultiMeshInstance3D.new()
 	mm_inst.multimesh = mm
-	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	lamp_root.add_child(mm_inst)
 
 	# Collision for the pole
@@ -18825,7 +18825,7 @@ func _create_traffic_light_immediate(pos: Vector2, elevation: float, parent: Nod
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 2.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	traffic_light.add_child(pole)
 
 	# Корпус светофора - чёрный бокс
@@ -18838,7 +18838,7 @@ func _create_traffic_light_immediate(pos: Vector2, elevation: float, parent: Nod
 	box_mat.albedo_color = Color(0.1, 0.1, 0.1)
 	box.material_override = box_mat
 	box.position.y = 4.2
-	box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	traffic_light.add_child(box)
 
 	# Красный сигнал
@@ -18982,7 +18982,7 @@ func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.1
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Треугольный знак: красный ободок + белый центр + серая спинка
@@ -18997,7 +18997,7 @@ func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D
 	border_plate.position.y = 2.3
 	border_plate.rotation.y = -PI / 2
 	border_plate.rotation.z = PI
-	border_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	border_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(border_plate)
 
 	# 2) Белый треугольник (центр, чуть меньше, чуть впереди)
@@ -19235,10 +19235,10 @@ func _setup_render_distance() -> void:
 	var dir_light := get_tree().current_scene.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
 	if dir_light:
 		dir_light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
-		dir_light.directional_shadow_max_distance = render_distance
+		dir_light.directional_shadow_max_distance = 150.0
 		dir_light.directional_shadow_split_1 = 0.3
 		dir_light.shadow_normal_bias = 2.0
-		print("OSM: Shadow: 2 cascades, max distance %.0f, bias %.1f" % [render_distance, dir_light.shadow_normal_bias])
+		print("OSM: Shadow: 2 cascades, max distance %.0f, bias %.1f" % [150.0, dir_light.shadow_normal_bias])
 
 	# Туман: лёгкая атмосферная дымка для 2км обзора
 	if fog_enabled:
