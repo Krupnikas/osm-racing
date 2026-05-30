@@ -1,0 +1,18 @@
+{
+  "id": "default-garage-1",
+  "category": "garage",
+  "min_floors": 1,
+  "max_floors": 1,
+  "has_seams": false,
+  "has_roofbottom": false,
+  "atom_dir": "res://decorations/russia/cherepovets/default-garage-1-atoms/",
+  "atoms": {
+    "wall": ["wall-1"],
+    "long-wall": ["long-wall-1"],
+    "long-garage": ["long-garage-1"]
+  },
+  "molecules": [
+    {"id": "long-garage-door", "slots": ["long-garage"], "tags": ["long"]},
+    {"id": "wall-only",        "slots": ["wall"],         "tags": ["short"]}
+  ]
+}

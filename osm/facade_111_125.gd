@@ -65,8 +65,29 @@ const TOTAL_FLOORS := 12
 # Edge classification threshold (m). 111-125 long sides ~60–70m, short sides ~12m.
 const LONG_SIDE_THRESHOLD_M := 30.0
 
-# OSM way id of Северное Шоссе 39 — used both for selection and as RNG seed.
-const TARGET_WAY_ID := 45836637
+# Архетип "111-125-12" — серия 111-125, 12 этажей.
+# Все дома этого архетипа собираются по одному и тому же рецепту с
+# фиксированным RNG-seed, поэтому варианты атомов (wall-1/2/3,
+# mid-balcony-1..5, window-1..6 и т.д.) выпадают в одинаковых местах у
+# всех домов серии — они выглядят идентично, отличаясь только размером и
+# ориентацией полигона.
+const ARCHETYPE_ID := "111-125-12"
+
+# Фиксированный RNG-seed для выбора вариантов атомов. Использован
+# way_id Северного Шоссе 39 — каноничный дом, по которому отлажен рецепт.
+const ARCHETYPE_SEED := 45836637
+
+# OSM way ids, относящиеся к этому архетипу.
+#   45836637 — Северное Шоссе 39
+#   45836638 — Северное Шоссе 37
+#   45836639 — Северное Шоссе 35
+const ARCHETYPE_WAY_IDS: Array = [45836637, 45836638, 45836639]
+
+# Сохранено для обратной совместимости со старыми ссылками в коде.
+const TARGET_WAY_ID := ARCHETYPE_SEED
+
+static func is_target_way(way_id: int) -> bool:
+	return way_id in ARCHETYPE_WAY_IDS
 
 # Slot's world-XZ centre is deduped against `override.entrances` lat/lon
 # (converted to local XZ by the caller). If the slot centre is within this
@@ -252,6 +273,7 @@ var _seed: int = 0
 var _terrain_gen: Node3D = null
 var _override_entrances_local: Array = []  # Array[Vector2] in local XZ
 var _parent_node: Node3D = null
+var _slot_extrusion: Dictionary = {}  # role → {depth_m, shape}
 
 
 # ── Public API ─────────────────────────────────────────────────────────────
@@ -266,15 +288,19 @@ var _parent_node: Node3D = null
 ## the list of OSM override entrances in local XZ — used to dedup so the
 ## facade doesn't add a duplicate group on top of one already spawned by
 ## OSMTerrainGenerator._add_residential_entrances.
-func build(points: PackedVector2Array, building_height: float, base_elev: float, parent: Node3D, foundation_h: float, way_id: int, terrain_gen: Node3D = null, override_entrances_local: Array = []) -> void:
+func build(points: PackedVector2Array, building_height: float, base_elev: float, parent: Node3D, foundation_h: float, way_id: int, terrain_gen: Node3D = null, override_entrances_local: Array = [], slot_extrusion: Dictionary = {}) -> void:
 	if points.size() < 3:
 		return
 
-	_seed = way_id
+	# All buildings of this archetype use the SAME RNG seed so they pick
+	# identical atom variants. `way_id` is still threaded through for
+	# logs / future per-building overrides.
+	_seed = ARCHETYPE_SEED
 	_batches.clear()
 	_terrain_gen = terrain_gen
 	_override_entrances_local = override_entrances_local
 	_parent_node = parent
+	_slot_extrusion = slot_extrusion
 
 	var foundation_y: float = base_elev + foundation_h
 	var roof_y: float = base_elev + building_height
@@ -308,7 +334,7 @@ func build(points: PackedVector2Array, building_height: float, base_elev: float,
 			n_long += 1
 		elif l >= 1.0:
 			n_short += 1
-	print("[Facade111_125] way=%d edges=%d long=%d short=%d is_ccw=%s avail_h=%.1fm floor_h=%.2fm" % [way_id, points.size(), n_long, n_short, str(is_ccw), avail_h, floor_h])
+	print("[Facade111_125] archetype=%s way=%d edges=%d long=%d short=%d is_ccw=%s avail_h=%.1fm floor_h=%.2fm" % [ARCHETYPE_ID, way_id, points.size(), n_long, n_short, str(is_ccw), avail_h, floor_h])
 
 	# Commit batches as MeshInstance3D children.
 	for atom_id in _batches.keys():
@@ -390,7 +416,16 @@ func _build_side(p1: Vector2, p2: Vector2, edge_length: float, foundation_y: flo
 				var ov_right_t: float = center_t + ov_w_m * 0.5
 				var ov_y_top: float = y_top - ov_off_top
 				var ov_y_bot: float = ov_y_top - ov_h_m
-				_emit_quad(p1, edge_dir, outward_2d, normal_3d, ov_left_t, ov_right_t, ov_y_bot, ov_y_top, Z_OVERLAY, ov_id, true, is_ccw)
+				var ext_info: Dictionary = _slot_extrusion.get(role, {})
+				var ext_depth: float = float(ext_info.get("depth_m", 0.0))
+				if ext_depth > 0.0:
+					# Front face background: full slot at extrusion depth.
+					_emit_quad(p1, edge_dir, outward_2d, normal_3d, t, t_next, y_bot, y_top, ext_depth, bg_id, false, is_ccw)
+				var z_off_final: float = (ext_depth + Z_OVERLAY) if ext_depth > 0.0 else Z_OVERLAY
+				_emit_quad(p1, edge_dir, outward_2d, normal_3d, ov_left_t, ov_right_t, ov_y_bot, ov_y_top, z_off_final, ov_id, true, is_ccw)
+				if ext_depth > 0.0:
+					_emit_balcony_box_sides_111(p1, edge_dir, outward_2d,
+							ov_left_t, ov_right_t, y_bot, y_top, ext_depth, bg_id)
 
 			# Spawn a bare porch (stairs + railings + entrance light) at
 			# each ground-floor mid-wall-entrance slot. OSM lat/lon
@@ -745,6 +780,35 @@ func _emit_porch_collision(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2, 
 		body.add_child(stair_collider)
 
 	_parent_node.add_child(body)
+
+
+# Emit top, left, and right faces of a rectangular balcony box using
+# _emit_quad_corners. Mirrors _emit_balcony_box_sides in FacadeAssembler.
+func _emit_balcony_box_sides_111(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2,
+		t_l: float, t_r: float, y_bot: float, y_top: float,
+		depth: float, bg_atom: String) -> void:
+	var wall_l := p1 + edge_dir * t_l
+	var wall_r := p1 + edge_dir * t_r
+	var ext_l  := wall_l + outward_2d * depth
+	var ext_r  := wall_r + outward_2d * depth
+	var wl_bot := Vector3(wall_l.x, y_bot, wall_l.y)
+	var wl_top := Vector3(wall_l.x, y_top, wall_l.y)
+	var wr_bot := Vector3(wall_r.x, y_bot, wall_r.y)
+	var wr_top := Vector3(wall_r.x, y_top, wall_r.y)
+	var el_bot := Vector3(ext_l.x,  y_bot, ext_l.y)
+	var el_top := Vector3(ext_l.x,  y_top, ext_l.y)
+	var er_bot := Vector3(ext_r.x,  y_bot, ext_r.y)
+	var er_top := Vector3(ext_r.x,  y_top, ext_r.y)
+	var left  := Vector3(-edge_dir.x, 0.0, -edge_dir.y)
+	var right := Vector3(edge_dir.x,  0.0,  edge_dir.y)
+	# TOP slab
+	_emit_quad_corners(bg_atom, wl_top, wr_top, er_top, el_top, Vector3.UP)
+	# BOTTOM slab (floor of balcony)
+	_emit_quad_corners(bg_atom, el_bot, er_bot, wr_bot, wl_bot, Vector3.DOWN)
+	# LEFT side
+	_emit_quad_corners(bg_atom, wl_bot, el_bot, el_top, wl_top, left)
+	# RIGHT side
+	_emit_quad_corners(bg_atom, er_bot, wr_bot, wr_top, er_top, right)
 
 
 # Generic 4-corner quad emitter. Vertices v0..v3 must be wound CCW viewed

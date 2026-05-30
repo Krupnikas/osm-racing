@@ -75,7 +75,7 @@ var _world_offset_chunks := Vector2i.ZERO
 
 # LOD system — 3 уровня детализации чанков
 @export_group("LOD System")
-@export var lod0_distance := 500.0   ## Полная детализация (дороги, бордюры, фонари, всё)
+@export var lod0_distance := 250.0   ## Полная детализация (дороги, бордюры, фонари, всё)
 @export var lod1_distance := 500.0   ## Средняя (=LOD0, LOD1 временно отключён — фризы)
 @export var lod2_distance := 1000.0  ## Минимальная (трава без вырезов, здания-коробки без текстур)
 @export var lod_hysteresis := 50.0   ## Гистерезис для предотвращения осцилляции на границах LOD
@@ -271,6 +271,7 @@ var _chunk_pending_deferred: Dictionary = {}  # chunk_key → int — счётч
 # Window batching system - ONE MultiMesh per chunk instead of per-building
 var _window_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], colors: Array[Color], parent: Node3D}
 var _window_batch_materials: Array[ShaderMaterial] = []  # Материалы всех window batches для обновления is_night параметра
+var _facade_emission_materials: Array[ShaderMaterial] = []  # FacadeAssembler материалы с emission texture (night_factor обновляется при смене дня/ночи)
 
 # BUILDING GEOMETRY MERGE: объединяем все стены/крыши чанка в один ArrayMesh для снижения draw calls
 var _building_geo_batch: Dictionary = {}  # chunk_key -> {parent, panel_walls: {verts,uvs,normals,indices}, brick_walls, wall_walls, roofs, collisions, decorations}
@@ -8777,6 +8778,19 @@ func update_window_night_mode(is_night: bool) -> void:
 			valid_mats.append(m)
 	_window_batch_materials = valid_mats
 
+	# FacadeAssembler emission materials (brick/panel windows with emission masks)
+	var night_factor := 1.0 if is_night else 0.0
+	var emit_count := 0
+	for mat in _facade_emission_materials:
+		if is_instance_valid(mat):
+			mat.set_shader_parameter("night_factor", night_factor)
+			emit_count += 1
+	var valid_emit: Array[ShaderMaterial] = []
+	for m in _facade_emission_materials:
+		if is_instance_valid(m):
+			valid_emit.append(m)
+	_facade_emission_materials = valid_emit
+
 	# Переключаем светильники подъездов
 	var light_count := 0
 	for light in _entrance_lights:
@@ -8785,8 +8799,8 @@ func update_window_night_mode(is_night: bool) -> void:
 			light_count += 1
 
 	var icon := "🌙" if is_night else "☀️"
-	print("OSM: %s Updated %d window batch materials, %d entrance lights: is_night=%s (pruned %d stale)" % [
-		icon, updated_count, light_count, is_night, before_size - _window_batch_materials.size()
+	print("OSM: %s Updated %d window batch materials, %d facade emission materials, %d entrance lights: is_night=%s (pruned %d stale)" % [
+		icon, updated_count, emit_count, light_count, is_night, before_size - _window_batch_materials.size()
 	])
 
 
@@ -9359,8 +9373,8 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	# Custom 3D model — полностью заменяет геометрию здания
 	if building_override and building_override.custom_model_path != "":
 		_place_custom_building_model(building_override, center, parent, base_elev)
-	elif way_id == Facade111_125.TARGET_WAY_ID and building_override and building_override.wall_texture_path != "":
-		# Северное Шоссе 39 — building-specific 111-125 atom facade prototype.
+	elif Facade111_125.is_target_way(way_id) and building_override and building_override.wall_texture_path != "":
+		# Северное Шоссе 39 / 37 / 35 — 111-125 atom facade prototype.
 		# Reuse the existing custom-texture function for roof / parapet /
 		# foundation / pediment (skip_walls=true), then build modular walls
 		# from atom textures on top of the same Y range.
@@ -9376,7 +9390,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 			if lat != 0.0 or lon != 0.0:
 				entr_local.append(_latlon_to_local(lat, lon))
 		var facade := Facade111_125.new()
-		facade.build(points, building_height, base_elev, parent, fnd_h, way_id, self, entr_local)
+		facade.build(points, building_height, base_elev, parent, fnd_h, way_id, self, entr_local, building_override.slot_extrusion)
 		print("OSM: 111-125 atom facade applied for way %d" % way_id)
 	elif building_override and building_override.wall_texture_path != "":
 		# Кастомная текстура с опциональным normal map
@@ -9403,40 +9417,57 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 			wood_override.building_material = "wood"
 			_create_3d_building_with_custom_texture(points, building_height, wood_override, parent, base_elev, debug_name)
 		else:
-			# Проверяем, подходит ли здание для случайной советской текстуры
-			var use_soviet_texture := false
-			var soviet_texture_path := ""
+			# Try FacadeAssembler first; fall back to default flat textures if it
+			# doesn't handle the building (wrong type, too few floors, atoms missing).
+			const FA_SKIP_TYPES := ["shed", "industrial",
+					"warehouse", "retail", "commercial", "kiosk", "service",
+					"roof", "carport", "barn", "farm", "farm_auxiliary",
+					"greenhouse", "stable", "sty", "transformer_tower",
+					"water_tower", "bunker", "bridge", "hut", "cabin"]
+			var fa_handled := false
+			if _is_cherepovets_location() and str(tags.get("building", "")) not in FA_SKIP_TYPES:
+				var btype := str(tags.get("building", ""))
+				var mat_tag := str(tags.get("building:material", ""))
+				if btype in ["garages", "garage"]:
+					mat_tag = "garage"
+				elif mat_tag.is_empty():
+					var h := (way_id * 2654435761) & 0xFFFF
+					mat_tag = "brick" if h < 26214 else "panel"  # 26214/65536 ≈ 40 %
+				if not mat_tag.is_empty():
+					var fa_floors := 0
+					if btype in ["garages", "garage"]:
+						fa_floors = 1
+					else:
+						var levels_str: String = str(tags.get("building:levels", ""))
+						if levels_str.is_valid_int():
+							fa_floors = int(levels_str)
+						if fa_floors <= 0:
+							fa_floors = maxi(2, roundi(building_height / 3.2))
+					var fa_arch := FacadeAssembler.select_archetype(way_id, mat_tag, fa_floors)
+					if FacadeAssembler.has_atoms(fa_arch):
+						var fnd_h: float = 0.0 if (building_override and building_override.no_foundation) else _get_foundation_height(points)
+						_create_3d_building_with_custom_texture(points, building_height, BuildingOverride.new(), parent, base_elev, debug_name, true)
+						var _fa := FacadeAssembler.new()
+						_fa.build(points, building_height, base_elev, parent, fnd_h, way_id, fa_arch, fa_floors)
+						_facade_emission_materials.append_array(_fa.emission_materials)
+						fa_handled = true
+						print("[FacadeAssembler] archetype=%s way=%d floors=%d" % [fa_arch.get("id", "?"), way_id, fa_floors])
 
-			# Критерий 1: Нет override (уже подтверждено, т.к. мы в else)
-			# Критерий 2: Только Череповец
-			# Критерий 3: 5 этажей
-			if _is_cherepovets_location() and _is_5_story_building(building_height, tags):
-				use_soviet_texture = true
-				soviet_texture_path = _get_random_soviet_texture(way_id, tags)
+			if not fa_handled:
+					# Fallback: original flat-texture logic.
+					var building_type: String = str(tags.get("building", "yes"))
+					var texture_type := "panel"  # По умолчанию панельки
+					if building_height > 15.0:
+						texture_type = "panel"  # Высотки - панельные
+					elif building_type in ["house", "detached", "semidetached_house"]:
+						texture_type = "brick"  # Частные дома - кирпич
+					elif building_type in ["industrial", "warehouse", "garage", "garages"]:
+						texture_type = "wall"  # Промышленные - простая штукатурка
+					else:
+						texture_type = "brick"  # Остальное - кирпич
 
-			if use_soviet_texture:
-				# Создаём динамический BuildingOverride со случайной текстурой
-				# ТОЛЬКО текстура + вертикальное повторение (1×). Без масштабов, без адаптивности.
-				var temp_override = BuildingOverride.new()
-				temp_override.wall_texture_path = soviet_texture_path
-				temp_override.texture_repeat_y = 1.0
-
-				_create_3d_building_with_custom_texture(points, building_height, temp_override, parent, base_elev, debug_name)
-			else:
-				# Оригинальная логика текстур по умолчанию
-				var building_type: String = str(tags.get("building", "yes"))
-				var texture_type := "panel"  # По умолчанию панельки
-				if building_height > 15.0:
-					texture_type = "panel"  # Высотки - панельные
-				elif building_type in ["house", "detached", "semidetached_house"]:
-					texture_type = "brick"  # Частные дома - кирпич
-				elif building_type in ["industrial", "warehouse", "garage", "garages"]:
-					texture_type = "wall"  # Промышленные - простая штукатурка
-				else:
-					texture_type = "brick"  # Остальное - кирпич
-
-				# Используем многопоточную генерацию зданий
-				_queue_building_for_thread(points, building_height, texture_type, parent, base_elev, distance_to_player)
+					# Используем многопоточную генерацию зданий
+					_queue_building_for_thread(points, building_height, texture_type, parent, base_elev, distance_to_player)
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
@@ -9914,7 +9945,7 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Лицевая сторона знака (текстура парковки)
@@ -9925,7 +9956,7 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	sign_front.material_override = _parking_sign_front_mat
 	sign_front.position = Vector3(0, 2.3, -0.051)
 	sign_front.rotation.y = PI
-	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_front)
 
 	# Обратная сторона (серый изношенный металл)
@@ -9935,7 +9966,7 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	sign_back.mesh = back_mesh
 	sign_back.material_override = _crossing_sign_back_mat
 	sign_back.position = Vector3(0, 2.3, -0.029)
-	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_back)
 
 	if _draw_call_logging_enabled:
@@ -10062,7 +10093,7 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Лицевая сторона знака (текстура пешеходного перехода)
@@ -10072,7 +10103,7 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 	sign_front.mesh = front_mesh
 	sign_front.material_override = _crossing_sign_front_mat
 	sign_front.position = Vector3(0, 2.3, 0.051)
-	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_front)
 
 	# Обратная сторона (серый изношенный металл)
@@ -10083,7 +10114,7 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 	sign_back.material_override = _crossing_sign_back_mat
 	sign_back.position = Vector3(0, 2.3, 0.029)
 	sign_back.rotation.y = PI
-	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_back)
 
 	if _draw_call_logging_enabled:
@@ -10174,7 +10205,7 @@ func _create_tram_stop_sign_immediate(pos: Vector2, elevation: float, rotation_y
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Лицевая сторона знака (текстура трамвайной остановки)
@@ -10184,7 +10215,7 @@ func _create_tram_stop_sign_immediate(pos: Vector2, elevation: float, rotation_y
 	sign_front.mesh = front_mesh
 	sign_front.material_override = _tram_stop_sign_front_mat
 	sign_front.position = Vector3(0, 2.3, 0.051)
-	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_front)
 
 	# Обратная сторона (серый изношенный металл)
@@ -10195,7 +10226,7 @@ func _create_tram_stop_sign_immediate(pos: Vector2, elevation: float, rotation_y
 	sign_back.material_override = _crossing_sign_back_mat
 	sign_back.position = Vector3(0, 2.3, 0.029)
 	sign_back.rotation.y = PI
-	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_back)
 
 	if _draw_call_logging_enabled:
@@ -16034,7 +16065,7 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 	for i in range(lamp_count):
 		mm.set_instance_transform(i, batch.transforms[i])
 	mm_inst.multimesh = mm
-	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	lamp_container.add_child(mm_inst)
 
 	# Collision bodies for each lamp pole
@@ -16439,7 +16470,7 @@ func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, pare
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Знак - красный/белый диск
@@ -16465,7 +16496,7 @@ func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, pare
 	sign_plate.material_override = sign_mat
 	sign_plate.position.y = 2.3
 	sign_plate.rotation.x = PI / 2  # Повернуть горизонтально
-	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_plate)
 
 	parent.add_child(body)
@@ -16515,7 +16546,7 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 
 	var mm_inst := MultiMeshInstance3D.new()
 	mm_inst.multimesh = mm
-	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	lamp_root.add_child(mm_inst)
 
 	# Collision for the pole
@@ -18457,7 +18488,7 @@ func _add_residential_entrances(points: PackedVector2Array, parent: Node3D, base
 	# Facade-driven buildings own their entrances — skip the OSM lat/lon
 	# system here so the full ResidentialEntrance group (with doors, green
 	# wall, canopy etc.) doesn't spawn alongside the facade's bare stairs.
-	if way_id == Facade111_125.TARGET_WAY_ID:
+	if Facade111_125.is_target_way(way_id):
 		return
 	var override = _decoration_layer.get_building_override_for_way(way_id)
 	if not override or override.entrances.is_empty():
@@ -18794,7 +18825,7 @@ func _create_traffic_light_immediate(pos: Vector2, elevation: float, parent: Nod
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 2.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	traffic_light.add_child(pole)
 
 	# Корпус светофора - чёрный бокс
@@ -18807,7 +18838,7 @@ func _create_traffic_light_immediate(pos: Vector2, elevation: float, parent: Nod
 	box_mat.albedo_color = Color(0.1, 0.1, 0.1)
 	box.material_override = box_mat
 	box.position.y = 4.2
-	box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	traffic_light.add_child(box)
 
 	# Красный сигнал
@@ -18951,7 +18982,7 @@ func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.1
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Треугольный знак: красный ободок + белый центр + серая спинка
@@ -18966,7 +18997,7 @@ func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D
 	border_plate.position.y = 2.3
 	border_plate.rotation.y = -PI / 2
 	border_plate.rotation.z = PI
-	border_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	border_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(border_plate)
 
 	# 2) Белый треугольник (центр, чуть меньше, чуть впереди)
@@ -19204,10 +19235,10 @@ func _setup_render_distance() -> void:
 	var dir_light := get_tree().current_scene.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
 	if dir_light:
 		dir_light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
-		dir_light.directional_shadow_max_distance = render_distance
+		dir_light.directional_shadow_max_distance = 150.0
 		dir_light.directional_shadow_split_1 = 0.3
 		dir_light.shadow_normal_bias = 2.0
-		print("OSM: Shadow: 2 cascades, max distance %.0f, bias %.1f" % [render_distance, dir_light.shadow_normal_bias])
+		print("OSM: Shadow: 2 cascades, max distance %.0f, bias %.1f" % [150.0, dir_light.shadow_normal_bias])
 
 	# Туман: лёгкая атмосферная дымка для 2км обзора
 	if fog_enabled:
