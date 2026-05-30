@@ -57,6 +57,7 @@ static var _tex_cache: Dictionary = {}
 # Per-build mesh accumulators: atom_path → {verts, uvs, normals, indices, alpha}.
 var _batches: Dictionary = {}
 var _seed: int = 0
+var _slot_extrusion: Dictionary = {}  # role → {depth_m, shape}
 
 # Materials with emission textures created during the last build() call.
 # Caller should append these to its night-mode tracking array.
@@ -121,6 +122,7 @@ func build(
 	_batches.clear()
 	emission_materials.clear()
 	_seed = way_id
+	_slot_extrusion = archetype.get("slot_extrusion", {})
 
 	var foundation_y := base_elev + foundation_h
 	var roof_y       := base_elev + building_height
@@ -238,9 +240,21 @@ func _build_edge(p1: Vector2, p2: Vector2, edge_len: float,
 						var ov_y_top := y_top - ov_off
 						var ov_y_bot := ov_y_top - ov_h_m
 						var glow_r := _glow_chance(floor_idx, edge_idx, slot["slot_idx"]) if not _emission_path_for(ov_path).is_empty() else 1.0
+						var ext_info: Dictionary = _slot_extrusion.get(role, {})
+						var ext_depth: float = float(ext_info.get("depth_m", 0.0))
+						var ext_shape: String = str(ext_info.get("shape", "box"))
+						if ext_depth > 0.0 and not bg_path.is_empty():
+							# Front face background: full slot at extrusion depth.
+							_emit_quad(p1, edge_dir, outward_2d, normal_3d,
+									t_l, t_r, y_bot, y_top, ext_depth, bg_path, false)
+						var z_off_final: float = (ext_depth + Z_OVERLAY) if ext_depth > 0.0 else Z_OVERLAY
 						_emit_quad(p1, edge_dir, outward_2d, normal_3d,
 								centre_t - ov_w_m * 0.5, centre_t + ov_w_m * 0.5,
-								ov_y_bot, ov_y_top, Z_OVERLAY, ov_path, true, glow_r)
+								ov_y_bot, ov_y_top, z_off_final, ov_path, true, glow_r)
+						if ext_depth > 0.0 and not bg_path.is_empty():
+							_dispatch_slot_extrusion(p1, edge_dir, outward_2d,
+									centre_t - ov_w_m * 0.5, centre_t + ov_w_m * 0.5,
+									y_bot, y_top, ext_depth, ext_shape, bg_path)
 
 	# 2. Roofbottom crown band (if the archetype has it).
 	if crown_h > 0.001:
@@ -472,6 +486,85 @@ func _emit_quad(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2,
 	batch["normals"] = normals
 	batch["colors"]  = colors
 	batch["indices"] = indices
+
+
+# ── Balcony box extrusion ──────────────────────────────────────────────────
+
+# General quad emitter with explicit 3D vertices. Same batch structure as
+# _emit_quad. Used for non-vertical faces (top slab, side walls of balcony box).
+func _emit_quad_raw(v0: Vector3, v1: Vector3, v2: Vector3, v3: Vector3,
+		normal_3d: Vector3, atom_path: String,
+		alpha: bool = false, glow_r: float = 1.0) -> void:
+	if not _batches.has(atom_path):
+		_batches[atom_path] = {
+			"verts":   PackedVector3Array(),
+			"uvs":     PackedVector2Array(),
+			"normals": PackedVector3Array(),
+			"colors":  PackedColorArray(),
+			"indices": PackedInt32Array(),
+			"alpha":   alpha,
+		}
+	var batch: Dictionary = _batches[atom_path]
+	var verts: PackedVector3Array   = batch["verts"]
+	var uvs: PackedVector2Array     = batch["uvs"]
+	var normals: PackedVector3Array = batch["normals"]
+	var colors: PackedColorArray    = batch["colors"]
+	var indices: PackedInt32Array   = batch["indices"]
+	var idx := verts.size()
+	verts.append(v0); verts.append(v1); verts.append(v2); verts.append(v3)
+	uvs.append(Vector2(0.0, 1.0)); uvs.append(Vector2(1.0, 1.0))
+	uvs.append(Vector2(1.0, 0.0)); uvs.append(Vector2(0.0, 0.0))
+	normals.append(normal_3d); normals.append(normal_3d)
+	normals.append(normal_3d); normals.append(normal_3d)
+	var c := Color(glow_r, 1.0, 1.0, 1.0)
+	colors.append(c); colors.append(c); colors.append(c); colors.append(c)
+	indices.append(idx);     indices.append(idx + 1); indices.append(idx + 2)
+	indices.append(idx);     indices.append(idx + 2); indices.append(idx + 3)
+	batch["verts"]   = verts
+	batch["uvs"]     = uvs
+	batch["normals"] = normals
+	batch["colors"]  = colors
+	batch["indices"] = indices
+
+
+# Emit top, left, and right faces of a rectangular balcony box.
+# t_l/t_r define the box width along the edge; y_bot/y_top its vertical range;
+# depth is the protrusion distance along outward_2d. bg_path = wall atom texture.
+func _emit_balcony_box_sides(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2,
+		t_l: float, t_r: float, y_bot: float, y_top: float,
+		depth: float, bg_path: String) -> void:
+	var wall_l := p1 + edge_dir * t_l
+	var wall_r := p1 + edge_dir * t_r
+	var ext_l  := wall_l + outward_2d * depth
+	var ext_r  := wall_r + outward_2d * depth
+	var wl_bot := Vector3(wall_l.x, y_bot, wall_l.y)
+	var wl_top := Vector3(wall_l.x, y_top, wall_l.y)
+	var wr_bot := Vector3(wall_r.x, y_bot, wall_r.y)
+	var wr_top := Vector3(wall_r.x, y_top, wall_r.y)
+	var el_bot := Vector3(ext_l.x,  y_bot, ext_l.y)
+	var el_top := Vector3(ext_l.x,  y_top, ext_l.y)
+	var er_bot := Vector3(ext_r.x,  y_bot, ext_r.y)
+	var er_top := Vector3(ext_r.x,  y_top, ext_r.y)
+	var left  := Vector3(-edge_dir.x, 0.0, -edge_dir.y)
+	var right := Vector3(edge_dir.x,  0.0,  edge_dir.y)
+	# TOP slab
+	_emit_quad_raw(wl_top, wr_top, er_top, el_top, Vector3.UP, bg_path)
+	# BOTTOM slab (floor of balcony)
+	_emit_quad_raw(el_bot, er_bot, wr_bot, wl_bot, Vector3.DOWN, bg_path)
+	# LEFT side
+	_emit_quad_raw(wl_bot, el_bot, el_top, wl_top, left, bg_path)
+	# RIGHT side
+	_emit_quad_raw(er_bot, wr_bot, wr_top, er_top, right, bg_path)
+
+
+# Dispatch extrusion by shape. Extension point for future shapes (erker, etc.).
+func _dispatch_slot_extrusion(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2,
+		t_l: float, t_r: float, y_bot: float, y_top: float,
+		depth: float, shape: String, bg_path: String) -> void:
+	match shape:
+		"box":
+			_emit_balcony_box_sides(p1, edge_dir, outward_2d,
+					t_l, t_r, y_bot, y_top, depth, bg_path)
 
 
 # Returns 1.0 (glow) with ~30% probability, deterministically per window instance.

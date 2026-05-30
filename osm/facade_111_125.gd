@@ -273,6 +273,7 @@ var _seed: int = 0
 var _terrain_gen: Node3D = null
 var _override_entrances_local: Array = []  # Array[Vector2] in local XZ
 var _parent_node: Node3D = null
+var _slot_extrusion: Dictionary = {}  # role → {depth_m, shape}
 
 
 # ── Public API ─────────────────────────────────────────────────────────────
@@ -287,7 +288,7 @@ var _parent_node: Node3D = null
 ## the list of OSM override entrances in local XZ — used to dedup so the
 ## facade doesn't add a duplicate group on top of one already spawned by
 ## OSMTerrainGenerator._add_residential_entrances.
-func build(points: PackedVector2Array, building_height: float, base_elev: float, parent: Node3D, foundation_h: float, way_id: int, terrain_gen: Node3D = null, override_entrances_local: Array = []) -> void:
+func build(points: PackedVector2Array, building_height: float, base_elev: float, parent: Node3D, foundation_h: float, way_id: int, terrain_gen: Node3D = null, override_entrances_local: Array = [], slot_extrusion: Dictionary = {}) -> void:
 	if points.size() < 3:
 		return
 
@@ -299,6 +300,7 @@ func build(points: PackedVector2Array, building_height: float, base_elev: float,
 	_terrain_gen = terrain_gen
 	_override_entrances_local = override_entrances_local
 	_parent_node = parent
+	_slot_extrusion = slot_extrusion
 
 	var foundation_y: float = base_elev + foundation_h
 	var roof_y: float = base_elev + building_height
@@ -414,7 +416,16 @@ func _build_side(p1: Vector2, p2: Vector2, edge_length: float, foundation_y: flo
 				var ov_right_t: float = center_t + ov_w_m * 0.5
 				var ov_y_top: float = y_top - ov_off_top
 				var ov_y_bot: float = ov_y_top - ov_h_m
-				_emit_quad(p1, edge_dir, outward_2d, normal_3d, ov_left_t, ov_right_t, ov_y_bot, ov_y_top, Z_OVERLAY, ov_id, true, is_ccw)
+				var ext_info: Dictionary = _slot_extrusion.get(role, {})
+				var ext_depth: float = float(ext_info.get("depth_m", 0.0))
+				if ext_depth > 0.0:
+					# Front face background: full slot at extrusion depth.
+					_emit_quad(p1, edge_dir, outward_2d, normal_3d, t, t_next, y_bot, y_top, ext_depth, bg_id, false, is_ccw)
+				var z_off_final: float = (ext_depth + Z_OVERLAY) if ext_depth > 0.0 else Z_OVERLAY
+				_emit_quad(p1, edge_dir, outward_2d, normal_3d, ov_left_t, ov_right_t, ov_y_bot, ov_y_top, z_off_final, ov_id, true, is_ccw)
+				if ext_depth > 0.0:
+					_emit_balcony_box_sides_111(p1, edge_dir, outward_2d,
+							ov_left_t, ov_right_t, y_bot, y_top, ext_depth, bg_id)
 
 			# Spawn a bare porch (stairs + railings + entrance light) at
 			# each ground-floor mid-wall-entrance slot. OSM lat/lon
@@ -769,6 +780,35 @@ func _emit_porch_collision(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2, 
 		body.add_child(stair_collider)
 
 	_parent_node.add_child(body)
+
+
+# Emit top, left, and right faces of a rectangular balcony box using
+# _emit_quad_corners. Mirrors _emit_balcony_box_sides in FacadeAssembler.
+func _emit_balcony_box_sides_111(p1: Vector2, edge_dir: Vector2, outward_2d: Vector2,
+		t_l: float, t_r: float, y_bot: float, y_top: float,
+		depth: float, bg_atom: String) -> void:
+	var wall_l := p1 + edge_dir * t_l
+	var wall_r := p1 + edge_dir * t_r
+	var ext_l  := wall_l + outward_2d * depth
+	var ext_r  := wall_r + outward_2d * depth
+	var wl_bot := Vector3(wall_l.x, y_bot, wall_l.y)
+	var wl_top := Vector3(wall_l.x, y_top, wall_l.y)
+	var wr_bot := Vector3(wall_r.x, y_bot, wall_r.y)
+	var wr_top := Vector3(wall_r.x, y_top, wall_r.y)
+	var el_bot := Vector3(ext_l.x,  y_bot, ext_l.y)
+	var el_top := Vector3(ext_l.x,  y_top, ext_l.y)
+	var er_bot := Vector3(ext_r.x,  y_bot, ext_r.y)
+	var er_top := Vector3(ext_r.x,  y_top, ext_r.y)
+	var left  := Vector3(-edge_dir.x, 0.0, -edge_dir.y)
+	var right := Vector3(edge_dir.x,  0.0,  edge_dir.y)
+	# TOP slab
+	_emit_quad_corners(bg_atom, wl_top, wr_top, er_top, el_top, Vector3.UP)
+	# BOTTOM slab (floor of balcony)
+	_emit_quad_corners(bg_atom, el_bot, er_bot, wr_bot, wl_bot, Vector3.DOWN)
+	# LEFT side
+	_emit_quad_corners(bg_atom, wl_bot, el_bot, el_top, wl_top, left)
+	# RIGHT side
+	_emit_quad_corners(bg_atom, er_bot, wr_bot, wr_top, er_top, right)
 
 
 # Generic 4-corner quad emitter. Vertices v0..v3 must be wound CCW viewed

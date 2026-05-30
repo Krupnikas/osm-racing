@@ -208,6 +208,10 @@ func _load_building_overrides_json(path: String) -> void:
 		if od.has("pediments"):
 			override.pediments = od["pediments"]
 
+		# Per-slot extrusion config (balcony box geometry)
+		if od.has("slot_extrusion"):
+			override.slot_extrusion = od["slot_extrusion"]
+
 		# Custom 3D model (replaces entire building)
 		if od.has("custom_model"):
 			override.custom_model_path = od["custom_model"]

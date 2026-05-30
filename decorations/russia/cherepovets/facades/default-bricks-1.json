@@ -45,8 +45,12 @@
     ]
   },
   "slot_overrides": {
-    "window":     {"overlay_offset_top_px": 0},
-    "mid-window": {"overlay_offset_top_px": 0}
+    "window": {
+      "overlay_offset_top_px": 0
+    },
+    "mid-window": {
+      "overlay_offset_top_px": 0
+    }
   },
   "molecules": [
     {
@@ -145,5 +149,11 @@
         "any"
       ]
     }
-  ]
+  ],
+  "slot_extrusion": {
+    "mid-balcony": {
+      "depth_m": 0.8,
+      "shape": "box"
+    }
+  }
 }

@@ -114,5 +114,11 @@
         "any"
       ]
     }
-  ]
+  ],
+  "slot_extrusion": {
+    "mid-balcony": {
+      "depth_m": 0.8,
+      "shape": "box"
+    }
+  }
 }

@@ -11,6 +11,9 @@
         "short": 1.0,
         "long": 3.0
       },
+      "slot_extrusion": {
+        "mid-balcony": {"depth_m": 0.8, "shape": "box"}
+      },
       "entrances": [
         {"lat": 59.149725, "lon": 37.949874},
         {"lat": 59.149537, "lon": 37.949379}
@@ -27,6 +30,9 @@
         "short": 1.0,
         "long": 3.0
       },
+      "slot_extrusion": {
+        "mid-balcony": {"depth_m": 0.8, "shape": "box"}
+      },
       "entrances": [
         {"lat": 59.149631, "lon": 37.951059},
         {"lat": 59.149442, "lon": 37.950574}
@@ -42,6 +48,9 @@
         "enabled": true,
         "short": 1.0,
         "long": 3.0
+      },
+      "slot_extrusion": {
+        "mid-balcony": {"depth_m": 0.8, "shape": "box"}
       },
       "entrances": [
         {"lat": 59.149533, "lon": 37.952277},

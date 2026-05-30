@@ -9390,7 +9390,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 			if lat != 0.0 or lon != 0.0:
 				entr_local.append(_latlon_to_local(lat, lon))
 		var facade := Facade111_125.new()
-		facade.build(points, building_height, base_elev, parent, fnd_h, way_id, self, entr_local)
+		facade.build(points, building_height, base_elev, parent, fnd_h, way_id, self, entr_local, building_override.slot_extrusion)
 		print("OSM: 111-125 atom facade applied for way %d" % way_id)
 	elif building_override and building_override.wall_texture_path != "":
 		# Кастомная текстура с опциональным normal map
