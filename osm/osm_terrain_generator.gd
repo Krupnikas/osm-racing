@@ -810,6 +810,7 @@ func _init_textures() -> void:
 		if _wall_roughness_textures.get(tex_type):
 			mat.set_shader_parameter("roughness_texture", _wall_roughness_textures[tex_type])
 			mat.set_shader_parameter("use_roughness_texture", true)
+		mat.set_shader_parameter("weather_strength", 0.6)  # Soviet grime/per-building tint
 		_building_wall_materials[tex_type] = mat
 		# Recess material — same textures but with vertex color emission for window glow
 		var recess_mat := ShaderMaterial.new()
@@ -828,6 +829,7 @@ func _init_textures() -> void:
 			recess_mat.set_shader_parameter("roughness_texture", _wall_roughness_textures[tex_type])
 			recess_mat.set_shader_parameter("use_roughness_texture", true)
 		recess_mat.set_shader_parameter("use_vertex_emission", true)
+		recess_mat.set_shader_parameter("weather_strength", 0.6)  # Soviet grime/per-building tint
 		_building_recess_materials[tex_type] = recess_mat
 
 	_building_roof_material = StandardMaterial3D.new()
@@ -5061,15 +5063,21 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 
 ## Применяет результат road geometry из worker thread (main thread only)
 func _apply_road_result(result: Dictionary) -> void:
-	var parent: Node3D = result.parent
+	# Fetch parent untyped first: the chunk may have unloaded between queueing
+	# and applying this result, and assigning a freed instance to a typed
+	# Node3D var raises "Trying to assign invalid previously freed instance"
+	# (which trips the editor's break-on-error and hangs generation) BEFORE
+	# is_instance_valid() can run. Validate as Variant, then narrow to Node3D.
+	var parent_obj: Variant = result.get("parent")
 	var chunk_key: String = result.chunk_key
-	if not is_instance_valid(parent):
+	if not is_instance_valid(parent_obj):
 		_emit_road_debug("ROAD_DROP key=%s reason=invalid_parent highway=%s way_id=%s" % [
 			chunk_key,
 			str(result.get("highway_type", "")),
 			str(result.get("way_id", 0))
 		])
 		return
+	var parent: Node3D = parent_obj
 
 	var texture_key: String = result.texture_key
 	var smoothed_points: PackedVector2Array = result.smoothed_points
@@ -5450,8 +5458,8 @@ func _create_bridge_road_lane_markings(pts: PackedVector2Array, perps: Array[Vec
 	const MARKING_Y_OFFSET := 0.003
 
 	var marking_mat := StandardMaterial3D.new()
-	marking_mat.albedo_color = Color(1.0, 1.0, 1.0)
-	marking_mat.roughness = 0.6
+	marking_mat.albedo_color = Color(0.8, 0.79, 0.73)  # Изношенная краска: грязно-белая, не неон
+	marking_mat.roughness = 0.75
 	marking_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	var st := SurfaceTool.new()
@@ -6815,8 +6823,8 @@ func _create_on_deck_lane_markings(pts: PackedVector2Array, road_width: float, t
 	const MARKING_Y_OFFSET := 0.003
 
 	var marking_mat := StandardMaterial3D.new()
-	marking_mat.albedo_color = Color(1.0, 1.0, 1.0)
-	marking_mat.roughness = 0.6
+	marking_mat.albedo_color = Color(0.8, 0.79, 0.73)  # Изношенная краска: грязно-белая, не неон
+	marking_mat.roughness = 0.75
 	marking_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	marking_mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
 
@@ -18668,6 +18676,11 @@ func _create_pending_parking_signs() -> void:
 	var created := 0
 	for sign_data in _pending_parking_signs:
 		var points: PackedVector2Array = sign_data.points
+		# Chunk node may have been freed if its chunk unloaded while signs were
+		# still pending — skip those instead of assigning a freed instance
+		# (which throws "invalid previously freed instance" and breaks the debugger).
+		if not is_instance_valid(sign_data.parent):
+			continue
 		var parent: Node3D = sign_data.parent
 
 		var sign_result = _find_parking_sign_position(points)
@@ -19246,10 +19259,11 @@ func _setup_render_distance() -> void:
 		if world_env and world_env.environment:
 			var env := world_env.environment
 			env.fog_enabled = true
-			env.fog_density = 0.0003  # Лёгкий туман для 2км видимости
-			env.fog_light_color = Color(0.7, 0.75, 0.85)
+			env.fog_density = 0.0002  # Лёгкая тёплая дымка — только вдали
+			env.fog_light_color = Color(0.82, 0.78, 0.68)  # Тёплая пыльная дымка (не холодный синий)
 			env.fog_light_energy = 1.0
-			env.fog_aerial_perspective = 0.7  # Усиленная дымка для ощущения глубины
+			env.fog_aerial_perspective = 0.35  # Дымка отодвинута вдаль, передний план чистый
+			env.fog_sky_affect = 0.0  # Небо не размывается туманом
 			print("OSM: Fog enabled (density: %.4f for %.0fm LOD view)" % [env.fog_density, lod2_distance])
 
 

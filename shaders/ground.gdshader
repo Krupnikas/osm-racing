@@ -2,12 +2,12 @@ shader_type spatial;
 render_mode cull_disabled;
 
 // PBR текстуры травы
-uniform sampler2D albedo_tex : source_color, filter_linear_mipmap, repeat_enable;
-uniform sampler2D normal_tex : hint_normal, filter_linear_mipmap, repeat_enable;
-uniform sampler2D roughness_tex : filter_linear_mipmap, repeat_enable;
+uniform sampler2D albedo_tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2D normal_tex : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2D roughness_tex : filter_linear_mipmap_anisotropic, repeat_enable;
 
 // Macro noise для борьбы с тайлингом
-uniform sampler2D noise_macro_tex : filter_linear_mipmap, repeat_enable;
+uniform sampler2D noise_macro_tex : filter_linear_mipmap_anisotropic, repeat_enable;
 
 // Глобальные режимы
 global uniform float wetness_global;
@@ -26,7 +26,7 @@ uniform float macro_roughness_intensity : hint_range(0.0, 0.3) = 0.15;
 
 // Tire track mask (локальная маска вокруг машины)
 uniform sampler2D track_mask_tex : repeat_disable, filter_linear;
-uniform sampler2D noise_micro_tex : filter_linear_mipmap, repeat_enable;
+uniform sampler2D noise_micro_tex : filter_linear_mipmap_anisotropic, repeat_enable;
 uniform vec2 track_origin_world = vec2(0.0);
 uniform float track_world_size = 50.0;
 

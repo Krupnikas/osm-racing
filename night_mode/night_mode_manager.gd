@@ -60,13 +60,14 @@ var _day_vfog_ambient_inject := 0.0
 var _day_vfog_gi_inject := 0.0
 var _day_vfog_detail_spread := 0.8
 var _day_vfog_length := 200.0
+var _day_vfog_enabled := false  # Днём объёмный туман выключен (молочная пелена убрана)
 
 # Ночные настройки в стиле NFS Underground
 const NIGHT_SUN_ENERGY := 0.02
-const MOON_LIGHT_ENERGY := 0.12
+const MOON_LIGHT_ENERGY := 0.2
 const MOON_LIGHT_COLOR := Color(0.7, 0.8, 1.0)
-const NIGHT_AMBIENT_COLOR := Color(0.015, 0.02, 0.04)
-const NIGHT_AMBIENT_ENERGY := 0.15
+const NIGHT_AMBIENT_COLOR := Color(0.03, 0.04, 0.08)
+const NIGHT_AMBIENT_ENERGY := 0.25
 const NIGHT_FOG_COLOR := Color(0.08, 0.04, 0.12)
 const NIGHT_FOG_DENSITY := 0.003
 
@@ -163,6 +164,11 @@ func _find_scene_components() -> void:
 			_day_vfog_gi_inject = _environment.volumetric_fog_gi_inject
 			_day_vfog_detail_spread = _environment.volumetric_fog_detail_spread
 			_day_vfog_length = _environment.volumetric_fog_length
+			_day_vfog_enabled = _environment.volumetric_fog_enabled
+			# Capture day ambient so night→day restore returns to the scene's
+			# real values (sky-source @ 1.35), not the var defaults (1.0 grey).
+			_day_ambient_color = _environment.ambient_light_color
+			_day_ambient_energy = _environment.ambient_light_energy
 
 	_sun_light = get_tree().current_scene.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
 	if _sun_light:
@@ -591,6 +597,7 @@ func disable_night_mode() -> void:
 		_environment.volumetric_fog_gi_inject = _day_vfog_gi_inject
 		_environment.volumetric_fog_detail_spread = _day_vfog_detail_spread
 		_environment.volumetric_fog_length = _day_vfog_length
+		_environment.volumetric_fog_enabled = _day_vfog_enabled
 
 	night_mode_changed.emit(false)
 	print("Night mode disabled")

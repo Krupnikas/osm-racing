@@ -2,20 +2,20 @@ shader_type spatial;
 render_mode cull_disabled;
 
 // Текстуры
-uniform sampler2D albedo_texture : source_color, filter_linear_mipmap, repeat_enable;
-uniform sampler2D normal_texture : hint_normal, filter_linear_mipmap, repeat_enable;
+uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2D normal_texture : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
 
 // PBR текстуры
-uniform sampler2D roughness_texture : filter_linear_mipmap, repeat_enable;
+uniform sampler2D roughness_texture : filter_linear_mipmap_anisotropic, repeat_enable;
 uniform bool use_roughness_texture = false;
 
 // Разметка (белые линии на прозрачном фоне)
-uniform sampler2D marking_texture : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D marking_texture : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform bool use_marking = false;
 
 // Noise текстуры (tileable)
-uniform sampler2D noise_micro_tex : filter_linear_mipmap, repeat_enable;
-uniform sampler2D noise_macro_tex : filter_linear_mipmap, repeat_enable;
+uniform sampler2D noise_micro_tex : filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2D noise_macro_tex : filter_linear_mipmap_anisotropic, repeat_enable;
 
 // Параметры материала
 uniform vec4 base_color : source_color = vec4(0.25, 0.25, 0.25, 1.0);
@@ -63,6 +63,9 @@ uniform float curb_puddle_bias : hint_range(0.0, 1.0) = 0.3;
 // World-space масштаб noise для луж (синхронизация между дорогами/перекрёстками)
 uniform float puddle_world_scale : hint_range(0.01, 0.5) = 0.08;
 
+// Soviet asphalt wear: крупные world-space заплатки/износ + пятна (сухой асфальт)
+uniform float asphalt_wear : hint_range(0.0, 1.0) = 0.55;
+
 varying vec3 world_pos;
 
 void vertex() {
@@ -102,6 +105,15 @@ void fragment() {
 	dry_rough += (n_micro - 0.5) * micro_roughness_dry;
 	dry_rough += (n_macro - 0.5) * macro_roughness_dry;
 	vec3 dry_albedo = albedo + (n_macro - 0.5) * macro_albedo_dry;
+
+	// Soviet asphalt: крупные world-space заплатки (ремонты/износ) + пятна (масло/грязь)
+	if (asphalt_wear > 0.0) {
+		float patch = texture(noise_macro_tex, world_pos.xz * 0.018).r;   // ~55m заплатки
+		float stain = texture(noise_micro_tex, world_pos.xz * 0.05).r;    // ~8m пятна
+		dry_albedo *= mix(1.0, mix(0.78, 1.05, patch), asphalt_wear);
+		dry_albedo *= mix(1.0, mix(0.90, 1.02, stain), asphalt_wear * 0.6);
+		dry_rough = mix(dry_rough, dry_rough * mix(0.95, 1.08, patch), asphalt_wear);
+	}
 
 	// === МОКРАЯ ДОРОГА ===
 	// Мокрый асфальт: сильное потемнение albedo (вода впитывается, свет поглощается)
