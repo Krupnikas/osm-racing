@@ -231,6 +231,66 @@ Stop when a side-by-side montage of several different streets reads, at a glance
 
 ---
 
+## 12. Plan revision — mode-aware (day / night / rain)
+
+The first pass tuned **sunny day only**. Three new references show what each mode needs
+(same target game family as `example.png`, a W124 on a wide city avenue):
+[example-2.png](../tools/overpass-docker/example-2.png) (day),
+[example-night.png](../tools/overpass-docker/example-night.png) (night),
+[example-rain.png](../tools/overpass-docker/example-rain.png) (rain).
+
+### 12.1 What's special in each reference
+
+**`example-2` — DAY (big-city avenue).** Beyond what we already nailed (warm sun, contrast, saturation, weathered blocks):
+- **Dense traffic** — many cars both directions + a continuous row of parked cars. The street is *alive*.
+- **Colorful street-level retail signage** — storefronts/awnings/sign strips (red/blue/white) line the commercial side. Big "inhabited city" cue.
+- **Distant skyline in warm haze** — towers fade into atmospheric depth; gives scale (bigger city than our provincial block).
+- **Long soft car shadow** — strong, slightly low sun; reads the time of day.
+- **Median strip** with trees/bushes between directions.
+- **Tire-polished wheel tracks** — lanes are darker/shinier where wheels run.
+
+**`example-night` — NIGHT.**
+- **Warm sodium street-lamp pools** on the asphalt + soft glow halos = the dominant light. Road between pools goes dark.
+- **Glowing colored shop signage** at street level (blue/red/white).
+- **Lit building windows** — sparse warm/cool dots in dark silhouettes.
+- **Headlight cones** (player + oncoming bright points) and **red tail-light glow**, reflecting slightly on the road.
+- **Semi-glossy asphalt** catching lamp/headlight highlights (specular streaks).
+- **Dark blue ambient, low fill, HIGH contrast**, faint **city glow** on the horizon.
+- Calm/realistic — **not** heavy purple-neon NFS.
+
+**`example-rain` — RAIN (overcast day).**
+- **Wet, glossy asphalt mirroring buildings + cars + sky** — the defining feature. *(Needs screen-space reflections — which we turned off.)*
+- **Headlights + tail-lights ON in daytime**, reflecting on the wet road.
+- **Desaturated, cool grey-blue overcast grade; flat soft light** (no sun, no cast shadows).
+- **Reduced visibility** — buildings fade into **cool grey** mist faster (denser, cooler fog).
+- **Wet-darkened surfaces** (asphalt much darker; buildings darker/muted).
+- **Puddles, spray/mist**, melancholic mood.
+
+### 12.2 Gaps our pass created or left (mode regressions)
+1. **SSR globally OFF breaks wet-road reflections** (rain's signature look). `set_wet_mode` ([osm_terrain_generator.gd:19136](../osm/osm_terrain_generator.gd#L19136)) only sets `wetness_global`; the wet_road shader's metallic/roughness then has nothing to reflect but the sky. → SSR must be **conditional** (off when dry, on when wet), not globally off.
+2. **Fog color is warm and global.** Rain/overcast wants **cool grey** fog; `night_mode_manager` rain path keeps `_day_fog_color` (warm) and only scales density.
+3. **Day-tuned grade is global.** ACES white 4.0 / exposure 0.9 / sat boost is right for sun; rain wants **desaturated + cool**; these should be mode-driven.
+4. **Headlights don't come on in daytime rain** (`car_lights` default `visible=false`, night-gated).
+5. **Night** is functional (warm lamps, lit windows, headlights, road reflection) but leans **purple-NFS** (`NIGHT_FOG_COLOR (0.08,0.04,0.12)`, neon tints) and can be soupy (night vfog 0.015) vs the reference's calmer warm-amber + blue with defined lamp pools.
+
+### 12.3 Revised phases (mode-aware)
+
+**Amend Phase 2:** SSR is not "off" but **off-when-dry / on-when-wet**. SSIL + SDFGI stay off.
+
+**New Phase M — Mode-aware rendering** (do before the optional polish):
+- **M1 · Rain reflections (highest):** in `set_wet_mode`, drive `env.ssr_enabled = wet` (with modest `ssr_max_steps` ~24–32 for perf) so wet asphalt mirrors buildings/cars. Verify against `example-rain`. Perf: SSR only runs while raining; dry day stays cheap.
+- **M2 · Mode-dependent fog + grade:** cool grey fog `(~0.62,0.66,0.70)` + denser for rain; warm thin fog for sun (done); night fog already set — neutralize its purple. Apply a per-mode grade (cool desaturate for rain) via the existing `color_grading` overlay or `Environment.adjustment_*`. Wire in `night_mode_manager` day/rain/night branches.
+- **M3 · Car lights in rain:** turn headlights/tail-lights on whenever raining (day or night); ensure they read + reflect on the wet road.
+- **M4 · Night refinement:** warmer, more defined sodium lamp pools (tune lamp `OmniLight` range/energy/attenuation + glow), pull `NIGHT_FOG`/ambient away from purple toward neutral warm+blue, verify glowing shop signage, tune night vfog so it's atmospheric not soupy. Compare to `example-night`.
+- **M5 · Day life (overlaps Phase 6):** denser traffic, colorful storefront signage on commercial frontages, distant skyline haze, tire-polished wheel tracks on lanes.
+
+### 12.4 Revised Definition of Done
+Was sunny-day only. Now: a side-by-side that reads as the right *kind of place* in **all three modes** —
+sunny vs [example-2](../tools/overpass-docker/example-2.png), night vs [example-night](../tools/overpass-docker/example-night.png),
+rain vs [example-rain](../tools/overpass-docker/example-rain.png) — each holding the perf budget, with night/rain transitions intact.
+
+---
+
 ## 11. Execution log
 
 - **2026-06-04 — MCP bridge fix:** a stale node MCP server from a prior session held port 6505; the editor connected to it while this session's server never bound. Killed stale server, killed all Godot, let the harness respawn the node server (bound free 6505), reopened editor → connected.
@@ -243,6 +303,12 @@ Stop when a side-by-side montage of several different streets reads, at a glance
 - **2026-06-04 — Bug fixes:** (1) **load-hang fix** — `_apply_road_result` (osm_terrain_generator.gd ~5066) assigned a possibly-freed chunk `parent` to a typed `Node3D`, raising "invalid previously freed instance" which tripped the editor break-on-error and froze generation; now fetched untyped → validated → narrowed. (2) night→day restore now restores `volumetric_fog_enabled` (`_day_vfog_enabled`) and **ambient color/energy** (were never captured → reset to 1.0 default after a night cycle). **Night mode verified intact** (`vibe_night_check.png`) — sodium lamps, lit windows, volumetric haze.
 - **Phase 4 DEFERRED (risk):** curbs were intentionally zeroed for every highway class; the sidewalk-junction curb system has 8 documented failed attempts ([[curb_junction_debug]]) and the bridge-seam rule applies. Not worth reopening now; revisit via texture-only concrete sidewalk if pursued.
 - **Remaining (optional polish):** Phase 6 clutter/vegetation density; Phase 7 sky cumulus clouds (day sky is the `day_clear_2k.hdr` panorama — cloudless; swap risks sun/exposure mismatch since it now also drives ambient) + final A/B montage.
+- **2026-06-04 — Phase M DONE (mode-aware day/night/rain), verified in all states:**
+  - **M1 SSR-when-wet** ([osm_terrain_generator.gd `set_wet_mode`](../osm/osm_terrain_generator.gd#L19136)): SSR on (28 steps) while wet, off when dry — fixes the rain regression; wet asphalt now mirrors buildings/cars/sky. Verified ssr flips true→false on rain off.
+  - **M2 mode fog/grade** (`night_mode_manager._apply_rain_lighting`): rain → cool grey fog `(0.62,0.66,0.72)` + `adjustment_saturation 0.78`; restores warm `_day_fog_color`/`_day_saturation` on clear. Night fog de-purpled to `(0.05,0.06,0.10)`; night vfog 0.015→0.008; night-sky neon glow toned down.
+  - **M3 rain headlights**: player ([car.gd:247](../car/car.gd#L247) already `night OR rain`) + NPC (added `rain_changed` → `_refresh_lights` in [npc_car.gd](../traffic/npc_car.gd)). Oncoming/queued traffic shows lights in daytime rain.
+  - **Rain brightness fix**: rain dimming mults were tuned for the old bright base → daytime rain read as dusk. Raised `RAIN_AMBIENT_ENERGY_MULT 0.4→0.85`, `RAIN_BG 0.4→0.65`, `RAIN_SUN 0.35→0.45` so rain is a *bright* overcast (sky-as-light), not twilight.
+  - Shots: [vibe_m_day](../screenshots/vibe_m_day.png) · [vibe_m_night](../screenshots/vibe_m_night.png) · [vibe_m_rain_day2](../screenshots/vibe_m_rain_day2.png) · [vibe_m_rain_night](../screenshots/vibe_m_rain_night.png). Perf: SSR cost is rain-only (bounded, 28 steps); dry day/night unchanged.
 
 ## 10. Open questions / uncertainties (resolve during execution)
 

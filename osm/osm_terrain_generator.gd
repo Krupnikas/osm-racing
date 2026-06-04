@@ -19148,13 +19148,25 @@ func set_wet_mode(enabled: bool, is_night: bool = true) -> void:
 	if _ground_shader_material_lod2:
 		_ground_shader_material_lod2.set_shader_parameter("is_night", is_night)
 
+	# Мокрый асфальт зеркалит сцену (здания/машины) → включаем SSR ТОЛЬКО пока мокро.
+	# В сухой день SSR выключен (perf + чистый дневной грейд). Это чинит регрессию:
+	# без SSR мокрая дорога отражала только небо, а не сцену (см. example-rain).
+	var world_env := get_tree().current_scene.find_child("WorldEnvironment", true, false) as WorldEnvironment
+	if world_env and world_env.environment:
+		var ssr_env := world_env.environment
+		ssr_env.ssr_enabled = enabled
+		if enabled:
+			ssr_env.ssr_max_steps = 28  # умеренно — SSR работает только в дождь
+			ssr_env.ssr_fade_in = 0.2
+			ssr_env.ssr_fade_out = 4.0
+
 	# Плавный переход wetness_global за 5 секунд (один вызов RenderingServer на кадр)
 	var target := 1.0 if enabled else 0.0
 	if _wetness_tween:
 		_wetness_tween.kill()
 	_wetness_tween = create_tween()
 	_wetness_tween.tween_method(_apply_wetness_global, _wetness_value, target, 5.0)
-	print("OSM: Wet mode %s (tweening %.1f → %.1f)" % ["enabled" if enabled else "disabled", _wetness_value, target])
+	print("OSM: Wet mode %s (tweening %.1f → %.1f), SSR=%s" % ["enabled" if enabled else "disabled", _wetness_value, target, str(enabled)])
 
 
 func _apply_wetness_global(value: float) -> void:

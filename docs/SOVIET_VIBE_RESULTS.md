@@ -59,6 +59,24 @@ Night mode (unchanged feature, verified intact through all the day-side changes)
 ## Performance
 Vsync-off, dense block: ~110–120 FPS, draws ~2.3–3.2k (NPC-dependent), no regression vs baseline. SSR/SSIL/SDFGI removal offsets MSAA 4× + anisotropic. (macOS Low Power Mode caps to 60 — measure with vsync off.)
 
+## Modes (day / night / rain)
+
+A second pass made the look mode-aware (the first pass tuned sunny day only). Targets:
+[example-2](../tools/overpass-docker/example-2.png) · [example-night](../tools/overpass-docker/example-night.png) · [example-rain](../tools/overpass-docker/example-rain.png).
+
+| Mode | Ours | Notes |
+|---|---|---|
+| Day | ![day](../screenshots/vibe_m_day.png) | warm sun, weathered blocks (Phase 1–5) |
+| Night | ![night](../screenshots/vibe_m_night.png) | warm sodium lamp pools, lit windows, calm (de-purpled, less haze) |
+| Rain (day) | ![rain-day](../screenshots/vibe_m_rain_day2.png) | bright cool overcast; **wet asphalt mirrors the scene (SSR-when-wet)**; traffic tail-lights on + reflecting |
+| Rain (night) | ![rain-night](../screenshots/vibe_m_rain_night.png) | wet mirror road with lamp/tail-light reflections |
+
+Key mode-aware fixes:
+- **SSR is wet-only** — re-enabled while raining (the wet-road reflections depend on it), off when dry for perf. Fixed the regression where the global SSR-off made wet roads reflect only the sky.
+- **Fog/grade per mode** — warm thin for sun; **cool grey + desaturated** for rain; neutral dark-blue (de-purpled) for night.
+- **Headlights/tail-lights on in rain** (player + NPC), day or night.
+- **Rain is a bright overcast**, not twilight (raised rain ambient/sky multipliers).
+
 ## Deferred / not done
 - **Phase 4 — raised curbs / concrete sidewalk** (geometry): curbs were intentionally zeroed for every road class; the sidewalk-junction curb system has 8 documented failed attempts ([curb_junction_debug](../memory/curb_junction_debug.md)) and the bridge-seam rule applies. High risk, deferred.
 - **Phase 6 — clutter/vegetation density** and **Phase 7 — sky cumulus clouds**: optional polish, not started. (Day sky is the cloudless `day_clear_2k.hdr` panorama, which also drives ambient — a cloud swap needs sun/exposure care.)

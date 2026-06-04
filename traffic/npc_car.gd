@@ -54,6 +54,8 @@ signal request_despawn
 # Night mode lights
 var _lights: Node3D
 var _lights_enabled := false
+var _is_night := false
+var _is_raining := false
 
 # Wheel rotation
 var _wheel_mesh_nodes: Array[MeshInstance3D] = []
@@ -694,13 +696,25 @@ func _connect_to_night_mode() -> void:
 	var night_manager := get_tree().current_scene.find_child("NightModeManager", true, false)
 	if night_manager:
 		night_manager.night_mode_changed.connect(_on_night_mode_changed)
-		# Если уже ночь - включаем свет
-		if night_manager.is_night:
-			enable_lights()
+		night_manager.rain_changed.connect(_on_rain_changed)
+		# Свет включён ночью ИЛИ в дождь (как в example-rain — встречка с фарами)
+		_is_night = night_manager.is_night
+		_is_raining = night_manager.is_raining
+		_refresh_lights()
 
 
 func _on_night_mode_changed(enabled: bool) -> void:
-	if enabled:
+	_is_night = enabled
+	_refresh_lights()
+
+
+func _on_rain_changed(enabled: bool) -> void:
+	_is_raining = enabled
+	_refresh_lights()
+
+
+func _refresh_lights() -> void:
+	if _is_night or _is_raining:
 		enable_lights()
 	else:
 		disable_lights()
