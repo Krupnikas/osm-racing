@@ -309,6 +309,7 @@ rain vs [example-rain](../tools/overpass-docker/example-rain.png) — each holdi
   - **M3 rain headlights**: player ([car.gd:247](../car/car.gd#L247) already `night OR rain`) + NPC (added `rain_changed` → `_refresh_lights` in [npc_car.gd](../traffic/npc_car.gd)). Oncoming/queued traffic shows lights in daytime rain.
   - **Rain brightness fix**: rain dimming mults were tuned for the old bright base → daytime rain read as dusk. Raised `RAIN_AMBIENT_ENERGY_MULT 0.4→0.85`, `RAIN_BG 0.4→0.65`, `RAIN_SUN 0.35→0.45` so rain is a *bright* overcast (sky-as-light), not twilight.
   - Shots: [vibe_m_day](../screenshots/vibe_m_day.png) · [vibe_m_night](../screenshots/vibe_m_night.png) · [vibe_m_rain_day2](../screenshots/vibe_m_rain_day2.png) · [vibe_m_rain_night](../screenshots/vibe_m_rain_night.png). Perf: SSR cost is rain-only (bounded, 28 steps); dry day/night unchanged.
+- **2026-06-04 — Phase 6 (partial): denser roadside greenery.** `TREE_DENSITY_PARK 0.005→0.0075`, `TREE_DENSITY_FOREST 0.012→0.015` ([osm_terrain_generator.gd:16873](../osm/osm_terrain_generator.gd#L16873)), still capped at `MAX_TREES_PER_POLYGON 600`. Verges read leafier (closer to the tree-lined reference streets); perf held (~143 FPS, draws ~2.4k at the test spot). Shot: [vibe_greenery](../screenshots/vibe_greenery.png).
 
 ## 10. Open questions / uncertainties (resolve during execution)
 

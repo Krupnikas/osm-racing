@@ -16870,8 +16870,8 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 	var height := max_y - min_y
 	var area := width * height
 
-	const TREE_DENSITY_FOREST := 0.012
-	const TREE_DENSITY_PARK := 0.005
+	const TREE_DENSITY_FOREST := 0.015
+	const TREE_DENSITY_PARK := 0.0075  # Гуще зелень на газонах/во дворах (как в референсах) — capped ниже
 	const MAX_TREES_PER_POLYGON := 600
 
 	var density := TREE_DENSITY_FOREST if dense else TREE_DENSITY_PARK
