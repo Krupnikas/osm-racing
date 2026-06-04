@@ -66,6 +66,9 @@ uniform float puddle_world_scale : hint_range(0.01, 0.5) = 0.08;
 // Soviet asphalt wear: крупные world-space заплатки/износ + пятна (сухой асфальт)
 uniform float asphalt_wear : hint_range(0.0, 1.0) = 0.55;
 
+// Полосы наката колёс (продольные, только на проезжей части; на тротуарах/трамвае = 0)
+uniform float wheel_wear : hint_range(0.0, 1.0) = 0.0;
+
 varying vec3 world_pos;
 
 void vertex() {
@@ -113,6 +116,16 @@ void fragment() {
 		dry_albedo *= mix(1.0, mix(0.78, 1.05, patch), asphalt_wear);
 		dry_albedo *= mix(1.0, mix(0.90, 1.02, stain), asphalt_wear * 0.6);
 		dry_rough = mix(dry_rough, dry_rough * mix(0.95, 1.08, patch), asphalt_wear);
+	}
+
+	// Полосы наката колёс — лёгкие продольные потемнения/полировка вдоль колеи.
+	// Тонко, чтобы читалось как износ, а не дефект; только на проезжей части.
+	if (wheel_wear > 0.0) {
+		float ax = UV.x;  // 0..1 поперёк дороги
+		float wp = min(min(abs(ax - 0.28), abs(ax - 0.44)), min(abs(ax - 0.56), abs(ax - 0.72)));
+		float band = smoothstep(0.05, 0.0, wp);
+		dry_albedo *= mix(1.0, 0.90, band * wheel_wear);          // колея темнее
+		dry_rough = mix(dry_rough, dry_rough * 0.92, band * wheel_wear);  // чуть отполировано
 	}
 
 	// === МОКРАЯ ДОРОГА ===

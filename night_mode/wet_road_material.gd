@@ -184,6 +184,8 @@ static func create_dry_road_material(base_color: Color = Color(0.2, 0.2, 0.22)) 
 
 
 static func apply_road_type_params(mat: ShaderMaterial, road_type: String) -> void:
+	# Накат колёс по умолчанию для проезжей части; отключаем на тротуарах/трамвае ниже.
+	mat.set_shader_parameter("wheel_wear", 1.0)
 	if road_type in ["intersection", "crossing"]:
 		mat.set_shader_parameter("macro_roughness_dry", 0.05)
 		mat.set_shader_parameter("macro_albedo_dry", 0.02)
@@ -196,6 +198,8 @@ static func apply_road_type_params(mat: ShaderMaterial, road_type: String) -> vo
 	elif road_type.begins_with("tram"):
 		mat.set_shader_parameter("macro_roughness_dry", 0.02)
 		mat.set_shader_parameter("macro_albedo_dry", 0.005)
+		mat.set_shader_parameter("wheel_wear", 0.0)  # без колеи на трамвайном полотне
 	elif road_type == "path":
 		mat.set_shader_parameter("macro_roughness_dry", 0.04)
 		mat.set_shader_parameter("micro_roughness_dry", 0.03)
+		mat.set_shader_parameter("wheel_wear", 0.0)  # без колеи на тротуарах/дорожках
