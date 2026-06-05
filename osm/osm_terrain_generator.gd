@@ -229,6 +229,12 @@ var _clutter_manager: Node3D       # постоянный менеджер ре�
 # road height_offset). _sample_elevation даёт уровень ПЧ, поэтому реквизит на
 # тротуаре поднимаем на эту величину, иначе он стоит в кювете у бордюра.
 const CLUTTER_SIDEWALK_RAISE := 0.23
+# Дорожные просадки («повреждённый асфальт») у площадок дорожных работ. Врезаются
+# в геометрию дорожного батча НА ФИНАЛИЗАЦИИ → visual и collision строятся из ОДНИХ
+# вершин (старой плоской коллизии над ямой не остаётся, машина реально проседает).
+var enable_road_depressions := true
+var debug_road_depressions := false
+var _road_depressions: Dictionary = {}  # chunk_key -> [ {c,u,v,L,W,depth,slope,seed,done}, ... ]
 var _parking_sign_front_mat: StandardMaterial3D
 var _tram_stop_sign_front_mat: StandardMaterial3D
 var _deferred_lamp_queue: Dictionary = {}  # chunk_key → Array[{points, width, parent}]
@@ -3015,6 +3021,7 @@ func _unload_chunk(chunk_key: String) -> void:
 			_chunk_rs_instances.erase(chunk_key)
 		_chunk_rs_meshes.erase(chunk_key)
 		_chunk_road_materials.erase(chunk_key)
+		_road_depressions.erase(chunk_key)  # перекарвится при перезагрузке чанка
 		_chunk_building_rs.erase(chunk_key)
 		_chunk_tree_shadow_nodes.erase(chunk_key)
 
@@ -8570,6 +8577,11 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 			_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
 		return
 
+	# Дорожная просадка: врезаем В МАССИВЫ БАТЧА до создания visual+collision, чтобы оба
+	# строились из одних вершин (без устаревшей плоской коллизии над ямой).
+	if enable_road_depressions and _road_depressions.has(chunk_key):
+		_apply_road_depressions(chunk_key, texture_key, batch)
+
 	# Создаём ArrayMesh из накопленных данных
 	var arrays: Array = []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -10646,10 +10658,14 @@ func _on_cone_trigger(other_body: Node, cone: RigidBody3D) -> void:
 	if not (other_body is Node and other_body.is_in_group("player")):
 		return
 	cone.freeze = false
-	# Дорога и машина на ОДНОМ слое 1 — нельзя «сталкивать с дорогой, но не с тачкой».
-	# Поэтому короткое окно БЕЗ коллизий (маска 0): конус улетает ТОЛЬКО по импульсу,
-	# не тормозя машину. Через 0.25с включаем маску 1 → падает и катится по дороге.
-	cone.collision_mask = 0
+	# Конус — лёгкий пластик: он НЕ должен толкать/подбрасывать машину (на полной
+	# скорости тачка въезжала на конус как на трамплин). Дорога и машина на одном
+	# слое 1, поэтому маску оставляем 1 (конус падает и катится по дороге), но
+	# ИСКЛЮЧАЕМ конкретно эту машину из коллизий конуса → машина проходит сквозь,
+	# конус улетает только по импульсу.
+	cone.collision_mask = 1
+	if other_body is PhysicsBody3D:
+		cone.add_collision_exception_with(other_body)
 	cone.contact_monitor = true
 	cone.max_contacts_reported = 6
 	cone.set_meta("clutter_hit_done", true)
@@ -10665,8 +10681,8 @@ func _on_cone_trigger(other_body: Node, cone: RigidBody3D) -> void:
 	if dir.length_squared() < 0.0001:
 		dir = Vector3(0.0, 0.0, 1.0)
 	dir = dir.normalized()
-	dir.y = 0.28  # больше горизонтали, не в небо
-	var dv: float = clampf(car_speed, 5.0, 18.0)  # было 3..13 — сильнее отлёт
+	dir.y = 0.22  # больше горизонтали, не в небо
+	var dv: float = clampf(car_speed, 6.0, 24.0)  # пластик — летит подальше
 	cone.apply_central_impulse(dir * dv * cone.mass)
 	cone.apply_torque_impulse(Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * dv * cone.mass * 0.14)
 	cone.body_entered.connect(_on_clutter_hit.bind(cone, "cone_hit", "cone_drop"))
@@ -10674,11 +10690,6 @@ func _on_cone_trigger(other_body: Node, cone: RigidBody3D) -> void:
 	for ch in cone.get_children():
 		if ch is Area3D:
 			ch.monitoring = false
-	# Включаем коллизию с дорогой чуть позже — конус уже отлетел от бампера.
-	var tmr := get_tree().create_timer(0.25)
-	tmr.timeout.connect(func() -> void:
-		if is_instance_valid(cone):
-			cone.collision_mask = 1)
 
 
 ## Дорожные работы: на части артериальных дорог ставит сужающую полосу «ёлочку» конусов.
@@ -10739,6 +10750,10 @@ func _maybe_enqueue_road_works(way_id: int, tags: Dictionary, nodes: Array, pare
 		var cpos: Vector2 = anchor + dir * (float(i) * 2.2) + perp * side * lat
 		_enqueue_clutter_cone(cpos, parent)
 
+	# Просадка асфальта в отгороженной конусами полосе (между линией конусов и бордюром).
+	if enable_road_depressions:
+		_register_road_depression(anchor, dir, perp, side, half_w, way_id, chunk_key)
+
 
 ## Полуширина ближайшего дорожного сегмента в точке (из дорожного spatial-hash).
 func _worksite_half_width(p: Vector2, ck: String) -> float:
@@ -10756,6 +10771,258 @@ func _worksite_half_width(p: Vector2, ck: String) -> float:
 					best_dist = d
 					best = float(seg.width) * 0.5
 	return best
+
+
+# ============================================================================
+# Дорожная просадка («повреждённый асфальт») в отгороженной конусами полосе.
+# Регистрируется на дорожных работах, врезается в дорожный батч на финализации.
+# ============================================================================
+
+## Кандидат-просадка для чанка (детерминированно по way_id). Кладём её в полосу
+## МЕЖДУ линией конусов и бордюром (на стороне side), оставаясь на асфальте.
+func _register_road_depression(anchor: Vector2, dir: Vector2, perp: Vector2, side: float, half_w: float, way_id: int, chunk_key: String) -> void:
+	var station := anchor + dir * (4.0 * 2.2)            # ~у конуса №4
+	var cone_lat := half_w * (0.65 - 0.8 * 0.45)         # боковое смещение конуса здесь (~0.29·hw)
+	var inner_edge := cone_lat + 0.35                    # отступ от линии конусов
+	var outer_edge := half_w - 0.45                      # отступ от бордюра (остаёмся на асфальте)
+	if outer_edge - inner_edge < 0.7:
+		return                                           # узкая дорога — места нет
+	var foot_w: float = clampf(outer_edge - inner_edge, 0.7, 1.5)   # поперёк дороги
+	var center_lat := (inner_edge + outer_edge) * 0.5
+	var c := station + perp * side * center_lat
+	if not _road_depressions.has(chunk_key):
+		_road_depressions[chunk_key] = []
+	for d in _road_depressions[chunk_key]:
+		if (d["c"] as Vector2).distance_to(c) < 0.5:
+			return
+	_road_depressions[chunk_key].append({
+		"c": c, "u": dir, "v": perp * side,
+		"L": 1.0, "W": foot_w, "depth": 0.10, "slope": 0.22,
+		"seed": int(absf(float(way_id))) % 100000 + 7,
+		"done": false,
+	})
+
+
+## На финализации батча врезаем непросаженные просадки этого чанка (центр в батче).
+func _apply_road_depressions(chunk_key: String, texture_key: String, batch: Dictionary) -> void:
+	if texture_key in ["path", "tram_bed", "tram_rails"]:
+		return
+	var deps: Array = _road_depressions[chunk_key]
+	for dep in deps:
+		if dep["done"]:
+			continue
+		var c: Vector2 = dep["c"]
+		if not _xz_in_batch(batch, c.x, c.y):
+			if debug_road_depressions:
+				print("[DEPRESSION] skip tk=%s c=(%.2f,%.2f): center not in this batch" % [texture_key, c.x, c.y])
+			continue
+		if debug_road_depressions:
+			print("[DEPRESSION] carving in tk=%s c=(%.2f,%.2f)..." % [texture_key, c.x, c.y])
+		if _carve_road_depression(batch, dep):
+			dep["done"] = true
+
+
+func _xz_in_batch(batch: Dictionary, px: float, pz: float) -> bool:
+	var verts: PackedVector3Array = batch["vertices"]
+	var idx: PackedInt32Array = batch["indices"]
+	var i := 0
+	while i < idx.size():
+		if not is_nan(_bary_y(verts[idx[i]], verts[idx[i + 1]], verts[idx[i + 2]], px, pz)):
+			return true
+		i += 3
+	return false
+
+
+## Barycentric Y треугольника (a,b,cc) в точке (px,pz) по XZ; NAN если снаружи.
+func _bary_y(a: Vector3, b: Vector3, cc: Vector3, px: float, pz: float) -> float:
+	var d := (b.x - a.x) * (cc.z - a.z) - (cc.x - a.x) * (b.z - a.z)
+	if absf(d) < 1.0e-9:
+		return NAN
+	var s := ((px - a.x) * (cc.z - a.z) - (cc.x - a.x) * (pz - a.z)) / d
+	var t := ((b.x - a.x) * (pz - a.z) - (px - a.x) * (b.z - a.z)) / d
+	if s < -0.0005 or t < -0.0005 or s + t > 1.0005:
+		return NAN
+	return a.y + s * (b.y - a.y) + t * (cc.y - a.y)
+
+
+func _uv_of(p: Vector3, c: Vector2, u: Vector2, v: Vector2) -> Vector2:
+	var d := Vector2(p.x, p.z) - c
+	return Vector2(d.dot(u), d.dot(v))
+
+
+func _pt_in_tri(p: Vector2, a: Vector2, b: Vector2, c: Vector2) -> bool:
+	var den := (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y)
+	if absf(den) < 1.0e-12:
+		return false
+	var s := ((b.y - c.y) * (p.x - c.x) + (c.x - b.x) * (p.y - c.y)) / den
+	var t := ((c.y - a.y) * (p.x - c.x) + (a.x - c.x) * (p.y - c.y)) / den
+	return s >= 0.0 and t >= 0.0 and s + t <= 1.0
+
+
+func _seg_x_seg(a: Vector2, b: Vector2, c: Vector2, d: Vector2) -> bool:
+	var r := b - a
+	var s := d - c
+	var rxs := r.x * s.y - r.y * s.x
+	if absf(rxs) < 1.0e-12:
+		return false
+	var t := ((c.x - a.x) * s.y - (c.y - a.y) * s.x) / rxs
+	var uu := ((c.x - a.x) * r.y - (c.y - a.y) * r.x) / rxs
+	return t >= 0.0 and t <= 1.0 and uu >= 0.0 and uu <= 1.0
+
+
+## Пересекает ли треугольник (в uv-кадре) прямоугольник [-ha,ha]×[-hb,hb].
+func _tri_overlaps_rect(p0: Vector2, p1: Vector2, p2: Vector2, ha: float, hb: float) -> bool:
+	for p in [p0, p1, p2]:
+		if absf(p.x) <= ha and absf(p.y) <= hb:
+			return true
+	var cs := [Vector2(-ha, -hb), Vector2(ha, -hb), Vector2(ha, hb), Vector2(-ha, hb)]
+	for cr in cs:
+		if _pt_in_tri(cr, p0, p1, p2):
+			return true
+	var te := [[p0, p1], [p1, p2], [p2, p0]]
+	var re := [[cs[0], cs[1]], [cs[1], cs[2]], [cs[2], cs[3]], [cs[3], cs[0]]]
+	for e1 in te:
+		for e2 in re:
+			if _seg_x_seg(e1[0], e1[1], e2[0], e2[1]):
+				return true
+	return false
+
+
+func _road_y_over(verts: PackedVector3Array, rem: Array, px: float, pz: float) -> float:
+	for t in rem:
+		var y := _bary_y(verts[t[0]], verts[t[1]], verts[t[2]], px, pz)
+		if not is_nan(y):
+			return y
+	return NAN
+
+
+## Добавляет треугольник в обмотке дороги (фронт-грань вверх = геом. нормаль ВНИЗ;
+## так намотаны дорожные треугольники — иначе чаша получается back-face: сквозная
+## дыра в визуале и промах рейкаста коллизии).
+func _push_tri(out: PackedInt32Array, verts: PackedVector3Array, a: int, b: int, c: int) -> void:
+	var nrm := (verts[b] - verts[a]).cross(verts[c] - verts[a])
+	if nrm.y <= 0.0:
+		out.append(a); out.append(b); out.append(c)
+	else:
+		out.append(a); out.append(c); out.append(b)
+
+
+## Врезает одну просадку в батч (vertices/uvs/uv2s/normals/indices). true при успехе.
+## На любой вырожденности — false, батч НЕ трогается (COW: пишем только в конце).
+func _carve_road_depression(batch: Dictionary, dep: Dictionary) -> bool:
+	var verts: PackedVector3Array = batch["vertices"]
+	var idx: PackedInt32Array = batch["indices"]
+	var uvs: PackedVector2Array = batch["uvs"]
+	var uv2s: PackedVector2Array = batch["uv2s"]
+	var norms: PackedVector3Array = batch["normals"]
+	var has_uv2: bool = uv2s.size() == verts.size()
+
+	var c: Vector2 = dep["c"]
+	var u: Vector2 = dep["u"]
+	var v: Vector2 = dep["v"]
+	var depth: float = dep["depth"]
+	var slope: float = dep["slope"]
+	var a_out: float = float(dep["L"]) * 0.5
+	var b_out: float = float(dep["W"]) * 0.5
+	var a_in: float = maxf(a_out - slope, 0.10)
+	var b_in: float = maxf(b_out - slope, 0.10)
+	var seed: int = int(dep["seed"])
+
+	# 1) делим треугольники на «убрать» (пересекают след) и «оставить»
+	var keep := PackedInt32Array()
+	var rem: Array = []
+	var i := 0
+	while i < idx.size():
+		var i0 := idx[i]; var i1 := idx[i + 1]; var i2 := idx[i + 2]
+		if _tri_overlaps_rect(_uv_of(verts[i0], c, u, v), _uv_of(verts[i1], c, u, v), _uv_of(verts[i2], c, u, v), a_out + 0.25, b_out + 0.25):
+			rem.append([i0, i1, i2])
+		else:
+			keep.append(i0); keep.append(i1); keep.append(i2)
+		i += 3
+	if rem.is_empty():
+		if debug_road_depressions: print("[DEPRESSION] FAIL: no triangles overlap footprint")
+		return false
+	var road_y_center := _road_y_over(verts, rem, c.x, c.y)  # для лога
+
+	# 2) Перетессилируем КАЖДЫЙ убираемый треугольник равномерной barycentric-сеткой и
+	#    проседаем вершины по гладкому depth-полю. Сетка ВСЕГДА полностью замощает
+	#    треугольник → сквозной дыры быть не может; вне эллипса глубина = 0 (плоский
+	#    асфальт). UV/uv2 интерполируются → текстура без разрывов.
+	var ni := PackedInt32Array(keep)
+	var added := 0
+	for tri in rem:
+		var A: Vector3 = verts[tri[0]]
+		var B: Vector3 = verts[tri[1]]
+		var C: Vector3 = verts[tri[2]]
+		var uvA: Vector2 = uvs[tri[0]]
+		var uvB: Vector2 = uvs[tri[1]]
+		var uvC: Vector2 = uvs[tri[2]]
+		var u2A := Vector2(2.0, 1.0)
+		var u2B := Vector2(2.0, 1.0)
+		var u2C := Vector2(2.0, 1.0)
+		if has_uv2:
+			u2A = uv2s[tri[0]]; u2B = uv2s[tri[1]]; u2C = uv2s[tri[2]]
+		var emax := maxf(maxf((B - A).length(), (C - B).length()), (A - C).length())
+		var R := clampi(int(ceil(emax / 0.25)), 2, 26)
+		var stride := R + 1
+		var gidx: PackedInt32Array = PackedInt32Array()
+		gidx.resize(stride * stride)
+		for ii in range(R + 1):
+			for jj in range(R + 1 - ii):
+				var bi := float(ii) / float(R)
+				var bj := float(jj) / float(R)
+				var bk := 1.0 - bi - bj
+				var pos := A * bk + B * bi + C * bj
+				var pxz := Vector2(pos.x, pos.z)
+				var dv := _depression_depth(pxz, c, u, v, a_out, b_out, depth, slope, seed)
+				# Нормаль из градиента depth-поля → стенки ямы дают затенение (иначе плоско).
+				var eps := 0.06
+				var ddx := (_depression_depth(pxz + Vector2(eps, 0.0), c, u, v, a_out, b_out, depth, slope, seed) - dv) / eps
+				var ddz := (_depression_depth(pxz + Vector2(0.0, eps), c, u, v, a_out, b_out, depth, slope, seed) - dv) / eps
+				verts.append(Vector3(pos.x, pos.y - dv, pos.z))
+				uvs.append(uvA * bk + uvB * bi + uvC * bj)
+				if has_uv2: uv2s.append(u2A * bk + u2B * bi + u2C * bj)
+				norms.append(Vector3(ddx, 1.0, ddz).normalized())
+				gidx[ii * stride + jj] = verts.size() - 1
+		for ii in range(R):
+			for jj in range(R - ii):
+				var v00 := gidx[ii * stride + jj]
+				var v10 := gidx[(ii + 1) * stride + jj]
+				var v01 := gidx[ii * stride + (jj + 1)]
+				_push_tri(ni, verts, v00, v10, v01)
+				added += 1
+				if jj < R - ii - 1:
+					var v11 := gidx[(ii + 1) * stride + (jj + 1)]
+					_push_tri(ni, verts, v10, v11, v01)
+					added += 1
+
+	# 3) коммит — visual и collision возьмут ОДНИ И ТЕ ЖЕ массивы
+	batch["vertices"] = verts
+	batch["uvs"] = uvs
+	if has_uv2:
+		batch["uv2s"] = uv2s
+	batch["normals"] = norms
+	batch["indices"] = ni
+	if debug_road_depressions:
+		print("[DEPRESSION] seed=%d c=(%.2f,%.2f) road_y=%.3f bottom_y=%.3f depth=%.2f L=%.2f W=%.2f rem_tris=%d new_tris=%d" % [seed, c.x, c.y, road_y_center, road_y_center - depth, depth, a_out * 2.0, b_out * 2.0, rem.size(), added])
+	return true
+
+
+## Глубина просадки в точке (px,pz): 0 вне эллипса (плоский асфальт), плавно до
+## depth_max ко дну. Эллипс с детерминированным гладким джиттером контура (seed).
+func _depression_depth(p: Vector2, c: Vector2, u: Vector2, v: Vector2, a_out: float, b_out: float, depth_max: float, slope: float, seed: int) -> float:
+	var d := p - c
+	var lu := d.dot(u) / maxf(a_out, 0.05)
+	var lv := d.dot(v) / maxf(b_out, 0.05)
+	var ang := atan2(lv, lu)
+	var jit := 1.0 + 0.16 * sin(3.0 * ang + float(seed) * 0.7) + 0.10 * sin(5.0 * ang - float(seed) * 0.3)
+	var r := sqrt(lu * lu + lv * lv) / maxf(jit, 0.4)
+	if r >= 1.0:
+		return 0.0
+	var slope_frac := clampf(slope / maxf(a_out, 0.1), 0.15, 0.9)
+	var f := clampf((1.0 - r) / slope_frac, 0.0, 1.0)
+	f = f * f * (3.0 - 2.0 * f)  # smoothstep
+	return depth_max * f
 
 
 func _enqueue_tram_stop_sign(pos: Vector2, parent: Node3D, chunk_key: String) -> void:

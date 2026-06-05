@@ -151,3 +151,21 @@ chunk):
 - `N` (worksite rarity), bin-per-crossing ratio, litter density/falloff numbers.
 - SFX assets.
 - Confirm OSM coverage of `highway=crossing` and `amenity=school` in the Cherepovets data.
+
+---
+
+## Shipped (Soviet-vibe phase progress)
+
+- **Roadwork cones** — deterministic lane-narrowing taper on arterial roads, persistent
+  `ClutterManager` (decoupled from chunk streaming). Cones sit flush on the carriageway
+  (fixed the inflated-`get_aabb` levitation — see `memory/cone_levitation_debug.md`).
+  On a player hit they fly off as light plastic and **never launch the car**
+  (`add_collision_exception_with` the player so the cone passes through; only the road
+  catches it). Tunable throw in `_on_cone_trigger`.
+- **Roadwork road depression** — a physically-real irregular sunken-asphalt patch carved
+  into the road in the cone-fenced strip by the curb, so the cones are *justified*. The
+  car physically dips in; visual and collision are the same geometry. Full technique:
+  `docs/ROAD_DEPRESSION_TECHNIQUE.md`. Result shot: `screenshots/cones_road_pit_after.png`.
+
+Still parked (Phase 3+): trash bags + crumpled paper near schools; deform (dent/squash);
+warning-sign barrier; штендеры.
