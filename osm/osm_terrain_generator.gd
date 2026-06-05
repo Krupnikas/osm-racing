@@ -11,6 +11,7 @@ const BuildingWallShader = preload("res://osm/building_wall.gdshader")
 const BuildingWallCustomShader = preload("res://osm/building_wall_custom.gdshader")
 const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
+const ClutterManagerScript = preload("res://clutter/clutter_manager.gd")
 const MarsEntranceGeneratorScript = preload("res://osm/mars_entrance_generator.gd")
 const LEAF_TREE_SCENE = preload("res://models/trees/leaf/scene.gltf")
 const PINE_TREE_SCENE = preload("res://models/trees/pine/scene.gltf")
@@ -218,7 +219,12 @@ var _crossing_sign_back_mat: StandardMaterial3D
 var _bin_scene: PackedScene
 var _bin_visual_xform: Transform3D = Transform3D.IDENTITY
 var _bin_size: Vector3 = Vector3.ONE
+# Конус извлекается из road_works_pack (piece index 1 = оранжевый конус)
+var _cone_mesh: Mesh
+var _cone_visual_xform: Transform3D = Transform3D.IDENTITY
+var _cone_size: Vector3 = Vector3.ONE
 var _clutter_sfx: Dictionary = {}  # key -> AudioStream (подхватывается, если ассет есть)
+var _clutter_manager: Node3D       # постоянный менеджер реквизита (не привязан к чанкам)
 # Тротуар поднят над проезжей частью на height_offset тротуара (0.23, см. таблицу
 # road height_offset). _sample_elevation даёт уровень ПЧ, поэтому реквизит на
 # тротуаре поднимаем на эту величину, иначе он стоит в кювете у бордюра.
@@ -3145,6 +3151,8 @@ func reset_terrain() -> void:
 	_veg_mutex.unlock()
 	_terrain_objects_queue.clear()
 	_infrastructure_queue.clear()
+	if _clutter_manager:
+		_clutter_manager.clear_all()
 	_vegetation_queue.clear()
 	_pending_parking_signs.clear()
 	_curb_queue.clear()
@@ -4086,6 +4094,7 @@ func _process_phase3_queue() -> bool:
 				continue
 			if tags.has("highway"):
 				_create_road(nodes, tags, target, null, way_id_raw, true)  # skip_spatial_hash: already built by Phase 1+2
+				_maybe_enqueue_road_works(way_id_raw, tags, nodes, target, chunk_key)
 			elif tags.get("railway", "") == "tram":
 				var tram_dedup_key := "%d_%s" % [way_id_raw, chunk_key]
 				if _dispatched_tram_ways.has(tram_dedup_key):
@@ -10325,6 +10334,19 @@ func _init_clutter_assets() -> void:
 		_bin_scene = d["scene"]
 		_bin_visual_xform = d["xform"]
 		_bin_size = d["size"]
+	# Конус — piece index 1 из road_works_pack (тренога=0, конус=1, люк=2)
+	var pack_path := "res://models/road_works_pack/road_works_stylized_pack.glb"
+	if ResourceLoader.exists(pack_path):
+		var c := _extract_pack_mesh(pack_path, 1, 0.6)
+		_cone_mesh = c["mesh"]
+		_cone_visual_xform = c["xform"]
+		_cone_size = c["size"]
+	# Постоянный менеджер реквизита — ребёнок OSMTerrain (переживает перегенерацию чанков)
+	_clutter_manager = ClutterManagerScript.new()
+	_clutter_manager.name = "ClutterManager"
+	add_child(_clutter_manager)
+	_clutter_manager.setup(self)
+
 	# Звуки удара/падения. Ключи: <тип>_hit / <тип>_drop.
 	var sfx := {
 		"bin_hit": "res://audio/sfx/clutter_bin_hit.mp3",
@@ -10383,6 +10405,45 @@ func _clutter_node_aabb(node: Node3D) -> AABB:
 	return out
 
 
+## Извлекает один меш из пака по индексу (порядок find_children). Возвращает
+## {mesh, xform, size}: Mesh + трансформ визуала (скейл к target_h, центр XZ, база y=0).
+func _extract_pack_mesh(path: String, index: int, target_h: float) -> Dictionary:
+	var ps: PackedScene = load(path)
+	var tmp: Node3D = ps.instantiate()
+	add_child(tmp)
+	var result := {"mesh": null, "xform": Transform3D.IDENTITY, "size": Vector3.ONE}
+	var mis := tmp.find_children("*", "MeshInstance3D", true, false)
+	if index < mis.size():
+		var mi: MeshInstance3D = mis[index]
+		var mesh_in_root := tmp.global_transform.affine_inverse() * mi.global_transform
+		var la := mi.get_aabb()
+		var aabb := AABB()
+		var first := true
+		for i in range(8):
+			var corner := la.position + Vector3(
+				la.size.x if (i & 1) else 0.0,
+				la.size.y if (i & 2) else 0.0,
+				la.size.z if (i & 4) else 0.0)
+			var p := mesh_in_root * corner
+			if first:
+				aabb = AABB(p, Vector3.ZERO)
+				first = false
+			else:
+				aabb = aabb.expand(p)
+		var s: float = target_h / maxf(aabb.size.y, 0.0001)
+		var recenter := Vector3(
+			-(aabb.position.x + aabb.size.x * 0.5) * s,
+			-aabb.position.y * s,
+			-(aabb.position.z + aabb.size.z * 0.5) * s)
+		var scale_recenter := Transform3D(Basis().scaled(Vector3(s, s, s)), recenter)
+		result["mesh"] = mi.mesh
+		result["xform"] = scale_recenter * mesh_in_root
+		result["size"] = aabb.size * s
+	remove_child(tmp)
+	tmp.queue_free()
+	return result
+
+
 ## Контакт реквизита. Первый контакт с машиной → удар (размораживаем, отбрасываем,
 ## крутим, звук hit). Последующий контакт с НЕ-машиной после взлёта → приземление (звук drop).
 func _on_clutter_hit(other_body: Node, rigid_body: RigidBody3D, hit_key: String, drop_key: String) -> void:
@@ -10390,9 +10451,8 @@ func _on_clutter_hit(other_body: Node, rigid_body: RigidBody3D, hit_key: String,
 		return
 
 	if rigid_body.freeze:
-		# Ещё стоит — реагируем только на машину
-		var is_vehicle := other_body is VehicleBody3D or other_body is RigidBody3D or other_body.is_in_group("car")
-		if not (is_vehicle and other_body != rigid_body):
+		# Ещё стоит — реагируем только на игрока (NPC-трафик не разносит площадки)
+		if not (other_body is Node and other_body.is_in_group("player")):
 			return
 		rigid_body.freeze = false
 		rigid_body.set_meta("clutter_airborne", true)
@@ -10416,9 +10476,8 @@ func _on_clutter_hit(other_body: Node, rigid_body: RigidBody3D, hit_key: String,
 			return
 		if Time.get_ticks_msec() - int(rigid_body.get_meta("clutter_hit_ms", 0)) < 200:
 			return
-		var is_car := other_body is VehicleBody3D or (other_body is Node and other_body.is_in_group("car"))
-		if is_car:
-			return  # повторный удар машиной — это не падение
+		if other_body is Node and other_body.is_in_group("player"):
+			return  # повторный контакт с игроком — это не падение
 		rigid_body.set_meta("clutter_airborne", false)
 		_play_clutter_sfx(rigid_body, drop_key)
 
@@ -10436,27 +10495,17 @@ func _play_clutter_sfx(body: Node3D, key: String) -> void:
 	p.finished.connect(p.queue_free)
 
 
-## Ставит урну в очередь инфраструктуры (один кадр = одна урна). Дедуп через _created_sign_positions.
-func _enqueue_clutter_bin(pos: Vector2, parent: Node3D) -> void:
-	var safe := _move_object_off_road(pos, 0.3, 3)
-	var pos_key := "bin_%d_%d" % [int(safe.x), int(safe.y)]
-	if _created_sign_positions.has(pos_key):
+## Регистрирует урну в постоянном менеджере реквизита (вне жизненного цикла чанков).
+func _enqueue_clutter_bin(pos: Vector2, _parent: Node3D) -> void:
+	if _clutter_manager == null:
 		return
-	_created_sign_positions[pos_key] = true
-	var rot := float(int(absf(safe.x * 7.0 + safe.y * 13.0)) % 360) * (PI / 180.0)
-	_infrastructure_queue.append({
-		"type": "bin",
-		"pos": safe,
-		"elevation": 0.0,
-		"parent": parent,
-		"rotation": rot,
-	})
+	_clutter_manager.register("bin", _move_object_off_road(pos, 0.3, 3))
 
 
 ## Создаёт урну: замороженный kinematic RigidBody с цилиндр-коллайдером и GLB-визуалом.
-func _create_bin_immediate(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> void:
+func _create_bin_immediate(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> RigidBody3D:
 	if not is_instance_valid(parent) or _bin_scene == null:
-		return
+		return null
 	var body := RigidBody3D.new()
 	body.name = "ClutterBin"
 	# Поднимаем на уровень тротуара (ПЧ → тротуар = +0.23), чтобы урна стояла
@@ -10487,6 +10536,124 @@ func _create_bin_immediate(pos: Vector2, elevation: float, rotation_y: float, pa
 	body.add_child(vis)
 
 	parent.add_child(body)
+	return body
+
+
+## Регистрирует конус в постоянном менеджере реквизита (вне жизненного цикла чанков).
+func _enqueue_clutter_cone(pos: Vector2, _parent: Node3D) -> void:
+	if _clutter_manager:
+		_clutter_manager.register("cone", pos)
+
+
+## Создаёт дорожный конус: лёгкий замороженный kinematic RigidBody на проезжей части.
+func _create_cone_immediate(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> RigidBody3D:
+	if _cone_mesh == null or not is_instance_valid(parent):
+		return null
+	var body := RigidBody3D.new()
+	body.name = "ClutterCone"
+	body.position = Vector3(pos.x, elevation + 0.02, pos.y)
+	if elevation != 0.0:
+		body.set_meta("_elevation_applied", true)
+	body.rotation.y = rotation_y
+	body.collision_layer = 4
+	body.collision_mask = 7
+	body.mass = 1.5  # лёгкий — разлетается
+	body.freeze = true
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	body.contact_monitor = true
+	body.max_contacts_reported = 6
+	body.body_entered.connect(_on_clutter_hit.bind(body, "cone_hit", "cone_drop"))
+
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.height = _cone_size.y
+	shape.radius = maxf(_cone_size.x, _cone_size.z) * 0.5
+	collision.shape = shape
+	collision.position.y = _cone_size.y * 0.5
+	body.add_child(collision)
+
+	var vis := MeshInstance3D.new()
+	vis.mesh = _cone_mesh
+	vis.transform = _cone_visual_xform
+	body.add_child(vis)
+
+	parent.add_child(body)
+	return body
+
+
+## Дорожные работы: на части артериальных дорог ставит сужающую полосу «ёлочку» конусов.
+## Якорь — середина того участка дороги, что лежит В ЭТОМ чанке (всегда в загруженном
+## чанке, переспавнится при перезагрузке). Гейт по (way_id, чанк) — изредка. NB: конусы
+## реагируют на любой транспорт.
+func _maybe_enqueue_road_works(way_id: int, tags: Dictionary, nodes: Array, parent: Node3D, chunk_key: String) -> void:
+	if not enable_clutter or _cone_mesh == null or chunk_key.is_empty():
+		return
+	var ht: String = tags.get("highway", "")
+	if not (ht in ["primary", "secondary", "tertiary", "primary_link", "secondary_link"]):
+		return
+	var parts := chunk_key.split(",")
+	if parts.size() != 2:
+		return
+	var cx := int(parts[0])
+	var cz := int(parts[1])
+	# Гейт по (дорога, чанк) — изредка
+	if ((int(absf(float(way_id))) + cx * 92837 + cz * 689287) % 4) != 0:
+		return
+	var cmin_x: float = float(cx) * chunk_size
+	var cmin_z: float = float(cz) * chunk_size
+	var cmax_x: float = cmin_x + chunk_size
+	var cmax_z: float = cmin_z + chunk_size
+	# Полилиния + индексы точек, попавших в этот чанк
+	var pts := PackedVector2Array()
+	for n in nodes:
+		pts.append(_latlon_to_local(float(n.lat), float(n.lon)))
+	if pts.size() < 2:
+		return
+	var inside_idx: Array = []
+	for i in range(pts.size()):
+		var p := pts[i]
+		if p.x >= cmin_x and p.x < cmax_x and p.y >= cmin_z and p.y < cmax_z:
+			inside_idx.append(i)
+	if inside_idx.is_empty():
+		return
+	var mi: int = inside_idx[inside_idx.size() / 2]
+	var anchor := pts[mi]
+	# Якорь должен быть достаточно далеко от краёв чанка, чтобы вся «ёлочка»
+	# (~13 м) уместилась в ЭТОМ чанке — иначе площадка рвётся между чанками.
+	var margin := 15.0
+	if anchor.x < cmin_x + margin or anchor.x > cmax_x - margin or anchor.y < cmin_z + margin or anchor.y > cmax_z - margin:
+		return
+	var dir := pts[mini(pts.size() - 1, mi + 1)] - pts[maxi(0, mi - 1)]
+	if dir.length_squared() < 0.01:
+		dir = Vector2(1, 0)
+	dir = dir.normalized()
+	var half_w := _worksite_half_width(anchor, chunk_key)
+	var perp := Vector2(-dir.y, dir.x)
+	var side: float = 1.0 if (int(absf(float(way_id))) % 2 == 0) else -1.0
+	var n_cones := 6
+	for i in range(n_cones):
+		var frac := float(i) / float(n_cones - 1)
+		var lat: float = maxf(half_w - lerpf(0.3, 3.8, frac), 0.5)  # от края внутрь на одну полосу
+		var cpos: Vector2 = anchor + dir * (float(i) * 2.2) + perp * side * lat
+		_enqueue_clutter_cone(cpos, parent)
+
+
+## Полуширина ближайшего дорожного сегмента в точке (из дорожного spatial-hash).
+func _worksite_half_width(p: Vector2, ck: String) -> float:
+	var cell_x := int(floor(p.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(p.y / ROAD_CELL_SIZE))
+	var best := 6.0
+	var best_dist := 999.0
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var segs := _query_road_hash(Vector2i(cell_x + dx, cell_y + dy), ck)
+			for seg in segs:
+				var closest := Geometry2D.get_closest_point_to_segment(p, seg.p1, seg.p2)
+				var d: float = p.distance_to(closest)
+				if d < best_dist:
+					best_dist = d
+					best = float(seg.width) * 0.5
+	return best
 
 
 func _enqueue_tram_stop_sign(pos: Vector2, parent: Node3D, chunk_key: String) -> void:
@@ -13767,9 +13934,6 @@ func _process_infrastructure_queue() -> void:
 			"crossing_sign":
 				_create_crossing_sign_immediate(item.pos, elevation, item.get("rotation", 0.0), item.parent)
 				_record_perf("infra_crossing_sign", Time.get_ticks_usec() - t0)
-			"bin":
-				_create_bin_immediate(item.pos, elevation, item.get("rotation", 0.0), item.parent)
-				_record_perf("infra_bin", Time.get_ticks_usec() - t0)
 			"tram_stop_sign":
 				_create_tram_stop_sign_immediate(item.pos, elevation, item.get("rotation", 0.0), item.parent)
 				_record_perf("infra_tram_stop_sign", Time.get_ticks_usec() - t0)

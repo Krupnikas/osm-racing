@@ -121,10 +121,24 @@ The bench stays in `tests/` and is reused to re-validate after each phase.
   `get_tree().paused = true` immediately before measuring/screenshotting.
 - Cone / tripod / manhole physics validated in Phase 2 after splitting the pack.
 
+## ClutterManager (the backbone — `clutter/clutter_manager.gd`)
+**Lesson learned the hard way:** the per-chunk infrastructure queue is fine for dense, near-player
+items (crossing bins) but **loses sparse/far clutter** (worksite cones): nodes added to chunk
+nodes during streaming get silently removed by chunk regeneration/trim, and only ~2 of every 18
+cones survived. Fix = a **persistent `ClutterManager`** node (child of `OSMTerrain`, NOT of any
+chunk):
+- Terrain registers **dormant records** (`{type, pos}`) — idempotent by rounded position.
+- The manager spawns the real frozen `RigidBody` only within `ACTIVATE_R` (140 m) of the player
+  and frees it past `DEACTIVATE_R` (175 m); records persist, so clutter reliably reappears.
+- Build budget (6/scan @ 5 Hz) avoids frame spikes. `_create_bin_immediate`/`_create_cone_immediate`
+  return the body; the manager parents it to itself (at world origin) and tracks it for despawn.
+- Both bins and cones now route through it (`register("bin"|"cone", pos)`); clear on location change.
+
 ## Build order
-- **Phase 0 — assets.** ✅ Copy 5 models into `models/`, import. Remaining: **split the road-works
-  pack into 3 placeable sub-scenes and identify which is cone / barrier / 3rd piece** (visual),
-  pick final scales via the bench.
+- **Phase 0 — assets.** ✅ Copied 5 models into `models/`, imported. Cone identified = pack piece 1.
+- **Phase 1 — bins at crossings.** ✅ Committed `9727ec7`; migrated onto the ClutterManager.
+- **Phase 2 — roadworks cones.** ✅ Complete 6-cone lane-narrowing taper on arterials, via the
+  ClutterManager. Player-only reaction, plastic hit/drop sounds. (Tripod + manhole pack pieces parked.)
 - **Phase 1 — backbone + crossing bins.** `ClutterManager` + dormant/live pool + first rule
   (bins at crossings). First visible win + first physics test.
 - **Phase 2 — roadworks kit.** Cones + `warning_sign_barrier`, arterial worksite trigger, taper.
