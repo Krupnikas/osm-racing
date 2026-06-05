@@ -16308,9 +16308,38 @@ func _update_lamp_night_mode(is_night: bool) -> void:
 	print("OSM: Updated lamp night mode (is_night=%s) by_chunk=%d immediate=%d deferred_pending=%d" % [is_night, total_by_chunk, _lamp_batch_lights.size(), _deferred_total_size(_deferred_lamp_lights)])
 
 ## Add tree to batch for MultiMesh rendering
+var _tree_clear_zones: Array = []   # [{pos: Vector2, r2: float}] — радиусы очистки от деревьев
+var _tree_clear_zones_built := false
+
+
+## Лениво строит зоны очистки от деревьев из custom_models (clear_trees_radius>0).
+## Не фиксируем зоны, пока decoration_layer не загружен — иначе при ранней
+## генерации список останется пустым навсегда.
+func _ensure_tree_clear_zones() -> void:
+	if _tree_clear_zones_built or _decoration_layer == null:
+		return
+	for md in _decoration_layer.get_custom_models():
+		var r: float = float(md.get("clear_trees_radius", 0.0))
+		if r > 0.0:
+			var lp := _latlon_to_local(float(md.get("lat", 0.0)), float(md.get("lon", 0.0)))
+			_tree_clear_zones.append({"pos": lp, "r2": r * r})
+	_tree_clear_zones_built = true
+
+
+func _point_in_tree_clear_zone(pos: Vector2) -> bool:
+	_ensure_tree_clear_zones()
+	for z in _tree_clear_zones:
+		if pos.distance_squared_to(z.pos) < z.r2:
+			return true
+	return false
+
+
 func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, parent: Node3D, is_pine: bool = false) -> void:
 	if not enable_vegetation:
 		return
+
+	# Зоны очистки от деревьев применяются позже, в _finalize_tree_batches_for_chunk
+	# (главный поток) — здесь мы в рабочем потоке и decoration_layer ещё не виден.
 
 	if not _tree_batch_data.has(chunk_key):
 		_tree_batch_data[chunk_key] = {
@@ -16358,6 +16387,24 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 	if total_trees == 0:
 		_tree_batch_data.erase(chunk_key)
 		return
+
+	# Удаляем деревья, попавшие в зоны очистки вокруг кастомных моделей
+	# (напр. травяная фигура «Ладья»). Делаем это на главном потоке —
+	# per-tree проверка в _add_tree_to_batch идёт в рабочем потоке и не
+	# успевает увидеть загруженный decoration_layer.
+	_ensure_tree_clear_zones()
+	if not _tree_clear_zones.is_empty():
+		var keep_t := func(t): return not _point_in_tree_clear_zone(Vector2(t.origin.x, t.origin.z))
+		leaf_transforms = leaf_transforms.filter(keep_t)
+		pine_transforms = pine_transforms.filter(keep_t)
+		batch["leaf_transforms"] = leaf_transforms
+		batch["pine_transforms"] = pine_transforms
+		batch["collisions"] = (batch["collisions"] as Array).filter(
+			func(c): return not _point_in_tree_clear_zone(Vector2(c.position.x, c.position.z)))
+		total_trees = leaf_transforms.size() + pine_transforms.size()
+		if total_trees == 0:
+			_tree_batch_data.erase(chunk_key)
+			return
 
 	# Создаём LOD0 + LOD1 + LOD2(billboard) MultiMesh для каждого типа дерева
 	var draw_calls := 0
