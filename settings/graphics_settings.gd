@@ -194,8 +194,10 @@ func _apply_render_distance() -> void:
 	# Настраиваем туман (Godot 4 экспоненциальный)
 	# Тоньше прежнего: чистый передний/средний план, тёплая дымка только вдали (Soviet vibe)
 	if _environment and fog_enabled:
-		_environment.fog_density = 0.4 / render_distance
-		_environment.fog_aerial_perspective = 0.4
+		# Дальняя тёплая дымка: силуэты вдали тают в атмосфере (skyline haze),
+		# передний/средний план остаётся чистым. Плотность обратна дальности обзора.
+		_environment.fog_density = 0.9 / render_distance
+		_environment.fog_aerial_perspective = 0.6
 
 	# Обновляем terrain generator (включая дистанции чанков)
 	var terrain := get_tree().current_scene.find_child("OSMTerrainGenerator", true, false)

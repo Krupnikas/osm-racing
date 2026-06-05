@@ -19429,10 +19429,10 @@ func _setup_render_distance() -> void:
 		if world_env and world_env.environment:
 			var env := world_env.environment
 			env.fog_enabled = true
-			env.fog_density = 0.0002  # Лёгкая тёплая дымка — только вдали
+			env.fog_density = 0.0015  # Дальняя тёплая дымка — силуэты вдали тают в атмосфере
 			env.fog_light_color = Color(0.82, 0.78, 0.68)  # Тёплая пыльная дымка (не холодный синий)
 			env.fog_light_energy = 1.0
-			env.fog_aerial_perspective = 0.35  # Дымка отодвинута вдаль, передний план чистый
+			env.fog_aerial_perspective = 0.6  # Сильная воздушная перспектива на дальних силуэтах
 			env.fog_sky_affect = 0.0  # Небо не размывается туманом
 			print("OSM: Fog enabled (density: %.4f for %.0fm LOD view)" % [env.fog_density, lod2_distance])
 
