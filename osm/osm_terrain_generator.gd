@@ -113,6 +113,7 @@ const WATER_Y := -1.0             # Water surface level (1m below ground)
 const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slope from 0.22 to -1.0)
 @export var enable_roads := true  # Включить дороги
 @export var enable_curbs := true  # Включить бордюры
+@export var enable_sidewalk_curbs := true  # Phase 4: поребрик по внешнему контуру тротуаров
 @export var enable_vegetation := true  # Включить деревья/растительность
 @export var enable_street_lamps := true  # Включить уличные фонари
 @export var enable_traffic_signs := true  # Включить дорожные знаки
@@ -7909,7 +7910,7 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 	var is_tagged_crossing: bool = item.tags.get("footway", "") == "crossing"
 	# Path base is needed even for tagged crossings so curb returns and sidewalk ramps
 	# are filled; the on-road portion is still removed by road-corridor clipping.
-	_add_path_clipped_to_batch(smoothed_points, width, 0.23, parent)
+	_add_path_clipped_to_batch(smoothed_points, width, 0.23, parent, int(item.get("way_id", 0)))
 
 	# Crossing: splitting по on_road для определения on-road portions (зебра)
 	var current_pts := PackedVector2Array()
@@ -8135,7 +8136,7 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 
 ## Добавляет тротуар (path) как polygon, обрезанный road corridors + intersections.
 ## Результат обрезается точно по бордюру, как terrain.
-func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, height_offset: float, parent: Node3D) -> void:
+func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, height_offset: float, parent: Node3D, way_id: int = 0) -> void:
 	if raw_points.size() < 2:
 		return
 
@@ -8203,6 +8204,7 @@ func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, he
 			"parent": parent,
 			"ck_x": ck_x,
 			"ck_z": ck_z,
+			"way_id": way_id,
 		})
 		return
 
@@ -8328,6 +8330,126 @@ func _add_path_polys_to_batch(filtered: Array[PackedVector2Array], validated: Pa
 			batch["indices"].append(base_idx + idx)
 
 
+## Phase 4: объединяет тротуарные полигоны чанка в внешние контуры.
+## merge_polygons убирает внутренние рёбра на пересечениях тротуаров → поребрик
+## строится только по внешнему периметру (правило "no curb in the middle").
+## Дырки (clockwise loops) отбрасываем — тротуары почти никогда не охватывают газон.
+func _union_footway_polys(polys: Array[PackedVector2Array]) -> Array[PackedVector2Array]:
+	var result: Array[PackedVector2Array] = []
+	for p_raw in polys:
+		if p_raw.size() < 3:
+			continue
+		var cur: PackedVector2Array = p_raw
+		if Geometry2D.is_polygon_clockwise(cur):
+			cur = cur.duplicate()
+			cur.reverse()
+		# Сливаем cur с любым пересекающимся членом result, повторяя пока сливается
+		var restart := true
+		while restart:
+			restart = false
+			var i := 0
+			while i < result.size():
+				var m := Geometry2D.merge_polygons(result[i], cur)
+				var outers: Array[PackedVector2Array] = []
+				for mp in m:
+					if not Geometry2D.is_polygon_clockwise(mp):
+						outers.append(mp)
+				if outers.size() == 1:
+					# Пересеклись → один внешний контур; заменяем cur и рестартуем
+					cur = outers[0]
+					result.remove_at(i)
+					restart = true
+					break
+				i += 1
+		result.append(cur)
+	return result
+
+
+## Phase 4: строит поребрик (concrete strip) по внешним рёбрам объединённых
+## тротуарных контуров. Пропускает рёбра, чья внешняя сторона — проезжая часть
+## (там бордюр уже даёт террейн). Меш добавляется через RenderingServer с _curb_material.
+func _build_sidewalk_kerbs(merged: Array[PackedVector2Array], chunk_key: String, _parent: Node3D) -> void:
+	var curb_w := 0.12          # ширина поребрика (м)
+	var top_off := 0.27         # верх поребрика над elevation (тротуар +0.23, газон +0.22 → проступ ~3-5см)
+	var bot_off := -0.30        # низ уходит под землю
+	var bucket := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+	for loop in merged:
+		var n := loop.size()
+		if n < 3:
+			continue
+		for ei in range(n):
+			var p1: Vector2 = loop[ei]
+			var p2: Vector2 = loop[(ei + 1) % n]
+			var seg := p2 - p1
+			var seglen := seg.length()
+			if seglen < 0.30:
+				continue
+			var dir := seg / seglen
+			var nrm := Vector2(-dir.y, dir.x)
+			var mid := (p1 + p2) * 0.5
+			# outward = наружу от полигона (постоянно вдоль прямого ребра)
+			if Geometry2D.is_point_in_polygon(mid + nrm * 0.2, loop):
+				nrm = -nrm
+			# Разбиваем ребро на ~3м куски: поребрик СЛЕДУЕТ за рельефом (sample
+			# elevation в каждой точке), иначе длинные рёбра (напр. 2-точечный
+			# тротуар на 156м) уходят под землю на буграх и пропадают.
+			# Проверка дороги — на каждом куске (точнее по правилу 3).
+			var nsub := maxi(1, int(ceil(seglen / 3.0)))
+			for j in range(nsub):
+				var a := p1.lerp(p2, float(j) / float(nsub))
+				var b := p1.lerp(p2, float(j + 1) / float(nsub))
+				var submid := (a + b) * 0.5
+				# Правило 3: снаружи проезжая часть → поребрик не нужен (там бордюр террейна)
+				if _is_point_on_vehicle_road_neighborhood(submid + nrm * 0.45, 0.5, chunk_key):
+					continue
+				_swkerb_add_quad(bucket, a, b, nrm, curb_w, top_off, bot_off)
+	var kv: PackedVector3Array = bucket["v"]
+	if kv.size() == 0:
+		return
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = kv
+	arr[Mesh.ARRAY_NORMAL] = bucket["n"]
+	arr[Mesh.ARRAY_INDEX] = bucket["i"]
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	_rs_add_mesh(chunk_key, mesh, _curb_material)
+
+
+## Добавляет одну секцию поребрика (top + наружная + внутренняя грань) в bucket,
+## сэмплируя высоту в обоих концах секции — следование рельефу.
+func _swkerb_add_quad(bucket: Dictionary, a: Vector2, b: Vector2, nrm: Vector2, curb_w: float, top_off: float, bot_off: float) -> void:
+	var ea := _sample_elevation(a.x, a.y)
+	var eb := _sample_elevation(b.x, b.y)
+	var oa := a + nrm * curb_w
+	var ob := b + nrm * curb_w
+	var it1 := Vector3(a.x, ea + top_off, a.y)
+	var it2 := Vector3(b.x, eb + top_off, b.y)
+	var ot1 := Vector3(oa.x, ea + top_off, oa.y)
+	var ot2 := Vector3(ob.x, eb + top_off, ob.y)
+	var ob1 := Vector3(oa.x, ea + bot_off, oa.y)
+	var ob2 := Vector3(ob.x, eb + bot_off, ob.y)
+	var ib1 := Vector3(a.x, ea + bot_off, a.y)
+	var ib2 := Vector3(b.x, eb + bot_off, b.y)
+	var nrm3 := Vector3(nrm.x, 0.0, nrm.y)
+	var kv: PackedVector3Array = bucket["v"]
+	var kn: PackedVector3Array = bucket["n"]
+	var ki: PackedInt32Array = bucket["i"]
+	var base := kv.size()
+	kv.append(it1); kv.append(it2); kv.append(ot2); kv.append(ot1)
+	for _j in 4: kn.append(Vector3.UP)
+	kv.append(ot1); kv.append(ot2); kv.append(ob2); kv.append(ob1)
+	for _j in 4: kn.append(nrm3)
+	kv.append(it1); kv.append(it2); kv.append(ib2); kv.append(ib1)
+	for _j in 4: kn.append(-nrm3)
+	ki.append(base + 0); ki.append(base + 2); ki.append(base + 1)
+	ki.append(base + 0); ki.append(base + 3); ki.append(base + 2)
+	ki.append(base + 4); ki.append(base + 6); ki.append(base + 5)
+	ki.append(base + 4); ki.append(base + 7); ki.append(base + 6)
+	ki.append(base + 8); ki.append(base + 9); ki.append(base + 10)
+	ki.append(base + 8); ki.append(base + 10); ki.append(base + 11)
+
+
 ## Ensures albedo + marking textures exist for a lane-aware texture_key like "ow2", "bi4".
 ## Called lazily — generates and caches on first use.
 func _ensure_lane_textures(texture_key: String) -> void:
@@ -8361,6 +8483,8 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	if _deferred_path_polys.has(chunk_key):
 		var deferred_items: Array = _deferred_path_polys[chunk_key]
 		_deferred_path_polys.erase(chunk_key)
+		var all_fw_polys: Array[PackedVector2Array] = []  # Phase 4: union для поребрика
+		var fw_parent: Node3D = null
 		for item in deferred_items:
 			var polys: Array[PackedVector2Array] = item.polys
 			polys = _clip_path_polys_by_roads_and_intersections(polys, item.ck_x, item.ck_z, chunk_key)
@@ -8370,7 +8494,17 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 					filtered.append(poly)
 			if not filtered.is_empty():
 				_add_path_polys_to_batch(filtered, item.validated, item.width, item.height_offset, chunk_key, item.parent)
+				all_fw_polys.append_array(filtered)
+				if fw_parent == null:
+					fw_parent = item.parent
 				_had_deferred_paths = true
+		# Phase 4: поребрик по ВНЕШНЕМУ контуру тротуаров. Union убирает внутренние
+		# рёбра на пересечениях тротуаров (бордюр только снаружи перекрёстка), а
+		# проверка "снаружи дорога?" убирает бордюр там, где тротуар вплотную к
+		# проезжей части (там уже есть бордюр террейна).
+		if enable_sidewalk_curbs and all_fw_polys.size() > 0 and is_instance_valid(fw_parent):
+			var merged_fw: Array[PackedVector2Array] = _union_footway_polys(all_fw_polys)
+			_build_sidewalk_kerbs(merged_fw, chunk_key, fw_parent)
 
 	if not _road_batch_data.has(chunk_key):
 		# Нет дорог — но террейн всё равно создаём
