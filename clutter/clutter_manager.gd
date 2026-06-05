@@ -49,12 +49,16 @@ func _process(delta: float) -> void:
 	var deact2 := DEACTIVATE_R * DEACTIVATE_R
 	var built := 0
 	for rec in _records:
+		if rec.get("skip", false):
+			continue  # точка непригодна (напр. приподнятая накладка) — не пытаемся снова
 		var d2: float = pp.distance_squared_to(rec.pos)
 		if rec.instance == null:
 			if d2 < act2 and built < BUILD_BUDGET:
 				rec.instance = _build(rec)
 				if rec.instance != null:
 					built += 1
+				else:
+					rec["skip"] = true  # _build вернул null → точку пропускаем навсегда
 		elif d2 > deact2:
 			if is_instance_valid(rec.instance):
 				rec.instance.queue_free()

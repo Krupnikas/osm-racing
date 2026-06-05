@@ -10337,7 +10337,7 @@ func _init_clutter_assets() -> void:
 	# Конус — piece index 1 из road_works_pack (тренога=0, конус=1, люк=2)
 	var pack_path := "res://models/road_works_pack/road_works_stylized_pack.glb"
 	if ResourceLoader.exists(pack_path):
-		var c := _extract_pack_mesh(pack_path, 1, 0.6)
+		var c := _extract_pack_mesh(pack_path, 1, 0.8)
 		_cone_mesh = c["mesh"]
 		_cone_visual_xform = c["xform"]
 		_cone_size = c["size"]
@@ -10416,20 +10416,25 @@ func _extract_pack_mesh(path: String, index: int, target_h: float) -> Dictionary
 	if index < mis.size():
 		var mi: MeshInstance3D = mis[index]
 		var mesh_in_root := tmp.global_transform.affine_inverse() * mi.global_transform
-		var la := mi.get_aabb()
+		# AABB по ФАКТИЧЕСКИМ вершинам, а НЕ mi.get_aabb(): у road_works_pack бокс
+		# меша раздут на ~0.25м ВНИЗ (мусорный import-bounds). Из-за этого конус
+		# «левитировал» — низ раздутого бокса садился на дорогу, а реальная геометрия
+		# висела выше; заодно конус выходил мелким (раздутая высота съедала масштаб).
+		var msh: Mesh = mi.mesh
 		var aabb := AABB()
 		var first := true
-		for i in range(8):
-			var corner := la.position + Vector3(
-				la.size.x if (i & 1) else 0.0,
-				la.size.y if (i & 2) else 0.0,
-				la.size.z if (i & 4) else 0.0)
-			var p := mesh_in_root * corner
-			if first:
-				aabb = AABB(p, Vector3.ZERO)
-				first = false
-			else:
-				aabb = aabb.expand(p)
+		for si in range(msh.get_surface_count()):
+			var sarr: Array = msh.surface_get_arrays(si)
+			var sverts: PackedVector3Array = sarr[Mesh.ARRAY_VERTEX]
+			for v in sverts:
+				var p := mesh_in_root * v
+				if first:
+					aabb = AABB(p, Vector3.ZERO)
+					first = false
+				else:
+					aabb = aabb.expand(p)
+		if first:
+			aabb = mesh_in_root * mi.get_aabb()  # fallback: меш без вершин
 		var s: float = target_h / maxf(aabb.size.y, 0.0001)
 		var recenter := Vector3(
 			-(aabb.position.x + aabb.size.x * 0.5) * s,
@@ -10444,40 +10449,49 @@ func _extract_pack_mesh(path: String, index: int, target_h: float) -> Dictionary
 	return result
 
 
-## Контакт реквизита. Первый контакт с машиной → удар (размораживаем, отбрасываем,
-## крутим, звук hit). Последующий контакт с НЕ-машиной после взлёта → приземление (звук drop).
+## Контакт реквизита. Первый контакт с игроком → удар (звук hit; урна ещё и отлетает).
+## Последующий контакт с НЕ-игроком после взлёта → приземление (звук drop).
 func _on_clutter_hit(other_body: Node, rigid_body: RigidBody3D, hit_key: String, drop_key: String) -> void:
 	if not is_instance_valid(rigid_body):
 		return
 
+	var is_player: bool = other_body is Node and other_body.is_in_group("player")
 	if rigid_body.freeze:
-		# Ещё стоит — реагируем только на игрока (NPC-трафик не разносит площадки)
-		if not (other_body is Node and other_body.is_in_group("player")):
+		# ЗАМОРОЖЕННЫЙ (урна): игрок размораживает + импульс + звук удара.
+		if not is_player:
 			return
 		rigid_body.freeze = false
 		rigid_body.set_meta("clutter_airborne", true)
 		rigid_body.set_meta("clutter_hit_ms", Time.get_ticks_msec())
-		var impulse_dir: Vector3 = (rigid_body.global_position - other_body.global_position)
-		impulse_dir.y = 0.0
-		impulse_dir = impulse_dir.normalized()
-		impulse_dir.y = 0.35
 		var car_speed := 0.0
 		if other_body is RigidBody3D:
 			car_speed = (other_body as RigidBody3D).linear_velocity.length()
 		elif other_body is VehicleBody3D:
 			car_speed = (other_body as VehicleBody3D).linear_velocity.length()
-		var strength: float = clampf(car_speed * 16.0, 50.0, 500.0)
-		rigid_body.apply_central_impulse(impulse_dir * strength)
-		rigid_body.apply_torque_impulse(Vector3(randf_range(-5, 5), randf_range(-3, 3), randf_range(-5, 5)) * strength * 0.05)
+		var dir: Vector3 = (rigid_body.global_position - other_body.global_position)
+		dir.y = 0.0
+		if dir.length_squared() < 0.0001:
+			dir = Vector3(0.0, 0.0, 1.0)
+		dir = dir.normalized()
+		dir.y = 0.25
+		var dv: float = clampf(car_speed, 2.0, 14.0)
+		rigid_body.apply_central_impulse(dir * dv * rigid_body.mass)
+		rigid_body.apply_torque_impulse(Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * dv * rigid_body.mass * 0.12)
 		_play_clutter_sfx(rigid_body, hit_key)
+	elif is_player:
+		# ДИНАМИЧЕСКИЙ (конус): отлёт даёт само столкновение (лёгкая масса → машина не тормозит),
+		# мы только проигрываем звук удара один раз и отмечаем «в полёте».
+		if not bool(rigid_body.get_meta("clutter_hit_done", false)):
+			rigid_body.set_meta("clutter_hit_done", true)
+			rigid_body.set_meta("clutter_airborne", true)
+			rigid_body.set_meta("clutter_hit_ms", Time.get_ticks_msec())
+			_play_clutter_sfx(rigid_body, hit_key)
 	else:
-		# Уже летит — ловим приземление: контакт НЕ с машиной, спустя время после удара
+		# Контакт НЕ с игроком после взлёта → приземление (звук drop)
 		if not bool(rigid_body.get_meta("clutter_airborne", false)):
 			return
 		if Time.get_ticks_msec() - int(rigid_body.get_meta("clutter_hit_ms", 0)) < 200:
 			return
-		if other_body is Node and other_body.is_in_group("player"):
-			return  # повторный контакт с игроком — это не падение
 		rigid_body.set_meta("clutter_airborne", false)
 		_play_clutter_sfx(rigid_body, drop_key)
 
@@ -10545,29 +10559,58 @@ func _enqueue_clutter_cone(pos: Vector2, _parent: Node3D) -> void:
 		_clutter_manager.register("cone", pos)
 
 
-## Создаёт дорожный конус: лёгкий замороженный kinematic RigidBody на проезжей части.
+## Создаёт дорожный конус: ЛЁГКИЙ ДИНАМИЧЕСКИЙ RigidBody на проезжей части.
+## НЕ kinematic-замороженный (тот = бесконечная масса → машина тормозит как об стену).
+## Лёгкая масса → машина проезжает почти без потери скорости, а конус разлетается.
 func _create_cone_immediate(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> RigidBody3D:
 	if _cone_mesh == null or not is_instance_valid(parent):
 		return null
+	# Ставим на САМУЮ НИЗКУЮ дорожную поверхность под точкой — это проезжая часть, по
+	# которой едет машина (а не приподнятый бордюр/люк/заплатка, на которые конус
+	# залезал и левитировал). Собираем все хиты по лучу и берём минимальный «Road».
+	var base_y := elevation + 0.02
+	var space := get_world_3d().direct_space_state
+	if space:
+		var excl: Array[RID] = []
+		var lo := 1.0e20
+		var hi := -1.0e20
+		for _i in range(6):
+			var rq := PhysicsRayQueryParameters3D.create(Vector3(pos.x, elevation + 4.0, pos.y), Vector3(pos.x, elevation - 4.0, pos.y))
+			rq.collision_mask = 1
+			rq.exclude = excl
+			var hit := space.intersect_ray(rq)
+			if hit.is_empty():
+				break
+			if (hit.collider as Node).is_in_group("Road"):
+				lo = minf(lo, float(hit.position.y))
+				hi = maxf(hi, float(hit.position.y))
+			excl.append((hit.collider as Object).get_rid())
+		if lo < 1.0e19:
+			base_y = lo + 0.02  # на самой низкой дорожной поверхности = на проезжей части
+	var radius := maxf(_cone_size.x, _cone_size.z) * 0.5
 	var body := RigidBody3D.new()
 	body.name = "ClutterCone"
-	body.position = Vector3(pos.x, elevation + 0.02, pos.y)
-	if elevation != 0.0:
-		body.set_meta("_elevation_applied", true)
+	body.position = Vector3(pos.x, base_y, pos.y)
 	body.rotation.y = rotation_y
+	body.mass = 0.6  # лёгкий → почти не тормозит машину (Δv отброса = impulse/mass, от массы не зависит)
+	body.linear_damp = 0.6  # было 3.0 — слишком гасило, конус не отлетал
+	body.angular_damp = 0.9
+	# Пока стоит — ЗАМОРОЖЕН и НИ с чем не сталкивается (маска 0): не тормозит машину
+	# И не «заезжает» на приподнятые дорожные накладки (бордюр/тротуар) → стоит ровно
+	# на проезжей части. Игрока ловит дочерний Area3D (см. ниже) и будит конус.
 	body.collision_layer = 4
-	body.collision_mask = 7
-	body.mass = 1.5  # лёгкий — разлетается
+	body.collision_mask = 0
 	body.freeze = true
 	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
-	body.contact_monitor = true
-	body.max_contacts_reported = 6
-	body.body_entered.connect(_on_clutter_hit.bind(body, "cone_hit", "cone_drop"))
+	var pmat := PhysicsMaterial.new()
+	pmat.bounce = 0.25
+	pmat.friction = 0.7
+	body.physics_material_override = pmat
 
 	var collision := CollisionShape3D.new()
 	var shape := CylinderShape3D.new()
 	shape.height = _cone_size.y
-	shape.radius = maxf(_cone_size.x, _cone_size.z) * 0.5
+	shape.radius = radius
 	collision.shape = shape
 	collision.position.y = _cone_size.y * 0.5
 	body.add_child(collision)
@@ -10577,8 +10620,65 @@ func _create_cone_immediate(pos: Vector2, elevation: float, rotation_y: float, p
 	vis.transform = _cone_visual_xform
 	body.add_child(vis)
 
+	# Триггер-зона: тело с маской 0 само не детектит контакты, поэтому игрока ловит Area3D.
+	var area := Area3D.new()
+	area.collision_layer = 0
+	area.collision_mask = 1  # игрок на слое 1; NPC (слой 4) не триггерят
+	var acol := CollisionShape3D.new()
+	var ashape := CylinderShape3D.new()
+	ashape.height = _cone_size.y
+	ashape.radius = radius + 0.45  # триггерим раньше — конус улетает ДО того, как бампер в него упрётся
+	acol.shape = ashape
+	acol.position.y = _cone_size.y * 0.5
+	area.add_child(acol)
+	area.body_entered.connect(_on_cone_trigger.bind(body))
+	body.add_child(area)
+
 	parent.add_child(body)
 	return body
+
+
+## Игрок задел конус (через Area3D): размораживаем, включаем коллизию, контролируемый
+## отброс от машины + звук. Хаотичного выброса из оверлапа нет — толкаем направленно.
+func _on_cone_trigger(other_body: Node, cone: RigidBody3D) -> void:
+	if not is_instance_valid(cone) or not cone.freeze:
+		return
+	if not (other_body is Node and other_body.is_in_group("player")):
+		return
+	cone.freeze = false
+	# Дорога и машина на ОДНОМ слое 1 — нельзя «сталкивать с дорогой, но не с тачкой».
+	# Поэтому короткое окно БЕЗ коллизий (маска 0): конус улетает ТОЛЬКО по импульсу,
+	# не тормозя машину. Через 0.25с включаем маску 1 → падает и катится по дороге.
+	cone.collision_mask = 0
+	cone.contact_monitor = true
+	cone.max_contacts_reported = 6
+	cone.set_meta("clutter_hit_done", true)
+	cone.set_meta("clutter_airborne", true)
+	cone.set_meta("clutter_hit_ms", Time.get_ticks_msec())
+	var car_speed := 0.0
+	if other_body is RigidBody3D:
+		car_speed = (other_body as RigidBody3D).linear_velocity.length()
+	elif other_body is VehicleBody3D:
+		car_speed = (other_body as VehicleBody3D).linear_velocity.length()
+	var dir: Vector3 = cone.global_position - (other_body as Node3D).global_position
+	dir.y = 0.0
+	if dir.length_squared() < 0.0001:
+		dir = Vector3(0.0, 0.0, 1.0)
+	dir = dir.normalized()
+	dir.y = 0.28  # больше горизонтали, не в небо
+	var dv: float = clampf(car_speed, 5.0, 18.0)  # было 3..13 — сильнее отлёт
+	cone.apply_central_impulse(dir * dv * cone.mass)
+	cone.apply_torque_impulse(Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * dv * cone.mass * 0.14)
+	cone.body_entered.connect(_on_clutter_hit.bind(cone, "cone_hit", "cone_drop"))
+	_play_clutter_sfx(cone, "cone_hit")
+	for ch in cone.get_children():
+		if ch is Area3D:
+			ch.monitoring = false
+	# Включаем коллизию с дорогой чуть позже — конус уже отлетел от бампера.
+	var tmr := get_tree().create_timer(0.25)
+	tmr.timeout.connect(func() -> void:
+		if is_instance_valid(cone):
+			cone.collision_mask = 1)
 
 
 ## Дорожные работы: на части артериальных дорог ставит сужающую полосу «ёлочку» конусов.
@@ -10633,7 +10733,9 @@ func _maybe_enqueue_road_works(way_id: int, tags: Dictionary, nodes: Array, pare
 	var n_cones := 6
 	for i in range(n_cones):
 		var frac := float(i) / float(n_cones - 1)
-		var lat: float = maxf(half_w - lerpf(0.3, 3.8, frac), 0.5)  # от края внутрь на одну полосу
+		# Держим «ёлочку» ВГЛУБИ проезжей части (а не у кромки): крайний конус — на 65%
+		# полуширины (середина полосы, не на бордюре), сужаемся к ~20% (ближе к центру).
+		var lat: float = clampf(half_w * (0.65 - frac * 0.45), 0.5, maxf(half_w - 1.3, 0.5))
 		var cpos: Vector2 = anchor + dir * (float(i) * 2.2) + perp * side * lat
 		_enqueue_clutter_cone(cpos, parent)
 
