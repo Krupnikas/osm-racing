@@ -122,6 +122,7 @@ const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slop
 @export var enable_night_mode_windows := true  # Включить подсветку окон ночью
 @export var enable_manholes := true  # Включить люки на дорогах
 @export var enable_crossing_signs := true  # Включить знаки пешеходных переходов
+@export var enable_clutter := true  # Интерактивный реквизит (урны, конусы, мешки…)
 @export var enable_fences := true  # Включить заборы (промзоны, территории)
 @export var enable_elevation := false  # Включить elevation из SRTM30m
 @export var enable_ground_plane := false  # Grey fallback plane at raw elevation under terrain
@@ -210,6 +211,18 @@ var _custom_model_cache: Dictionary = {}  # path -> PackedScene
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
 var _crossing_sign_front_mat: StandardMaterial3D
 var _crossing_sign_back_mat: StandardMaterial3D
+
+# --- Интерактивный клаттер (урны/конусы/мешки…) ---
+# Модели грузятся как замороженные kinematic RigidBody (как знаки переходов):
+# не тратят физику и стоят на месте, пока машина не заденет → _on_clutter_hit.
+var _bin_scene: PackedScene
+var _bin_visual_xform: Transform3D = Transform3D.IDENTITY
+var _bin_size: Vector3 = Vector3.ONE
+var _clutter_sfx: Dictionary = {}  # key -> AudioStream (подхватывается, если ассет есть)
+# Тротуар поднят над проезжей частью на height_offset тротуара (0.23, см. таблицу
+# road height_offset). _sample_elevation даёт уровень ПЧ, поэтому реквизит на
+# тротуаре поднимаем на эту величину, иначе он стоит в кювете у бордюра.
+const CLUTTER_SIDEWALK_RAISE := 0.23
 var _parking_sign_front_mat: StandardMaterial3D
 var _tram_stop_sign_front_mat: StandardMaterial3D
 var _deferred_lamp_queue: Dictionary = {}  # chunk_key → Array[{points, width, parent}]
@@ -653,6 +666,9 @@ func _ready() -> void:
 
 	# Инициализируем lamp meshes для батчинга
 	_init_lamp_meshes()
+
+	# Инициализируем модели интерактивного клаттера
+	_init_clutter_assets()
 
 	# Материалы знака пешеходного перехода (shared)
 	_crossing_sign_front_mat = StandardMaterial3D.new()
@@ -10210,6 +10226,12 @@ func _enqueue_crossing_signs(crossing_pts: PackedVector2Array, parent: Node3D, c
 	var rot_b: float = atan2(-road_dir.x, -road_dir.y)
 	_enqueue_single_crossing_sign(pos_b, rot_b, parent)
 
+	# Урна на тротуаре у перехода — не на каждом («изредка»), детерминированно по позиции
+	if enable_clutter and (int(absf(mid.x * 3.0 + mid.y * 5.0)) % 10) < 7:
+		var bin_pos: Vector2 = mid + road_dir * (sign_offset_along + 1.3) \
+			+ Vector2(road_dir.y, -road_dir.x) * (half_road_w + 2.3)
+		_enqueue_clutter_bin(bin_pos, parent)
+
 
 func _enqueue_single_crossing_sign(pos: Vector2, rotation_y: float, parent: Node3D) -> void:
 	var safe_pos := _move_object_off_road(pos, 0.3, 3)
@@ -10289,6 +10311,180 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 
 	if _draw_call_logging_enabled:
 		_draw_call_stats["signs"] += 2
+
+	parent.add_child(body)
+
+
+# ============================ ИНТЕРАКТИВНЫЙ КЛАТТЕР ============================
+
+## Грузит и измеряет модели клаттера один раз. Автоскейл по высоте (как на стенде).
+func _init_clutter_assets() -> void:
+	var bin_path := "res://models/green_metal_waste_bin/green_metal_waste_bin.glb"
+	if ResourceLoader.exists(bin_path):
+		var d := _measure_clutter_model(bin_path, 1.0)
+		_bin_scene = d["scene"]
+		_bin_visual_xform = d["xform"]
+		_bin_size = d["size"]
+	# Звуки удара/падения. Ключи: <тип>_hit / <тип>_drop.
+	var sfx := {
+		"bin_hit": "res://audio/sfx/clutter_bin_hit.mp3",
+		"bin_drop": "res://audio/sfx/clutter_bin_drop.mp3",
+		"cone_hit": "res://audio/sfx/clutter_cone_hit.mp3",
+		"cone_drop": "res://audio/sfx/clutter_cone_drop.mp3",
+		"bag_hit": "res://audio/sfx/clutter_bag_hit.mp3",
+		"bag_drop": "res://audio/sfx/clutter_bag_drop.mp3",
+		"paper_drop": "res://audio/sfx/clutter_paper_drop.mp3",
+	}
+	for key in sfx:
+		var p: String = sfx[key]
+		if ResourceLoader.exists(p):
+			var stream: AudioStream = load(p)
+			if stream is AudioStreamMP3:
+				(stream as AudioStreamMP3).loop = false  # SFX не зациклить
+			_clutter_sfx[key] = stream
+
+
+## Возвращает {scene, xform, size}: PackedScene + трансформ визуала (скейл к target_h,
+## центр по XZ, основание в y=0) + габариты после скейла.
+func _measure_clutter_model(path: String, target_h: float) -> Dictionary:
+	var ps: PackedScene = load(path)
+	var tmp: Node3D = ps.instantiate()
+	add_child(tmp)
+	var aabb := _clutter_node_aabb(tmp)
+	remove_child(tmp)
+	tmp.queue_free()
+	var s: float = target_h / maxf(aabb.size.y, 0.0001)
+	var origin := Vector3(
+		-(aabb.position.x + aabb.size.x * 0.5) * s,
+		-aabb.position.y * s,
+		-(aabb.position.z + aabb.size.z * 0.5) * s)
+	return {"scene": ps, "xform": Transform3D(Basis().scaled(Vector3(s, s, s)), origin), "size": aabb.size * s}
+
+
+## Слитый AABB всех мешей узла в его собственном локальном пространстве.
+func _clutter_node_aabb(node: Node3D) -> AABB:
+	var out := AABB()
+	var first := true
+	var root_inv := node.global_transform.affine_inverse()
+	for mi in node.find_children("*", "MeshInstance3D", true, false):
+		var a: AABB = mi.get_aabb()
+		var gt: Transform3D = mi.global_transform
+		for i in range(8):
+			var corner := a.position + Vector3(
+				a.size.x if (i & 1) else 0.0,
+				a.size.y if (i & 2) else 0.0,
+				a.size.z if (i & 4) else 0.0)
+			var local := root_inv * (gt * corner)
+			if first:
+				out = AABB(local, Vector3.ZERO)
+				first = false
+			else:
+				out = out.expand(local)
+	return out
+
+
+## Контакт реквизита. Первый контакт с машиной → удар (размораживаем, отбрасываем,
+## крутим, звук hit). Последующий контакт с НЕ-машиной после взлёта → приземление (звук drop).
+func _on_clutter_hit(other_body: Node, rigid_body: RigidBody3D, hit_key: String, drop_key: String) -> void:
+	if not is_instance_valid(rigid_body):
+		return
+
+	if rigid_body.freeze:
+		# Ещё стоит — реагируем только на машину
+		var is_vehicle := other_body is VehicleBody3D or other_body is RigidBody3D or other_body.is_in_group("car")
+		if not (is_vehicle and other_body != rigid_body):
+			return
+		rigid_body.freeze = false
+		rigid_body.set_meta("clutter_airborne", true)
+		rigid_body.set_meta("clutter_hit_ms", Time.get_ticks_msec())
+		var impulse_dir: Vector3 = (rigid_body.global_position - other_body.global_position)
+		impulse_dir.y = 0.0
+		impulse_dir = impulse_dir.normalized()
+		impulse_dir.y = 0.35
+		var car_speed := 0.0
+		if other_body is RigidBody3D:
+			car_speed = (other_body as RigidBody3D).linear_velocity.length()
+		elif other_body is VehicleBody3D:
+			car_speed = (other_body as VehicleBody3D).linear_velocity.length()
+		var strength: float = clampf(car_speed * 16.0, 50.0, 500.0)
+		rigid_body.apply_central_impulse(impulse_dir * strength)
+		rigid_body.apply_torque_impulse(Vector3(randf_range(-5, 5), randf_range(-3, 3), randf_range(-5, 5)) * strength * 0.05)
+		_play_clutter_sfx(rigid_body, hit_key)
+	else:
+		# Уже летит — ловим приземление: контакт НЕ с машиной, спустя время после удара
+		if not bool(rigid_body.get_meta("clutter_airborne", false)):
+			return
+		if Time.get_ticks_msec() - int(rigid_body.get_meta("clutter_hit_ms", 0)) < 200:
+			return
+		var is_car := other_body is VehicleBody3D or (other_body is Node and other_body.is_in_group("car"))
+		if is_car:
+			return  # повторный удар машиной — это не падение
+		rigid_body.set_meta("clutter_airborne", false)
+		_play_clutter_sfx(rigid_body, drop_key)
+
+
+func _play_clutter_sfx(body: Node3D, key: String) -> void:
+	var stream: AudioStream = _clutter_sfx.get(key)
+	if stream == null or not is_instance_valid(body):
+		return
+	var p := AudioStreamPlayer3D.new()
+	p.stream = stream
+	p.max_distance = 70.0
+	p.unit_size = 8.0
+	body.add_child(p)
+	p.play()
+	p.finished.connect(p.queue_free)
+
+
+## Ставит урну в очередь инфраструктуры (один кадр = одна урна). Дедуп через _created_sign_positions.
+func _enqueue_clutter_bin(pos: Vector2, parent: Node3D) -> void:
+	var safe := _move_object_off_road(pos, 0.3, 3)
+	var pos_key := "bin_%d_%d" % [int(safe.x), int(safe.y)]
+	if _created_sign_positions.has(pos_key):
+		return
+	_created_sign_positions[pos_key] = true
+	var rot := float(int(absf(safe.x * 7.0 + safe.y * 13.0)) % 360) * (PI / 180.0)
+	_infrastructure_queue.append({
+		"type": "bin",
+		"pos": safe,
+		"elevation": 0.0,
+		"parent": parent,
+		"rotation": rot,
+	})
+
+
+## Создаёт урну: замороженный kinematic RigidBody с цилиндр-коллайдером и GLB-визуалом.
+func _create_bin_immediate(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> void:
+	if not is_instance_valid(parent) or _bin_scene == null:
+		return
+	var body := RigidBody3D.new()
+	body.name = "ClutterBin"
+	# Поднимаем на уровень тротуара (ПЧ → тротуар = +0.23), чтобы урна стояла
+	# НА тротуаре, а не в кювете у бордюра.
+	body.position = Vector3(pos.x, elevation + CLUTTER_SIDEWALK_RAISE, pos.y)
+	if elevation != 0.0:
+		body.set_meta("_elevation_applied", true)
+	body.rotation.y = rotation_y
+	body.collision_layer = 4
+	body.collision_mask = 7
+	body.mass = 16.0  # потяжелее, чтобы не отлетала так далеко
+	body.freeze = true
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	body.contact_monitor = true
+	body.max_contacts_reported = 6
+	body.body_entered.connect(_on_clutter_hit.bind(body, "bin_hit", "bin_drop"))
+
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.height = _bin_size.y
+	shape.radius = maxf(_bin_size.x, _bin_size.z) * 0.5
+	collision.shape = shape
+	collision.position.y = _bin_size.y * 0.5
+	body.add_child(collision)
+
+	var vis: Node3D = _bin_scene.instantiate()
+	vis.transform = _bin_visual_xform
+	body.add_child(vis)
 
 	parent.add_child(body)
 
@@ -13571,6 +13767,9 @@ func _process_infrastructure_queue() -> void:
 			"crossing_sign":
 				_create_crossing_sign_immediate(item.pos, elevation, item.get("rotation", 0.0), item.parent)
 				_record_perf("infra_crossing_sign", Time.get_ticks_usec() - t0)
+			"bin":
+				_create_bin_immediate(item.pos, elevation, item.get("rotation", 0.0), item.parent)
+				_record_perf("infra_bin", Time.get_ticks_usec() - t0)
 			"tram_stop_sign":
 				_create_tram_stop_sign_immediate(item.pos, elevation, item.get("rotation", 0.0), item.parent)
 				_record_perf("infra_tram_stop_sign", Time.get_ticks_usec() - t0)
