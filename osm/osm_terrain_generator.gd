@@ -8519,6 +8519,11 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		var all_fw_polys: Array[PackedVector2Array] = []  # Phase 4: union для поребрика
 		var fw_parent: Node3D = null
 		for item in deferred_items:
+			# Chunk may have unloaded (freeing item.parent) before this deferred
+			# flush runs — skip stale items, otherwise _add_path_polys_to_batch
+			# gets a freed Node3D for arg 6 and the debugger trips.
+			if not is_instance_valid(item.parent):
+				continue
 			var polys: Array[PackedVector2Array] = item.polys
 			polys = _clip_path_polys_by_roads_and_intersections(polys, item.ck_x, item.ck_z, chunk_key)
 			var filtered: Array[PackedVector2Array] = []
@@ -10707,34 +10712,54 @@ func _maybe_enqueue_road_works(way_id: int, tags: Dictionary, nodes: Array, pare
 		return
 	var cx := int(parts[0])
 	var cz := int(parts[1])
-	# Гейт по (дорога, чанк) — изредка
-	if ((int(absf(float(way_id))) + cx * 92837 + cz * 689287) % 4) != 0:
-		return
+	# Гейт по (дорога, чанк) — изредка. ВАЖНО: хэшируем по АБСОЛЮТНОМУ (origin-
+	# относительному) индексу чанка, а не по сцен-относительному cx,cz. Иначе
+	# free roam и гонка спавнятся в разных точках → разный _world_offset_chunks →
+	# одна и та же реальная дорога получает разный cx,cz → работы выпадают на
+	# разных дорогах в разных сценах. abs_cx/abs_cz одинаковы в любой сцене.
+	var abs_cx := cx + _world_offset_chunks.x
+	var abs_cz := cz + _world_offset_chunks.y
 	var cmin_x: float = float(cx) * chunk_size
 	var cmin_z: float = float(cz) * chunk_size
 	var cmax_x: float = cmin_x + chunk_size
 	var cmax_z: float = cmin_z + chunk_size
-	# Полилиния + индексы точек, попавших в этот чанк
+	# Полилиния дороги
 	var pts := PackedVector2Array()
 	for n in nodes:
 		pts.append(_latlon_to_local(float(n.lat), float(n.lon)))
 	if pts.size() < 2:
 		return
-	var inside_idx: Array = []
-	for i in range(pts.size()):
-		var p := pts[i]
-		if p.x >= cmin_x and p.x < cmax_x and p.y >= cmin_z and p.y < cmax_z:
-			inside_idx.append(i)
-	if inside_idx.is_empty():
-		return
-	var mi: int = inside_idx[inside_idx.size() / 2]
-	var anchor := pts[mi]
+	# Размещение: либо ФОРСИРОВАННАЯ точка (ручной список, всегда, минует гейт),
+	# либо процедурный гейт 1-к-20 по АБСОЛЮТНОМУ чанку (в 5 раз реже прежнего 1-к-4).
+	var anchor: Vector2
+	var dir: Vector2
+	var fres := _forced_roadwork(pts, cmin_x, cmin_z, cmax_x, cmax_z)
+	var forced: bool = fres.get("hit", false)
+	if forced:
+		anchor = fres["anchor"]
+		dir = fres["dir"]
+	else:
+		if ((int(absf(float(way_id))) + abs_cx * 92837 + abs_cz * 689287) % 20) != 0:
+			return
+		var inside_idx: Array = []
+		for i in range(pts.size()):
+			var p := pts[i]
+			if p.x >= cmin_x and p.x < cmax_x and p.y >= cmin_z and p.y < cmax_z:
+				inside_idx.append(i)
+		if inside_idx.is_empty():
+			return
+		var mi: int = inside_idx[inside_idx.size() / 2]
+		anchor = pts[mi]
+		dir = pts[mini(pts.size() - 1, mi + 1)] - pts[maxi(0, mi - 1)]
 	# Якорь должен быть достаточно далеко от краёв чанка, чтобы вся «ёлочка»
 	# (~13 м) уместилась в ЭТОМ чанке — иначе площадка рвётся между чанками.
 	var margin := 15.0
 	if anchor.x < cmin_x + margin or anchor.x > cmax_x - margin or anchor.y < cmin_z + margin or anchor.y > cmax_z - margin:
-		return
-	var dir := pts[mini(pts.size() - 1, mi + 1)] - pts[maxi(0, mi - 1)]
+		if not forced:
+			return
+		# форсированную точку просто поджимаем внутрь чанка, чтобы не рвалась
+		anchor.x = clampf(anchor.x, cmin_x + margin, cmax_x - margin)
+		anchor.y = clampf(anchor.y, cmin_z + margin, cmax_z - margin)
 	if dir.length_squared() < 0.01:
 		dir = Vector2(1, 0)
 	dir = dir.normalized()
@@ -10753,6 +10778,44 @@ func _maybe_enqueue_road_works(way_id: int, tags: Dictionary, nodes: Array, pare
 	# Просадка асфальта в отгороженной конусами полосе (между линией конусов и бордюром).
 	if enable_road_depressions:
 		_register_road_depression(anchor, dir, perp, side, half_w, way_id, chunk_key)
+
+
+## Ручной список «всегда здесь» точек дорожных работ (lat, lon) — минуют
+## процедурный гейт. Сюда кладём трассовые/дебажные споты. Координаты реальные
+## (origin-независимые), так что работают одинаково в free roam и в гонках.
+const FORCED_ROADWORKS: Array[Vector2] = [
+	Vector2(59.144900, 37.939466),  # дебаг/трасса: конусная ёлочка + яма
+]
+
+## Если форсированная точка лежит НА этой дороге внутри чанка — возвращает
+## {hit:true, anchor:Vector2 (проекция на дорогу), dir:Vector2 (вдоль дороги)},
+## иначе {hit:false}. Расстояние «точка на дороге» — point-to-segment (узлы OSM
+## редкие, поэтому считаем до отрезков, а не до вершин).
+func _forced_roadwork(pts: PackedVector2Array, cmin_x: float, cmin_z: float, cmax_x: float, cmax_z: float) -> Dictionary:
+	for fll in FORCED_ROADWORKS:
+		var fp := _latlon_to_local(fll.x, fll.y)
+		if not (fp.x >= cmin_x and fp.x < cmax_x and fp.y >= cmin_z and fp.y < cmax_z):
+			continue
+		var best_d := 1.0e30
+		var best_proj := Vector2.ZERO
+		var best_dir := Vector2(1, 0)
+		for i in range(pts.size() - 1):
+			var a := pts[i]
+			var b := pts[i + 1]
+			var ab := b - a
+			var l2 := ab.length_squared()
+			var t := 0.0
+			if l2 > 0.0001:
+				t = clampf((fp - a).dot(ab) / l2, 0.0, 1.0)
+			var proj := a + ab * t
+			var d := proj.distance_squared_to(fp)
+			if d < best_d:
+				best_d = d
+				best_proj = proj
+				best_dir = ab
+		if best_d < 15.0 * 15.0:  # точка действительно на этой дороге
+			return {"hit": true, "anchor": best_proj, "dir": best_dir}
+	return {"hit": false}
 
 
 ## Полуширина ближайшего дорожного сегмента в точке (из дорожного spatial-hash).

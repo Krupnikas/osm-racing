@@ -22,6 +22,7 @@ const CAR_SPEC_LINES := {
 	"polo":       "2009 · 1.6L · 105 HP · FWD · 1135 KG",
 	"beetle":     "1968 · 1.5L · 53 HP · RWD · 880 KG",
 	"bmw_m3_gtr": "2001 · 3.2L · 380 HP · RWD · 1350 KG",
+	"ford_focus_st_2006": "2006 · 2.5L · 225 HP · FWD · 1392 KG",
 }
 
 # — Tunnel car-select (NFS Underground style) feature flag —

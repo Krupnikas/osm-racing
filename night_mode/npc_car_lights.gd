@@ -31,7 +31,7 @@ var _lights_enabled := false
 var _taillight_mat: StandardMaterial3D
 
 # Тип модели машины (синхронизировано с car_lights.gd)
-enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109, VAZ_2107, POLO }
+enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109, VAZ_2107, POLO, FORD_FOCUS }
 var _car_model: CarModel = CarModel.DEFAULT
 
 
@@ -59,6 +59,9 @@ func _detect_car_model() -> void:
 			return
 		elif child.name == "PoloModel":
 			_car_model = CarModel.POLO
+			return
+		elif child.name == "FocusModel":
+			_car_model = CarModel.FORD_FOCUS
 			return
 		elif child.name == "Model":
 			# Lada 2109 (taxi, DPS) uses "Model" node name
@@ -108,6 +111,14 @@ func _create_headlight() -> void:
 		_use_split_lights = true
 		var left_pos = Vector3(-0.50, 0.55, 1.5)
 		var right_pos = Vector3(0.50, 0.55, 1.5)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.FORD_FOCUS:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.62, 0.72, 1.85)
+		var right_pos = Vector3(0.62, 0.72, 1.85)
 		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
 		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
 		return
@@ -171,6 +182,13 @@ func _create_taillight() -> void:
 		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
 		return
 
+	if _car_model == CarModel.FORD_FOCUS:
+		var left_pos = Vector3(-0.60, 0.85, -1.90)
+		var right_pos = Vector3(0.60, 0.85, -1.90)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
 	# Блочные машинки используют одну центральную фару
 	taillight = _create_single_taillight("NPCTaillight", Vector3(0, 0.4, -2.2))
 
@@ -201,6 +219,8 @@ func _create_reverse_light() -> void:
 		pos = Vector3(0, 0.3, -1.23)
 	elif _car_model == CarModel.POLO:
 		pos = Vector3(0, 0.55, -1.5)
+	elif _car_model == CarModel.FORD_FOCUS:
+		pos = Vector3(0, 0.6, -1.95)
 	else:
 		pos = Vector3(0, 0.35, -2.2)
 
@@ -260,6 +280,9 @@ func _create_light_meshes() -> void:
 	elif _car_model == CarModel.POLO:
 		reverse_pos = Vector3(0, 0.55, -1.52)
 		reverse_size = Vector3(0.10, 0.05, 0.03)
+	elif _car_model == CarModel.FORD_FOCUS:
+		reverse_pos = Vector3(0, 0.6, -1.97)
+		reverse_size = Vector3(0.12, 0.05, 0.03)
 	else:
 		reverse_pos = Vector3(0, 0.35, -2.22)
 		reverse_size = Vector3(0.12, 0.05, 0.03)
@@ -319,6 +342,13 @@ func _create_split_light_meshes(headlight_mat: StandardMaterial3D) -> void:
 		tl_left_pos = Vector3(-0.45, 0.55, -1.57)
 		tl_right_pos = Vector3(0.45, 0.55, -1.57)
 		tl_size = Vector3(0.16, 0.08, 0.03)
+	elif _car_model == CarModel.FORD_FOCUS:
+		hl_left_pos = Vector3(-0.62, 0.72, 1.95)
+		hl_right_pos = Vector3(0.62, 0.72, 1.95)
+		hl_size = Vector3(0.26, 0.12, 0.05)
+		tl_left_pos = Vector3(-0.60, 0.88, -1.97)
+		tl_right_pos = Vector3(0.60, 0.88, -1.97)
+		tl_size = Vector3(0.20, 0.16, 0.04)
 	else:
 		return  # Не должно случиться
 

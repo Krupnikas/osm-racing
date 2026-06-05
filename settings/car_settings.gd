@@ -28,7 +28,8 @@ const DISPLAY_STATS := {
 	"polo": {"accel": 0.60, "speed": 0.55, "handling": 0.75},
 	"logan": {"accel": 0.55, "speed": 0.50, "handling": 0.65},
 	"matiz": {"accel": 0.40, "speed": 0.35, "handling": 0.75},
-	"bmw_m3_gtr": {"accel": 0.90, "speed": 0.95, "handling": 0.85}
+	"bmw_m3_gtr": {"accel": 0.90, "speed": 0.95, "handling": 0.85},
+	"ford_focus_st_2006": {"accel": 0.78, "speed": 0.80, "handling": 0.78}
 }
 
 var selected_car_id: String = DEFAULT_CAR
@@ -98,6 +99,18 @@ const CARS := {
 	"bmw_m3_gtr": {
 		"name": "BMW M3 GTR",
 		"scene": "res://addons/gevp/scenes/bmw_m3_gtr_car.tscn"
+	},
+	"ford_focus_st_2006": {
+		"name": "Ford Focus ST",
+		"scene": "res://addons/gevp/scenes/ford_focus_st_car.tscn",
+		"max_torque": 850.0,  # 2.5L турбо, спортивный хот-хэтч
+		"max_steering_angle": 38.0,
+		"steering_speed": 4.3,
+		"final_drive": 3.8,
+		"max_rpm": 6500.0,
+		"coefficient_of_drag": 0.32,
+		"frontal_area": 2.0,
+		"gear_ratios": [3.5, 2.3, 1.7, 1.3, 1.0]
 	}
 }
 

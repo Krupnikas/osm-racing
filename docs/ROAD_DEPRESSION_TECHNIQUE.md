@@ -73,6 +73,32 @@ host loop → a **triangular through-hole** with only the bowl bottom partly cov
 - Placement: in the strip **between the cone line and the curb** (`side`), near taper
   station ~cone #4 where the outboard strip is widest; skipped on roads too narrow.
 
+## Roadwork placement: rarity + forced spots + scene-consistency
+Cones (the 6-cone taper) and the pit are placed together in
+`osm/osm_terrain_generator.gd::_maybe_enqueue_road_works()`. Two ways a road gets works:
+
+1. **Procedural (rare):** a 1-in-20 hash gate — `(way_id + abs_cx*92837 + abs_cz*689287) % 20 == 0`.
+   - **Tune frequency here:** `% 20` ≈ 5 %. Smaller modulus = more works (`% 4` was the old, too-dense value). Bigger = rarer.
+   - **Must hash the ABSOLUTE chunk** (`abs_cx = cx + _world_offset_chunks.x`), NOT the
+     scene-relative `cx,cz`. `_world_offset_chunks` is derived from each scene's spawn
+     point, so free-roam (`main.tscn`) and the race (`race/race_scene.tscn`) have DIFFERENT
+     offsets (e.g. `(-2,2)` vs `(0,1)`). Hashing relative coords put works on *different
+     real roads* in each scene — that was the "no cones in the race" bug. Absolute coords
+     are origin-relative → identical in every scene.
+
+2. **Forced (always — for tracks / set-pieces):** the const list near the function:
+   ```gdscript
+   const FORCED_ROADWORKS: Array[Vector2] = [
+       Vector2(59.144900, 37.939466),  # (lat, lon) — debug/track spot
+   ]
+   ```
+   **To add a spot: append one `Vector2(lat, lon)` placed on the road centerline.** It
+   bypasses the rarity gate and is anchored exactly on the nearest road via
+   `_forced_roadwork()` (point-to-segment projection; tolerance 15 m, so the point must
+   actually lie on a `primary/secondary/tertiary` road). Real lat/lon = origin-independent
+   → shows up identically in free-roam and races. Verify in-game: teleport there, check
+   `_road_depressions` (nearest pit) + `_clutter_manager._records` (cones within ~18 m).
+
 ## To extend later
 - **Speed bump / ramp:** same carve, positive displacement (negate the depth field).
 - **Manhole / patch:** depth ≈ 0, swap UV/material region (needs a second texture_key or

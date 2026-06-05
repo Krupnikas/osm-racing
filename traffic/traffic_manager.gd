@@ -20,6 +20,7 @@ var npc_vaz2107_scene: PackedScene
 var npc_polo_scene: PackedScene
 var npc_matiz_scene: PackedScene
 var npc_logan_scene: PackedScene
+var npc_focus_scene: PackedScene
 var road_network: Node  # RoadNetwork
 var terrain_generator: Node  # OSMTerrainGenerator
 var player_car: Node3D
@@ -55,6 +56,7 @@ func _ready() -> void:
 	npc_polo_scene = preload("res://traffic/npc_polo.tscn")
 	npc_matiz_scene = preload("res://traffic/npc_matiz.tscn")
 	npc_logan_scene = preload("res://traffic/npc_logan.tscn")
+	npc_focus_scene = preload("res://traffic/npc_ford_focus_st.tscn")
 
 	# Создаём RoadNetwork
 	var RoadNetworkScript = preload("res://traffic/road_network.gd")
@@ -108,6 +110,7 @@ func _warmup_mesh_cache() -> void:
 	if npc_polo_scene: scenes.append(npc_polo_scene)
 	if npc_matiz_scene: scenes.append(npc_matiz_scene)
 	if npc_logan_scene: scenes.append(npc_logan_scene)
+	if npc_focus_scene: scenes.append(npc_focus_scene)
 	for scene in scenes:
 		var instance := scene.instantiate() as Node3D
 		instance.visible = false
@@ -406,7 +409,7 @@ func _get_npc_from_pool():
 		return npc
 
 	if active_npcs.size() < max_npcs:
-		# Распределение: 5% DPS, 10% Такси, 10% ПАЗ, 25% ВАЗ-2107, 20% Polo, 2% Logan, 28% блочные
+		# Распределение: 5% DPS, 10% Такси, 10% ПАЗ, 25% ВАЗ-2107, 10% Polo, 10% Matiz, 2% Logan, 3% Focus ST, 25% блочные
 		var rand := randf()
 		var scene_to_use: PackedScene
 		var car_type: String
@@ -439,8 +442,12 @@ func _get_npc_from_pool():
 			# 2% - Renault Logan
 			scene_to_use = npc_logan_scene
 			car_type = "Renault Logan"
+		elif rand < 0.75:
+			# 3% - Ford Focus ST (rare hot-hatch)
+			scene_to_use = npc_focus_scene
+			car_type = "Ford Focus ST"
 		else:
-			# 28% - блочные машинки
+			# 25% - блочные машинки
 			scene_to_use = npc_car_scene
 			car_type = "box car"
 
