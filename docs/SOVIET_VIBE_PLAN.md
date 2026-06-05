@@ -291,6 +291,35 @@ rain vs [example-rain](../tools/overpass-docker/example-rain.png) — each holdi
 
 ---
 
+## 13. Phase S — Ground-floor commercial frontage (storefront row)
+
+**Trigger:** an **apartment** building (`building=apartments/residential`, or ≥3 levels / ≥9 m; **never** a standalone shop / supermarket / retail / commercial building) that has **≥3 shop/amenity POI nodes** inside or on its outline. POI nodes that are *vertices* of the building outline count (fixed `_find_pois_inside_building` to include boundary points — e.g. Пятёрочка node 2183228569 is a vertex of way 45417773).
+
+**Goal:** the `example-2` look — a continuous ground-floor retail strip: shops side by side under one protruding canopy carrying a continuous multi-colour sign ribbon, with display windows, integrated into the facade's bay grid.
+
+**Spec (agreed 2026-06-05):**
+1. **One continuous sign ribbon** across the run (not separate per-shop tablets of varying size), carried on a **protruding canopy** (козырёк) — *not* flat on the wall; the canopy stays forward as now. The ribbon is divided per bay (each bay shows its shop's colour + name/logo).
+2. **Bay alignment:** each shop = exactly **1 small bay** (the ~3.2 m / 512 px slot), stretched/compressed by the **same scale** the facade uses for its bay textures, and **starting on a bay boundary** (never mid-bay). The storefront grid = the facade's ground-floor bay grid for the frontage edge (so it doesn't break the pattern).
+3. **Display windows + one door:** every shop bay gets a витрина (glass); exactly **one door** for the whole chain, placed in the bay with the **highest terrain elevation** (where the colour foundation plinth is shortest, so the door actually meets the ground — buildings sit on plinths to stay level on hilly terrain).
+4. **Multi-colour signs:** realistic colour **sets keyed by shop/amenity type** (grocery, pharmacy, bank, hardware…), with **per-name override**. Brand logo used when matched (e.g. Пятёрочка → `pyaterochka.png`), else coloured text.
+5. **Leftover length (agreed):** shops occupy **one contiguous run of K bays** (K = shop count) on the frontage, anchored near the POIs' centroid (snapped to a bay boundary); the **remaining ground-floor bays render as normal residential facade** — no artificial filler. (Future: split into several runs if shops are spread far apart.)
+
+**Frontage wall:** edge nearest the POIs (longest among voted); normal flipped **outward** from the building centre (bug fixed — inward normal had pushed the whole row inside the building and hidden it).
+
+**Status:** ✅ DONE 2026-06-05. Verified at way 45417773 (56 ул. Краснодонцев) — Антей · Fix Price · ВТБ · Сантехника · Пятёрочка, all five as a continuous lit storefront band, day + night. Standalone stores correctly excluded (verified ТЦ Квадрат way 46227249 `shop=mall` → no ribbon, single sign).
+
+**Implementation (osm_terrain_generator.gd + facade_assembler.gd):**
+- Gate in `_add_business_signs_simple`: `≥3 shop POIs` + `_is_apartment_building` + not a self-store → `_add_storefront_row`.
+- Boundary-POI fix in `_find_pois_inside_building` (shop nodes that are building-outline vertices now counted, e.g. Пятёрочка).
+- `FacadeAssembler.edge_patterns` exposes the per-edge tiled bay grid; the row aligns витрины/door to the real slot boundaries (fixes "doesn't reach the bay end").
+- `_find_storefront_wall`: POI-voted longest edge, **outward** normal (centroid flip — the earlier inward normal hid the whole row inside the building).
+- `_build_storefront_frontage`: one protruding canopy + per-bay colour fascia (emissive `night_factor` shader → короба glow softly at night via `_facade_emission_materials`), витрины with frames + расстекловка, one aluminium glass door (handles/kick-plate/transom) at the max-elevation bay with stairs.
+- `_storefront_make_sign`: fixed-height segment, content fitted (logo scaled / long text wrapped to 2 lines); `_storefront_sign_combo` = colour bg+fg by type → hash(way_id,bay), name overrides; brand logos shown as-is.
+- Leftover ground-floor bays = normal facade.
+- Shots: `screenshots/storefront_door_day.png`, `storefront_night3.png`.
+
+---
+
 ## 11. Execution log
 
 - **2026-06-04 — MCP bridge fix:** a stale node MCP server from a prior session held port 6505; the editor connected to it while this session's server never bound. Killed stale server, killed all Godot, let the harness respawn the node server (bound free 6505), reopened editor → connected.

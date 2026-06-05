@@ -46,6 +46,7 @@ var _cached_road_albedo: Texture2D = null  # Shared asphalt albedo for lane-awar
 var _building_textures: Dictionary = {}
 var _window_shader: Shader = null  # Кэш шейдера окон (создается один раз)
 var _shop_back_wall_shader: Shader = null  # Кэш шейдера задней стенки магазина
+var _storefront_sign_shader: Shader = null  # Короба вывесок: цвет + эмиссия по night_factor
 var _ground_textures: Dictionary = {}
 var _normal_textures: Dictionary = {}  # Normal maps
 var _noise_textures: Dictionary = {}  # Noise textures for road shader
@@ -9493,6 +9494,8 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
+	var fa_bays: Dictionary = {}  # Phase S: facade bay grid для выравнивания витрин
+
 	# Сохраняем рёбра здания для проверки расстояния при генерации деревьев
 	# Skip if spatial hash was already built by Phase 1+2 worker thread
 	if not skip_spatial_hash:
@@ -9616,6 +9619,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 						var _fa := FacadeAssembler.new()
 						_fa.build(points, building_height, base_elev, parent, fnd_h, way_id, fa_arch, fa_floors)
 						_facade_emission_materials.append_array(_fa.emission_materials)
+						fa_bays = _fa.edge_patterns.duplicate()
 						fa_handled = true
 						print("[FacadeAssembler] archetype=%s way=%d floors=%d" % [fa_arch.get("id", "?"), way_id, fa_floors])
 
@@ -9637,7 +9641,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
-	_add_business_signs_simple(points, tags, parent, building_height, base_elev, loader, way_id, entrance_nodes, poi_nodes)
+	_add_business_signs_simple(points, tags, parent, building_height, base_elev, loader, way_id, entrance_nodes, poi_nodes, fa_bays)
 
 	# Добавляем подъезды жилых домов (из building_overrides JSON)
 	if way_id > 0 and _decoration_layer:
@@ -19797,7 +19801,7 @@ func _add_building_windows(points: PackedVector2Array, height: float, rng: Rando
 ## BUSINESS SIGNS (вывески для заведений)
 ## ============================================================================
 
-func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, parent: Node3D, building_height: float, base_elev: float = 0.0, loader: Node = null, way_id: int = 0, entrance_nodes: Array = [], poi_nodes: Array = []) -> void:
+func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, parent: Node3D, building_height: float, base_elev: float = 0.0, loader: Node = null, way_id: int = 0, entrance_nodes: Array = [], poi_nodes: Array = [], fa_bays: Dictionary = {}) -> void:
 	"""
 	Добавление вывесок для заведений
 	Приоритет: вход (entrance) > POI node > самая длинная стена
@@ -19827,6 +19831,18 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 				print("BusinessSign: Skipping POI %s (suppressed by override for way %d)" % [str(poi_id_val), way_id])
 				continue
 		businesses_to_process.append({"tags": poi.tags, "poi_position": poi.position, "poi_id": poi_id_val})
+
+	# Многоквартирный дом с 3+ магазинами на первом этаже → процедурный ряд
+	# витрин (входные группы mid-блоками встык). НЕ применяется к самостоятельным
+	# магазинам/супермаркетам (отдельно стоящее здание-магазин) — у них одна вывеска.
+	if not (tags.has("amenity") or tags.has("shop")) and _is_apartment_building(tags, building_height):
+		var storefront_shops: Array = []
+		for b in businesses_to_process:
+			if b.get("poi_position") != null:
+				storefront_shops.append(b)
+		if storefront_shops.size() >= 3:
+			_add_storefront_row(points, storefront_shops, parent, base_elev, building_height, way_id, fa_bays)
+			return
 
 	if businesses_to_process.is_empty():
 		return
@@ -19938,6 +19954,461 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 			parent.add_child(back_wall)
 
 		parent.add_child(sign)
+
+
+## True для многоквартирного/жилого дома (не отдельно стоящий магазин/супермаркет).
+func _is_apartment_building(tags: Dictionary, building_height: float) -> bool:
+	var b := str(tags.get("building", ""))
+	# Отдельно стоящие магазины/коммерция/гаражи — НЕ ряд витрин
+	if b in ["retail", "commercial", "supermarket", "warehouse", "industrial",
+			"kiosk", "garage", "garages", "shed", "hangar", "service", "roof",
+			"construction", "hut", "container"]:
+		return false
+	# Явно жилые
+	if b in ["apartments", "residential", "dormitory"]:
+		return true
+	# Многоэтажность как признак квартирного дома
+	var levels := int(tags.get("building:levels", "0"))
+	if levels >= 3:
+		return true
+	if building_height >= 9.0:
+		return true
+	return false
+
+
+## Находит фасадную стену под витрины: ребро, к которому ближе всего большинство
+## POI-магазинов (уличный фронт). Fallback — самая длинная стена.
+func _find_storefront_wall(points: PackedVector2Array, shops: Array, block_w: float) -> Dictionary:
+	var n_edges := points.size()
+	if n_edges < 3:
+		return {}
+	var votes := {}
+	for shop in shops:
+		var pt: Vector2 = shop.poi_position
+		var best_i := -1
+		var best_d := 1.0e9
+		for i in range(n_edges):
+			var a: Vector2 = points[i]
+			var c := points[(i + 1) % n_edges]
+			var cp := Geometry2D.get_closest_point_to_segment(pt, a, c)
+			var d := pt.distance_to(cp)
+			if d < best_d:
+				best_d = d
+				best_i = i
+		if best_i >= 0:
+			votes[best_i] = int(votes.get(best_i, 0)) + 1
+	# Среди рёбер, к которым тяготеют магазины, берём САМОЕ ДЛИННОЕ (чтобы влез
+	# весь ряд витрин), а не просто с большинством голосов.
+	var best_edge := -1
+	var best_len := 0.0
+	for i in votes.keys():
+		var a: Vector2 = points[i]
+		var c: Vector2 = points[(i + 1) % n_edges]
+		var L := a.distance_to(c)
+		if L < block_w + 1.0:
+			continue
+		if L > best_len:
+			best_len = L
+			best_edge = i
+	if best_edge < 0:
+		return {}
+	var p1: Vector2 = points[best_edge]
+	var p2: Vector2 = points[(best_edge + 1) % n_edges]
+	var dir := (p2 - p1).normalized()
+	# Нормаль ДОЛЖНА смотреть наружу от центра здания (иначе витрины уходят внутрь
+	# дома и не видны). Тот же приём, что в _find_closest_wall_to_point.
+	var center := Vector2.ZERO
+	for pt in points:
+		center += pt
+	center /= float(n_edges)
+	var nrm := Vector2(dir.y, -dir.x)
+	var wall_center := (p1 + p2) * 0.5
+	if nrm.dot(center - wall_center) > 0.0:
+		nrm = -nrm
+	return {"p1": p1, "p2": p2, "normal": Vector3(nrm.x, 0, nrm.y), "length": best_len, "edge": best_edge}
+
+
+# Phase S: цветовые наборы вывесок по типу заведения (+ override по названию).
+const STOREFRONT_COLORS := {
+	"supermarket": Color(0.78, 0.13, 0.13), "convenience": Color(0.78, 0.13, 0.13),
+	"grocery": Color(0.72, 0.18, 0.16), "greengrocer": Color(0.30, 0.55, 0.25),
+	"pharmacy": Color(0.13, 0.55, 0.27), "chemist": Color(0.13, 0.55, 0.27),
+	"bank": Color(0.13, 0.30, 0.62), "atm": Color(0.13, 0.30, 0.62),
+	"variety_store": Color(0.90, 0.45, 0.10),
+	"hardware": Color(0.20, 0.42, 0.60), "doityourself": Color(0.20, 0.42, 0.60),
+	"bathroom_furnishing": Color(0.22, 0.40, 0.58),
+	"bakery": Color(0.66, 0.42, 0.16), "confectionery": Color(0.75, 0.45, 0.55),
+	"clothes": Color(0.52, 0.18, 0.48), "shoes": Color(0.45, 0.22, 0.30),
+	"hairdresser": Color(0.45, 0.25, 0.55), "beauty": Color(0.60, 0.30, 0.45),
+	"mobile_phone": Color(0.85, 0.50, 0.05), "electronics": Color(0.10, 0.45, 0.70),
+	"alcohol": Color(0.40, 0.12, 0.16), "florist": Color(0.30, 0.55, 0.30),
+	"books": Color(0.30, 0.35, 0.55), "optician": Color(0.15, 0.50, 0.55),
+}
+const STOREFRONT_NAME_OVERRIDES := {
+	"пятёрочка": Color(0.85, 0.20, 0.10), "пятерочка": Color(0.85, 0.20, 0.10),
+	"магнит": Color(0.80, 0.10, 0.10), "fix price": Color(0.95, 0.45, 0.05),
+	"антей": Color(0.10, 0.50, 0.30), "вкусвилл": Color(0.30, 0.55, 0.20),
+}
+# Сочетания фон+шрифт для текстовых вывесок (разноцветно как в примере).
+const STOREFRONT_COMBOS := [
+	{"bg": Color(0.78, 0.14, 0.14), "fg": Color(1, 1, 1)},          # красный / белый
+	{"bg": Color(0.13, 0.32, 0.62), "fg": Color(1, 0.92, 0.35)},    # синий / жёлтый
+	{"bg": Color(0.95, 0.78, 0.10), "fg": Color(0.15, 0.15, 0.18)}, # жёлтый / тёмный
+	{"bg": Color(0.16, 0.50, 0.28), "fg": Color(1, 1, 1)},          # зелёный / белый
+	{"bg": Color(0.90, 0.45, 0.08), "fg": Color(1, 1, 1)},          # оранжевый / белый
+	{"bg": Color(0.90, 0.90, 0.92), "fg": Color(0.16, 0.22, 0.48)}, # белый / синий
+	{"bg": Color(0.36, 0.14, 0.46), "fg": Color(1, 0.86, 0.32)},    # фиолетовый / жёлтый
+	{"bg": Color(0.10, 0.45, 0.55), "fg": Color(1, 1, 1)},          # бирюзовый / белый
+	{"bg": Color(0.20, 0.22, 0.26), "fg": Color(0.95, 0.75, 0.20)}, # тёмный / янтарный
+]
+
+
+func _contrast_fg(bg: Color) -> Color:
+	var lum := 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b
+	return Color(0.12, 0.12, 0.14) if lum > 0.62 else Color(1, 1, 1)
+
+
+## Сочетание фон+шрифт для вывески: override по названию → цвет по типу → хэш по way_id+bay.
+func _storefront_sign_combo(tags: Dictionary, way_id: int, bay_idx: int) -> Dictionary:
+	var nm := str(tags.get("name", "")).to_lower()
+	for key in STOREFRONT_NAME_OVERRIDES:
+		if key in nm:
+			var bg: Color = STOREFRONT_NAME_OVERRIDES[key]
+			return {"bg": bg, "fg": _contrast_fg(bg)}
+	var t := str(tags.get("shop", ""))
+	if t == "":
+		t = str(tags.get("amenity", ""))
+	if STOREFRONT_COLORS.has(t):
+		var bg2: Color = STOREFRONT_COLORS[t]
+		return {"bg": bg2, "fg": _contrast_fg(bg2)}
+	var h := absi(way_id * 2654435761 + bay_idx * 40503)
+	return STOREFRONT_COMBOS[h % STOREFRONT_COMBOS.size()]
+
+
+## Вывеска фиксированной высоты сегмента: контент вписан внутрь (лого — пропорц.,
+## длинный текст — в 2 строки меньшим шрифтом). Возвращает {node, bg}.
+func _storefront_make_sign(tags: Dictionary, way_id: int, bay_idx: int, seg_w: float, seg_h: float) -> Dictionary:
+	var inner_w := seg_w * 0.93
+	var inner_h := seg_h * 0.85
+	var root := Node3D.new()
+	var logo := BusinessSignGenerator._find_brand_logo(tags)
+	if logo != "" and ResourceLoader.exists(logo):
+		var tex: Texture2D = load(logo)
+		var sp := Sprite3D.new()
+		sp.texture = tex
+		sp.shaded = false
+		sp.double_sided = true
+		sp.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		var tw := maxf(1.0, float(tex.get_width()))
+		var th := maxf(1.0, float(tex.get_height()))
+		sp.pixel_size = minf(inner_w / tw, inner_h / th)
+		root.add_child(sp)
+		return {"node": root, "bg": Color(0.95, 0.95, 0.96)}  # лого на белой подложке
+	# Текст
+	var combo := _storefront_sign_combo(tags, way_id, bay_idx)
+	var txt := BusinessSignGenerator.get_sign_text(tags).to_upper()
+	if txt == "":
+		return {"node": root, "bg": combo.bg}
+	var lbl := Label3D.new()
+	lbl.text = txt
+	lbl.modulate = combo.fg
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.font_size = 96
+	lbl.double_sided = true
+	var nlines := 1 if txt.length() <= 9 else 2
+	if nlines == 2:
+		lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	var cpl := txt.length() if nlines == 1 else int(ceil(float(txt.length()) / 2.0))
+	var text_w_px := float(cpl) * float(lbl.font_size) * 0.55
+	var text_h_px := float(nlines) * float(lbl.font_size) * 1.12
+	var ps := minf(inner_w / maxf(text_w_px, 1.0), inner_h / maxf(text_h_px, 1.0))
+	lbl.pixel_size = ps
+	if nlines == 2:
+		lbl.width = inner_w / ps
+	root.add_child(lbl)
+	return {"node": root, "bg": combo.bg}
+
+
+## Точка фасада в world-координатах: t — вдоль стены, h — высота над base_elev, d — наружу.
+func _sfp(p1: Vector2, wdir: Vector2, nrm2: Vector2, base_elev: float, t: float, h: float, d: float) -> Vector3:
+	return Vector3(p1.x + wdir.x * t + nrm2.x * d, base_elev + h, p1.y + wdir.y * t + nrm2.y * d)
+
+
+func _sf_add_quad(bucket: Dictionary, a: Vector3, b: Vector3, c: Vector3, d: Vector3, nrm: Vector3) -> void:
+	var kv: PackedVector3Array = bucket["v"]
+	var kn: PackedVector3Array = bucket["n"]
+	var ki: PackedInt32Array = bucket["i"]
+	var base := kv.size()
+	kv.append(a); kv.append(b); kv.append(c); kv.append(d)
+	for _j in 4: kn.append(nrm)
+	ki.append(base + 0); ki.append(base + 1); ki.append(base + 2)
+	ki.append(base + 0); ki.append(base + 2); ki.append(base + 3)
+
+
+func _sf_commit(bucket: Dictionary, mat: Material, nm: String, parent: Node3D) -> void:
+	var kv: PackedVector3Array = bucket["v"]
+	if kv.size() == 0:
+		return
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = kv
+	arr[Mesh.ARRAY_NORMAL] = bucket["n"]
+	arr[Mesh.ARRAY_INDEX] = bucket["i"]
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = mat
+	mi.name = nm
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mi)
+
+
+## Тонкая горизонтальная планка рамы/импоста (front-facing).
+func _sf_hbar(bucket: Dictionary, p1: Vector2, wdir: Vector2, nrm2: Vector2, base_elev: float, t0: float, t1: float, y: float, d: float, th: float = 0.05) -> void:
+	_sf_add_quad(bucket, _sfp(p1,wdir,nrm2,base_elev,t0,y-th,d), _sfp(p1,wdir,nrm2,base_elev,t1,y-th,d), _sfp(p1,wdir,nrm2,base_elev,t1,y+th,d), _sfp(p1,wdir,nrm2,base_elev,t0,y+th,d), Vector3(nrm2.x,0,nrm2.y))
+
+
+## Тонкая вертикальная планка рамы/импоста.
+func _sf_vbar(bucket: Dictionary, p1: Vector2, wdir: Vector2, nrm2: Vector2, base_elev: float, t: float, y0: float, y1: float, d: float, th: float = 0.05) -> void:
+	_sf_add_quad(bucket, _sfp(p1,wdir,nrm2,base_elev,t-th,y0,d), _sfp(p1,wdir,nrm2,base_elev,t+th,y0,d), _sfp(p1,wdir,nrm2,base_elev,t+th,y1,d), _sfp(p1,wdir,nrm2,base_elev,t-th,y1,d), Vector3(nrm2.x,0,nrm2.y))
+
+
+## Phase S: непрерывная торговая лента по первому этажу. K магазинов = K смежных bay,
+## выровненных по РЕАЛЬНОЙ сетке фасада (со швами). Один выдающийся козырёк со сплошной
+## разноцветной лентой вывесок, витрины с рамой/расстекловкой, одна дверь — в bay с
+## максимальным elevation, со ступенями. Остальной первый этаж — обычный фасад.
+func _add_storefront_row(points: PackedVector2Array, shops: Array, parent: Node3D, base_elev: float, building_height: float, way_id: int, fa_bays: Dictionary = {}) -> void:
+	var wall := _find_storefront_wall(points, shops, 3.2)
+	if wall.is_empty():
+		return
+	var p1: Vector2 = wall.p1
+	var p2: Vector2 = wall.p2
+	var edge_idx := int(wall.get("edge", -1))
+	var wdir := (p2 - p1).normalized()
+	var wlen: float = p1.distance_to(p2)
+	var nrm3: Vector3 = wall.normal
+	var nrm2 := Vector2(nrm3.x, nrm3.z)
+
+	# Границы bay (t от p1). Берём РЕАЛЬНУЮ сетку фасада (слоты молекулы со швами),
+	# чтобы витрины точно совпадали с фасадом; иначе равномерный фолбэк 3.2м.
+	var bnds: Array = []
+	if fa_bays.has(edge_idx):
+		var pat: Array = fa_bays[edge_idx]
+		for slot in pat:
+			bnds.append(float(slot["t_left"]))
+		if pat.size() > 0:
+			bnds.append(float(pat[pat.size() - 1]["t_right"]))
+	if bnds.size() < 2:
+		var nb := maxi(1, int(round(wlen / 3.2)))
+		bnds.clear()
+		for i in range(nb + 1):
+			bnds.append(wlen * float(i) / float(nb))
+	var nbays := bnds.size() - 1
+	var k := mini(shops.size(), nbays)
+	if k < 1:
+		return
+
+	shops.sort_custom(func(a, b): return (a.poi_position - p1).dot(wdir) < (b.poi_position - p1).dot(wdir))
+	var run_shops: Array = shops.slice(0, k)
+
+	# Якорь: bay с центроидом POI, прогон из k bay вокруг него
+	var cen := Vector2.ZERO
+	for s in run_shops:
+		cen += s.poi_position
+	cen /= float(run_shops.size())
+	var t_cen := (cen - p1).dot(wdir)
+	var cbay := 0
+	for i in range(nbays):
+		if t_cen >= float(bnds[i]) and t_cen < float(bnds[i + 1]):
+			cbay = i
+			break
+	var start_bay := clampi(cbay - k / 2, 0, nbays - k)
+
+	var run_bays: Array = []
+	for i in range(k):
+		run_bays.append({"t0": float(bnds[start_bay + i]), "t1": float(bnds[start_bay + i + 1])})
+
+	# Дверь — в bay с максимальным elevation
+	var door_idx := 0
+	var max_e := -1.0e9
+	for i in range(k):
+		var ct: float = (run_bays[i].t0 + run_bays[i].t1) * 0.5
+		var cc := p1 + wdir * ct
+		var e := _sample_elevation(cc.x, cc.y)
+		if e > max_e:
+			max_e = e
+			door_idx = i
+
+	_build_storefront_frontage(p1, wdir, nrm2, base_elev, run_bays, run_shops, door_idx, parent, way_id)
+
+
+func _build_storefront_frontage(p1: Vector2, wdir: Vector2, nrm2: Vector2, base_elev: float, run_bays: Array, shops: Array, door_idx: int, parent: Node3D, way_id: int) -> void:
+	var k := run_bays.size()
+	var STALL := 0.55       # высота цоколя под витриной
+	var WIN_TOP := 2.45     # верх витрины = низ козырька
+	var CAN_TOP := 3.2      # верх козырька (лента вывесок WIN_TOP..CAN_TOP)
+	var CAN_DEPTH := 1.25   # вынос козырька вперёд
+	var PIL := 0.16         # простенок между витринами
+	var FR := 0.085         # глубина рамы/импостов (перед стеклом 0.06)
+	var t_a: float = run_bays[0].t0
+	var t_b: float = run_bays[k - 1].t1
+	var outn := Vector3(nrm2.x, 0.0, nrm2.y)
+	var perp := Vector3(-wdir.x, 0.0, -wdir.y)
+
+	var concrete := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+	var glass := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+	var frame := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+	var door := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+
+	# Козырёк: низ, верх, торцы
+	_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,t_a,WIN_TOP,0.0), _sfp(p1,wdir,nrm2,base_elev,t_b,WIN_TOP,0.0), _sfp(p1,wdir,nrm2,base_elev,t_b,WIN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_a,WIN_TOP,CAN_DEPTH), Vector3.DOWN)
+	_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,t_a,CAN_TOP,0.0), _sfp(p1,wdir,nrm2,base_elev,t_a,CAN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_b,CAN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_b,CAN_TOP,0.0), Vector3.UP)
+	_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,t_a,WIN_TOP,0.0), _sfp(p1,wdir,nrm2,base_elev,t_a,WIN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_a,CAN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_a,CAN_TOP,0.0), perp)
+	_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,t_b,WIN_TOP,0.0), _sfp(p1,wdir,nrm2,base_elev,t_b,WIN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_b,CAN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_b,CAN_TOP,0.0), -perp)
+
+	# Цоколь под витринами
+	_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,t_a,0.0,0.1), _sfp(p1,wdir,nrm2,base_elev,t_b,0.0,0.1), _sfp(p1,wdir,nrm2,base_elev,t_b,STALL,0.1), _sfp(p1,wdir,nrm2,base_elev,t_a,STALL,0.1), outn)
+
+	if _storefront_sign_shader == null:
+		_storefront_sign_shader = Shader.new()
+		_storefront_sign_shader.code = """
+shader_type spatial;
+render_mode cull_disabled;
+uniform vec4 albedo_color : source_color = vec4(0.8, 0.8, 0.8, 1.0);
+uniform float roughness_value : hint_range(0.0, 1.0) = 0.7;
+uniform float night_factor : hint_range(0.0, 1.0) = 0.0;
+void fragment() {
+	ALBEDO = albedo_color.rgb;
+	ROUGHNESS = roughness_value;
+	// Мягкое свечение короба ночью: не пересвечивать, чтобы текст/лого читались.
+	EMISSION = albedo_color.rgb * night_factor * 0.45;
+	if (!FRONT_FACING) { NORMAL = -NORMAL; }
+}
+"""
+	var fascia_shader := _storefront_sign_shader
+
+	var band_h := CAN_TOP - WIN_TOP
+	for i in range(k):
+		var bt0: float = run_bays[i].t0
+		var bt1: float = run_bays[i].t1
+		var bw_local := bt1 - bt0
+
+		var sgn := _storefront_make_sign(shops[i].tags, way_id, i, bw_local, band_h)
+		var col: Color = sgn.bg
+
+		if i > 0:
+			_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,bt0-PIL*0.5,0.0,0.12), _sfp(p1,wdir,nrm2,base_elev,bt0+PIL*0.5,0.0,0.12), _sfp(p1,wdir,nrm2,base_elev,bt0+PIL*0.5,WIN_TOP,0.12), _sfp(p1,wdir,nrm2,base_elev,bt0-PIL*0.5,WIN_TOP,0.12), outn)
+
+		var gx0 := bt0 + PIL
+		var gx1 := bt1 - PIL
+		var gxm := (gx0 + gx1) * 0.5
+		if i == door_idx:
+			# Алюминиевая стеклянная ДВУСТВОРЧАТАЯ дверь: рама по периметру, центральная
+			# стойка (2 створки), замковый импост, вертикальные ручки, нижняя цокольная
+			# панель (металл), фрамуга сверху.
+			var dtop := 2.05
+			var kick := 0.34   # высота нижней цокольной панели
+			# стекло двери (выше цоколя) + фрамуга сверху
+			_sf_add_quad(door, _sfp(p1,wdir,nrm2,base_elev,gx0,kick,0.055), _sfp(p1,wdir,nrm2,base_elev,gx1,kick,0.055), _sfp(p1,wdir,nrm2,base_elev,gx1,dtop,0.055), _sfp(p1,wdir,nrm2,base_elev,gx0,dtop,0.055), outn)
+			_sf_add_quad(glass, _sfp(p1,wdir,nrm2,base_elev,gx0,dtop,0.06), _sfp(p1,wdir,nrm2,base_elev,gx1,dtop,0.06), _sfp(p1,wdir,nrm2,base_elev,gx1,WIN_TOP,0.06), _sfp(p1,wdir,nrm2,base_elev,gx0,WIN_TOP,0.06), outn)
+			# цокольная панель внизу двери (металл)
+			_sf_add_quad(frame, _sfp(p1,wdir,nrm2,base_elev,gx0,0.02,0.07), _sfp(p1,wdir,nrm2,base_elev,gx1,0.02,0.07), _sfp(p1,wdir,nrm2,base_elev,gx1,kick,0.07), _sfp(p1,wdir,nrm2,base_elev,gx0,kick,0.07), outn)
+			# рама по периметру + импост фрамуги + центральная стойка
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, 0.02, FR)
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, dtop, FR)
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, WIN_TOP, FR)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gx0, 0.02, WIN_TOP, FR)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gx1, 0.02, WIN_TOP, FR)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gxm, 0.02, dtop, FR)
+			# замковый горизонтальный импост на створках
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, 1.05, FR * 0.8)
+			# вертикальные ручки у центральной стойки (выступают сильнее)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gxm - 0.14, 0.92, 1.34, 0.14, 0.035)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gxm + 0.14, 0.92, 1.34, 0.14, 0.035)
+		else:
+			# Витрина: стекло + рама + расстекловка (импост + вертик. перемычка)
+			_sf_add_quad(glass, _sfp(p1,wdir,nrm2,base_elev,gx0,STALL,0.06), _sfp(p1,wdir,nrm2,base_elev,gx1,STALL,0.06), _sfp(p1,wdir,nrm2,base_elev,gx1,WIN_TOP,0.06), _sfp(p1,wdir,nrm2,base_elev,gx0,WIN_TOP,0.06), outn)
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, STALL, FR)
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, WIN_TOP, FR)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gx0, STALL, WIN_TOP, FR)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gx1, STALL, WIN_TOP, FR)
+			var my := STALL + (WIN_TOP - STALL) * 0.6
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, my, FR)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gxm, STALL, WIN_TOP, FR)
+
+		# Фронт козырька = цветной сегмент ленты вывесок
+		var fb := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+		_sf_add_quad(fb, _sfp(p1,wdir,nrm2,base_elev,bt0,WIN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,bt1,WIN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,bt1,CAN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,bt0,CAN_TOP,CAN_DEPTH), outn)
+		var fmat := ShaderMaterial.new()
+		fmat.shader = fascia_shader
+		fmat.set_shader_parameter("albedo_color", col)
+		fmat.set_shader_parameter("roughness_value", 0.7)
+		fmat.set_shader_parameter("night_factor", 0.0)
+		_facade_emission_materials.append(fmat)  # подсветка коробов ночью (как окна)
+		_sf_commit(fb, fmat, "StorefrontFascia_%d_%d" % [way_id, i], parent)
+
+		var snode: Node3D = sgn.node
+		if snode.get_child_count() > 0:
+			var sc := p1 + wdir * ((bt0 + bt1) * 0.5)
+			snode.position = Vector3(sc.x, base_elev + (WIN_TOP + CAN_TOP) * 0.5, sc.y) + outn * (CAN_DEPTH + 0.04)
+			snode.rotation.y = atan2(outn.x, outn.z)
+			snode.name = "StorefrontSign_%d_%d" % [way_id, i]
+			parent.add_child(snode)
+		else:
+			snode.queue_free()
+
+	# Ступени ко входу (bay двери): от террейна до порога, если цоколь не нулевой
+	var dbt0: float = run_bays[door_idx].t0
+	var dbt1: float = run_bays[door_idx].t1
+	var door_cx := p1 + wdir * ((dbt0 + dbt1) * 0.5)
+	var ground_h := _sample_elevation(door_cx.x, door_cx.y) - base_elev
+	if ground_h < -0.06:
+		var n_steps := clampi(int(ceil(-ground_h / 0.16)), 1, 8)
+		var step_h := -ground_h / float(n_steps)
+		var dw0 := dbt0 + PIL
+		var dw1 := dbt1 - PIL
+		for s in range(n_steps):
+			var y_top := ground_h + step_h * float(s + 1)
+			var d_far := 0.06 + float(n_steps - s) * 0.30
+			var d_near := 0.06 + float(n_steps - 1 - s) * 0.30
+			_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,dw0,y_top,d_near), _sfp(p1,wdir,nrm2,base_elev,dw1,y_top,d_near), _sfp(p1,wdir,nrm2,base_elev,dw1,y_top,d_far), _sfp(p1,wdir,nrm2,base_elev,dw0,y_top,d_far), Vector3.UP)
+			_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,dw0,y_top-step_h,d_far), _sfp(p1,wdir,nrm2,base_elev,dw1,y_top-step_h,d_far), _sfp(p1,wdir,nrm2,base_elev,dw1,y_top,d_far), _sfp(p1,wdir,nrm2,base_elev,dw0,y_top,d_far), outn)
+
+	# Материалы
+	var concrete_mat := StandardMaterial3D.new()
+	concrete_mat.albedo_color = Color(0.82, 0.80, 0.77)
+	concrete_mat.roughness = 0.9
+	concrete_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_sf_commit(concrete, concrete_mat, "StorefrontStruct_%d" % way_id, parent)
+
+	var glass_mat := StandardMaterial3D.new()
+	glass_mat.albedo_color = Color(0.46, 0.54, 0.58, 1.0)
+	glass_mat.metallic = 0.25
+	glass_mat.roughness = 0.12
+	glass_mat.emission_enabled = true
+	glass_mat.emission = Color(0.62, 0.56, 0.44)
+	glass_mat.emission_energy_multiplier = 0.28
+	glass_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_sf_commit(glass, glass_mat, "StorefrontGlass_%d" % way_id, parent)
+
+	var frame_mat := StandardMaterial3D.new()
+	frame_mat.albedo_color = Color(0.30, 0.30, 0.33)  # тёмный металл рам/импостов
+	frame_mat.metallic = 0.5
+	frame_mat.roughness = 0.5
+	frame_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_sf_commit(frame, frame_mat, "StorefrontFrame_%d" % way_id, parent)
+
+	var door_mat := StandardMaterial3D.new()
+	door_mat.albedo_color = Color(0.12, 0.16, 0.20, 1.0)  # тёмное стекло двери
+	door_mat.metallic = 0.45
+	door_mat.roughness = 0.1
+	door_mat.emission_enabled = true
+	door_mat.emission = Color(0.35, 0.32, 0.26)
+	door_mat.emission_energy_multiplier = 0.18
+	door_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_sf_commit(door, door_mat, "StorefrontDoor_%d" % way_id, parent)
 
 
 func _add_shop_entrances_from_override(points: PackedVector2Array, parent: Node3D, building_height: float, base_elev: float, way_id: int) -> void:
@@ -20983,9 +21454,21 @@ func _find_pois_inside_building(building_points: PackedVector2Array, _loader: No
 			continue
 
 		# Точная проверка point-in-polygon
-		if _point_in_polygon(poi_pos, building_points):
-			var name = poi.tags.get("name", "unknown")
-			print("POI_DEBUG: Found '%s' (id=%s) inside building at local (%.1f, %.1f)" % [name, str(poi.get("id", 0)), poi_pos.x, poi_pos.y])
+		var is_in := _point_in_polygon(poi_pos, building_points)
+		if not is_in:
+			# POI может быть ВЕРШИНОЙ контура здания (магазин затегован на узле
+			# самого полигона, напр. Пятёрочка на way 45417773) — ray casting для
+			# граничных точек ненадёжен и отбрасывает их. Включаем, если точка
+			# вплотную к любому ребру здания.
+			var bnd_eps := 0.6
+			var npts := building_points.size()
+			for k in range(npts):
+				var a: Vector2 = building_points[k]
+				var b: Vector2 = building_points[(k + 1) % npts]
+				if poi_pos.distance_to(Geometry2D.get_closest_point_to_segment(poi_pos, a, b)) <= bnd_eps:
+					is_in = true
+					break
+		if is_in:
 			result.append({
 				"position": poi_pos,
 				"tags": poi.tags,

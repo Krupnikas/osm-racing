@@ -63,6 +63,10 @@ var _slot_extrusion: Dictionary = {}  # role → {depth_m, shape}
 # Caller should append these to its night-mode tracking array.
 var emission_materials: Array[ShaderMaterial] = []
 
+# Phase S: per-edge tiled bay pattern from the last build() — {edge_idx: Array of
+# {role, t_left, t_right}}. Lets the storefront row align to the exact facade bay grid.
+var edge_patterns: Dictionary = {}
+
 
 # ── Archetype selection ────────────────────────────────────────────────────
 
@@ -121,6 +125,7 @@ func build(
 		return
 	_batches.clear()
 	emission_materials.clear()
+	edge_patterns.clear()
 	_seed = way_id
 	_slot_extrusion = archetype.get("slot_extrusion", {})
 
@@ -202,6 +207,7 @@ func _build_edge(p1: Vector2, p2: Vector2, edge_len: float,
 	var pattern := _tile_wall(edge_len, edge_idx, archetype, edge_class)
 	if pattern.is_empty():
 		return
+	edge_patterns[edge_idx] = pattern  # Phase S: expose bay grid for storefront alignment
 
 	var has_seams: bool = bool(archetype.get("has_seams", true))
 
