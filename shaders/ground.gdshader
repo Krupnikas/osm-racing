@@ -24,6 +24,14 @@ uniform float macro_world_scale : hint_range(0.005, 0.2) = 0.015;
 uniform float macro_albedo_intensity : hint_range(0.0, 0.3) = 0.12;
 uniform float macro_roughness_intensity : hint_range(0.0, 0.3) = 0.15;
 
+// Weedy verge / разнотравье: пятна более густой и зелёной травы поверх сухой базы.
+// Несколько масштабов world-space шума → неоднородный, "запущенный" газон.
+uniform float weed_scale : hint_range(0.005, 0.3) = 0.06;
+uniform float weed_threshold : hint_range(0.0, 1.0) = 0.42;
+uniform float weed_intensity : hint_range(0.0, 1.0) = 0.7;
+uniform float weed_green : hint_range(1.0, 1.4) = 1.18;   // буст зелёного в клочках
+uniform float weed_darken : hint_range(0.5, 1.0) = 0.82;  // гуще/темнее
+
 // Tire track mask (локальная маска вокруг машины)
 uniform sampler2D track_mask_tex : repeat_disable, filter_linear;
 uniform sampler2D noise_micro_tex : filter_linear_mipmap_anisotropic, repeat_enable;
@@ -60,6 +68,16 @@ void fragment() {
 	float n_macro = texture(noise_macro_tex, world_xz * macro_world_scale).r;
 	albedo += (n_macro - 0.5) * macro_albedo_intensity;
 	roughness += (n_macro - 0.5) * macro_roughness_intensity;
+
+	// Weedy verge: клочки более густой/зелёной травы (разнотравье), два масштаба
+	// шума со смещением, чтобы не коррелировать с macro variation выше.
+	float weed_a = texture(noise_macro_tex, world_xz * weed_scale + vec2(11.3, 7.1)).r;
+	float weed_b = texture(noise_macro_tex, world_xz * weed_scale * 2.7 + vec2(3.4, 19.2)).r;
+	float weed = smoothstep(weed_threshold, 1.0, weed_a * 0.65 + weed_b * 0.35);
+	// Убираем жёлтый (гасим R и B), поднимаем зелёный → явно зелёные клочки
+	vec3 weedy = vec3(albedo.r * 0.74, min(1.0, albedo.g * weed_green), albedo.b * 0.66) * weed_darken;
+	albedo = mix(albedo, weedy, weed * weed_intensity);
+	roughness = mix(roughness, min(1.0, roughness + 0.05), weed);  // гуще → чуть матовее
 
 	// === Tire tracks (грязные следы шин) ===
 	vec2 track_local = (world_xz - track_origin_world) / track_world_size;
