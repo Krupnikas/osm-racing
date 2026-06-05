@@ -66,8 +66,12 @@ uniform float puddle_world_scale : hint_range(0.01, 0.5) = 0.08;
 // Soviet asphalt wear: крупные world-space заплатки/износ + пятна (сухой асфальт)
 uniform float asphalt_wear : hint_range(0.0, 1.0) = 0.55;
 
-// Полосы наката колёс (продольные, только на проезжей части; на тротуарах/трамвае = 0)
-uniform float wheel_wear : hint_range(0.0, 1.0) = 0.0;
+// Полосы наката колёс. По умолчанию ВКЛ (1.0) на всех дорогах — покрытие "бесплатно",
+// т.к. шейдер общий для всех дорожных мешей. apply_road_type_params выключает (0.0)
+// на тротуарах/трамвае/перекрёстках. Ширина колеи постоянна в метрах:
+// across_m берём из UV2.x (точно, если меш несёт UV2.y>0.5), иначе из road_width_m.
+uniform float wheel_wear : hint_range(0.0, 1.0) = 1.0;
+uniform float road_width_m : hint_range(1.0, 30.0) = 6.0;
 
 varying vec3 world_pos;
 
@@ -118,15 +122,23 @@ void fragment() {
 		dry_rough = mix(dry_rough, dry_rough * mix(0.95, 1.08, patch), asphalt_wear);
 	}
 
-	// Полосы наката колёс — лёгкие продольные потемнения/полировка вдоль колеи.
-	// Тонко, чтобы читалось как износ, а не дефект; только на проезжей части.
-	if (wheel_wear > 0.0) {
-		float ax = UV.x;  // 0..1 поперёк дороги
-		float wp = min(min(abs(ax - 0.28), abs(ax - 0.44)), min(abs(ax - 0.56), abs(ax - 0.72)));
-		float band = smoothstep(0.05, 0.0, wp);
-		dry_albedo *= mix(1.0, 0.90, band * wheel_wear);          // колея темнее
-		dry_rough = mix(dry_rough, dry_rough * 0.92, band * wheel_wear);  // чуть отполировано
+	// Полосы наката колёс: две тёмные полосы в каждой полосе движения (3.5 м),
+	// на расстоянии 1.4 м (колея авто ≈ ±0.7 м от центра полосы). ПОСТОЯННО в метрах.
+	// Только на достаточно широких дорогах (узкие проезды/дорожки — без колеи).
+	if (wheel_wear > 0.0 && road_width_m >= 5.5) {
+		// across_m — расстояние от осевой в метрах. UV2 (если валиден) точнее всего.
+		float across_m = (UV2.y > 0.5) ? UV2.x : (UV.x - 0.5) * road_width_m;
+		float lane_center = (floor(across_m / 3.5) + 0.5) * 3.5;
+		float lane_local = across_m - lane_center;          // -1.75..1.75 в полосе
+		float wp = abs(abs(lane_local) - 0.70);             // до ближайшей колеи, м
+		float band = smoothstep(0.28, 0.0, wp);             // полоса наката ~56 см (шире)
+		// продольная/world вариация, чтобы не было идеальной краски
+		float wj = texture(noise_macro_tex, world_pos.xz * 0.06).r;
+		band *= mix(0.7, 1.0, wj);
+		dry_albedo *= mix(1.0, 0.83, band * wheel_wear);    // бледнее (раньше 0.72)
+		dry_rough = mix(dry_rough, dry_rough * 0.9, band * wheel_wear);
 	}
+
 
 	// === МОКРАЯ ДОРОГА ===
 	// Мокрый асфальт: сильное потемнение albedo (вода впитывается, свет поглощается)

@@ -4775,6 +4775,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	# Build geometry if not bridge
 	var vertices := PackedVector3Array()
 	var uvs := PackedVector2Array()
+	var uv2s := PackedVector2Array()  # UV2.x = метрич. расстояние от осевой (м), UV2.y=1 → валидно (колея)
 	var normals := PackedVector3Array()
 	var indices := PackedInt32Array()
 	var terrain_corridors: Array[PackedVector2Array] = []
@@ -4980,17 +4981,22 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 					var h_r0: float = _road_sample_y_for_way(way_id, r0, cl_d_seg, height_offset + z_offset)
 					var h_l1: float = _road_sample_y_for_way(way_id, l1, cl_d_next, height_offset + z_offset)
 					var h_r1: float = _road_sample_y_for_way(way_id, r1, cl_d_next, height_offset + z_offset)
+					var half_w_uv2: float = width * 0.5
 					vertices.append(Vector3(l0.x, h_l0, l0.y))
 					uvs.append(Vector2(0.0, uv_y0))
+					uv2s.append(Vector2(-half_w_uv2, 1.0))
 					normals.append(Vector3.UP)
 					vertices.append(Vector3(r0.x, h_r0, r0.y))
 					uvs.append(Vector2(1.0, uv_y0))
+					uv2s.append(Vector2(half_w_uv2, 1.0))
 					normals.append(Vector3.UP)
 					vertices.append(Vector3(l1.x, h_l1, l1.y))
 					uvs.append(Vector2(0.0, uv_y1))
+					uv2s.append(Vector2(-half_w_uv2, 1.0))
 					normals.append(Vector3.UP)
 					vertices.append(Vector3(r1.x, h_r1, r1.y))
 					uvs.append(Vector2(1.0, uv_y1))
+					uv2s.append(Vector2(half_w_uv2, 1.0))
 					normals.append(Vector3.UP)
 					indices.append(base_idx)
 					indices.append(base_idx + 3)
@@ -5028,6 +5034,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 							var uv_x := clampf(cross_d / width + 0.5, 0.0, 1.0)
 							var uv_y := (accum_lens[seg] + along) * uv_scale
 							uvs.append(Vector2(uv_x, uv_y))
+							uv2s.append(Vector2(cross_d, 1.0))  # истинное метрич. across (м)
 							normals.append(Vector3.UP)
 						for ti in tri_idx:
 							indices.append(base_idx + ti)
@@ -5038,6 +5045,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		"full_smoothed_points": full_smoothed_points,
 		"vertices": vertices,
 		"uvs": uvs,
+		"uv2s": uv2s,
 		"normals": normals,
 		"indices": indices,
 		"texture_key": texture_key,
@@ -5155,14 +5163,18 @@ func _apply_road_result(result: Dictionary) -> void:
 				_road_batch_data[chunk_key][texture_key] = {
 					"vertices": PackedVector3Array(),
 					"uvs": PackedVector2Array(),
+					"uv2s": PackedVector2Array(),
 					"normals": PackedVector3Array(),
 					"indices": PackedInt32Array(),
-					"parent": parent
+					"parent": parent,
+					"road_width": width  # реальная ширина для постоянной колеи
 				}
 			var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
 			var vertex_offset: int = batch["vertices"].size()
 			batch["vertices"].append_array(verts)
 			batch["uvs"].append_array(result.uvs)
+			if batch.has("uv2s") and result.has("uv2s"):
+				batch["uv2s"].append_array(result.uv2s)
 			batch["normals"].append_array(result.normals)
 			# Offset indices — pre-offset in bulk instead of per-element append
 			var src_indices: PackedInt32Array = result.indices
@@ -7721,9 +7733,11 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 		_road_batch_data[chunk_key][texture_key] = {
 			"vertices": PackedVector3Array(),
 			"uvs": PackedVector2Array(),
+			"uv2s": PackedVector2Array(),  # UV2.x = метрич. across (м), UV2.y=1 → валидно (колея)
 			"normals": PackedVector3Array(),
 			"indices": PackedInt32Array(),
-			"parent": parent  # Сохраняем parent для создания MeshInstance3D позже
+			"parent": parent,  # Сохраняем parent для создания MeshInstance3D позже
+			"road_width": width
 		}
 
 	# Convert to local coordinates and smooth
@@ -7813,10 +7827,12 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 		# Left vertex
 		batch["vertices"].append(Vector3(left_pos.x, h_left, left_pos.y))
 		batch["uvs"].append(Vector2(0.0, uv_y))
+		batch["uv2s"].append(Vector2(-half_w, 1.0))
 
 		# Right vertex
 		batch["vertices"].append(Vector3(right_pos.x, h_right, right_pos.y))
 		batch["uvs"].append(Vector2(1.0, uv_y))
+		batch["uv2s"].append(Vector2(half_w, 1.0))
 
 		# Normal from cross-section tilt
 		var cross := Vector3(right_pos.x - left_pos.x, h_right - h_left, right_pos.y - left_pos.y)
@@ -8010,9 +8026,11 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 		_road_batch_data[chunk_key][texture_key] = {
 			"vertices": PackedVector3Array(),
 			"uvs": PackedVector2Array(),
+			"uv2s": PackedVector2Array(),  # UV2.x = метрич. across (м), UV2.y=1 → валидно (колея)
 			"normals": PackedVector3Array(),
 			"indices": PackedInt32Array(),
-			"parent": parent
+			"parent": parent,
+			"road_width": width
 		}
 
 	# Точки уже сглажены вызывающей стороной — только validate
@@ -8090,9 +8108,11 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 
 		batch["vertices"].append(Vector3(left_pos.x, h_left, left_pos.y))
 		batch["uvs"].append(Vector2(0.0, uv_y))
+		batch["uv2s"].append(Vector2(-half_w, 1.0))
 
 		batch["vertices"].append(Vector3(right_pos.x, h_right, right_pos.y))
 		batch["uvs"].append(Vector2(1.0, uv_y))
+		batch["uv2s"].append(Vector2(half_w, 1.0))
 
 		var cross := Vector3(right_pos.x - left_pos.x, h_right - h_left, right_pos.y - left_pos.y)
 		var fwd := Vector3(perp.y, 0.0, -perp.x)
@@ -8395,6 +8415,10 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = batch["vertices"]
 	arrays[Mesh.ARRAY_TEX_UV] = batch["uvs"]
+	# UV2 несёт метрическое расстояние от осевой (для колеи постоянной ширины).
+	# Ставим только если размеры совпадают — иначе ArrayMesh упадёт.
+	if batch.has("uv2s") and batch["uv2s"].size() == batch["vertices"].size():
+		arrays[Mesh.ARRAY_TEX_UV2] = batch["uv2s"]
 	arrays[Mesh.ARRAY_NORMAL] = batch["normals"]
 	arrays[Mesh.ARRAY_INDEX] = batch["indices"]
 
@@ -8439,7 +8463,7 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 			marking_tex
 		)
 		if material is ShaderMaterial:
-			WetRoadMaterial.apply_road_type_params(material, texture_key)
+			WetRoadMaterial.apply_road_type_params(material, texture_key, float(batch.get("road_width", 6.0)))
 
 	# Добавляем в parent (chunk node)
 	var parent: Node3D = batch["parent"]
