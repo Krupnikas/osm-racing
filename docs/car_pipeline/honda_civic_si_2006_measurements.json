@@ -1,0 +1,68 @@
+{
+  "car_id": "honda_civic_si_2006",
+  "display_name": "Honda Civic Si",
+  "source_file": "~/Desktop/OSM material/2006_honda_civic_si.glb",
+  "imported_model": "res://car/models/honda_civic_si/honda_civic_si.glb",
+  "tier": "A",
+  "model_organization": "by_material_merged_wheels",
+  "total_verts": 31988,
+  "mesh_parts": 20,
+  "target_length_m": 4.46,
+  "raw_aabb_m": { "length": 0.0441, "width": 0.0193, "height": 0.0139, "length_axis": "z" },
+  "scale_factor": 101.0854,
+  "scaled_aabb_m": { "length": 4.46, "width": 1.95, "height": 1.40 },
+  "native_forward": "+Z",
+  "player_orientation": "rotated_180_front_-Z",
+  "npc_orientation": "no_rotation_front_+Z",
+  "wheel_detection": "merged_wheel_split_CarWheelRig",
+  "wheel_radius_m": 0.312,
+  "wheelbase_m": 2.678,
+  "track_front_m": 1.513,
+  "track_rear_m": 1.542,
+  "wheel_centers_m": {
+    "FL": [-0.757, 0.198, 1.339],
+    "FR": [0.757, 0.198, 1.339],
+    "RL": [-0.771, 0.165, -1.339],
+    "RR": [0.771, 0.165, -1.339]
+  },
+  "collision_box_m": { "size": [1.72, 0.90, 3.95], "origin_y": 0.55 },
+  "body_materials": ["capaint", "chassis"],
+  "paint_material": "capaint",
+  "taillight_material": "red_glass",
+  "headlight_meshes_contain": ["LightCluster", "LightRefracted"],
+  "player_light_positions_m": {
+    "headlight": [[-0.62, 0.70, -1.92], [0.62, 0.70, -1.92]],
+    "brake": [[-0.60, 0.86, 1.98], [0.60, 0.86, 1.98]]
+  },
+  "npc_light_positions_m": {
+    "headlight": [[-0.62, 0.70, 1.90], [0.62, 0.70, 1.90]],
+    "taillight": [[-0.60, 0.82, -1.95], [0.60, 0.82, -1.95]],
+    "reverse": [0.0, 0.60, -1.98]
+  },
+  "light_sources_inside_body": true,
+  "color_source": "new_cars_color_mapping.md",
+  "player_default_color": "Rallye Red #B61920",
+  "player_scene": "res://addons/gevp/scenes/honda_civic_si_car.tscn",
+  "npc_scene": "res://traffic/npc_honda_civic_si.tscn",
+  "price_rub": 420000,
+  "stats": {
+    "max_torque": 760.0,
+    "max_rpm": 8000.0,
+    "final_drive": 4.76,
+    "gear_ratios": [3.27, 2.13, 1.52, 1.15, 0.92, 0.74],
+    "coefficient_of_drag": 0.31,
+    "frontal_area": 1.98,
+    "mass_kg": 1270,
+    "display": { "accel": 0.76, "speed": 0.78, "handling": 0.80 }
+  },
+  "npc_spawn_weight_pct": 2,
+  "spec_line": "2006 · 2.0L · 197 HP · FWD · 1270 KG",
+  "mcp_runtime": {
+    "drove_m": 87.1,
+    "stayed_upright": true,
+    "front_wheel_spin_delta_rad": 812.1,
+    "npc_distinct_colors": 3,
+    "npc_lights_night": true
+  },
+  "status": "completed"
+}

@@ -21,6 +21,10 @@ var npc_polo_scene: PackedScene
 var npc_matiz_scene: PackedScene
 var npc_logan_scene: PackedScene
 var npc_focus_scene: PackedScene
+var npc_civic_scene: PackedScene
+var npc_rx8_scene: PackedScene
+var npc_tt_scene: PackedScene
+var npc_volga_scene: PackedScene
 var road_network: Node  # RoadNetwork
 var terrain_generator: Node  # OSMTerrainGenerator
 var player_car: Node3D
@@ -57,6 +61,10 @@ func _ready() -> void:
 	npc_matiz_scene = preload("res://traffic/npc_matiz.tscn")
 	npc_logan_scene = preload("res://traffic/npc_logan.tscn")
 	npc_focus_scene = preload("res://traffic/npc_ford_focus_st.tscn")
+	npc_civic_scene = preload("res://traffic/npc_honda_civic_si.tscn")
+	npc_rx8_scene = preload("res://traffic/npc_mazda_rx8.tscn")
+	npc_tt_scene = preload("res://traffic/npc_audi_tt.tscn")
+	npc_volga_scene = preload("res://traffic/npc_volga_gaz3110.tscn")
 
 	# Создаём RoadNetwork
 	var RoadNetworkScript = preload("res://traffic/road_network.gd")
@@ -111,6 +119,10 @@ func _warmup_mesh_cache() -> void:
 	if npc_matiz_scene: scenes.append(npc_matiz_scene)
 	if npc_logan_scene: scenes.append(npc_logan_scene)
 	if npc_focus_scene: scenes.append(npc_focus_scene)
+	if npc_civic_scene: scenes.append(npc_civic_scene)
+	if npc_rx8_scene: scenes.append(npc_rx8_scene)
+	if npc_tt_scene: scenes.append(npc_tt_scene)
+	if npc_volga_scene: scenes.append(npc_volga_scene)
 	for scene in scenes:
 		var instance := scene.instantiate() as Node3D
 		instance.visible = false
@@ -446,8 +458,24 @@ func _get_npc_from_pool():
 			# 3% - Ford Focus ST (rare hot-hatch)
 			scene_to_use = npc_focus_scene
 			car_type = "Ford Focus ST"
+		elif rand < 0.77:
+			# 2% - Honda Civic Si (rare hot compact)
+			scene_to_use = npc_civic_scene
+			car_type = "Honda Civic Si"
+		elif rand < 0.78:
+			# 1% - Mazda RX-8 (very rare rotary sports)
+			scene_to_use = npc_rx8_scene
+			car_type = "Mazda RX-8"
+		elif rand < 0.79:
+			# 1% - Audi TT 3.2 quattro (very rare)
+			scene_to_use = npc_tt_scene
+			car_type = "Audi TT"
+		elif rand < 0.83:
+			# 4% - Volga GAZ-3110 (common older Russian sedan)
+			scene_to_use = npc_volga_scene
+			car_type = "Volga GAZ-3110"
 		else:
-			# 25% - блочные машинки
+			# 17% - блочные машинки
 			scene_to_use = npc_car_scene
 			car_type = "box car"
 

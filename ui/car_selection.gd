@@ -23,6 +23,10 @@ const CAR_SPEC_LINES := {
 	"beetle":     "1968 · 1.5L · 53 HP · RWD · 880 KG",
 	"bmw_m3_gtr": "2001 · 3.2L · 380 HP · RWD · 1350 KG",
 	"ford_focus_st_2006": "2006 · 2.5L · 225 HP · FWD · 1392 KG",
+	"honda_civic_si_2006": "2006 · 2.0L · 197 HP · FWD · 1270 KG",
+	"mazda_rx8_2006": "2006 · 1.3L Rotary · 232 HP · RWD · 1310 KG",
+	"audi_tt_32_2003": "2003 · 3.2L VR6 · 250 HP · AWD · 1510 KG",
+	"volga_gaz3110": "2000 · 2.3L · 150 HP · RWD · 1400 KG",
 }
 
 # — Tunnel car-select (NFS Underground style) feature flag —

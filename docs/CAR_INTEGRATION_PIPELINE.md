@@ -32,8 +32,16 @@ Source models live in `~/Desktop/OSM material/`; the colour mapping is
   (per-model split spot/omni lights, toggled by night/rain).
 - **NPC registry:** `traffic/traffic_manager.gd` — a `PackedScene` var + `preload` in
   `_ready` + append in `_warmup_mesh_cache` + a weight slot in `_get_npc_from_pool`.
-- **Reference cars:** Matiz = ideal model-wheel approach (reparent model wheels onto
-  the spinning GEVP wheel nodes). Nexia = working day/night glass + head/tail lights.
+- **Reference cars** (compare new work against these):
+  - **Nexia** — stable **full-car integration** reference: general scene setup, working
+    player-car behaviour, day/night glass + head/tail lights.
+  - **Matiz** — ideal **model-wheel** reference: real model wheels, visual wheel rotation,
+    reparenting onto the spinning GEVP wheel nodes, and grounding.
+  - **Ford Focus ST 2006** — first **validated end-to-end pipeline** reference, and the best
+    reference for **imported GLBs with merged wheel meshes**: quadrant-splitting a merged
+    `Tire`/`Rim` mesh, recentring the wheel geometry, body-paint recolour, dual player+NPC
+    integration, and a full report + checklist (§4, §6). Any new car with merged,
+    material-grouped wheels should compare its wheel setup against the Focus ST one.
 
 ---
 
@@ -94,7 +102,117 @@ _mcp_print(A.format_report(A.analyze("/abs/path/model.glb", {"target_length": 4.
 
 ---
 
-## 3. Hard-won gotchas
+## 3. Definition of Done (a car is integrated only when ALL of these pass)
+
+A car is **NOT** done just because the model imports, the scene opens, it shows in the
+showroom, or an NPC scene exists. Those are necessary, not sufficient. A car is done
+only when every gate below holds — **if any one fails, the car is not complete** (leave
+it in progress, or quarantine it per §8, and say so in the report).
+
+**Import & transform**
+- imported into the correct project folder (`car/models/<id>/`)
+- normalised to a plausible real-world scale
+- orientation verified — the *visual* front moves in the correct gameplay forward
+  direction (player −Z, NPC +Z)
+
+**Wheels**
+- uses the real model wheels where the model provides them
+- visual wheels rotate while driving
+- front wheels steer visually (if the physics system supports steer)
+- wheel positions match the physics / suspension corners reasonably
+
+**Grounding & collision**
+- the car stands correctly on the road — no visible floating, no sinking
+- the collision shape is plausible and does not itself lift or sink the car
+
+**Body & colour**
+- the body-paint material is correctly identified
+- colour variants apply **only** to body paint — never glass, tyres, lights, or interior
+
+**Player**
+- the player / showroom version works (drivable)
+- the showroom preview scale + orientation look correct
+- the selectable car spawns correctly in gameplay
+
+**NPC**
+- the NPC version works
+- NPC wheels rotate while moving
+- NPC colours vary per instance
+- NPC headlights / taillights work
+
+**Lights (player + NPC)**
+- player headlights / taillights work
+- headlights are placed on the real **front** lamp blocks
+- taillights are placed on the real **rear** lamp blocks
+
+**Registry & verification**
+- stats, price, display name, spec line, and NPC spawn weight are all added
+- the car passes MCP runtime testing in the real game scene
+- the integration report **and** checklist are written
+
+---
+
+## 4. Per-car integration report
+
+Every completed car must produce a written report, preferably at:
+
+```
+docs/car_pipeline/<car_id>_integration_report.md
+```
+
+plus the pass/fail verification checklist (`docs/car_pipeline/<car_id>_checklist.md`,
+as in §6). Optionally also emit a machine-readable measurements file:
+
+```
+docs/car_pipeline/<car_id>_measurements.json
+```
+
+holding the same key numbers in structured form, so future integrations can compare
+cars against each other (scale, wheelbase, track, radius, vert count, …).
+
+The report should record:
+- source file
+- `car_id`
+- display name
+- chosen target length / target dimensions
+- original real-vertex AABB
+- final scaled AABB
+- scale factor
+- native forward direction
+- final player orientation
+- final NPC orientation
+- wheel-detection method — *separate wheel nodes* / *merged-wheel split* / *fallback or manual*
+- wheel centres
+- wheel radius
+- wheelbase
+- track width
+- grounding measurements
+- light-detection method
+- headlight positions
+- taillight positions
+- body material names
+- colour source from `new_cars_color_mapping.md`
+- player scene path
+- NPC scene path
+- registry changes
+- price
+- stats
+- NPC spawn weight
+- MCP test result
+- screenshot / evidence paths, if available
+- known risks / limitations
+- final pass/fail checklist
+
+The optional JSON file should mirror the same key numbers in structured form.
+
+**This is not bureaucracy.** The report exists so a future LLM or debugging pass does
+not have to re-discover the same facts — which end is the front, the scale factor, where
+the lamp blocks are, why a model was rejected. Writing it once stops the next loop from
+rediscovering it.
+
+---
+
+## 5. Hard-won gotchas
 
 - **`:=` type inference** fails on values whose type GDScript can't see (`dict["k"]`,
   `node.mesh`, untyped loop vars). Use an explicit `var x: T =`. Headless-compile every
@@ -112,11 +230,11 @@ _mcp_print(A.format_report(A.analyze("/abs/path/model.glb", {"target_length": 4.
 - **Grounding:** trust the visual (visible-mesh bottom vs wheel bottom vs the surface
   the car rests on). A single down-raycast reads ~1 m off where road-collision layers
   overlap at junctions.
-- **Model organisation varies wildly** — analyse before committing (see §5).
+- **Model organisation varies wildly** — analyse before committing (see §7).
 
 ---
 
-## 4. First car report — Ford Focus ST 2006
+## 6. First car report — Ford Focus ST 2006
 
 - **Chosen because:** in the user's preferred shortlist, normal hatch shape, **cleanest
   semantic materials** (`Paint` body, `red_glass` tail, `chrome`, separate glass/
@@ -160,7 +278,7 @@ _mcp_print(A.format_report(A.analyze("/abs/path/model.glb", {"target_length": 4.
 
 ---
 
-## 5. Batch intelligence (measured up front — saves time on the rest)
+## 7. Batch intelligence (measured up front — saves time on the rest)
 
 Model organisation differs a lot; analyse before authoring:
 
@@ -178,3 +296,52 @@ Approach the rest **one at a time**: import → analyse → (clean wheels via ri
 or reparent if separate) → author player + NPC → register → MCP-test → tick the
 checklist. Decimate/quarantine the unusable ones (Vesta, Accent) and report why rather
 than letting them block the working cars.
+
+---
+
+## 8. Quarantine criteria & NPC performance budget
+
+Not every model should be integrated immediately. Some are better **quarantined** for
+cleanup — decimation, re-export, material remap, wheel separation, texture relink, or
+manual repair — before they're worth wiring in. Quarantining a model is a **valid,
+successful pipeline outcome**: do not let one bad model block the rest of the batch.
+
+### NPC vertex budget
+NPC cars spawn in numbers and are the cost driver, so judge by vert count for NPC use:
+
+| Tier | Verts | Rule |
+|---|---|---|
+| **Preferred** | < 50k | NPC-safe as-is |
+| **Acceptable** | 50k–100k | OK *if* materials + scene structure are clean and the car won't be too common |
+| **Risky** | 100k–150k | caution — consider merge/LOD, keep the NPC spawn weight low |
+| **Quarantine by default** | > 150k | not for common NPC use unless decimated or specifically justified |
+| **Heavy** | > 500k | not for *any* NPC use unless explicitly approved |
+| **Unusable as-is** | 1M+ | treat as unusable until decimated / re-exported |
+
+### Quarantine the model if
+- vert count is too high for the intended NPC frequency
+- the hierarchy is unusable or extremely messy
+- wheels cannot be identified or separated
+- wheel meshes are merged in a way the wheel rig cannot split reliably
+- a single baked body material prevents a clean recolour
+- glass / lights / body / interior cannot be separated enough for acceptable visuals
+- material names are garbage **and** geometry classification also fails
+- scale or orientation cannot be verified
+- essential visible parts are missing
+- imported textures are broken or missing
+- collision / grounding cannot be fixed without excessive manual work
+- it causes unacceptable performance or memory use
+
+### A quarantined model gets a short note
+State what is wrong and what it needs — e.g. decimation, LOD generation, Blender
+cleanup, material remap, wheel separation, texture relink, re-export, or manual light
+placement — so the next pass can act on it without re-diagnosing.
+
+### Current-batch calls (from §7)
+- **Hyundai Accent / Solaris** (~779k) — do **not** use as an NPC as-is; decimate first.
+- **Lada Vesta Cross** (~1.0M, SketchUp `wire_*` materials) — **quarantine as-is**; needs
+  re-export / material remap.
+- **Ford Focus ST** (~28k) — a good NPC-safe reference.
+- **Honda Civic Si** (~32k) — likely a good next candidate (same clean path as Focus).
+- **Mazda 6** (~14k) — light, but may need special handling because of its single-body-
+  material limitation (recolour + lights are the hard part, not the wheels).

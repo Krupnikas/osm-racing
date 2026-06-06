@@ -18,6 +18,10 @@ const CAR_PRICES := {
 	"beetle": 700000,
 	"bmw_m3_gtr": 1500000,
 	"ford_focus_st_2006": 450000,
+	"honda_civic_si_2006": 420000,
+	"mazda_rx8_2006": 480000,
+	"audi_tt_32_2003": 650000,
+	"volga_gaz3110": 130000,
 }
 
 # Тюнинг: 4 категории, 3 уровня
