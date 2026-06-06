@@ -29,6 +29,7 @@ const CAR_SPEC_LINES := {
 	"volga_gaz3110": "2000 · 2.3L · 150 HP · RWD · 1400 KG",
 	"lancer_evo_x_2008": "2008 · 2.0L Turbo · 291 HP · AWD · 1560 KG",
 	"subaru_sti_2011": "2011 · 2.5L Turbo · 305 HP · AWD · 1505 KG",
+	"mercedes_clk55_2003": "2003 · 5.4L V8 · 367 HP · RWD · 1635 KG",
 }
 
 # — Tunnel car-select (NFS Underground style) feature flag —

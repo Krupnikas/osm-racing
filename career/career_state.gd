@@ -24,6 +24,7 @@ const CAR_PRICES := {
 	"volga_gaz3110": 130000,
 	"lancer_evo_x_2008": 700000,
 	"subaru_sti_2011": 750000,
+	"mercedes_clk55_2003": 850000,
 }
 
 # Тюнинг: 4 категории, 3 уровня

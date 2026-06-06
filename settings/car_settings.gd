@@ -35,7 +35,8 @@ const DISPLAY_STATS := {
 	"audi_tt_32_2003": {"accel": 0.80, "speed": 0.82, "handling": 0.80},
 	"volga_gaz3110": {"accel": 0.45, "speed": 0.50, "handling": 0.50},
 	"lancer_evo_x_2008": {"accel": 0.85, "speed": 0.82, "handling": 0.88},
-	"subaru_sti_2011": {"accel": 0.86, "speed": 0.83, "handling": 0.87}
+	"subaru_sti_2011": {"accel": 0.86, "speed": 0.83, "handling": 0.87},
+	"mercedes_clk55_2003": {"accel": 0.82, "speed": 0.85, "handling": 0.76}
 }
 
 var selected_car_id: String = DEFAULT_CAR
@@ -189,6 +190,18 @@ const CARS := {
 		"coefficient_of_drag": 0.36,
 		"frontal_area": 2.1,
 		"gear_ratios": [3.64, 2.24, 1.59, 1.16, 0.97, 0.76]
+	},
+	"mercedes_clk55_2003": {
+		"name": "Mercedes CLK 55 AMG",
+		"scene": "res://addons/gevp/scenes/mercedes_clk55_car.tscn",
+		"max_torque": 1000.0,  # 5.4L M113 V8, RWD
+		"max_steering_angle": 36.0,
+		"steering_speed": 4.0,
+		"final_drive": 2.82,
+		"max_rpm": 6100.0,
+		"coefficient_of_drag": 0.32,
+		"frontal_area": 2.0,
+		"gear_ratios": [3.59, 2.19, 1.41, 1.0, 0.83]
 	}
 }
 
