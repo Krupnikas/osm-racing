@@ -77,7 +77,7 @@ static func build(model_root: Node3D, name_keys: Array = DEFAULT_NAME_KEYS, mat_
 			var thr := 0.45 * max_abs_x
 			var kept: Array = []
 			for i in range(sources.size()):
-				if absf((caabb[i] as AABB).get_center().x) >= thr:
+				if absf((caabb[i] as AABB).get_center().x) >= thr or (caabb[i] as AABB).size.x >= 0.5 * track_x:  # keep corner wheels AND track-spanning merged wheel meshes (all-4-tires-as-one → else they hula-hoop); drop only small centreline strays
 					kept.append(sources[i])
 			if kept.size() >= 2:
 				sources = kept

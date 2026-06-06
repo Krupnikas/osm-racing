@@ -74,6 +74,8 @@ func _build(rec: Dictionary) -> RigidBody3D:
 			return _terrain._create_bin_immediate(pos, elev, rot, self)
 		"cone":
 			return _terrain._create_cone_immediate(pos, elev, rot, self)
+		"bag":
+			return _terrain._create_bag_immediate(pos, elev, rot, self)
 	return null
 
 

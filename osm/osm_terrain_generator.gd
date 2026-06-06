@@ -223,6 +223,12 @@ var _bin_size: Vector3 = Vector3.ONE
 var _cone_mesh: Mesh
 var _cone_visual_xform: Transform3D = Transform3D.IDENTITY
 var _cone_size: Vector3 = Vector3.ONE
+
+var _bag_scene: PackedScene
+var _bag_visual_xform: Transform3D = Transform3D.IDENTITY
+var _bag_size: Vector3 = Vector3.ONE
+
+var _paper_variants: Array = []  # [{mesh, xform, size}] — обрывки бумаги, на которые ЛОПАЕТСЯ мешок при наезде на 60+ км/ч
 var _clutter_sfx: Dictionary = {}  # key -> AudioStream (подхватывается, если ассет есть)
 var _clutter_manager: Node3D       # постоянный менеджер реквизита (не привязан к чанкам)
 # Тротуар поднят над проезжей частью на height_offset тротуара (0.115, см. таблицу
@@ -10271,6 +10277,10 @@ func _enqueue_crossing_signs(crossing_pts: PackedVector2Array, parent: Node3D, c
 		var bin_pos: Vector2 = mid + road_dir * (sign_offset_along + 1.3) \
 			+ Vector2(road_dir.y, -road_dir.x) * (half_road_w + 2.3)
 		_enqueue_clutter_bin(bin_pos, parent)
+		# Мешок мусора у урны (переполнение) — ещё реже, детерминированно по позиции.
+		if (int(absf(mid.x * 7.0 + mid.y * 11.0)) % 10) < 4:
+			var bag_pos: Vector2 = bin_pos + road_dir * 0.85
+			_enqueue_clutter_bag(bag_pos, parent)
 
 
 func _enqueue_single_crossing_sign(pos: Vector2, rotation_y: float, parent: Node3D) -> void:
@@ -10372,6 +10382,34 @@ func _init_clutter_assets() -> void:
 		_cone_mesh = c["mesh"]
 		_cone_visual_xform = c["xform"]
 		_cone_size = c["size"]
+	# Мешок мусора — мягкая «помойка» у урн (переполнение). Авто-скейл к ~0.6 м.
+	var bag_path := "res://models/low_poly_trash_bag/low_poly_trash_bag.glb"
+	if ResourceLoader.exists(bag_path):
+		var b := _measure_clutter_model(bag_path, 0.6)
+		_bag_scene = b["scene"]
+		_bag_visual_xform = b["xform"]
+		_bag_size = b["size"]
+	# Обрывки бумаги (6 вариантов) — на них разлетается мешок при наезде на 60+ км/ч.
+	var paper_path := "res://models/crumpled_paper/dirty_crumpled_pieces_of_paper.glb"
+	if ResourceLoader.exists(paper_path):
+		_paper_variants.clear()
+		for pi in range(6):
+			var pv := _extract_pack_mesh(paper_path, pi, 0.22)
+			if pv["mesh"] == null:
+				continue
+			# Часть вариантов — плоские ШИРОКИЕ листы (X/Z до ~2.8 м при высоте 0.22):
+			# _extract масштабирует по высоте, поэтому ширина остаётся гигантской. Дожимаем
+			# по САМОЙ БОЛЬШОЙ стороне до ~0.28 м, иначе разлетаются «простыни».
+			var sz: Vector3 = pv["size"]
+			var maxd: float = maxf(sz.x, maxf(sz.y, sz.z))
+			if maxd > 0.28:
+				var k: float = 0.28 / maxd
+				var xf: Transform3D = pv["xform"]
+				xf.basis = xf.basis.scaled(Vector3(k, k, k))
+				xf.origin *= k
+				pv["xform"] = xf
+				pv["size"] = sz * k
+			_paper_variants.append(pv)
 	# Постоянный менеджер реквизита — ребёнок OSMTerrain (переживает перегенерацию чанков)
 	_clutter_manager = ClutterManagerScript.new()
 	_clutter_manager.name = "ClutterManager"
@@ -10582,6 +10620,165 @@ func _create_bin_immediate(pos: Vector2, elevation: float, rotation_y: float, pa
 
 	parent.add_child(body)
 	return body
+
+
+## Мешок мусора: мягкий тяжёлый RigidBody на тротуаре у урны. Лежит ЗАМОРОЖЕННЫЙ
+## (маска 0 — не тормозит машину), игрока ловит Area3D и будит мешок. На ударе —
+## слабый импульс + сильное демпфирование → ШЛЁПАЕТСЯ ~0.5 м и замирает (не летит).
+func _create_bag_immediate(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> RigidBody3D:
+	if _bag_scene == null or not is_instance_valid(parent):
+		return null
+	var body := RigidBody3D.new()
+	body.name = "ClutterBag"
+	body.position = Vector3(pos.x, elevation + CLUTTER_SIDEWALK_RAISE, pos.y)  # на тротуаре у урны
+	if elevation != 0.0:
+		body.set_meta("_elevation_applied", true)
+	body.rotation.y = rotation_y
+	body.mass = 6.0
+	body.linear_damp = 0.8   # летит от удара, затем плавно тормозит (не прилипает)
+	body.angular_damp = 1.5
+	body.collision_layer = 4
+	body.collision_mask = 0   # пока лежит — ни с чем не сталкивается (не тормозит машину)
+	body.freeze = true
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	var pmat := PhysicsMaterial.new()
+	pmat.bounce = 0.0   # тряпка не прыгает
+	pmat.friction = 1.0
+	body.physics_material_override = pmat
+
+	var collision := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = _bag_size
+	collision.shape = shape
+	collision.position.y = _bag_size.y * 0.5
+	body.add_child(collision)
+
+	var vis: Node3D = _bag_scene.instantiate()
+	vis.transform = _bag_visual_xform
+	body.add_child(vis)
+
+	# Тело с маской 0 не детектит контакты → игрока ловит Area3D (как у конуса).
+	var area := Area3D.new()
+	area.collision_layer = 0
+	area.collision_mask = 1  # только игрок (слой 1)
+	var acol := CollisionShape3D.new()
+	var ashape := BoxShape3D.new()
+	ashape.size = _bag_size + Vector3(0.5, 0.0, 0.5)
+	acol.shape = ashape
+	acol.position.y = _bag_size.y * 0.5
+	area.add_child(acol)
+	area.body_entered.connect(_on_bag_trigger.bind(body))
+	body.add_child(area)
+
+	parent.add_child(body)
+	return body
+
+
+## Игрок задел мешок: размораживаем, исключаем машину из коллизий (не толкает тачку),
+## слабый направленный импульс + сильное демпфирование → мягкий «шлёп» недалеко.
+func _on_bag_trigger(other_body: Node, bag: RigidBody3D) -> void:
+	if not is_instance_valid(bag):
+		return
+	if not (other_body is Node and other_body.is_in_group("player")):
+		return
+	# Кулдаун: Area может выстрелить несколько раз из перекрытия — не множим реакцию.
+	var now := Time.get_ticks_msec()
+	if bag.has_meta("bag_hit_ms") and now - int(bag.get_meta("bag_hit_ms")) < 300:
+		return
+	bag.set_meta("bag_hit_ms", now)
+
+	var car_speed := 0.0
+	if other_body is RigidBody3D:
+		car_speed = (other_body as RigidBody3D).linear_velocity.length()
+	elif other_body is VehicleBody3D:
+		car_speed = (other_body as VehicleBody3D).linear_velocity.length()
+
+	# 60+ км/ч (≈16.7 м/с) — мешок ЛОПАЕТСЯ: ~20 обрывков бумаги разлетаются.
+	if car_speed >= 16.67 and not _paper_variants.is_empty():
+		_burst_bag_into_paper(bag, other_body, car_speed)
+		return
+
+	# Иначе — мешок ОТЛЕТАЕТ и остаётся интерактивным (Area3D НЕ выключаем → реагирует
+	# на каждый наезд, а не только на первый).
+	if bag.freeze:
+		bag.freeze = false
+		bag.collision_mask = 1
+		if other_body is PhysicsBody3D:
+			bag.add_collision_exception_with(other_body)
+		bag.contact_monitor = true
+		bag.max_contacts_reported = 4
+		bag.body_entered.connect(_on_clutter_hit.bind(bag, "bag_hit", "bag_drop"))
+	var dir: Vector3 = bag.global_position - (other_body as Node3D).global_position
+	dir.y = 0.0
+	if dir.length_squared() < 0.0001:
+		dir = Vector3(0.0, 0.0, 1.0)
+	dir = dir.normalized()
+	dir.y = 0.28  # заметно подбрасываем
+	var dv: float = clampf(car_speed, 4.0, 14.0)  # летит от удара (тяжелее/мягче, чем конус 6–24)
+	bag.apply_central_impulse(dir * dv * bag.mass)
+	bag.apply_torque_impulse(Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * bag.mass * 0.2)
+	_play_clutter_sfx(bag, "bag_hit")
+
+
+## Мешок лопнул (наезд на 60+ км/ч): убираем мешок и рождаем ~20 обрывков бумаги,
+## разлетающихся вперёд по ходу машины + вверх; лёгкие, парусят и оседают, потом
+## самоудаляются. Бумажки сталкиваются только с дорогой (слой 4 / маска 1), не между
+## собой, и пропускают сквозь себя машину.
+func _burst_bag_into_paper(bag: RigidBody3D, other_body: Node, car_speed: float) -> void:
+	var parent := bag.get_parent()
+	var origin: Vector3 = bag.global_position
+	var hit_dir: Vector3 = origin - (other_body as Node3D).global_position
+	hit_dir.y = 0.0
+	if hit_dir.length_squared() < 0.0001:
+		hit_dir = Vector3(0.0, 0.0, 1.0)
+	hit_dir = hit_dir.normalized()
+	_play_clutter_sfx(bag, "bag_hit")
+	bag.queue_free()
+	if not is_instance_valid(parent):
+		return
+	for i in range(20):
+		var pv: Dictionary = _paper_variants[i % _paper_variants.size()]
+		var body := RigidBody3D.new()
+		body.name = "ClutterPaperScrap"
+		body.mass = 0.05
+		body.linear_damp = 1.2   # парусит, но реально разлетается
+		body.angular_damp = 0.8
+		body.gravity_scale = 0.55
+		body.collision_layer = 4
+		body.collision_mask = 1
+		body.position = origin + Vector3(randf_range(-0.35, 0.35), randf_range(0.05, 0.55), randf_range(-0.35, 0.35))
+		body.rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
+		var col := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		var sz: Vector3 = pv["size"]
+		box.size = Vector3(maxf(sz.x, 0.06), maxf(sz.y, 0.03), maxf(sz.z, 0.06))
+		col.shape = box
+		body.add_child(col)
+		var vis := MeshInstance3D.new()
+		vis.mesh = pv["mesh"]
+		vis.transform = pv["xform"]
+		vis.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		body.add_child(vis)
+		if other_body is PhysicsBody3D:
+			body.add_collision_exception_with(other_body)
+		parent.add_child(body)
+		# Лёгкая бумага: задаём СКОРОСТЬ напрямую. apply_central_impulse на только что
+		# добавленном теле теряется до первого физ-кадра → бумажки «висели замороженными».
+		# Разлетаются веером вперёд по ходу машины + вверх, кувыркаясь.
+		var spread := hit_dir.rotated(Vector3.UP, randf_range(-1.5, 1.5))
+		var spd: float = clampf(car_speed, 6.0, 16.0)
+		body.linear_velocity = spread * (spd * randf_range(0.35, 0.7)) + Vector3.UP * randf_range(2.5, 6.0)
+		body.angular_velocity = Vector3(randf_range(-12.0, 12.0), randf_range(-12.0, 12.0), randf_range(-12.0, 12.0))
+		var t := get_tree().create_timer(randf_range(6.0, 9.0))
+		t.timeout.connect(func() -> void:
+			if is_instance_valid(body):
+				body.queue_free())
+
+
+## Регистрирует мешок мусора в постоянном менеджере реквизита.
+func _enqueue_clutter_bag(pos: Vector2, _parent: Node3D) -> void:
+	if _clutter_manager:
+		_clutter_manager.register("bag", _move_object_off_road(pos, 0.3, 3))
 
 
 ## Регистрирует конус в постоянном менеджере реквизита (вне жизненного цикла чанков).
