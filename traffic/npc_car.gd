@@ -815,6 +815,11 @@ func _merge_meshes() -> void:
 		var mname: String = mi.name.to_lower()
 		if "wheel" in mname or "tire" in mname or "rim" in mname or "brakedisk" in mname or "brake_disc" in mname:
 			_wheel_mesh_nodes.append(mi)
+		elif mi.has_meta("npc_keep_unmerged"):
+			# Real lamp lens meshes: kept separate & visible so a per-surface emissive
+			# override (front white / rear red, set by the car's NPC setup) renders as a
+			# lens-shaped glow instead of a rectangular proxy box.
+			pass
 		else:
 			body_meshes.append(mi)
 
