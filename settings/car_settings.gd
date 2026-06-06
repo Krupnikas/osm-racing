@@ -36,7 +36,8 @@ const DISPLAY_STATS := {
 	"volga_gaz3110": {"accel": 0.45, "speed": 0.50, "handling": 0.50},
 	"lancer_evo_x_2008": {"accel": 0.85, "speed": 0.82, "handling": 0.88},
 	"subaru_sti_2011": {"accel": 0.86, "speed": 0.83, "handling": 0.87},
-	"mercedes_clk55_2003": {"accel": 0.82, "speed": 0.85, "handling": 0.76}
+	"mercedes_clk55_2003": {"accel": 0.82, "speed": 0.85, "handling": 0.76},
+	"porsche_cayenne_turbo_s_2009": {"accel": 0.80, "speed": 0.82, "handling": 0.60}
 }
 
 var selected_car_id: String = DEFAULT_CAR
@@ -202,6 +203,18 @@ const CARS := {
 		"coefficient_of_drag": 0.32,
 		"frontal_area": 2.0,
 		"gear_ratios": [3.59, 2.19, 1.41, 1.0, 0.83]
+	},
+	"porsche_cayenne_turbo_s_2009": {
+		"name": "Porsche Cayenne Turbo S",
+		"scene": "res://addons/gevp/scenes/cayenne_car.tscn",
+		"max_torque": 1100.0,  # 4.8L twin-turbo V8, AWD SUV
+		"max_steering_angle": 34.0,
+		"steering_speed": 3.6,
+		"final_drive": 3.7,
+		"max_rpm": 6000.0,
+		"coefficient_of_drag": 0.36,
+		"frontal_area": 2.7,
+		"gear_ratios": [4.1, 2.3, 1.5, 1.1, 0.87, 0.69]
 	}
 }
 

@@ -31,7 +31,7 @@ var _lights_enabled := false
 var _taillight_mat: StandardMaterial3D
 
 # Тип модели машины (синхронизировано с car_lights.gd)
-enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109, VAZ_2107, POLO, FORD_FOCUS, HONDA_CIVIC, MAZDA_RX8, AUDI_TT, VOLGA, LANCER_EVO, SUBARU_STI, MERCEDES_CLK }
+enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109, VAZ_2107, POLO, FORD_FOCUS, HONDA_CIVIC, MAZDA_RX8, AUDI_TT, VOLGA, LANCER_EVO, SUBARU_STI, MERCEDES_CLK, PORSCHE_CAYENNE }
 var _car_model: CarModel = CarModel.DEFAULT
 
 
@@ -83,6 +83,9 @@ func _detect_car_model() -> void:
 			return
 		elif child.name == "CLKModel":
 			_car_model = CarModel.MERCEDES_CLK
+			return
+		elif child.name == "CayenneModel":
+			_car_model = CarModel.PORSCHE_CAYENNE
 			return
 		elif child.name == "Model":
 			# Lada 2109 (taxi, DPS) uses "Model" node name
@@ -196,6 +199,14 @@ func _create_headlight() -> void:
 		_use_split_lights = true
 		var left_pos = Vector3(-0.60, 0.50, 2.05)
 		var right_pos = Vector3(0.60, 0.50, 2.05)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.PORSCHE_CAYENNE:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.70, 0.85, 2.20)
+		var right_pos = Vector3(0.70, 0.85, 2.20)
 		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
 		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
 		return
@@ -315,6 +326,13 @@ func _create_taillight() -> void:
 		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
 		return
 
+	if _car_model == CarModel.PORSCHE_CAYENNE:
+		var left_pos = Vector3(-0.65, 0.92, -2.20)
+		var right_pos = Vector3(0.65, 0.92, -2.20)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
 	# Блочные машинки используют одну центральную фару
 	taillight = _create_single_taillight("NPCTaillight", Vector3(0, 0.4, -2.2))
 
@@ -361,6 +379,8 @@ func _create_reverse_light() -> void:
 		pos = Vector3(0, 0.7, -1.90)
 	elif _car_model == CarModel.MERCEDES_CLK:
 		pos = Vector3(0, 0.66, -2.10)
+	elif _car_model == CarModel.PORSCHE_CAYENNE:
+		pos = Vector3(0, 0.85, -2.22)
 	else:
 		pos = Vector3(0, 0.35, -2.2)
 
@@ -444,6 +464,9 @@ func _create_light_meshes() -> void:
 	elif _car_model == CarModel.MERCEDES_CLK:
 		reverse_pos = Vector3(0, 0.66, -2.12)
 		reverse_size = Vector3(0.12, 0.05, 0.03)
+	elif _car_model == CarModel.PORSCHE_CAYENNE:
+		reverse_pos = Vector3(0, 0.85, -2.24)
+		reverse_size = Vector3(0.14, 0.06, 0.03)
 	else:
 		reverse_pos = Vector3(0, 0.35, -2.22)
 		reverse_size = Vector3(0.12, 0.05, 0.03)
@@ -559,6 +582,13 @@ func _create_split_light_meshes(headlight_mat: StandardMaterial3D) -> void:
 		tl_left_pos = Vector3(-0.61, 0.66, -2.10)
 		tl_right_pos = Vector3(0.61, 0.66, -2.10)
 		tl_size = Vector3(0.22, 0.12, 0.04)
+	elif _car_model == CarModel.PORSCHE_CAYENNE:
+		hl_left_pos = Vector3(-0.70, 0.85, 2.22)
+		hl_right_pos = Vector3(0.70, 0.85, 2.22)
+		hl_size = Vector3(0.26, 0.14, 0.06)
+		tl_left_pos = Vector3(-0.65, 0.92, -2.22)
+		tl_right_pos = Vector3(0.65, 0.92, -2.22)
+		tl_size = Vector3(0.24, 0.16, 0.05)
 	else:
 		return  # Не должно случиться
 

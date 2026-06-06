@@ -25,6 +25,7 @@ const CAR_PRICES := {
 	"lancer_evo_x_2008": 700000,
 	"subaru_sti_2011": 750000,
 	"mercedes_clk55_2003": 850000,
+	"porsche_cayenne_turbo_s_2009": 1200000,
 }
 
 # Тюнинг: 4 категории, 3 уровня
