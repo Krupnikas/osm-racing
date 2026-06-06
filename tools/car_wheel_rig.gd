@@ -25,6 +25,15 @@ extends RefCounted
 
 const DEFAULT_NAME_KEYS := ["tire", "tyre", "rim", "wheel", "brakedisc", "brake_disc", "caliper"]
 const DEFAULT_MAT_KEYS := ["tire", "tyre", "rim", "wheel", "brakr", "brake", "caliper", "disk", "disc"]
+# Body parts whose name/material contains a wheel-key SUBSTRING but are NOT wheels:
+# "trim"→"rim", "steeringwheel"→"wheel", "windscreen"→... . A stray panel reparented
+# onto a spinning wheel node spins a big slab instead of the wheel (Subaru rear bumper
+# carbon "trim", interior steering wheel). Reject these even if a wheel key matched.
+const DEFAULT_EXCLUDE_KEYS := [
+	"trim", "steering", "spoiler", "bumper", "fender", "skirt", "mirror",
+	"door", "hood", "bonnet", "exhaust", "grille", "grill", "boot", "trunk",
+	"windscreen", "windshield",
+]
 
 # Returns:
 # { ok:bool, radius:float, center_y:float, centers:{FL:Vector3,...},
@@ -227,6 +236,11 @@ static func _collect_wheel_meshes(node: Node, name_keys: Array, mat_keys: Array,
 					if k in mn:
 						hit = true; break
 				if hit: break
+		if hit:
+			# Reject body parts that merely contain a wheel-key substring.
+			for ex in DEFAULT_EXCLUDE_KEYS:
+				if ex in nm:
+					hit = false; break
 		if hit:
 			out.append(mi)
 	for c in node.get_children():
