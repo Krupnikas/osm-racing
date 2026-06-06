@@ -157,6 +157,74 @@ static func split_lens_mesh(root: Node3D, lens_keys: Array, front_energy := 0.0,
 	return out
 
 
+# Like split_lens_mesh, but for ONE surface (exact material name) of a possibly MULTI-surface
+# mesh (e.g. the Lada "headlight" node where "headlight_glass" is one surface spanning the front
+# headlight glass AND the rear corner taillights). Splits that surface's triangles by model-z:
+# rear → red sub-mesh (returned), front → a clear sub-mesh with the original material; the
+# original surface is hidden (transparent override) so only the rear corners glow.
+static func split_surface(root: Node3D, material_exact: String, native_front_z_positive := true, rear_energy := 0.7, flag_unmerged := false, exclude_node_substr := "") -> Array:
+	var out: Array = []
+	var meshes: Array = []
+	_all_meshes(root, meshes)
+	for mesh in meshes:
+		if mesh.mesh == null:
+			continue
+		if exclude_node_substr != "" and exclude_node_substr in String(mesh.name).to_lower():
+			continue
+		for i in range(mesh.mesh.get_surface_count()):
+			var src: Material = mesh.mesh.surface_get_material(i)
+			if src == null or src.resource_name.to_lower() != material_exact:
+				continue
+			var t := _xform_to_root(mesh, root)
+			var arr = mesh.mesh.surface_get_arrays(i)
+			var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+			if verts.size() == 0:
+				continue
+			var norms: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
+			var uvs: PackedVector2Array = arr[Mesh.ARRAY_TEX_UV]
+			var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
+			var has_idx := idx.size() > 0
+			var tri_count := (idx.size() / 3) if has_idx else (verts.size() / 3)
+			var st_f := SurfaceTool.new(); st_f.begin(Mesh.PRIMITIVE_TRIANGLES)
+			var st_r := SurfaceTool.new(); st_r.begin(Mesh.PRIMITIVE_TRIANGLES)
+			var nf := 0; var nr := 0
+			for tri in range(tri_count):
+				var a: int = idx[tri * 3] if has_idx else tri * 3
+				var b: int = idx[tri * 3 + 1] if has_idx else tri * 3 + 1
+				var c: int = idx[tri * 3 + 2] if has_idx else tri * 3 + 2
+				var cz := ((t * verts[a]).z + (t * verts[b]).z + (t * verts[c]).z) / 3.0
+				var is_front := (cz >= 0.0) if native_front_z_positive else (cz < 0.0)
+				var st := st_f if is_front else st_r
+				for vi in [a, b, c]:
+					if norms.size() > vi: st.set_normal(norms[vi])
+					if uvs.size() > vi: st.set_uv(uvs[vi])
+					st.add_vertex(verts[vi])
+				if is_front: nf += 1
+				else: nr += 1
+			var parent: Node = mesh.get_parent()
+			# hide the original spanning surface (transparent), keep the mesh's other surfaces
+			var clear: Material = src.duplicate()
+			if clear is StandardMaterial3D:
+				clear.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+				clear.albedo_color = Color(clear.albedo_color.r, clear.albedo_color.g, clear.albedo_color.b, 0.0)
+			mesh.set_surface_override_material(i, clear)
+			if nf > 0:
+				var fi := MeshInstance3D.new(); fi.name = "GlassFrontSplit"; fi.mesh = st_f.commit(); fi.transform = mesh.transform
+				fi.material_override = src.duplicate()
+				parent.add_child(fi)
+				if flag_unmerged: fi.set_meta("npc_keep_unmerged", true)
+			if nr > 0:
+				var rmat := StandardMaterial3D.new()
+				rmat.albedo_color = Color(0.4, 0.05, 0.05)
+				rmat.emission_enabled = true; rmat.emission = REAR_COLOR; rmat.emission_energy_multiplier = rear_energy
+				var ri := MeshInstance3D.new(); ri.name = "TailSplit"; ri.mesh = st_r.commit(); ri.transform = mesh.transform
+				ri.material_override = rmat
+				parent.add_child(ri)
+				if flag_unmerged: ri.set_meta("npc_keep_unmerged", true)
+				out.append(rmat)
+	return out
+
+
 # lamp_keys: substrings for a SHARED lamp material; split per-surface by centroid z.
 # native_front_z_positive: true when the model's native front is +Z (default).
 static func apply_zsplit(root: Node3D, lamp_keys: Array, front_energy := 0.0, rear_energy := 0.7, native_front_z_positive := true, flag_unmerged := false) -> Dictionary:

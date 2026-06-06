@@ -55,7 +55,7 @@ static func compute_road_geometry(nodes: Array, tags: Dictionary, chunk_key: Str
 			height_offset = 0.004
 		"footway", "path", "pedestrian":
 			texture_key = "path"
-			height_offset = 0.23
+			height_offset = 0.115
 		"cycleway":
 			texture_key = "cycleway"
 			height_offset = 0.006

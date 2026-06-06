@@ -225,10 +225,10 @@ var _cone_visual_xform: Transform3D = Transform3D.IDENTITY
 var _cone_size: Vector3 = Vector3.ONE
 var _clutter_sfx: Dictionary = {}  # key -> AudioStream (подхватывается, если ассет есть)
 var _clutter_manager: Node3D       # постоянный менеджер реквизита (не привязан к чанкам)
-# Тротуар поднят над проезжей частью на height_offset тротуара (0.23, см. таблицу
+# Тротуар поднят над проезжей частью на height_offset тротуара (0.115, см. таблицу
 # road height_offset). _sample_elevation даёт уровень ПЧ, поэтому реквизит на
 # тротуаре поднимаем на эту величину, иначе он стоит в кювете у бордюра.
-const CLUTTER_SIDEWALK_RAISE := 0.23
+const CLUTTER_SIDEWALK_RAISE := 0.115
 # Дорожные просадки («повреждённый асфальт») у площадок дорожных работ. Врезаются
 # в геометрию дорожного батча НА ФИНАЛИЗАЦИИ → visual и collision строятся из ОДНИХ
 # вершин (старой плоской коллизии над ямой не остаётся, машина реально проседает).
@@ -4729,7 +4729,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			curb_height = 0.0
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
-			height_offset = 0.23
+			height_offset = 0.115
 			curb_height = 0.0
 		_:
 			texture_key = "residential"
@@ -5470,6 +5470,8 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 	)
 	if material is ShaderMaterial:
 		WetRoadMaterial.apply_road_type_params(material, texture_key)
+		# No wheel-wear ruts on the bridge (looks wrong on a structure).
+		material.set_shader_parameter("wheel_wear", 0.0)
 
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.name = "BridgeRoad"
@@ -5501,11 +5503,15 @@ func _create_bridge_road_lane_markings(pts: PackedVector2Array, perps: Array[Vec
 	const LINE_WIDTH := 0.15
 	const DASH_LENGTH := 3.0
 	const DASH_GAP := 3.0
-	const MARKING_Y_OFFSET := 0.003
+	const MARKING_Y_OFFSET := 0.05  # 5cm: clears z-fighting at ~120m deck elevation AND the deck's ~3cm linear-interp error on the ramp (was 0.003 → markings buried/z-fought, looked dark)
 
 	var marking_mat := StandardMaterial3D.new()
-	marking_mat.albedo_color = Color(0.8, 0.79, 0.73)  # Изношенная краска: грязно-белая, не неон
-	marking_mat.roughness = 0.75
+	marking_mat.albedo_color = Color(0.9, 0.89, 0.84)  # worn white (not neon)
+	# Unshaded: on the elevated bridge deck, SSAO (enabled by the procedural-cherepovets
+	# merge) + railing self-shadow darkened the SHADED paint to near-invisible. Road
+	# markings escape this because they're baked into the road shader on a coplanar
+	# surface; these are separate floating strips. Unshaded keeps them readable.
+	marking_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	marking_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	var st := SurfaceTool.new()
@@ -6810,6 +6816,8 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 		_noise_textures.get("macro", null))
 	if material is ShaderMaterial:
 		WetRoadMaterial.apply_road_type_params(material, "ow2")
+		# No wheel-wear ruts on the bridge deck (looks wrong on a structure).
+		material.set_shader_parameter("wheel_wear", 0.0)
 
 	var mesh_inst := MeshInstance3D.new()
 	mesh_inst.name = "BridgeDeck"
@@ -6854,8 +6862,10 @@ func _create_on_deck_lane_markings(pts: PackedVector2Array, road_width: float, t
 		return
 	# Subdivide at 5 m grid crossings so per-vertex Y from
 	# _deck_surface_y_at_cached tracks the smoothstep ramp curve
-	# (same idea as _subdivide_for_elevation on terrain roads).
-	pts = _subdivide_for_elevation(pts, 5.0)
+	# (same idea as _subdivide_for_elevation on terrain roads). 2 m (not 5 m)
+	# so the dashed strip hugs the ramp curve instead of chord-cutting ~8 cm
+	# under the deck's finer (3 m) triangles, which would bury the markings.
+	pts = _subdivide_for_elevation(pts, 2.0)
 
 	var lanes_str: String = str(tags.get("lanes", "2"))
 	var lane_count: int = int(lanes_str) if lanes_str.is_valid_int() else 2
@@ -6866,11 +6876,15 @@ func _create_on_deck_lane_markings(pts: PackedVector2Array, road_width: float, t
 	const LINE_WIDTH := 0.15
 	const DASH_LENGTH := 3.0
 	const DASH_GAP := 3.0
-	const MARKING_Y_OFFSET := 0.003
+	const MARKING_Y_OFFSET := 0.05  # 5cm: clears z-fighting at ~120m deck elevation AND the deck's ~3cm linear-interp error on the ramp (was 0.003 → markings buried/z-fought, looked dark)
 
 	var marking_mat := StandardMaterial3D.new()
-	marking_mat.albedo_color = Color(0.8, 0.79, 0.73)  # Изношенная краска: грязно-белая, не неон
-	marking_mat.roughness = 0.75
+	marking_mat.albedo_color = Color(0.9, 0.89, 0.84)  # worn white (not neon)
+	# Unshaded: on the elevated bridge deck, SSAO (enabled by the procedural-cherepovets
+	# merge) + railing self-shadow darkened the SHADED paint to near-invisible. Road
+	# markings escape this because they're baked into the road shader on a coplanar
+	# surface; these are separate floating strips. Unshaded keeps them readable.
+	marking_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	marking_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	marking_mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
 
@@ -7067,7 +7081,7 @@ func _create_on_deck_footway(smoothed_points: PackedVector2Array, width: float, 
 	for k in range(pts.size()):
 		var p: Vector2 = pts[k]
 		var perp: Vector2 = perps[k]
-		var deck_y_here: float = _deck_surface_y_at_cached(p) + 0.23
+		var deck_y_here: float = _deck_surface_y_at_cached(p) + 0.115
 		verts.append(Vector3(p.x - perp.x * hw_lefts[k], deck_y_here, p.y - perp.y * hw_lefts[k]))
 		verts.append(Vector3(p.x + perp.x * hw_rights[k], deck_y_here, p.y + perp.y * hw_rights[k]))
 		uv_arr.append(Vector2(0.0, acc * 0.1))
@@ -7110,7 +7124,7 @@ func _create_on_deck_footway(smoothed_points: PackedVector2Array, width: float, 
 	# Curb: 22 cm tall strip on both edges of the sidewalk so it reads as a
 	# raised pavement against the carriageway.
 	if pts.size() >= 2:
-		var curb_h: float = 0.22
+		var curb_h: float = 0.11
 		var curb_st := SurfaceTool.new()
 		curb_st.begin(Mesh.PRIMITIVE_TRIANGLES)
 		var curb_mat := StandardMaterial3D.new()
@@ -7943,7 +7957,7 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 	var is_tagged_crossing: bool = item.tags.get("footway", "") == "crossing"
 	# Path base is needed even for tagged crossings so curb returns and sidewalk ramps
 	# are filled; the on-road portion is still removed by road-corridor clipping.
-	_add_path_clipped_to_batch(smoothed_points, width, 0.23, parent, int(item.get("way_id", 0)))
+	_add_path_clipped_to_batch(smoothed_points, width, 0.115, parent, int(item.get("way_id", 0)))
 
 	# Crossing: splitting по on_road для определения on-road portions (зебра)
 	var current_pts := PackedVector2Array()
@@ -8403,7 +8417,7 @@ func _union_footway_polys(polys: Array[PackedVector2Array]) -> Array[PackedVecto
 ## (там бордюр уже даёт террейн). Меш добавляется через RenderingServer с _curb_material.
 func _build_sidewalk_kerbs(merged: Array[PackedVector2Array], chunk_key: String, _parent: Node3D) -> void:
 	var curb_w := 0.12          # ширина поребрика (м)
-	var top_off := 0.27         # верх поребрика над elevation (тротуар +0.23, газон +0.22 → проступ ~3-5см)
+	var top_off := 0.135        # верх поребрика над elevation (тротуар +0.115, газон +0.11 → проступ ~2-3см)
 	var bot_off := -0.30        # низ уходит под землю
 	var bucket := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
 	for loop in merged:
@@ -9564,7 +9578,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	var max_elev := _sample_elevation(center.x, center.y)
 	for p in points:
 		max_elev = maxf(max_elev, _sample_elevation(p.x, p.y))
-	var base_elev := 0.22 + max_elev
+	var base_elev := 0.11 + max_elev
 
 	# Вычисляем расстояние до игрока для LOD (shadows)
 	var distance_to_player: float = 0.0
@@ -9901,7 +9915,7 @@ func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_k
 
 	st.set_material(material)
 
-	var height_offset := 0.23  # Same as footway (1cm above grass terrain at 0.22)
+	var height_offset := 0.115  # Same as footway (~0.5cm above grass terrain at 0.11)
 	var uv_ws := 1.0 / 4.0
 
 	for cell_poly in grid_polys:
@@ -10539,7 +10553,7 @@ func _create_bin_immediate(pos: Vector2, elevation: float, rotation_y: float, pa
 		return null
 	var body := RigidBody3D.new()
 	body.name = "ClutterBin"
-	# Поднимаем на уровень тротуара (ПЧ → тротуар = +0.23), чтобы урна стояла
+	# Поднимаем на уровень тротуара (ПЧ → тротуар = +0.115), чтобы урна стояла
 	# НА тротуаре, а не в кювете у бордюра.
 	body.position = Vector3(pos.x, elevation + CLUTTER_SIDEWALK_RAISE, pos.y)
 	if elevation != 0.0:
@@ -10860,7 +10874,7 @@ func _register_road_depression(anchor: Vector2, dir: Vector2, perp: Vector2, sid
 			return
 	_road_depressions[chunk_key].append({
 		"c": c, "u": dir, "v": perp * side,
-		"L": 1.0, "W": foot_w, "depth": 0.10, "slope": 0.22,
+		"L": 1.6, "W": foot_w, "depth": 0.12, "slope": 0.22,
 		"seed": int(absf(float(way_id))) % 100000 + 7,
 		"done": false,
 	})
@@ -10872,17 +10886,16 @@ func _apply_road_depressions(chunk_key: String, texture_key: String, batch: Dict
 		return
 	var deps: Array = _road_depressions[chunk_key]
 	for dep in deps:
-		if dep["done"]:
-			continue
-		var c: Vector2 = dep["c"]
-		if not _xz_in_batch(batch, c.x, c.y):
-			if debug_road_depressions:
-				print("[DEPRESSION] skip tk=%s c=(%.2f,%.2f): center not in this batch" % [texture_key, c.x, c.y])
-			continue
+		# Carve into EVERY road batch whose triangles overlap the footprint. A pit
+		# can sit where two road surfaces overlap (through road + intersection/
+		# crosswalk apron, or two ways batched under different texture_keys). The old
+		# dep["done"] gate stopped after the FIRST batch, leaving the other batch flat
+		# — it then covered part of the carved pit (the visible "road patch over the
+		# pit"). _carve_road_depression self-filters: it returns false without touching
+		# the batch when no triangle overlaps, so calling it on every batch is safe.
 		if debug_road_depressions:
-			print("[DEPRESSION] carving in tk=%s c=(%.2f,%.2f)..." % [texture_key, c.x, c.y])
-		if _carve_road_depression(batch, dep):
-			dep["done"] = true
+			print("[DEPRESSION] try carve tk=%s c=(%.2f,%.2f)" % [texture_key, dep["c"].x, dep["c"].y])
+		_carve_road_depression(batch, dep)
 
 
 func _xz_in_batch(batch: Dictionary, px: float, pz: float) -> bool:
@@ -11026,7 +11039,7 @@ func _carve_road_depression(batch: Dictionary, dep: Dictionary) -> bool:
 		if has_uv2:
 			u2A = uv2s[tri[0]]; u2B = uv2s[tri[1]]; u2C = uv2s[tri[2]]
 		var emax := maxf(maxf((B - A).length(), (C - B).length()), (A - C).length())
-		var R := clampi(int(ceil(emax / 0.25)), 2, 26)
+		var R := clampi(int(ceil(emax / 0.12)), 6, 40)  # 0.12m grid: fine enough to sample the pit's flat bottom (was 0.25m → grid straddled the bottom, carving only the shallow rim → looked ~1cm instead of full depth)
 		var stride := R + 1
 		var gidx: PackedInt32Array = PackedInt32Array()
 		gidx.resize(stride * stride)
@@ -11903,7 +11916,7 @@ func _register_water_polygon(points: PackedVector2Array, parent: Node3D) -> void
 				cw_hash[cell].append({"idx": local_water_idx, "p1": p1, "p2": p2})
 
 
-## Генерирует наклонный берег вокруг водного полигона (от Y=0.22 до Y=-1.0)
+## Генерирует наклонный берег вокруг водного полигона (от Y=0.11 до Y=-1.0)
 func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 	if water_poly.size() < 3:
 		return
@@ -11923,7 +11936,7 @@ func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 		has_chunk_rect = true
 
 	var pn := poly.size()
-	var sidewalk_h := 0.22  # Верхний край берега (уровень тротуара/террейна)
+	var sidewalk_h := 0.11  # Верхний край берега (уровень тротуара/террейна)
 	var water_h := WATER_Y  # Нижний край берега (уровень воды)
 
 	# Определяем направление полигона для правильной ориентации наружных нормалей
@@ -18626,7 +18639,7 @@ func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void
 		for ix in range(grid_res + 1):
 			var x := min_x + ix * step
 			var z := min_z + iz * step
-			var y := 0.22 + _sample_elevation_local(x, z, ft_has_elev, ft_grid, ft_grid_res, ft_base_x, ft_base_z, ft_step)
+			var y := 0.11 + _sample_elevation_local(x, z, ft_has_elev, ft_grid, ft_grid_res, ft_base_x, ft_base_z, ft_step)
 			vertices.append(Vector3(x, y, z))
 			uvs.append(Vector2(x * uv_scale, z * uv_scale))
 			normals.append(Vector3.UP)
@@ -18716,7 +18729,7 @@ func _generate_lod2_buildings(chunk_key: String, osm_data: Dictionary, min_x: fl
 
 		var building_height := _compute_building_height(tags)
 		var color := _compute_building_color(tags)
-		var base_elev := 0.22 + _sample_elevation(center_x2, center_z2)
+		var base_elev := 0.11 + _sample_elevation(center_x2, center_z2)
 		var is_ccw := _is_polygon_ccw(points)
 		var normal_sign := -1.0 if is_ccw else 1.0
 
@@ -18959,7 +18972,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	var max_x := min_x + chunk_size
 	var min_z := float(chunk_z) * chunk_size
 	var max_z := min_z + chunk_size
-	var sidewalk_height := 0.22
+	var sidewalk_height := 0.11
 
 	# Use this chunk's own elevation data directly to avoid float precision
 	# issues at chunk boundaries where floor(pos / chunk_size) might map
@@ -19314,7 +19327,7 @@ func _generate_industrial_buildings(points: PackedVector2Array, parent: Node3D) 
 			var bld_max_elev := _sample_elevation(bld_ctr.x, bld_ctr.y)
 			for bp in bld_points:
 				bld_max_elev = maxf(bld_max_elev, _sample_elevation(bp.x, bp.y))
-			var base_elev := 0.22 + bld_max_elev
+			var base_elev := 0.11 + bld_max_elev
 			_create_3d_building(bld_points, building_color, bld_height, parent, base_elev)
 
 
@@ -23710,6 +23723,27 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 
 	if vertices.is_empty():
 		return
+
+	# Carve any registered road depression that overlaps this junction patch. The
+	# patch is a SEPARATE raised mesh (not part of _road_batch_data), so the normal
+	# road-batch carve never touches it — without this it stays flat and covers the
+	# pit (the "road patch sitting over the pit"). _carve_road_depression self-filters:
+	# it returns false without modifying the batch when no triangle overlaps.
+	if enable_road_depressions and not _road_depressions.is_empty():
+		var pbatch := {
+			"vertices": vertices, "uvs": uvs, "uv2s": PackedVector2Array(),
+			"normals": normals, "indices": indices,
+		}
+		var patch_carved := false
+		for dck in _road_depressions:
+			for dep in _road_depressions[dck]:
+				if _carve_road_depression(pbatch, dep):
+					patch_carved = true
+		if patch_carved:
+			vertices = pbatch["vertices"]
+			uvs = pbatch["uvs"]
+			normals = pbatch["normals"]
+			indices = pbatch["indices"]
 
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)

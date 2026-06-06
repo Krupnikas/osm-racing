@@ -33,6 +33,10 @@ const CAR_SPEC_LINES := {
 	"porsche_cayenne_turbo_s_2009": "2009 · 4.8L TT V8 · 550 HP · AWD · 2355 KG",
 	"chevrolet_aveo_5_lt_2009": "2009 · 1.6L · 106 HP · FWD · 1100 KG",
 	"chevrolet_spark_12_lt_2011": "2011 · 1.2L · 81 HP · FWD · 930 KG",
+	"lada_2171_priora_2009": "2009 · 1.6L 16V · 98 HP · FWD · 1160 KG",
+	"lada_2114_samara_2001": "2001 · 1.6L · 81 HP · FWD · 985 KG",
+	"lada_2110_1995": "1995 · 1.6L · 89 HP · FWD · 1010 KG",
+	"mini_cooper_s_f56_2014": "2014 · 2.0L Turbo · 189 HP · FWD · 1160 KG",
 }
 
 # — Tunnel car-select (NFS Underground style) feature flag —
@@ -80,7 +84,7 @@ var _wheel_nodes: Array[Node3D] = []
 
 
 func _ready() -> void:
-	_car_ids = CarSettings.get_car_ids()
+	_car_ids = CareerState.sort_car_ids_by_price(CarSettings.get_car_ids())
 	_initial_car_id = CarSettings.selected_car_id
 	_current_index = max(0, _car_ids.find(CarSettings.selected_car_id))
 	_build_ui()
@@ -799,11 +803,9 @@ func _on_back_pressed() -> void:
 func show_selection(owned_only: bool = false, initial_car_id: String = "") -> void:
 	_owned_only = owned_only
 	if owned_only:
-		_car_ids = []
-		for cid in CareerState.owned_cars:
-			_car_ids.append(cid)
+		_car_ids = CareerState.sort_car_ids_by_price(CareerState.owned_cars)
 	else:
-		_car_ids = CarSettings.get_car_ids()
+		_car_ids = CareerState.sort_car_ids_by_price(CarSettings.get_car_ids())
 
 	if initial_car_id == "":
 		initial_car_id = (CareerState.selected_car if owned_only

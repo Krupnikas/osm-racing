@@ -39,7 +39,11 @@ const DISPLAY_STATS := {
 	"mercedes_clk55_2003": {"accel": 0.82, "speed": 0.85, "handling": 0.76},
 	"porsche_cayenne_turbo_s_2009": {"accel": 0.80, "speed": 0.82, "handling": 0.60},
 	"chevrolet_aveo_5_lt_2009": {"accel": 0.50, "speed": 0.52, "handling": 0.58},
-	"chevrolet_spark_12_lt_2011": {"accel": 0.42, "speed": 0.44, "handling": 0.62}
+	"chevrolet_spark_12_lt_2011": {"accel": 0.42, "speed": 0.44, "handling": 0.62},
+	"lada_2171_priora_2009": {"accel": 0.46, "speed": 0.48, "handling": 0.55},
+	"lada_2114_samara_2001": {"accel": 0.44, "speed": 0.46, "handling": 0.54},
+	"lada_2110_1995": {"accel": 0.45, "speed": 0.47, "handling": 0.53},
+	"mini_cooper_s_f56_2014": {"accel": 0.66, "speed": 0.64, "handling": 0.78}
 }
 
 var selected_car_id: String = DEFAULT_CAR
@@ -241,6 +245,54 @@ const CARS := {
 		"coefficient_of_drag": 0.33,
 		"frontal_area": 1.9,
 		"gear_ratios": [3.6, 2.05, 1.35, 0.97, 0.76]
+	},
+	"lada_2171_priora_2009": {
+		"name": "LADA 2171 Priora",
+		"scene": "res://addons/gevp/scenes/lada_priora_car.tscn",
+		"max_torque": 440.0,  # 1.6L 16v, FWD estate
+		"max_steering_angle": 38.0,
+		"steering_speed": 4.2,
+		"final_drive": 3.7,
+		"max_rpm": 5800.0,
+		"coefficient_of_drag": 0.34,
+		"frontal_area": 2.0,
+		"gear_ratios": [3.6, 2.0, 1.35, 1.0, 0.82]
+	},
+	"lada_2114_samara_2001": {
+		"name": "LADA 2114 Samara",
+		"scene": "res://addons/gevp/scenes/lada_samara_car.tscn",
+		"max_torque": 420.0,  # 1.5/1.6L, FWD hatch
+		"max_steering_angle": 38.0,
+		"steering_speed": 4.2,
+		"final_drive": 3.7,
+		"max_rpm": 5800.0,
+		"coefficient_of_drag": 0.36,
+		"frontal_area": 1.95,
+		"gear_ratios": [3.6, 2.0, 1.35, 1.0, 0.82]
+	},
+	"lada_2110_1995": {
+		"name": "LADA 2110",
+		"scene": "res://addons/gevp/scenes/lada_2110_car.tscn",
+		"max_torque": 430.0,  # 1.5/1.6L, FWD sedan
+		"max_steering_angle": 38.0,
+		"steering_speed": 4.2,
+		"final_drive": 3.7,
+		"max_rpm": 5800.0,
+		"coefficient_of_drag": 0.34,
+		"frontal_area": 1.95,
+		"gear_ratios": [3.6, 2.0, 1.35, 1.0, 0.82]
+	},
+	"mini_cooper_s_f56_2014": {
+		"name": "Mini Cooper S F56",
+		"scene": "res://addons/gevp/scenes/mini_cooper_car.tscn",
+		"max_torque": 560.0,  # 2.0L turbo, FWD hot hatch
+		"max_steering_angle": 40.0,
+		"steering_speed": 4.8,
+		"final_drive": 3.9,
+		"max_rpm": 6500.0,
+		"coefficient_of_drag": 0.31,
+		"frontal_area": 2.0,
+		"gear_ratios": [3.5, 2.2, 1.5, 1.1, 0.87, 0.72]
 	}
 }
 

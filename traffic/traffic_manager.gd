@@ -31,6 +31,10 @@ var npc_clk_scene: PackedScene
 var npc_cayenne_scene: PackedScene
 var npc_aveo_scene: PackedScene
 var npc_spark_scene: PackedScene
+var npc_priora_scene: PackedScene
+var npc_samara_scene: PackedScene
+var npc_2110_scene: PackedScene
+var npc_mini_scene: PackedScene
 var road_network: Node  # RoadNetwork
 var terrain_generator: Node  # OSMTerrainGenerator
 var player_car: Node3D
@@ -73,10 +77,15 @@ func _ready() -> void:
 	npc_volga_scene = preload("res://traffic/npc_volga_gaz3110.tscn")
 	npc_evo_scene = preload("res://traffic/npc_lancer_evo_x.tscn")
 	npc_sti_scene = preload("res://traffic/npc_subaru_sti.tscn")
-	npc_clk_scene = preload("res://traffic/npc_mercedes_clk55.tscn")
+	# Mercedes CLK 55 disabled in traffic: glitchy wheels. Re-enable when fixed.
+	# npc_clk_scene = preload("res://traffic/npc_mercedes_clk55.tscn")
 	npc_cayenne_scene = preload("res://traffic/npc_cayenne.tscn")
 	npc_aveo_scene = preload("res://traffic/npc_aveo.tscn")
 	npc_spark_scene = preload("res://traffic/npc_spark.tscn")
+	npc_priora_scene = preload("res://traffic/npc_lada_priora.tscn")
+	npc_samara_scene = preload("res://traffic/npc_lada_samara.tscn")
+	npc_2110_scene = preload("res://traffic/npc_lada_2110.tscn")
+	npc_mini_scene = preload("res://traffic/npc_mini_cooper.tscn")
 
 	# Создаём RoadNetwork
 	var RoadNetworkScript = preload("res://traffic/road_network.gd")
@@ -141,6 +150,10 @@ func _warmup_mesh_cache() -> void:
 	if npc_cayenne_scene: scenes.append(npc_cayenne_scene)
 	if npc_aveo_scene: scenes.append(npc_aveo_scene)
 	if npc_spark_scene: scenes.append(npc_spark_scene)
+	if npc_priora_scene: scenes.append(npc_priora_scene)
+	if npc_samara_scene: scenes.append(npc_samara_scene)
+	if npc_2110_scene: scenes.append(npc_2110_scene)
+	if npc_mini_scene: scenes.append(npc_mini_scene)
 	for scene in scenes:
 		var instance := scene.instantiate() as Node3D
 		instance.visible = false
@@ -500,10 +513,8 @@ func _get_npc_from_pool():
 			# 1% - Subaru WRX STI (very rare performance hatch)
 			scene_to_use = npc_sti_scene
 			car_type = "Subaru WRX STI"
-		elif rand < 0.86:
-			# 1% - Mercedes CLK 55 AMG (very rare luxury coupe)
-			scene_to_use = npc_clk_scene
-			car_type = "Mercedes CLK 55"
+		# Mercedes CLK 55 disabled (glitchy wheels) — its 0.85–0.86 band falls
+		# through to the next car so no null scene is ever selected.
 		elif rand < 0.87:
 			# 1% - Porsche Cayenne Turbo S (very rare luxury SUV)
 			scene_to_use = npc_cayenne_scene
@@ -516,10 +527,26 @@ func _get_npc_from_pool():
 			# 3% - Chevrolet Spark (common city hatch)
 			scene_to_use = npc_spark_scene
 			car_type = "Chevrolet Spark"
+		elif rand < 0.95:
+			# 3% - LADA 2171 Priora (common Russian car)
+			scene_to_use = npc_priora_scene
+			car_type = "LADA Priora"
+		elif rand < 0.975:
+			# 2.5% - LADA 2114 Samara (common Russian car)
+			scene_to_use = npc_samara_scene
+			car_type = "LADA Samara"
+		elif rand < 0.985:
+			# 2% - LADA 2110 (common Russian car)
+			scene_to_use = npc_2110_scene
+			car_type = "LADA 2110"
+		elif rand < 0.995:
+			# 1% - Mini Cooper S (rare premium hatch)
+			scene_to_use = npc_mini_scene
+			car_type = "Mini Cooper S"
 		else:
-			# 7% - блочные машинки
-			scene_to_use = npc_car_scene
-			car_type = "box car"
+			# block cars disabled — fall back to a common real car (VAZ-2107)
+			scene_to_use = npc_vaz2107_scene if npc_vaz2107_scene else npc_car_scene
+			car_type = "VAZ-2107"
 
 		var npc = scene_to_use.instantiate()
 		get_parent().add_child(npc)

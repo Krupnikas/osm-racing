@@ -103,6 +103,25 @@ func mute_merged_emission(mats: Array) -> void:
 				mat.emission_enabled = false
 
 
+## Reparent kept lamp meshes (npc_keep_unmerged) up to this model root, so they are NOT left
+## as children of a body mesh that npc_car.gd._merge_meshes() hides (visible=false propagates
+## to children → the whole lamp would vanish, e.g. the Lada FBX nests "headlight" under "body").
+## Call AFTER init_real_lens* and BEFORE the _ready await (i.e. before the parent merges).
+func lift_kept_lamps() -> void:
+	var kept: Array = []
+	_collect_kept(self, kept)
+	for n in kept:
+		if n.get_parent() != self:
+			n.reparent(self, true)
+
+
+func _collect_kept(node: Node, out: Array) -> void:
+	if node is MeshInstance3D and node.has_meta("npc_keep_unmerged"):
+		out.append(node)
+	for c in node.get_children():
+		_collect_kept(c, out)
+
+
 func _process(_delta: float) -> void:
 	if not is_instance_valid(_night_manager):
 		var scene := get_tree().current_scene

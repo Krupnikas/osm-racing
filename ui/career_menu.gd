@@ -1362,7 +1362,7 @@ func _populate_garage() -> void:
 		_garage_cars_container.add_child(empty_label)
 		return
 
-	for car_id in CareerState.owned_cars:
+	for car_id in CareerState.sort_car_ids_by_price(CareerState.owned_cars):
 		var is_selected := car_id == CareerState.selected_car
 		var car_name := CarSettings.get_car_name(car_id)
 
