@@ -95,10 +95,15 @@ _mcp_print(A.format_report(A.analyze("/abs/path/model.glb", {"target_length": 4.
    Add a model entry to `npc_car_lights.gd` (detected by the model node name).
 5. **Register** — add to `CARS` + `DISPLAY_STATS` (player stats), `CAR_PRICES`,
    `CAR_SPEC_LINES`, and `traffic_manager` (var + preload + warmup + weight).
-6. **Test via MCP** — `play_scene res://main.tscn`, swap car in, drive (verify
-   `velocity·−Z > 0`, wheels spin, front wheels steer, grounded), toggle night for
-   head/tail/brake lights; spawn NPC instances for grounding + colour variety; check
-   the showroom preview. **Confirm night actually went dark before judging headlights.**
+6. **Test via MCP** — drive-test on the **flat test track** `res://race/test_track_scene.tscn`
+   (city curbs leave a wheel airborne → false "won't drive"; the track has a `Car` node +
+   flat ground). Swap the car in, verify `velocity·−Z > 0`, all 4 wheels contact, wheels
+   spin, grounded. Toggle night and verify lights from **THREE angles — front, rear,
+   top-down**: front/rear lenses themselves are alight (white front, red rear, real lens
+   shape), top-down shows the lights are inside the body footprint (§5, §5b). Spawn NPC
+   instances for grounding + per-instance colour variety. **Confirm night actually went dark
+   before judging headlights**, and **freeze the body before teleporting** a moving car
+   (teleport-at-speed glitches it skyward).
 
 ---
 
@@ -138,12 +143,14 @@ it in progress, or quarantine it per §8, and say so in the report).
 - the NPC version works
 - NPC wheels rotate while moving
 - NPC colours vary per instance
-- NPC headlights / taillights work
+- NPC headlights / taillights are the REAL emissive lens meshes (NOT proxy boxes) — via
+  `npc_keep_unmerged` + `real_lens_lights` (§5c)
 
-**Lights (player + NPC)**
-- player headlights / taillights work
-- headlights are placed on the real **front** lamp blocks
-- taillights are placed on the real **rear** lamp blocks
+**Lights (player + NPC) — emissive real lens, never proxy boxes (§5b/§5c)**
+- player AND NPC head/tail glow is the actual lamp-lens mesh made emissive (lens-shaped)
+- front lenses warm-white, rear lenses red; energy toggles with night
+- **verified at night from 3 angles (front / rear / top-down) for BOTH the player and the NPC**
+  (§5d) — lenses alight, lights inside the body footprint
 
 **Registry & verification**
 - stats, price, display name, spec line, and NPC spawn weight are all added
@@ -231,6 +238,91 @@ rediscovering it.
   the car rests on). A single down-raycast reads ~1 m off where road-collision layers
   overlap at junctions.
 - **Model organisation varies wildly** — analyse before committing (see §7).
+- **Lights must be the REAL lens mesh made emissive — never a proxy box.** A `SpotLight3D`
+  beam with a dark lens looks like "light coming from nowhere"; a `BoxMesh` proxy at the
+  lamp mismatches the lens shape and pokes outside the body. Both were rejected in review.
+  Emissive the actual lamp-lens mesh so the glow matches the lens shape and sits in the body.
+- **Verify lights at night from THREE angles — front, rear, AND top-down — for every car.**
+  Front/rear confirm the lenses themselves are alight (white front, red rear); top-down
+  confirms the light sources/lenses are inside the car-body footprint, not floating outside.
+- **Wheel-rig substring false-positives:** `_collect_wheel_meshes` matches name/material
+  substrings, so `"…Trim…"`→`"rim"` and `"SteeringWheel"`→`"wheel"` drag bumpers/steering
+  wheels into the rig. The hardened rig now drops centreline strays on separate-wheel models
+  (see §5b). Also affects NPC wheel-spin collection — rename or rely on the filter.
+- **Opaque/foreign wheel materials:** some models name wheels `llanta`/`rin` (Spanish),
+  `chevy_aveo_*`, `Sparkrines`, etc. The analyzer reports "0 wheels", but the meshes exist —
+  pass those tokens to `CarWheelRig.build(..., extra_mat_keys=[...])`.
+
+---
+
+## 5b. Lights — emissive the real lens (front white / rear red)
+
+The lamp glow must come from the car's **actual lamp-lens mesh**, made emissive — matching
+the lens shape and sitting inside the body. Keep the placed `SpotLight3D` (forward beam) and
+brake `OmniLight3D`/`SpotLight3D` for illumination, but the lens itself must visibly glow.
+
+Identify the lens and assign colour by, in order of preference:
+1. **Separate lens material per end** (best): `red_glass`/`Light_glass`/`TailLight*` = rear
+   (red); `LightCluster`/`LightRefracted`/`Glass_light_1`/`HeadLight*` = front (warm white).
+   Emissive each by material name. (Civic, RX-8, Audi, STI, CLK, Volga, Focus.)
+2. **Per-mesh z-split** when front and rear are SEPARATE meshes that share a material: for
+   each mesh, real-vertex centroid z (native front = +Z) → front white / rear red.
+3. **Explicit front/rear material lists** when one mesh *spans* both ends (centroid ≈ 0 so
+   z-split fails): hard-code `FRONT_LAMP_MATS`/`REAR_LAMP_MATS`. (Cayenne `cayenne_luz`=front,
+   `cayenne_luz2`=rear.) If a single material truly covers both ends and can't be split,
+   emissive it warm-white (front headlights are the priority) and let the rear red OmniLight
+   carry the rear; note the limitation.
+
+Toggle: front headlight emission energy = 0 by day, ~1.3 at night (tie to NightModeManager);
+rear emission baseline ~0.6, ~2.0 on `brake_input > 0.1`. Reusable helper pattern lives in
+`car/cayenne_setup.gd` / `car/aveo_setup.gd` / `car/spark_setup.gd` (`_emissive_lamps`).
+
+**Finding the lens material (do this, don't guess):** dump the REAL
+`mesh.mesh.surface_get_material(i).resource_name` for every surface — names are often
+TRUNCATED in notes/analysis (e.g. `chevy_aveo_342yhwwes` was really
+`chevy_aveo_342yhwwesrtfnhdtf`). When names are opaque (Spanish/SketchUp tokens), **probe**:
+set a distinct bright emissive (cyan/magenta/yellow) on each candidate material and screenshot
+front + rear + top — the colour reveals exactly which mesh is the headlight vs taillight vs
+fog vs reflector. Only then write `FRONT_LAMP_MATS`/`REAR_LAMP_MATS`. Express positions in the
+car-LOCAL frame (`car.global_transform.affine_inverse() * world_centroid`) — GEVP forward is
+−Z, so front lenses sit at local −Z.
+
+## 5c. Lights on the NPC — the mesh-merge trap (MUST READ)
+
+NPC cars are **not** like the player. `traffic/npc_car.gd._merge_meshes()` bakes every body
+MeshInstance into a single cached `MergedMesh` (one surface per material) and HIDES the
+originals (wheels are kept separate to spin). Consequences for lights:
+- A per-surface emissive override on the original lens meshes **never renders** — that mesh is
+  hidden behind the merged mesh. (This is why a player car can glow correctly while its NPC
+  twin stays dark — same material, same energy.)
+- In the merged mesh the lamp material is ONE surface fusing front+rear lenses, so you cannot
+  split white/red there.
+
+The shared `night_mode/npc_car_lights.gd` historically drew **rectangular `BoxMesh` proxy
+lamps** for NPCs — the exact lens-shape mismatch we reject. Correct approach (shipped for
+Spark, generalized in `npc_car.gd` + `npc_car_lights.gd`):
+1. In the car's `*_npc_setup.gd`, **synchronously before its `await`** (so before the parent's
+   `_merge_meshes()` runs), for each lamp-lens mesh: `mesh.set_meta("npc_keep_unmerged", true)`
+   and apply the same per-surface front/rear emissive override as the player.
+2. Set `get_parent().set_meta("real_lens_lights", true)` (also before the await).
+3. `_merge_meshes()` skips meshes flagged `npc_keep_unmerged` (leaves them visible, like
+   wheels) and `_create_light_meshes()` skips its proxy boxes when the NPC root has
+   `real_lens_lights`. The shared SpotLight beams + taillight OmniLights are still created.
+4. Toggle lens emission in the npc-setup `_process` by polling `NightModeManager.is_night`
+   (0 by day, front ~1.3 / rear ~1.8 at night).
+
+Template: `car/spark_npc_setup.gd`. NOTE the static `_merged_mesh_cache` — when iterating you
+must STOP & re-PLAY the scene to rebuild it (otherwise a stale merge that still contains the
+lamp surface causes z-fighting with the now-visible lens meshes).
+
+## 5d. Verify lights — night, 3 angles, EVERY variant
+
+For **both** the player AND the NPC of every car: enable night via
+`NightModeManager.enable_night_mode()` (NOT `is_night = true` — that leaves the scene in
+daylight), confirm the sky actually went dark, then screenshot **front, rear, and top-down**.
+Pass criteria: front lenses warm-white-lit and rear lenses red-lit (the lens mesh itself
+glows, matching its shape), and top-down shows every light source/lens inside the body
+footprint (nothing floating outside). A code edit is NOT "done" until these shots confirm it.
 
 ---
 

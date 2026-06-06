@@ -1,4 +1,4 @@
-extends Node3D
+extends "res://car/npc_real_lens.gd"
 
 ## NPC setup for the Ford Focus ST 2006 (VehicleBody3D traffic car).
 ##
@@ -38,6 +38,7 @@ func _ready() -> void:
 	# 1) split wheels synchronously so they exist before NPCCar._merge_meshes()
 	CarWheelRig.build(self)
 	# 2) pick a colour now; apply after the merge has run
+	init_real_lens(["lightcluster", "lightrefracted"], ["red_glass"], true)
 	body_color = NPC_COLORS[randi() % NPC_COLORS.size()]
 	await get_tree().process_frame
 	_apply_body_color()

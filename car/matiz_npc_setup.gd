@@ -1,8 +1,8 @@
-extends Node3D
+extends "res://car/npc_real_lens.gd"
 
 ## Скрипт для настройки модели Daewoo Matiz (NPC версия)
-## Рандомизирует цвет кузова, НЕ скрывает колёса
-## Фары настраиваются через npc_car_lights.gd
+## Рандомизирует цвет кузова, НЕ скрывает колёса.
+## Фары: реальные линзы светятся через npc_real_lens (никаких прокси-боксов).
 
 # Типичные цвета Daewoo Matiz
 const MATIZ_COLORS := [
@@ -23,6 +23,11 @@ var body_color := Color(0.95, 0.85, 0.15, 1.0)
 
 func _ready() -> void:
 	body_color = MATIZ_COLORS[randi() % MATIZ_COLORS.size()]
+
+	# real lamp lenses (front white / rear red). Matiz MAIN headlights = the "lights_chassis"
+	# + "lights_body_7" meshes (front); "front turn signals" are the small markers. Rear keys
+	# are matched first so "rear turn signals" stays red.
+	init_real_lens(["lights_chassis", "lights_body_7", "front turn"], ["rear brake", "rear lamp", "rear light", "rear turn"], true)
 
 	await get_tree().process_frame
 

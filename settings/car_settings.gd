@@ -37,7 +37,9 @@ const DISPLAY_STATS := {
 	"lancer_evo_x_2008": {"accel": 0.85, "speed": 0.82, "handling": 0.88},
 	"subaru_sti_2011": {"accel": 0.86, "speed": 0.83, "handling": 0.87},
 	"mercedes_clk55_2003": {"accel": 0.82, "speed": 0.85, "handling": 0.76},
-	"porsche_cayenne_turbo_s_2009": {"accel": 0.80, "speed": 0.82, "handling": 0.60}
+	"porsche_cayenne_turbo_s_2009": {"accel": 0.80, "speed": 0.82, "handling": 0.60},
+	"chevrolet_aveo_5_lt_2009": {"accel": 0.50, "speed": 0.52, "handling": 0.58},
+	"chevrolet_spark_12_lt_2011": {"accel": 0.42, "speed": 0.44, "handling": 0.62}
 }
 
 var selected_car_id: String = DEFAULT_CAR
@@ -215,6 +217,30 @@ const CARS := {
 		"coefficient_of_drag": 0.36,
 		"frontal_area": 2.7,
 		"gear_ratios": [4.1, 2.3, 1.5, 1.1, 0.87, 0.69]
+	},
+	"chevrolet_aveo_5_lt_2009": {
+		"name": "Chevrolet Aveo 5 LT",
+		"scene": "res://addons/gevp/scenes/aveo_car.tscn",
+		"max_torque": 560.0,  # 1.6L, FWD economy hatch
+		"max_steering_angle": 38.0,
+		"steering_speed": 4.2,
+		"final_drive": 4.18,
+		"max_rpm": 6000.0,
+		"coefficient_of_drag": 0.33,
+		"frontal_area": 2.0,
+		"gear_ratios": [3.5, 2.0, 1.3, 0.95, 0.75]
+	},
+	"chevrolet_spark_12_lt_2011": {
+		"name": "Chevrolet Spark 1.2 LT",
+		"scene": "res://addons/gevp/scenes/spark_car.tscn",
+		"max_torque": 480.0,  # 1.2L, FWD city hatch
+		"max_steering_angle": 40.0,
+		"steering_speed": 4.5,
+		"final_drive": 4.3,
+		"max_rpm": 6200.0,
+		"coefficient_of_drag": 0.33,
+		"frontal_area": 1.9,
+		"gear_ratios": [3.6, 2.05, 1.35, 0.97, 0.76]
 	}
 }
 

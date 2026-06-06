@@ -29,6 +29,8 @@ var npc_evo_scene: PackedScene
 var npc_sti_scene: PackedScene
 var npc_clk_scene: PackedScene
 var npc_cayenne_scene: PackedScene
+var npc_aveo_scene: PackedScene
+var npc_spark_scene: PackedScene
 var road_network: Node  # RoadNetwork
 var terrain_generator: Node  # OSMTerrainGenerator
 var player_car: Node3D
@@ -73,6 +75,8 @@ func _ready() -> void:
 	npc_sti_scene = preload("res://traffic/npc_subaru_sti.tscn")
 	npc_clk_scene = preload("res://traffic/npc_mercedes_clk55.tscn")
 	npc_cayenne_scene = preload("res://traffic/npc_cayenne.tscn")
+	npc_aveo_scene = preload("res://traffic/npc_aveo.tscn")
+	npc_spark_scene = preload("res://traffic/npc_spark.tscn")
 
 	# Создаём RoadNetwork
 	var RoadNetworkScript = preload("res://traffic/road_network.gd")
@@ -135,6 +139,8 @@ func _warmup_mesh_cache() -> void:
 	if npc_sti_scene: scenes.append(npc_sti_scene)
 	if npc_clk_scene: scenes.append(npc_clk_scene)
 	if npc_cayenne_scene: scenes.append(npc_cayenne_scene)
+	if npc_aveo_scene: scenes.append(npc_aveo_scene)
+	if npc_spark_scene: scenes.append(npc_spark_scene)
 	for scene in scenes:
 		var instance := scene.instantiate() as Node3D
 		instance.visible = false
@@ -502,8 +508,16 @@ func _get_npc_from_pool():
 			# 1% - Porsche Cayenne Turbo S (very rare luxury SUV)
 			scene_to_use = npc_cayenne_scene
 			car_type = "Porsche Cayenne"
+		elif rand < 0.90:
+			# 3% - Chevrolet Aveo (common economy hatch)
+			scene_to_use = npc_aveo_scene
+			car_type = "Chevrolet Aveo"
+		elif rand < 0.93:
+			# 3% - Chevrolet Spark (common city hatch)
+			scene_to_use = npc_spark_scene
+			car_type = "Chevrolet Spark"
 		else:
-			# 13% - блочные машинки
+			# 7% - блочные машинки
 			scene_to_use = npc_car_scene
 			car_type = "box car"
 

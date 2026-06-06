@@ -1,36 +1,31 @@
 extends "res://car/npc_real_lens.gd"
 
-## NPC setup for the Volga GAZ-3110 (VehicleBody3D traffic car, low-poly).
-## Pipeline-generated. Real-world scale (~1.0). Native forward = +Z = NPC forward → no
-## rotation. Separate corner wheels split by CarWheelRig (sync, before _merge_meshes).
-## Body colour is a per-instance surface_override_material on the cached MergedMesh's
-## "BodyColor" surface.
+## NPC setup for the Porsche Cayenne Turbo S 2009 (VehicleBody3D traffic car).
+## Pipeline-generated. Native forward = +Z = NPC forward → no rotation. Wheels split by
+## CarWheelRig with extra mat keys ["llanta","rin"] (+ default "disk"); hardened lateral
+## filter keeps the 4 corners. Body colour = per-instance override on cached MergedMesh's
+## "CAYENNE" surface.
 
 const CarWheelRig := preload("res://tools/car_wheel_rig.gd")
+const WHEEL_MATS := ["llanta", "rin"]
+const PAINT_MAT := "cayenne"
 
 const NPC_COLORS := [
-	Color(0.941, 0.937, 0.894),  # White
-	Color(0.941, 0.937, 0.894),  # White (common)
-	Color(0.749, 0.761, 0.761),  # Buran (silver)
-	Color(0.749, 0.761, 0.761),  # silver (common)
-	Color(0.408, 0.420, 0.439),  # Scat (grey)
-	Color(0.184, 0.188, 0.196),  # Anthracite
-	Color(0.118, 0.247, 0.388),  # Cyclone (blue)
-	Color(0.357, 0.078, 0.125),  # Red Wine
-	Color(0.137, 0.263, 0.208),  # Malakhit (rarer)
+	Color(0.067, 0.067, 0.067),  # Basalt Black
+	Color(0.067, 0.067, 0.067),  # Black (common)
+	Color(0.784, 0.788, 0.780),  # Crystal Silver
+	Color(0.294, 0.306, 0.314),  # Meteor Gray
+	Color(0.910, 0.882, 0.824),  # Sand White
+	Color(0.082, 0.173, 0.306),  # Marine Blue
+	Color(0.706, 0.627, 0.420),  # Nordic Gold (rare)
 ]
 
 var body_color := NPC_COLORS[0]
 
 
 func _ready() -> void:
-	# drop the grille emblem named like a wheel before rigging (see player setup)
-	for mi in find_children("*", "MeshInstance3D", true, false):
-		var nm := str(mi.name)
-		if nm.begins_with("Body") and "Wheel" in nm:
-			mi.free()
-	CarWheelRig.build(self)
-	init_real_lens(["light"], ["light3"], false)
+	CarWheelRig.build(self, CarWheelRig.DEFAULT_NAME_KEYS, CarWheelRig.DEFAULT_MAT_KEYS, WHEEL_MATS)
+	init_real_lens(["cayenne_luz"], ["cayenne_luz2"], false)
 	body_color = NPC_COLORS[randi() % NPC_COLORS.size()]
 	await get_tree().process_frame
 	_apply_body_color()
@@ -43,11 +38,11 @@ func _apply_body_color() -> void:
 		var m: Mesh = merged.mesh
 		for i in range(m.get_surface_count()):
 			var src: Material = m.surface_get_material(i)
-			if src and src.resource_name.to_lower() == "bodycolor" and src is StandardMaterial3D:
+			if src and src.resource_name.to_lower() == PAINT_MAT and src is StandardMaterial3D:
 				var dup: StandardMaterial3D = src.duplicate()
 				dup.albedo_color = body_color
-				dup.metallic = 0.3
-				dup.metallic_specular = 0.8
+				dup.metallic = 0.4
+				dup.metallic_specular = 0.85
 				dup.roughness = 0.25
 				merged.set_surface_override_material(i, dup)
 	else:
@@ -57,7 +52,7 @@ func _apply_body_color() -> void:
 				continue
 			for i in range(mesh.mesh.get_surface_count()):
 				var mat: Material = mesh.get_active_material(i)
-				if mat and mat.resource_name.to_lower() == "bodycolor" and mat is StandardMaterial3D:
+				if mat and mat.resource_name.to_lower() == PAINT_MAT and mat is StandardMaterial3D:
 					var dup: StandardMaterial3D = mat.duplicate()
 					dup.albedo_color = body_color
 					mesh.set_surface_override_material(i, dup)

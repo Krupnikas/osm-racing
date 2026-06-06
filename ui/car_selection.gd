@@ -31,6 +31,8 @@ const CAR_SPEC_LINES := {
 	"subaru_sti_2011": "2011 · 2.5L Turbo · 305 HP · AWD · 1505 KG",
 	"mercedes_clk55_2003": "2003 · 5.4L V8 · 367 HP · RWD · 1635 KG",
 	"porsche_cayenne_turbo_s_2009": "2009 · 4.8L TT V8 · 550 HP · AWD · 2355 KG",
+	"chevrolet_aveo_5_lt_2009": "2009 · 1.6L · 106 HP · FWD · 1100 KG",
+	"chevrolet_spark_12_lt_2011": "2011 · 1.2L · 81 HP · FWD · 930 KG",
 }
 
 # — Tunnel car-select (NFS Underground style) feature flag —

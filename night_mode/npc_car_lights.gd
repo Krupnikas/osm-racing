@@ -31,7 +31,7 @@ var _lights_enabled := false
 var _taillight_mat: StandardMaterial3D
 
 # Тип модели машины (синхронизировано с car_lights.gd)
-enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109, VAZ_2107, POLO, FORD_FOCUS, HONDA_CIVIC, MAZDA_RX8, AUDI_TT, VOLGA, LANCER_EVO, SUBARU_STI, MERCEDES_CLK, PORSCHE_CAYENNE }
+enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109, VAZ_2107, POLO, FORD_FOCUS, HONDA_CIVIC, MAZDA_RX8, AUDI_TT, VOLGA, LANCER_EVO, SUBARU_STI, MERCEDES_CLK, PORSCHE_CAYENNE, CHEVY_AVEO, CHEVY_SPARK }
 var _car_model: CarModel = CarModel.DEFAULT
 
 
@@ -86,6 +86,12 @@ func _detect_car_model() -> void:
 			return
 		elif child.name == "CayenneModel":
 			_car_model = CarModel.PORSCHE_CAYENNE
+			return
+		elif child.name == "AveoModel":
+			_car_model = CarModel.CHEVY_AVEO
+			return
+		elif child.name == "SparkModel":
+			_car_model = CarModel.CHEVY_SPARK
 			return
 		elif child.name == "Model":
 			# Lada 2109 (taxi, DPS) uses "Model" node name
@@ -207,6 +213,22 @@ func _create_headlight() -> void:
 		_use_split_lights = true
 		var left_pos = Vector3(-0.70, 0.85, 2.20)
 		var right_pos = Vector3(0.70, 0.85, 2.20)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.CHEVY_AVEO:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.62, 0.78, 1.78)
+		var right_pos = Vector3(0.62, 0.78, 1.78)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.CHEVY_SPARK:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.60, 0.82, 1.75)
+		var right_pos = Vector3(0.60, 0.82, 1.75)
 		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
 		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
 		return
@@ -333,6 +355,20 @@ func _create_taillight() -> void:
 		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
 		return
 
+	if _car_model == CarModel.CHEVY_AVEO:
+		var left_pos = Vector3(-0.60, 0.86, -1.78)
+		var right_pos = Vector3(0.60, 0.86, -1.78)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
+	if _car_model == CarModel.CHEVY_SPARK:
+		var left_pos = Vector3(-0.58, 0.95, -1.72)
+		var right_pos = Vector3(0.58, 0.95, -1.72)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
 	# Блочные машинки используют одну центральную фару
 	taillight = _create_single_taillight("NPCTaillight", Vector3(0, 0.4, -2.2))
 
@@ -381,6 +417,10 @@ func _create_reverse_light() -> void:
 		pos = Vector3(0, 0.66, -2.10)
 	elif _car_model == CarModel.PORSCHE_CAYENNE:
 		pos = Vector3(0, 0.85, -2.22)
+	elif _car_model == CarModel.CHEVY_AVEO:
+		pos = Vector3(0, 0.7, -1.80)
+	elif _car_model == CarModel.CHEVY_SPARK:
+		pos = Vector3(0, 0.85, -1.74)
 	else:
 		pos = Vector3(0, 0.35, -2.2)
 
@@ -396,6 +436,12 @@ func _create_reverse_light() -> void:
 
 
 func _create_light_meshes() -> void:
+	# Cars whose model-setup script makes the REAL lamp lens meshes emissive
+	# (lens-shaped glow, matching the car body) set this meta and must NOT get the
+	# rectangular proxy boxes — they would mismatch the lens shape. The SpotLight beams
+	# and taillight OmniLights are still created; only the proxy meshes are skipped.
+	if _npc and _npc.has_meta("real_lens_lights"):
+		return
 	# Материал для светящихся фар
 	var headlight_mat := StandardMaterial3D.new()
 	headlight_mat.albedo_color = Color(1.0, 1.0, 0.9)
@@ -467,6 +513,12 @@ func _create_light_meshes() -> void:
 	elif _car_model == CarModel.PORSCHE_CAYENNE:
 		reverse_pos = Vector3(0, 0.85, -2.24)
 		reverse_size = Vector3(0.14, 0.06, 0.03)
+	elif _car_model == CarModel.CHEVY_AVEO:
+		reverse_pos = Vector3(0, 0.7, -1.82)
+		reverse_size = Vector3(0.12, 0.05, 0.03)
+	elif _car_model == CarModel.CHEVY_SPARK:
+		reverse_pos = Vector3(0, 0.85, -1.76)
+		reverse_size = Vector3(0.11, 0.05, 0.03)
 	else:
 		reverse_pos = Vector3(0, 0.35, -2.22)
 		reverse_size = Vector3(0.12, 0.05, 0.03)
@@ -589,6 +641,20 @@ func _create_split_light_meshes(headlight_mat: StandardMaterial3D) -> void:
 		tl_left_pos = Vector3(-0.65, 0.92, -2.22)
 		tl_right_pos = Vector3(0.65, 0.92, -2.22)
 		tl_size = Vector3(0.24, 0.16, 0.05)
+	elif _car_model == CarModel.CHEVY_AVEO:
+		hl_left_pos = Vector3(-0.62, 0.78, 1.80)
+		hl_right_pos = Vector3(0.62, 0.78, 1.80)
+		hl_size = Vector3(0.22, 0.12, 0.05)
+		tl_left_pos = Vector3(-0.60, 0.86, -1.80)
+		tl_right_pos = Vector3(0.60, 0.86, -1.80)
+		tl_size = Vector3(0.18, 0.20, 0.04)
+	elif _car_model == CarModel.CHEVY_SPARK:
+		hl_left_pos = Vector3(-0.60, 0.82, 1.75)
+		hl_right_pos = Vector3(0.60, 0.82, 1.75)
+		hl_size = Vector3(0.20, 0.13, 0.05)
+		tl_left_pos = Vector3(-0.58, 0.98, -1.72)
+		tl_right_pos = Vector3(0.58, 0.98, -1.72)
+		tl_size = Vector3(0.14, 0.26, 0.04)  # tall vertical Spark taillights
 	else:
 		return  # Не должно случиться
 

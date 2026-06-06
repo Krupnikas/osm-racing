@@ -1,4 +1,4 @@
-extends Node3D
+extends "res://car/npc_real_lens.gd"
 
 ## NPC setup for the Honda Civic Si 2006 (VehicleBody3D traffic car).
 ##
@@ -36,6 +36,8 @@ var body_color := NPC_COLORS[0]
 func _ready() -> void:
 	# 1) split wheels synchronously so they exist before NPCCar._merge_meshes()
 	CarWheelRig.build(self)
+	# 1b) real lamp-lens emissive (front cluster white / rear red_glass) BEFORE the merge
+	init_real_lens(["lightcluster", "lightrefracted"], ["red_glass"], true)
 	# 2) pick a colour now; apply after the merge has run
 	body_color = NPC_COLORS[randi() % NPC_COLORS.size()]
 	await get_tree().process_frame

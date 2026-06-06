@@ -1,8 +1,9 @@
-extends Node3D
+extends "res://car/npc_real_lens.gd"
 
 ## Скрипт для настройки модели VW Polo Sedan (NPC версия)
-## Рандомизирует цвет кузова, НЕ скрывает колёса
-## Фары настраиваются через npc_car_lights.gd
+## Рандомизирует цвет кузова, НЕ скрывает колёса.
+## Фары: реальные линзы (front gabarit/pov/fara/head, rear stop/_red) светятся через
+## npc_real_lens (никаких прямоугольных прокси-боксов).
 
 # Официальные цвета VW Polo Sedan 2020 (Россия)
 const POLO_COLORS := [
@@ -23,6 +24,9 @@ var body_color := Color(0.75, 0.75, 0.8, 1.0)
 func _ready() -> void:
 	# Выбираем случайный цвет
 	body_color = POLO_COLORS[randi() % POLO_COLORS.size()]
+
+	# real lamp lenses (front white / rear red) instead of proxy boxes
+	init_real_lens(["gabarit", "pov", "fara", "head", "fog"], ["stop", "_red"], true)
 
 	await get_tree().process_frame
 

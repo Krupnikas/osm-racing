@@ -1,4 +1,4 @@
-extends Node3D
+extends "res://car/npc_real_lens.gd"
 
 ## NPC setup for the Mazda RX-8 2006 (VehicleBody3D traffic car).
 ##
@@ -31,9 +31,15 @@ var body_color := NPC_COLORS[0]
 
 func _ready() -> void:
 	CarWheelRig.build(self)
+	# "light_glass" is ONE lens spanning both ends → triangle-split (front white / rear red);
+	# "red_glass" main taillight is red too. "Light_C" is the interior dashboard — muted.
+	init_real_lens_split(["light_glass"], true)
+	var r2: Dictionary = LampEmissive.apply_by_name(self, [], ["red_glass"], 0.0, 0.0, true, true)
+	_tail_glow_mats.append_array(r2["tail"])
 	body_color = NPC_COLORS[randi() % NPC_COLORS.size()]
 	await get_tree().process_frame
 	_apply_body_color()
+	mute_merged_emission(["light_c"])
 
 
 func _apply_body_color() -> void:

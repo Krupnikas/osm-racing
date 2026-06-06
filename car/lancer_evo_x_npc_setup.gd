@@ -1,4 +1,4 @@
-extends Node3D
+extends "res://car/npc_real_lens.gd"
 
 ## NPC setup for the Mitsubishi Lancer Evo X MR 2008 (VehicleBody3D traffic car).
 ## Pipeline-generated. Real scale (~1.0). Native forward = +Z = NPC forward → no rotation.
@@ -26,6 +26,8 @@ var body_color := NPC_COLORS[0]
 
 func _ready() -> void:
 	CarWheelRig.build(self)
+	# real lens: single spanning "lightglass" mesh → triangle-split front-white / rear-red
+	init_real_lens_split(["lightglass"], true)
 	body_color = NPC_COLORS[randi() % NPC_COLORS.size()]
 	await get_tree().process_frame
 	_apply_body_color()

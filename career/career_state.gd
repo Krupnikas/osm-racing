@@ -26,6 +26,8 @@ const CAR_PRICES := {
 	"subaru_sti_2011": 750000,
 	"mercedes_clk55_2003": 850000,
 	"porsche_cayenne_turbo_s_2009": 1200000,
+	"chevrolet_aveo_5_lt_2009": 220000,
+	"chevrolet_spark_12_lt_2011": 180000,
 }
 
 # Тюнинг: 4 категории, 3 уровня

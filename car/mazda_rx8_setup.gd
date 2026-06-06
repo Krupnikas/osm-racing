@@ -9,9 +9,11 @@ extends Node3D
 ##
 ## Model native forward = +Z (rear red_glass + plate at −Z). GEVP scene rotates the
 ## model 180° (forward = −Z) and scales ~99.92. Body paint material = "caarpaint";
-## taillights = "red_glass"; front lamp cluster mesh name contains "light_c".
+## taillights = "red_glass"; front headlight lens = "light_glass" (a hidden LOD mesh). The
+## "light_c" mesh is the INTERIOR dashboard (baked green emission) — muted here.
 
 const CarWheelRig := preload("res://tools/car_wheel_rig.gd")
+const LampEmissive := preload("res://tools/lamp_emissive.gd")
 
 # Official Mazda RX-8 colours (new_cars_color_mapping.md). Default = Velocity Red Mica.
 const BODY_COLORS := {
@@ -172,23 +174,22 @@ func _setup_taillights() -> void:
 
 
 func _setup_headlights() -> void:
+	# "light_glass" is ONE lens spanning both ends → triangle-split: front warm white, rear red
+	# (otherwise the rear clear-lens portion glows white). red_glass taillight stays red too.
+	# "light_c" is the interior dashboard — mute its baked green emission.
+	LampEmissive.split_lens_mesh(self, ["light_glass"], 1.2, 0.7, true, false)
 	for mesh in _find_all_meshes(self):
-		if not (mesh is MeshInstance3D):
+		if not (mesh is MeshInstance3D) or mesh.mesh == null:
 			continue
-		var nm: String = mesh.name.to_lower()
-		if "light_c" in nm or "lightcluster" in nm or "lightrefracted" in nm:
-			var sc: int = mesh.mesh.get_surface_count() if mesh.mesh else 0
-			for i in range(sc):
+		if "light_c" in mesh.name.to_lower():
+			for i in range(mesh.mesh.get_surface_count()):
 				var mat: Material = mesh.get_surface_override_material(i)
-				if not mat and mesh.mesh:
+				if not mat:
 					var orig: Material = mesh.mesh.surface_get_material(i)
 					if orig:
-						mat = orig.duplicate()
-						mesh.set_surface_override_material(i, mat)
+						mat = orig.duplicate(); mesh.set_surface_override_material(i, mat)
 				if mat is StandardMaterial3D:
-					mat.emission_enabled = true
-					mat.emission = Color(1.0, 0.96, 0.85)
-					mat.emission_energy_multiplier = 0.4
+					mat.emission_enabled = false
 	for x in [-0.62, 0.62]:
 		var l := SpotLight3D.new()
 		l.name = "Headlight"
