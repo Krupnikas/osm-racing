@@ -26,6 +26,7 @@ var npc_rx8_scene: PackedScene
 var npc_tt_scene: PackedScene
 var npc_volga_scene: PackedScene
 var npc_evo_scene: PackedScene
+var npc_sti_scene: PackedScene
 var road_network: Node  # RoadNetwork
 var terrain_generator: Node  # OSMTerrainGenerator
 var player_car: Node3D
@@ -67,6 +68,7 @@ func _ready() -> void:
 	npc_tt_scene = preload("res://traffic/npc_audi_tt.tscn")
 	npc_volga_scene = preload("res://traffic/npc_volga_gaz3110.tscn")
 	npc_evo_scene = preload("res://traffic/npc_lancer_evo_x.tscn")
+	npc_sti_scene = preload("res://traffic/npc_subaru_sti.tscn")
 
 	# Создаём RoadNetwork
 	var RoadNetworkScript = preload("res://traffic/road_network.gd")
@@ -126,6 +128,7 @@ func _warmup_mesh_cache() -> void:
 	if npc_tt_scene: scenes.append(npc_tt_scene)
 	if npc_volga_scene: scenes.append(npc_volga_scene)
 	if npc_evo_scene: scenes.append(npc_evo_scene)
+	if npc_sti_scene: scenes.append(npc_sti_scene)
 	for scene in scenes:
 		var instance := scene.instantiate() as Node3D
 		instance.visible = false
@@ -481,8 +484,12 @@ func _get_npc_from_pool():
 			# 1% - Mitsubishi Lancer Evo X (very rare performance sedan)
 			scene_to_use = npc_evo_scene
 			car_type = "Lancer Evo X"
+		elif rand < 0.85:
+			# 1% - Subaru WRX STI (very rare performance hatch)
+			scene_to_use = npc_sti_scene
+			car_type = "Subaru WRX STI"
 		else:
-			# 16% - блочные машинки
+			# 15% - блочные машинки
 			scene_to_use = npc_car_scene
 			car_type = "box car"
 

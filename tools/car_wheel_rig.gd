@@ -40,6 +40,39 @@ static func build(model_root: Node3D, name_keys: Array = DEFAULT_NAME_KEYS, mat_
 	if sources.is_empty():
 		return {"ok": false, "note": "no wheel meshes found", "containers": {}}
 
+	# ---- lateral stray filter -------------------------------------------------
+	# Messy models name body parts with wheel-key SUBSTRINGS ("CarPaint_Trim" → "rim",
+	# "SteeringWheel" → "wheel"), so _collect_wheel_meshes grabs steering wheels, bumpers,
+	# diffusers, exhausts, etc. Two model styles:
+	#  * MERGED wheels (one mesh per type spanning BOTH sides) → every candidate is centred
+	#    on x≈0, so max|x| is small vs the track width — leave untouched.
+	#  * SEPARATE corner wheels → the real wheels sit at the track edges (|x|≈track/2) while
+	#    strays cluster on the lateral centreline (x≈0). Only here, drop centreline candidates.
+	if sources.size() >= 4:
+		var caabb: Array = []
+		var trackw := AABB()
+		var firstt := true
+		for s in sources:
+			var ab: AABB = _mesh_aabb_local(s, model_root)
+			caabb.append(ab)
+			if firstt:
+				trackw = ab; firstt = false
+			else:
+				trackw = trackw.merge(ab)
+		var track_x: float = trackw.size.x
+		var max_abs_x := 0.0
+		for ab in caabb:
+			max_abs_x = max(max_abs_x, absf(ab.get_center().x))
+		# separate-wheel model only when the outermost candidate is well off-centre
+		if track_x > 0.0 and max_abs_x > 0.30 * track_x:
+			var thr := 0.45 * max_abs_x
+			var kept: Array = []
+			for i in range(sources.size()):
+				if absf((caabb[i] as AABB).get_center().x) >= thr:
+					kept.append(sources[i])
+			if kept.size() >= 2:
+				sources = kept
+
 	# ---- PASS 1: classify triangles into quadrants, compute wheel centres ----
 	# Determine the XZ split origin from the combined wheel bounds (robust if the
 	# model origin isn't exactly at car centre).

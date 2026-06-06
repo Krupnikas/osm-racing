@@ -34,7 +34,8 @@ const DISPLAY_STATS := {
 	"mazda_rx8_2006": {"accel": 0.78, "speed": 0.80, "handling": 0.82},
 	"audi_tt_32_2003": {"accel": 0.80, "speed": 0.82, "handling": 0.80},
 	"volga_gaz3110": {"accel": 0.45, "speed": 0.50, "handling": 0.50},
-	"lancer_evo_x_2008": {"accel": 0.85, "speed": 0.82, "handling": 0.88}
+	"lancer_evo_x_2008": {"accel": 0.85, "speed": 0.82, "handling": 0.88},
+	"subaru_sti_2011": {"accel": 0.86, "speed": 0.83, "handling": 0.87}
 }
 
 var selected_car_id: String = DEFAULT_CAR
@@ -176,6 +177,18 @@ const CARS := {
 		"coefficient_of_drag": 0.35,
 		"frontal_area": 2.1,
 		"gear_ratios": [3.65, 2.37, 1.69, 1.32, 1.06, 0.84]
+	},
+	"subaru_sti_2011": {
+		"name": "Subaru WRX STI",
+		"scene": "res://addons/gevp/scenes/subaru_sti_car.tscn",
+		"max_torque": 950.0,  # 2.5L EJ257 turbo, AWD
+		"max_steering_angle": 38.0,
+		"steering_speed": 4.4,
+		"final_drive": 3.9,
+		"max_rpm": 6500.0,
+		"coefficient_of_drag": 0.36,
+		"frontal_area": 2.1,
+		"gear_ratios": [3.64, 2.24, 1.59, 1.16, 0.97, 0.76]
 	}
 }
 
