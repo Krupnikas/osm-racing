@@ -27,6 +27,7 @@ const CAR_SPEC_LINES := {
 	"mazda_rx8_2006": "2006 · 1.3L Rotary · 232 HP · RWD · 1310 KG",
 	"audi_tt_32_2003": "2003 · 3.2L VR6 · 250 HP · AWD · 1510 KG",
 	"volga_gaz3110": "2000 · 2.3L · 150 HP · RWD · 1400 KG",
+	"lancer_evo_x_2008": "2008 · 2.0L Turbo · 291 HP · AWD · 1560 KG",
 }
 
 # — Tunnel car-select (NFS Underground style) feature flag —

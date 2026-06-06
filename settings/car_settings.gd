@@ -33,7 +33,8 @@ const DISPLAY_STATS := {
 	"honda_civic_si_2006": {"accel": 0.76, "speed": 0.78, "handling": 0.80},
 	"mazda_rx8_2006": {"accel": 0.78, "speed": 0.80, "handling": 0.82},
 	"audi_tt_32_2003": {"accel": 0.80, "speed": 0.82, "handling": 0.80},
-	"volga_gaz3110": {"accel": 0.45, "speed": 0.50, "handling": 0.50}
+	"volga_gaz3110": {"accel": 0.45, "speed": 0.50, "handling": 0.50},
+	"lancer_evo_x_2008": {"accel": 0.85, "speed": 0.82, "handling": 0.88}
 }
 
 var selected_car_id: String = DEFAULT_CAR
@@ -163,6 +164,18 @@ const CARS := {
 		"coefficient_of_drag": 0.42,
 		"frontal_area": 2.1,
 		"gear_ratios": [3.5, 2.26, 1.45, 1.0, 0.85]
+	},
+	"lancer_evo_x_2008": {
+		"name": "Mitsubishi Lancer Evo X",
+		"scene": "res://addons/gevp/scenes/lancer_evo_x_car.tscn",
+		"max_torque": 900.0,  # 2.0L 4B11T turbo, AWD S-AWC
+		"max_steering_angle": 38.0,
+		"steering_speed": 4.4,
+		"final_drive": 4.06,
+		"max_rpm": 7000.0,
+		"coefficient_of_drag": 0.35,
+		"frontal_area": 2.1,
+		"gear_ratios": [3.65, 2.37, 1.69, 1.32, 1.06, 0.84]
 	}
 }
 
