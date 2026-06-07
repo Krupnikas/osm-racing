@@ -4300,7 +4300,7 @@ func _process_phase3_queue() -> bool:
 			if filter_by_chunk:
 				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
 					continue
-			_create_bus_stop(local, 0.0, tags, target)
+			_create_bus_stop(local, _sample_elevation(local.x, local.y), tags, target)
 		# Done with bus stops — move to tram stops
 		entry.phase = "tram_stops"
 		entry.way_idx = 0
