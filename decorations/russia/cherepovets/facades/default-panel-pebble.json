@@ -1,0 +1,249 @@
+{
+  "id": "default-panel-pebble",
+  "category": "panel",
+  "material_tags": [
+    "panel",
+    "large_panel"
+  ],
+  "min_floors": 4,
+  "max_floors": 20,
+  "has_seams": true,
+  "has_roofbottom": false,
+  "balcony_placement": "centre",
+  "atom_dir": "res://decorations/russia/cherepovets/default-panels-atoms/",
+  "atoms": {
+    "wall": [
+      "wall-pebble-1"
+    ],
+    "mid-wall": [
+      "mid-wall-pebble-1"
+    ],
+    "long-wall": [
+      "long-wall-pebble-1"
+    ],
+    "window": [
+      "window-1",
+      "window-2",
+      "window-3",
+      "window-4",
+      "window-5",
+      "window-6"
+    ],
+    "mid-window": [
+      "mid-window-1",
+      "mid-window-2",
+      "mid-window-3",
+      "mid-window-4",
+      "mid-window-5",
+      "mid-window-6"
+    ],
+    "mid-balcony": [
+      "mid-balcony-1",
+      "mid-balcony-2",
+      "mid-balcony-3",
+      "mid-balcony-4",
+      "mid-balcony-5"
+    ],
+    "long-balcony": [
+      "long-balcony-1",
+      "long-balcony-2",
+      "long-balcony-3",
+      "long-balcony-4",
+      "long-balcony-5",
+      "long-balcony-6"
+    ],
+    "horizontal-seam": [
+      "horizontal-seam-pebble-1"
+    ],
+    "horizontal-mid-seam": [
+      "horizontal-mid-seam-pebble-1"
+    ],
+    "horizontal-long-seam": [
+      "horizontal-long-seam-pebble-1"
+    ],
+    "vertical-seam": [
+      "vertical-seam-pebble-1"
+    ]
+  },
+  "molecules": [
+    {
+      "id": "wall-win",
+      "slots": [
+        "wall",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "win-wall-wall-win",
+      "slots": [
+        "window",
+        "wall",
+        "wall",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "win-win",
+      "slots": [
+        "window",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "win-midbal-win",
+      "slots": [
+        "window",
+        "mid-balcony",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "win-midbal-midbal-win",
+      "slots": [
+        "window",
+        "mid-balcony",
+        "mid-balcony",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "midbal-win-win",
+      "slots": [
+        "mid-balcony",
+        "window",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "midbal-win-win-win",
+      "slots": [
+        "mid-balcony",
+        "window",
+        "window",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "midbal-win3-midbal-win2",
+      "slots": [
+        "mid-balcony",
+        "window",
+        "window",
+        "window",
+        "mid-balcony",
+        "window",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "midwin-win-win",
+      "slots": [
+        "mid-window",
+        "window",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "midwin-win-win-win",
+      "slots": [
+        "mid-window",
+        "window",
+        "window",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "midwin-win3-midwin-win2",
+      "slots": [
+        "mid-window",
+        "window",
+        "window",
+        "window",
+        "mid-window",
+        "window",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "win-win-longbal-win-win",
+      "slots": [
+        "window",
+        "window",
+        "long-balcony",
+        "window",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "longbal-win-midbal-win-longbal",
+      "slots": [
+        "long-balcony",
+        "window",
+        "mid-balcony",
+        "window",
+        "long-balcony"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "longbal-win-midbal-win-win-midbal-win-longbal",
+      "slots": [
+        "long-balcony",
+        "window",
+        "mid-balcony",
+        "window",
+        "window",
+        "mid-balcony",
+        "window",
+        "long-balcony"
+      ],
+      "tags": [
+        "any"
+      ]
+    }
+  ],
+  "slot_extrusion": {
+    "mid-balcony": {
+      "depth_m": 0.8,
+      "shape": "box"
+    }
+  }
+}

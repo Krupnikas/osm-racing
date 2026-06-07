@@ -17,6 +17,21 @@ const CAR_PRICES := {
 	"polo": 300000,
 	"beetle": 700000,
 	"bmw_m3_gtr": 1500000,
+	"ford_focus_st_2006": 450000,
+	"honda_civic_si_2006": 420000,
+	"mazda_rx8_2006": 480000,
+	"audi_tt_32_2003": 650000,
+	"volga_gaz3110": 130000,
+	"lancer_evo_x_2008": 700000,
+	"subaru_sti_2011": 750000,
+	"mercedes_clk55_2003": 850000,
+	"porsche_cayenne_turbo_s_2009": 1200000,
+	"chevrolet_aveo_5_lt_2009": 220000,
+	"chevrolet_spark_12_lt_2011": 180000,
+	"lada_2171_priora_2009": 165000,
+	"lada_2114_samara_2001": 130000,
+	"lada_2110_1995": 140000,
+	"mini_cooper_s_f56_2014": 950000,
 }
 
 # Тюнинг: 4 категории, 3 уровня
@@ -179,6 +194,17 @@ func get_sell_price(car_id: String) -> int:
 
 func get_car_price(car_id: String) -> int:
 	return CAR_PRICES.get(car_id, 0)
+
+
+func sort_car_ids_by_price(ids: Array) -> Array[String]:
+	## Returns a copy of `ids` ordered by price, cheapest first. Used by every
+	## screen that shows cars as a list/selector so the order is consistent.
+	## Returns a typed Array[String] so callers keep type inference on car_id.
+	var out: Array[String] = []
+	for cid in ids:
+		out.append(str(cid))
+	out.sort_custom(func(a, b): return get_car_price(a) < get_car_price(b))
+	return out
 
 
 func can_afford(car_id: String) -> bool:

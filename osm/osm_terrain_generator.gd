@@ -11,6 +11,7 @@ const BuildingWallShader = preload("res://osm/building_wall.gdshader")
 const BuildingWallCustomShader = preload("res://osm/building_wall_custom.gdshader")
 const WetRoadMaterial = preload("res://night_mode/wet_road_material.gd")
 const EntranceGroupGenerator = preload("res://osm/entrance_group_generator.gd")
+const ClutterManagerScript = preload("res://clutter/clutter_manager.gd")
 const MarsEntranceGeneratorScript = preload("res://osm/mars_entrance_generator.gd")
 const LEAF_TREE_SCENE = preload("res://models/trees/leaf/scene.gltf")
 const PINE_TREE_SCENE = preload("res://models/trees/pine/scene.gltf")
@@ -46,6 +47,7 @@ var _cached_road_albedo: Texture2D = null  # Shared asphalt albedo for lane-awar
 var _building_textures: Dictionary = {}
 var _window_shader: Shader = null  # Кэш шейдера окон (создается один раз)
 var _shop_back_wall_shader: Shader = null  # Кэш шейдера задней стенки магазина
+var _storefront_sign_shader: Shader = null  # Короба вывесок: цвет + эмиссия по night_factor
 var _ground_textures: Dictionary = {}
 var _normal_textures: Dictionary = {}  # Normal maps
 var _noise_textures: Dictionary = {}  # Noise textures for road shader
@@ -75,7 +77,7 @@ var _world_offset_chunks := Vector2i.ZERO
 
 # LOD system — 3 уровня детализации чанков
 @export_group("LOD System")
-@export var lod0_distance := 500.0   ## Полная детализация (дороги, бордюры, фонари, всё)
+@export var lod0_distance := 250.0   ## Полная детализация (дороги, бордюры, фонари, всё)
 @export var lod1_distance := 500.0   ## Средняя (=LOD0, LOD1 временно отключён — фризы)
 @export var lod2_distance := 1000.0  ## Минимальная (трава без вырезов, здания-коробки без текстур)
 @export var lod_hysteresis := 50.0   ## Гистерезис для предотвращения осцилляции на границах LOD
@@ -113,6 +115,7 @@ const WATER_Y := -1.0             # Water surface level (1m below ground)
 const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slope from 0.22 to -1.0)
 @export var enable_roads := true  # Включить дороги
 @export var enable_curbs := true  # Включить бордюры
+@export var enable_sidewalk_curbs := true  # Phase 4: поребрик по внешнему контуру тротуаров
 @export var enable_vegetation := true  # Включить деревья/растительность
 @export var enable_street_lamps := true  # Включить уличные фонари
 @export var enable_traffic_signs := true  # Включить дорожные знаки
@@ -120,6 +123,7 @@ const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slop
 @export var enable_night_mode_windows := true  # Включить подсветку окон ночью
 @export var enable_manholes := true  # Включить люки на дорогах
 @export var enable_crossing_signs := true  # Включить знаки пешеходных переходов
+@export var enable_clutter := true  # Интерактивный реквизит (урны, конусы, мешки…)
 @export var enable_fences := true  # Включить заборы (промзоны, территории)
 @export var enable_elevation := false  # Включить elevation из SRTM30m
 @export var enable_ground_plane := false  # Grey fallback plane at raw elevation under terrain
@@ -208,6 +212,35 @@ var _custom_model_cache: Dictionary = {}  # path -> PackedScene
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
 var _crossing_sign_front_mat: StandardMaterial3D
 var _crossing_sign_back_mat: StandardMaterial3D
+
+# --- Интерактивный клаттер (урны/конусы/мешки…) ---
+# Модели грузятся как замороженные kinematic RigidBody (как знаки переходов):
+# не тратят физику и стоят на месте, пока машина не заденет → _on_clutter_hit.
+var _bin_scene: PackedScene
+var _bin_visual_xform: Transform3D = Transform3D.IDENTITY
+var _bin_size: Vector3 = Vector3.ONE
+# Конус извлекается из road_works_pack (piece index 1 = оранжевый конус)
+var _cone_mesh: Mesh
+var _cone_visual_xform: Transform3D = Transform3D.IDENTITY
+var _cone_size: Vector3 = Vector3.ONE
+
+var _bag_scene: PackedScene
+var _bag_visual_xform: Transform3D = Transform3D.IDENTITY
+var _bag_size: Vector3 = Vector3.ONE
+
+var _paper_variants: Array = []  # [{mesh, xform, size}] — обрывки бумаги, на которые ЛОПАЕТСЯ мешок при наезде на 60+ км/ч
+var _clutter_sfx: Dictionary = {}  # key -> AudioStream (подхватывается, если ассет есть)
+var _clutter_manager: Node3D       # постоянный менеджер реквизита (не привязан к чанкам)
+# Тротуар поднят над проезжей частью на height_offset тротуара (0.115, см. таблицу
+# road height_offset). _sample_elevation даёт уровень ПЧ, поэтому реквизит на
+# тротуаре поднимаем на эту величину, иначе он стоит в кювете у бордюра.
+const CLUTTER_SIDEWALK_RAISE := 0.115
+# Дорожные просадки («повреждённый асфальт») у площадок дорожных работ. Врезаются
+# в геометрию дорожного батча НА ФИНАЛИЗАЦИИ → visual и collision строятся из ОДНИХ
+# вершин (старой плоской коллизии над ямой не остаётся, машина реально проседает).
+var enable_road_depressions := true
+var debug_road_depressions := false
+var _road_depressions: Dictionary = {}  # chunk_key -> [ {c,u,v,L,W,depth,slope,seed,done}, ... ]
 var _parking_sign_front_mat: StandardMaterial3D
 var _tram_stop_sign_front_mat: StandardMaterial3D
 var _deferred_lamp_queue: Dictionary = {}  # chunk_key → Array[{points, width, parent}]
@@ -271,6 +304,7 @@ var _chunk_pending_deferred: Dictionary = {}  # chunk_key → int — счётч
 # Window batching system - ONE MultiMesh per chunk instead of per-building
 var _window_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], colors: Array[Color], parent: Node3D}
 var _window_batch_materials: Array[ShaderMaterial] = []  # Материалы всех window batches для обновления is_night параметра
+var _facade_emission_materials: Array[ShaderMaterial] = []  # FacadeAssembler материалы с emission texture (night_factor обновляется при смене дня/ночи)
 
 # BUILDING GEOMETRY MERGE: объединяем все стены/крыши чанка в один ArrayMesh для снижения draw calls
 var _building_geo_batch: Dictionary = {}  # chunk_key -> {parent, panel_walls: {verts,uvs,normals,indices}, brick_walls, wall_walls, roofs, collisions, decorations}
@@ -651,6 +685,9 @@ func _ready() -> void:
 	# Инициализируем lamp meshes для батчинга
 	_init_lamp_meshes()
 
+	# Инициализируем модели интерактивного клаттера
+	_init_clutter_assets()
+
 	# Материалы знака пешеходного перехода (shared)
 	_crossing_sign_front_mat = StandardMaterial3D.new()
 	_crossing_sign_front_mat.albedo_texture = CROSSING_SIGN_TEXTURE
@@ -809,6 +846,7 @@ func _init_textures() -> void:
 		if _wall_roughness_textures.get(tex_type):
 			mat.set_shader_parameter("roughness_texture", _wall_roughness_textures[tex_type])
 			mat.set_shader_parameter("use_roughness_texture", true)
+		mat.set_shader_parameter("weather_strength", 0.6)  # Soviet grime/per-building tint
 		_building_wall_materials[tex_type] = mat
 		# Recess material — same textures but with vertex color emission for window glow
 		var recess_mat := ShaderMaterial.new()
@@ -827,6 +865,7 @@ func _init_textures() -> void:
 			recess_mat.set_shader_parameter("roughness_texture", _wall_roughness_textures[tex_type])
 			recess_mat.set_shader_parameter("use_roughness_texture", true)
 		recess_mat.set_shader_parameter("use_vertex_emission", true)
+		recess_mat.set_shader_parameter("weather_strength", 0.6)  # Soviet grime/per-building tint
 		_building_recess_materials[tex_type] = recess_mat
 
 	_building_roof_material = StandardMaterial3D.new()
@@ -2988,6 +3027,7 @@ func _unload_chunk(chunk_key: String) -> void:
 			_chunk_rs_instances.erase(chunk_key)
 		_chunk_rs_meshes.erase(chunk_key)
 		_chunk_road_materials.erase(chunk_key)
+		_road_depressions.erase(chunk_key)  # перекарвится при перезагрузке чанка
 		_chunk_building_rs.erase(chunk_key)
 		_chunk_tree_shadow_nodes.erase(chunk_key)
 
@@ -3124,6 +3164,8 @@ func reset_terrain() -> void:
 	_veg_mutex.unlock()
 	_terrain_objects_queue.clear()
 	_infrastructure_queue.clear()
+	if _clutter_manager:
+		_clutter_manager.clear_all()
 	_vegetation_queue.clear()
 	_pending_parking_signs.clear()
 	_curb_queue.clear()
@@ -4065,6 +4107,7 @@ func _process_phase3_queue() -> bool:
 				continue
 			if tags.has("highway"):
 				_create_road(nodes, tags, target, null, way_id_raw, true)  # skip_spatial_hash: already built by Phase 1+2
+				_maybe_enqueue_road_works(way_id_raw, tags, nodes, target, chunk_key)
 			elif tags.get("railway", "") == "tram":
 				var tram_dedup_key := "%d_%s" % [way_id_raw, chunk_key]
 				if _dispatched_tram_ways.has(tram_dedup_key):
@@ -4692,7 +4735,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 			curb_height = 0.0
 		"footway", "path", "cycleway", "track":
 			texture_key = "path"
-			height_offset = 0.23
+			height_offset = 0.115
 			curb_height = 0.0
 		_:
 			texture_key = "residential"
@@ -4772,6 +4815,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 	# Build geometry if not bridge
 	var vertices := PackedVector3Array()
 	var uvs := PackedVector2Array()
+	var uv2s := PackedVector2Array()  # UV2.x = метрич. расстояние от осевой (м), UV2.y=1 → валидно (колея)
 	var normals := PackedVector3Array()
 	var indices := PackedInt32Array()
 	var terrain_corridors: Array[PackedVector2Array] = []
@@ -4977,17 +5021,22 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 					var h_r0: float = _road_sample_y_for_way(way_id, r0, cl_d_seg, height_offset + z_offset)
 					var h_l1: float = _road_sample_y_for_way(way_id, l1, cl_d_next, height_offset + z_offset)
 					var h_r1: float = _road_sample_y_for_way(way_id, r1, cl_d_next, height_offset + z_offset)
+					var half_w_uv2: float = width * 0.5
 					vertices.append(Vector3(l0.x, h_l0, l0.y))
 					uvs.append(Vector2(0.0, uv_y0))
+					uv2s.append(Vector2(-half_w_uv2, 1.0))
 					normals.append(Vector3.UP)
 					vertices.append(Vector3(r0.x, h_r0, r0.y))
 					uvs.append(Vector2(1.0, uv_y0))
+					uv2s.append(Vector2(half_w_uv2, 1.0))
 					normals.append(Vector3.UP)
 					vertices.append(Vector3(l1.x, h_l1, l1.y))
 					uvs.append(Vector2(0.0, uv_y1))
+					uv2s.append(Vector2(-half_w_uv2, 1.0))
 					normals.append(Vector3.UP)
 					vertices.append(Vector3(r1.x, h_r1, r1.y))
 					uvs.append(Vector2(1.0, uv_y1))
+					uv2s.append(Vector2(half_w_uv2, 1.0))
 					normals.append(Vector3.UP)
 					indices.append(base_idx)
 					indices.append(base_idx + 3)
@@ -5025,6 +5074,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 							var uv_x := clampf(cross_d / width + 0.5, 0.0, 1.0)
 							var uv_y := (accum_lens[seg] + along) * uv_scale
 							uvs.append(Vector2(uv_x, uv_y))
+							uv2s.append(Vector2(cross_d, 1.0))  # истинное метрич. across (м)
 							normals.append(Vector3.UP)
 						for ti in tri_idx:
 							indices.append(base_idx + ti)
@@ -5035,6 +5085,7 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 		"full_smoothed_points": full_smoothed_points,
 		"vertices": vertices,
 		"uvs": uvs,
+		"uv2s": uv2s,
 		"normals": normals,
 		"indices": indices,
 		"texture_key": texture_key,
@@ -5060,15 +5111,21 @@ func _compute_road_geometry_thread(task_data: Dictionary) -> void:
 
 ## Применяет результат road geometry из worker thread (main thread only)
 func _apply_road_result(result: Dictionary) -> void:
-	var parent: Node3D = result.parent
+	# Fetch parent untyped first: the chunk may have unloaded between queueing
+	# and applying this result, and assigning a freed instance to a typed
+	# Node3D var raises "Trying to assign invalid previously freed instance"
+	# (which trips the editor's break-on-error and hangs generation) BEFORE
+	# is_instance_valid() can run. Validate as Variant, then narrow to Node3D.
+	var parent_obj: Variant = result.get("parent")
 	var chunk_key: String = result.chunk_key
-	if not is_instance_valid(parent):
+	if not is_instance_valid(parent_obj):
 		_emit_road_debug("ROAD_DROP key=%s reason=invalid_parent highway=%s way_id=%s" % [
 			chunk_key,
 			str(result.get("highway_type", "")),
 			str(result.get("way_id", 0))
 		])
 		return
+	var parent: Node3D = parent_obj
 
 	var texture_key: String = result.texture_key
 	var smoothed_points: PackedVector2Array = result.smoothed_points
@@ -5146,14 +5203,18 @@ func _apply_road_result(result: Dictionary) -> void:
 				_road_batch_data[chunk_key][texture_key] = {
 					"vertices": PackedVector3Array(),
 					"uvs": PackedVector2Array(),
+					"uv2s": PackedVector2Array(),
 					"normals": PackedVector3Array(),
 					"indices": PackedInt32Array(),
-					"parent": parent
+					"parent": parent,
+					"road_width": width  # реальная ширина для постоянной колеи
 				}
 			var batch: Dictionary = _road_batch_data[chunk_key][texture_key]
 			var vertex_offset: int = batch["vertices"].size()
 			batch["vertices"].append_array(verts)
 			batch["uvs"].append_array(result.uvs)
+			if batch.has("uv2s") and result.has("uv2s"):
+				batch["uv2s"].append_array(result.uv2s)
 			batch["normals"].append_array(result.normals)
 			# Offset indices — pre-offset in bulk instead of per-element append
 			var src_indices: PackedInt32Array = result.indices
@@ -5415,6 +5476,8 @@ func _create_bridge_road(nodes: Array, width: float, texture_key: String, height
 	)
 	if material is ShaderMaterial:
 		WetRoadMaterial.apply_road_type_params(material, texture_key)
+		# No wheel-wear ruts on the bridge (looks wrong on a structure).
+		material.set_shader_parameter("wheel_wear", 0.0)
 
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.name = "BridgeRoad"
@@ -5446,11 +5509,15 @@ func _create_bridge_road_lane_markings(pts: PackedVector2Array, perps: Array[Vec
 	const LINE_WIDTH := 0.15
 	const DASH_LENGTH := 3.0
 	const DASH_GAP := 3.0
-	const MARKING_Y_OFFSET := 0.003
+	const MARKING_Y_OFFSET := 0.05  # 5cm: clears z-fighting at ~120m deck elevation AND the deck's ~3cm linear-interp error on the ramp (was 0.003 → markings buried/z-fought, looked dark)
 
 	var marking_mat := StandardMaterial3D.new()
-	marking_mat.albedo_color = Color(1.0, 1.0, 1.0)
-	marking_mat.roughness = 0.6
+	marking_mat.albedo_color = Color(0.9, 0.89, 0.84)  # worn white (not neon)
+	# Unshaded: on the elevated bridge deck, SSAO (enabled by the procedural-cherepovets
+	# merge) + railing self-shadow darkened the SHADED paint to near-invisible. Road
+	# markings escape this because they're baked into the road shader on a coplanar
+	# surface; these are separate floating strips. Unshaded keeps them readable.
+	marking_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	marking_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	var st := SurfaceTool.new()
@@ -6755,6 +6822,8 @@ func _create_bridge_deck_mesh(points: PackedVector2Array, tags: Dictionary, pare
 		_noise_textures.get("macro", null))
 	if material is ShaderMaterial:
 		WetRoadMaterial.apply_road_type_params(material, "ow2")
+		# No wheel-wear ruts on the bridge deck (looks wrong on a structure).
+		material.set_shader_parameter("wheel_wear", 0.0)
 
 	var mesh_inst := MeshInstance3D.new()
 	mesh_inst.name = "BridgeDeck"
@@ -6799,8 +6868,10 @@ func _create_on_deck_lane_markings(pts: PackedVector2Array, road_width: float, t
 		return
 	# Subdivide at 5 m grid crossings so per-vertex Y from
 	# _deck_surface_y_at_cached tracks the smoothstep ramp curve
-	# (same idea as _subdivide_for_elevation on terrain roads).
-	pts = _subdivide_for_elevation(pts, 5.0)
+	# (same idea as _subdivide_for_elevation on terrain roads). 2 m (not 5 m)
+	# so the dashed strip hugs the ramp curve instead of chord-cutting ~8 cm
+	# under the deck's finer (3 m) triangles, which would bury the markings.
+	pts = _subdivide_for_elevation(pts, 2.0)
 
 	var lanes_str: String = str(tags.get("lanes", "2"))
 	var lane_count: int = int(lanes_str) if lanes_str.is_valid_int() else 2
@@ -6811,11 +6882,15 @@ func _create_on_deck_lane_markings(pts: PackedVector2Array, road_width: float, t
 	const LINE_WIDTH := 0.15
 	const DASH_LENGTH := 3.0
 	const DASH_GAP := 3.0
-	const MARKING_Y_OFFSET := 0.003
+	const MARKING_Y_OFFSET := 0.05  # 5cm: clears z-fighting at ~120m deck elevation AND the deck's ~3cm linear-interp error on the ramp (was 0.003 → markings buried/z-fought, looked dark)
 
 	var marking_mat := StandardMaterial3D.new()
-	marking_mat.albedo_color = Color(1.0, 1.0, 1.0)
-	marking_mat.roughness = 0.6
+	marking_mat.albedo_color = Color(0.9, 0.89, 0.84)  # worn white (not neon)
+	# Unshaded: on the elevated bridge deck, SSAO (enabled by the procedural-cherepovets
+	# merge) + railing self-shadow darkened the SHADED paint to near-invisible. Road
+	# markings escape this because they're baked into the road shader on a coplanar
+	# surface; these are separate floating strips. Unshaded keeps them readable.
+	marking_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	marking_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	marking_mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
 
@@ -7012,7 +7087,7 @@ func _create_on_deck_footway(smoothed_points: PackedVector2Array, width: float, 
 	for k in range(pts.size()):
 		var p: Vector2 = pts[k]
 		var perp: Vector2 = perps[k]
-		var deck_y_here: float = _deck_surface_y_at_cached(p) + 0.23
+		var deck_y_here: float = _deck_surface_y_at_cached(p) + 0.115
 		verts.append(Vector3(p.x - perp.x * hw_lefts[k], deck_y_here, p.y - perp.y * hw_lefts[k]))
 		verts.append(Vector3(p.x + perp.x * hw_rights[k], deck_y_here, p.y + perp.y * hw_rights[k]))
 		uv_arr.append(Vector2(0.0, acc * 0.1))
@@ -7055,7 +7130,7 @@ func _create_on_deck_footway(smoothed_points: PackedVector2Array, width: float, 
 	# Curb: 22 cm tall strip on both edges of the sidewalk so it reads as a
 	# raised pavement against the carriageway.
 	if pts.size() >= 2:
-		var curb_h: float = 0.22
+		var curb_h: float = 0.11
 		var curb_st := SurfaceTool.new()
 		curb_st.begin(Mesh.PRIMITIVE_TRIANGLES)
 		var curb_mat := StandardMaterial3D.new()
@@ -7712,9 +7787,11 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 		_road_batch_data[chunk_key][texture_key] = {
 			"vertices": PackedVector3Array(),
 			"uvs": PackedVector2Array(),
+			"uv2s": PackedVector2Array(),  # UV2.x = метрич. across (м), UV2.y=1 → валидно (колея)
 			"normals": PackedVector3Array(),
 			"indices": PackedInt32Array(),
-			"parent": parent  # Сохраняем parent для создания MeshInstance3D позже
+			"parent": parent,  # Сохраняем parent для создания MeshInstance3D позже
+			"road_width": width
 		}
 
 	# Convert to local coordinates and smooth
@@ -7804,10 +7881,12 @@ func _add_road_to_batch(nodes: Array, width: float, texture_key: String, height_
 		# Left vertex
 		batch["vertices"].append(Vector3(left_pos.x, h_left, left_pos.y))
 		batch["uvs"].append(Vector2(0.0, uv_y))
+		batch["uv2s"].append(Vector2(-half_w, 1.0))
 
 		# Right vertex
 		batch["vertices"].append(Vector3(right_pos.x, h_right, right_pos.y))
 		batch["uvs"].append(Vector2(1.0, uv_y))
+		batch["uv2s"].append(Vector2(half_w, 1.0))
 
 		# Normal from cross-section tilt
 		var cross := Vector3(right_pos.x - left_pos.x, h_right - h_left, right_pos.y - left_pos.y)
@@ -7884,7 +7963,7 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 	var is_tagged_crossing: bool = item.tags.get("footway", "") == "crossing"
 	# Path base is needed even for tagged crossings so curb returns and sidewalk ramps
 	# are filled; the on-road portion is still removed by road-corridor clipping.
-	_add_path_clipped_to_batch(smoothed_points, width, 0.23, parent)
+	_add_path_clipped_to_batch(smoothed_points, width, 0.115, parent, int(item.get("way_id", 0)))
 
 	# Crossing: splitting по on_road для определения on-road portions (зебра)
 	var current_pts := PackedVector2Array()
@@ -8001,9 +8080,11 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 		_road_batch_data[chunk_key][texture_key] = {
 			"vertices": PackedVector3Array(),
 			"uvs": PackedVector2Array(),
+			"uv2s": PackedVector2Array(),  # UV2.x = метрич. across (м), UV2.y=1 → валидно (колея)
 			"normals": PackedVector3Array(),
 			"indices": PackedInt32Array(),
-			"parent": parent
+			"parent": parent,
+			"road_width": width
 		}
 
 	# Точки уже сглажены вызывающей стороной — только validate
@@ -8081,9 +8162,11 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 
 		batch["vertices"].append(Vector3(left_pos.x, h_left, left_pos.y))
 		batch["uvs"].append(Vector2(0.0, uv_y))
+		batch["uv2s"].append(Vector2(-half_w, 1.0))
 
 		batch["vertices"].append(Vector3(right_pos.x, h_right, right_pos.y))
 		batch["uvs"].append(Vector2(1.0, uv_y))
+		batch["uv2s"].append(Vector2(half_w, 1.0))
 
 		var cross := Vector3(right_pos.x - left_pos.x, h_right - h_left, right_pos.y - left_pos.y)
 		var fwd := Vector3(perp.y, 0.0, -perp.x)
@@ -8106,7 +8189,7 @@ func _add_road_to_batch_fast(raw_points: PackedVector2Array, width: float, textu
 
 ## Добавляет тротуар (path) как polygon, обрезанный road corridors + intersections.
 ## Результат обрезается точно по бордюру, как terrain.
-func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, height_offset: float, parent: Node3D) -> void:
+func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, height_offset: float, parent: Node3D, way_id: int = 0) -> void:
 	if raw_points.size() < 2:
 		return
 
@@ -8174,6 +8257,7 @@ func _add_path_clipped_to_batch(raw_points: PackedVector2Array, width: float, he
 			"parent": parent,
 			"ck_x": ck_x,
 			"ck_z": ck_z,
+			"way_id": way_id,
 		})
 		return
 
@@ -8299,6 +8383,126 @@ func _add_path_polys_to_batch(filtered: Array[PackedVector2Array], validated: Pa
 			batch["indices"].append(base_idx + idx)
 
 
+## Phase 4: объединяет тротуарные полигоны чанка в внешние контуры.
+## merge_polygons убирает внутренние рёбра на пересечениях тротуаров → поребрик
+## строится только по внешнему периметру (правило "no curb in the middle").
+## Дырки (clockwise loops) отбрасываем — тротуары почти никогда не охватывают газон.
+func _union_footway_polys(polys: Array[PackedVector2Array]) -> Array[PackedVector2Array]:
+	var result: Array[PackedVector2Array] = []
+	for p_raw in polys:
+		if p_raw.size() < 3:
+			continue
+		var cur: PackedVector2Array = p_raw
+		if Geometry2D.is_polygon_clockwise(cur):
+			cur = cur.duplicate()
+			cur.reverse()
+		# Сливаем cur с любым пересекающимся членом result, повторяя пока сливается
+		var restart := true
+		while restart:
+			restart = false
+			var i := 0
+			while i < result.size():
+				var m := Geometry2D.merge_polygons(result[i], cur)
+				var outers: Array[PackedVector2Array] = []
+				for mp in m:
+					if not Geometry2D.is_polygon_clockwise(mp):
+						outers.append(mp)
+				if outers.size() == 1:
+					# Пересеклись → один внешний контур; заменяем cur и рестартуем
+					cur = outers[0]
+					result.remove_at(i)
+					restart = true
+					break
+				i += 1
+		result.append(cur)
+	return result
+
+
+## Phase 4: строит поребрик (concrete strip) по внешним рёбрам объединённых
+## тротуарных контуров. Пропускает рёбра, чья внешняя сторона — проезжая часть
+## (там бордюр уже даёт террейн). Меш добавляется через RenderingServer с _curb_material.
+func _build_sidewalk_kerbs(merged: Array[PackedVector2Array], chunk_key: String, _parent: Node3D) -> void:
+	var curb_w := 0.12          # ширина поребрика (м)
+	var top_off := 0.135        # верх поребрика над elevation (тротуар +0.115, газон +0.11 → проступ ~2-3см)
+	var bot_off := -0.30        # низ уходит под землю
+	var bucket := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+	for loop in merged:
+		var n := loop.size()
+		if n < 3:
+			continue
+		for ei in range(n):
+			var p1: Vector2 = loop[ei]
+			var p2: Vector2 = loop[(ei + 1) % n]
+			var seg := p2 - p1
+			var seglen := seg.length()
+			if seglen < 0.30:
+				continue
+			var dir := seg / seglen
+			var nrm := Vector2(-dir.y, dir.x)
+			var mid := (p1 + p2) * 0.5
+			# outward = наружу от полигона (постоянно вдоль прямого ребра)
+			if Geometry2D.is_point_in_polygon(mid + nrm * 0.2, loop):
+				nrm = -nrm
+			# Разбиваем ребро на ~3м куски: поребрик СЛЕДУЕТ за рельефом (sample
+			# elevation в каждой точке), иначе длинные рёбра (напр. 2-точечный
+			# тротуар на 156м) уходят под землю на буграх и пропадают.
+			# Проверка дороги — на каждом куске (точнее по правилу 3).
+			var nsub := maxi(1, int(ceil(seglen / 3.0)))
+			for j in range(nsub):
+				var a := p1.lerp(p2, float(j) / float(nsub))
+				var b := p1.lerp(p2, float(j + 1) / float(nsub))
+				var submid := (a + b) * 0.5
+				# Правило 3: снаружи проезжая часть → поребрик не нужен (там бордюр террейна)
+				if _is_point_on_vehicle_road_neighborhood(submid + nrm * 0.45, 0.5, chunk_key):
+					continue
+				_swkerb_add_quad(bucket, a, b, nrm, curb_w, top_off, bot_off)
+	var kv: PackedVector3Array = bucket["v"]
+	if kv.size() == 0:
+		return
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = kv
+	arr[Mesh.ARRAY_NORMAL] = bucket["n"]
+	arr[Mesh.ARRAY_INDEX] = bucket["i"]
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	_rs_add_mesh(chunk_key, mesh, _curb_material)
+
+
+## Добавляет одну секцию поребрика (top + наружная + внутренняя грань) в bucket,
+## сэмплируя высоту в обоих концах секции — следование рельефу.
+func _swkerb_add_quad(bucket: Dictionary, a: Vector2, b: Vector2, nrm: Vector2, curb_w: float, top_off: float, bot_off: float) -> void:
+	var ea := _sample_elevation(a.x, a.y)
+	var eb := _sample_elevation(b.x, b.y)
+	var oa := a + nrm * curb_w
+	var ob := b + nrm * curb_w
+	var it1 := Vector3(a.x, ea + top_off, a.y)
+	var it2 := Vector3(b.x, eb + top_off, b.y)
+	var ot1 := Vector3(oa.x, ea + top_off, oa.y)
+	var ot2 := Vector3(ob.x, eb + top_off, ob.y)
+	var ob1 := Vector3(oa.x, ea + bot_off, oa.y)
+	var ob2 := Vector3(ob.x, eb + bot_off, ob.y)
+	var ib1 := Vector3(a.x, ea + bot_off, a.y)
+	var ib2 := Vector3(b.x, eb + bot_off, b.y)
+	var nrm3 := Vector3(nrm.x, 0.0, nrm.y)
+	var kv: PackedVector3Array = bucket["v"]
+	var kn: PackedVector3Array = bucket["n"]
+	var ki: PackedInt32Array = bucket["i"]
+	var base := kv.size()
+	kv.append(it1); kv.append(it2); kv.append(ot2); kv.append(ot1)
+	for _j in 4: kn.append(Vector3.UP)
+	kv.append(ot1); kv.append(ot2); kv.append(ob2); kv.append(ob1)
+	for _j in 4: kn.append(nrm3)
+	kv.append(it1); kv.append(it2); kv.append(ib2); kv.append(ib1)
+	for _j in 4: kn.append(-nrm3)
+	ki.append(base + 0); ki.append(base + 2); ki.append(base + 1)
+	ki.append(base + 0); ki.append(base + 3); ki.append(base + 2)
+	ki.append(base + 4); ki.append(base + 6); ki.append(base + 5)
+	ki.append(base + 4); ki.append(base + 7); ki.append(base + 6)
+	ki.append(base + 8); ki.append(base + 9); ki.append(base + 10)
+	ki.append(base + 8); ki.append(base + 10); ki.append(base + 11)
+
+
 ## Ensures albedo + marking textures exist for a lane-aware texture_key like "ow2", "bi4".
 ## Called lazily — generates and caches on first use.
 func _ensure_lane_textures(texture_key: String) -> void:
@@ -8332,7 +8536,14 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	if _deferred_path_polys.has(chunk_key):
 		var deferred_items: Array = _deferred_path_polys[chunk_key]
 		_deferred_path_polys.erase(chunk_key)
+		var all_fw_polys: Array[PackedVector2Array] = []  # Phase 4: union для поребрика
+		var fw_parent: Node3D = null
 		for item in deferred_items:
+			# Chunk may have unloaded (freeing item.parent) before this deferred
+			# flush runs — skip stale items, otherwise _add_path_polys_to_batch
+			# gets a freed Node3D for arg 6 and the debugger trips.
+			if not is_instance_valid(item.parent):
+				continue
 			var polys: Array[PackedVector2Array] = item.polys
 			polys = _clip_path_polys_by_roads_and_intersections(polys, item.ck_x, item.ck_z, chunk_key)
 			var filtered: Array[PackedVector2Array] = []
@@ -8341,7 +8552,17 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 					filtered.append(poly)
 			if not filtered.is_empty():
 				_add_path_polys_to_batch(filtered, item.validated, item.width, item.height_offset, chunk_key, item.parent)
+				all_fw_polys.append_array(filtered)
+				if fw_parent == null:
+					fw_parent = item.parent
 				_had_deferred_paths = true
+		# Phase 4: поребрик по ВНЕШНЕМУ контуру тротуаров. Union убирает внутренние
+		# рёбра на пересечениях тротуаров (бордюр только снаружи перекрёстка), а
+		# проверка "снаружи дорога?" убирает бордюр там, где тротуар вплотную к
+		# проезжей части (там уже есть бордюр террейна).
+		if enable_sidewalk_curbs and all_fw_polys.size() > 0 and is_instance_valid(fw_parent):
+			var merged_fw: Array[PackedVector2Array] = _union_footway_polys(all_fw_polys)
+			_build_sidewalk_kerbs(merged_fw, chunk_key, fw_parent)
 
 	if not _road_batch_data.has(chunk_key):
 		# Нет дорог — но террейн всё равно создаём
@@ -8381,11 +8602,20 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 			_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
 		return
 
+	# Дорожная просадка: врезаем В МАССИВЫ БАТЧА до создания visual+collision, чтобы оба
+	# строились из одних вершин (без устаревшей плоской коллизии над ямой).
+	if enable_road_depressions and _road_depressions.has(chunk_key):
+		_apply_road_depressions(chunk_key, texture_key, batch)
+
 	# Создаём ArrayMesh из накопленных данных
 	var arrays: Array = []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = batch["vertices"]
 	arrays[Mesh.ARRAY_TEX_UV] = batch["uvs"]
+	# UV2 несёт метрическое расстояние от осевой (для колеи постоянной ширины).
+	# Ставим только если размеры совпадают — иначе ArrayMesh упадёт.
+	if batch.has("uv2s") and batch["uv2s"].size() == batch["vertices"].size():
+		arrays[Mesh.ARRAY_TEX_UV2] = batch["uv2s"]
 	arrays[Mesh.ARRAY_NORMAL] = batch["normals"]
 	arrays[Mesh.ARRAY_INDEX] = batch["indices"]
 
@@ -8430,7 +8660,7 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 			marking_tex
 		)
 		if material is ShaderMaterial:
-			WetRoadMaterial.apply_road_type_params(material, texture_key)
+			WetRoadMaterial.apply_road_type_params(material, texture_key, float(batch.get("road_width", 6.0)))
 
 	# Добавляем в parent (chunk node)
 	var parent: Node3D = batch["parent"]
@@ -8777,6 +9007,19 @@ func update_window_night_mode(is_night: bool) -> void:
 			valid_mats.append(m)
 	_window_batch_materials = valid_mats
 
+	# FacadeAssembler emission materials (brick/panel windows with emission masks)
+	var night_factor := 1.0 if is_night else 0.0
+	var emit_count := 0
+	for mat in _facade_emission_materials:
+		if is_instance_valid(mat):
+			mat.set_shader_parameter("night_factor", night_factor)
+			emit_count += 1
+	var valid_emit: Array[ShaderMaterial] = []
+	for m in _facade_emission_materials:
+		if is_instance_valid(m):
+			valid_emit.append(m)
+	_facade_emission_materials = valid_emit
+
 	# Переключаем светильники подъездов
 	var light_count := 0
 	for light in _entrance_lights:
@@ -8785,8 +9028,8 @@ func update_window_night_mode(is_night: bool) -> void:
 			light_count += 1
 
 	var icon := "🌙" if is_night else "☀️"
-	print("OSM: %s Updated %d window batch materials, %d entrance lights: is_night=%s (pruned %d stale)" % [
-		icon, updated_count, light_count, is_night, before_size - _window_batch_materials.size()
+	print("OSM: %s Updated %d window batch materials, %d facade emission materials, %d entrance lights: is_night=%s (pruned %d stale)" % [
+		icon, updated_count, emit_count, light_count, is_night, before_size - _window_batch_materials.size()
 	])
 
 
@@ -9313,6 +9556,8 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
+	var fa_bays: Dictionary = {}  # Phase S: facade bay grid для выравнивания витрин
+
 	# Сохраняем рёбра здания для проверки расстояния при генерации деревьев
 	# Skip if spatial hash was already built by Phase 1+2 worker thread
 	if not skip_spatial_hash:
@@ -9339,7 +9584,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	var max_elev := _sample_elevation(center.x, center.y)
 	for p in points:
 		max_elev = maxf(max_elev, _sample_elevation(p.x, p.y))
-	var base_elev := 0.22 + max_elev
+	var base_elev := 0.11 + max_elev
 
 	# Вычисляем расстояние до игрока для LOD (shadows)
 	var distance_to_player: float = 0.0
@@ -9359,8 +9604,8 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 	# Custom 3D model — полностью заменяет геометрию здания
 	if building_override and building_override.custom_model_path != "":
 		_place_custom_building_model(building_override, center, parent, base_elev)
-	elif way_id == Facade111_125.TARGET_WAY_ID and building_override and building_override.wall_texture_path != "":
-		# Северное Шоссе 39 — building-specific 111-125 atom facade prototype.
+	elif Facade111_125.is_target_way(way_id) and building_override and building_override.wall_texture_path != "":
+		# Северное Шоссе 39 / 37 / 35 — 111-125 atom facade prototype.
 		# Reuse the existing custom-texture function for roof / parapet /
 		# foundation / pediment (skip_walls=true), then build modular walls
 		# from atom textures on top of the same Y range.
@@ -9376,7 +9621,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 			if lat != 0.0 or lon != 0.0:
 				entr_local.append(_latlon_to_local(lat, lon))
 		var facade := Facade111_125.new()
-		facade.build(points, building_height, base_elev, parent, fnd_h, way_id, self, entr_local)
+		facade.build(points, building_height, base_elev, parent, fnd_h, way_id, self, entr_local, building_override.slot_extrusion)
 		print("OSM: 111-125 atom facade applied for way %d" % way_id)
 	elif building_override and building_override.wall_texture_path != "":
 		# Кастомная текстура с опциональным normal map
@@ -9403,44 +9648,62 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 			wood_override.building_material = "wood"
 			_create_3d_building_with_custom_texture(points, building_height, wood_override, parent, base_elev, debug_name)
 		else:
-			# Проверяем, подходит ли здание для случайной советской текстуры
-			var use_soviet_texture := false
-			var soviet_texture_path := ""
+			# Try FacadeAssembler first; fall back to default flat textures if it
+			# doesn't handle the building (wrong type, too few floors, atoms missing).
+			const FA_SKIP_TYPES := ["shed", "industrial",
+					"warehouse", "retail", "commercial", "kiosk", "service",
+					"roof", "carport", "barn", "farm", "farm_auxiliary",
+					"greenhouse", "stable", "sty", "transformer_tower",
+					"water_tower", "bunker", "bridge", "hut", "cabin"]
+			var fa_handled := false
+			if _is_cherepovets_location() and str(tags.get("building", "")) not in FA_SKIP_TYPES:
+				var btype := str(tags.get("building", ""))
+				var mat_tag := str(tags.get("building:material", ""))
+				if btype in ["garages", "garage"]:
+					mat_tag = "garage"
+				elif mat_tag.is_empty():
+					var h := (way_id * 2654435761) & 0xFFFF
+					mat_tag = "brick" if h < 26214 else "panel"  # 26214/65536 ≈ 40 %
+				if not mat_tag.is_empty():
+					var fa_floors := 0
+					if btype in ["garages", "garage"]:
+						fa_floors = 1
+					else:
+						var levels_str: String = str(tags.get("building:levels", ""))
+						if levels_str.is_valid_int():
+							fa_floors = int(levels_str)
+						if fa_floors <= 0:
+							fa_floors = maxi(2, roundi(building_height / 3.2))
+					var fa_arch := FacadeAssembler.select_archetype(way_id, mat_tag, fa_floors)
+					if FacadeAssembler.has_atoms(fa_arch):
+						var fnd_h: float = 0.0 if (building_override and building_override.no_foundation) else _get_foundation_height(points)
+						_create_3d_building_with_custom_texture(points, building_height, BuildingOverride.new(), parent, base_elev, debug_name, true)
+						var _fa := FacadeAssembler.new()
+						_fa.build(points, building_height, base_elev, parent, fnd_h, way_id, fa_arch, fa_floors)
+						_facade_emission_materials.append_array(_fa.emission_materials)
+						fa_bays = _fa.edge_patterns.duplicate()
+						fa_handled = true
+						print("[FacadeAssembler] archetype=%s way=%d floors=%d" % [fa_arch.get("id", "?"), way_id, fa_floors])
 
-			# Критерий 1: Нет override (уже подтверждено, т.к. мы в else)
-			# Критерий 2: Только Череповец
-			# Критерий 3: 5 этажей
-			if _is_cherepovets_location() and _is_5_story_building(building_height, tags):
-				use_soviet_texture = true
-				soviet_texture_path = _get_random_soviet_texture(way_id, tags)
+			if not fa_handled:
+					# Fallback: original flat-texture logic.
+					var building_type: String = str(tags.get("building", "yes"))
+					var texture_type := "panel"  # По умолчанию панельки
+					if building_height > 15.0:
+						texture_type = "panel"  # Высотки - панельные
+					elif building_type in ["house", "detached", "semidetached_house"]:
+						texture_type = "brick"  # Частные дома - кирпич
+					elif building_type in ["industrial", "warehouse", "garage", "garages"]:
+						texture_type = "wall"  # Промышленные - простая штукатурка
+					else:
+						texture_type = "brick"  # Остальное - кирпич
 
-			if use_soviet_texture:
-				# Создаём динамический BuildingOverride со случайной текстурой
-				# ТОЛЬКО текстура + вертикальное повторение (1×). Без масштабов, без адаптивности.
-				var temp_override = BuildingOverride.new()
-				temp_override.wall_texture_path = soviet_texture_path
-				temp_override.texture_repeat_y = 1.0
-
-				_create_3d_building_with_custom_texture(points, building_height, temp_override, parent, base_elev, debug_name)
-			else:
-				# Оригинальная логика текстур по умолчанию
-				var building_type: String = str(tags.get("building", "yes"))
-				var texture_type := "panel"  # По умолчанию панельки
-				if building_height > 15.0:
-					texture_type = "panel"  # Высотки - панельные
-				elif building_type in ["house", "detached", "semidetached_house"]:
-					texture_type = "brick"  # Частные дома - кирпич
-				elif building_type in ["industrial", "warehouse", "garage", "garages"]:
-					texture_type = "wall"  # Промышленные - простая штукатурка
-				else:
-					texture_type = "brick"  # Остальное - кирпич
-
-				# Используем многопоточную генерацию зданий
-				_queue_building_for_thread(points, building_height, texture_type, parent, base_elev, distance_to_player)
+					# Используем многопоточную генерацию зданий
+					_queue_building_for_thread(points, building_height, texture_type, parent, base_elev, distance_to_player)
 
 	# Добавляем вывески для заведений (amenity/shop с названием)
 	# Вывески создаются синхронно т.к. они лёгкие
-	_add_business_signs_simple(points, tags, parent, building_height, base_elev, loader, way_id, entrance_nodes, poi_nodes)
+	_add_business_signs_simple(points, tags, parent, building_height, base_elev, loader, way_id, entrance_nodes, poi_nodes, fa_bays)
 
 	# Добавляем подъезды жилых домов (из building_overrides JSON)
 	if way_id > 0 and _decoration_layer:
@@ -9658,7 +9921,7 @@ func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_k
 
 	st.set_material(material)
 
-	var height_offset := 0.23  # Same as footway (1cm above grass terrain at 0.22)
+	var height_offset := 0.115  # Same as footway (~0.5cm above grass terrain at 0.11)
 	var uv_ws := 1.0 / 4.0
 
 	for cell_poly in grid_polys:
@@ -9914,7 +10177,7 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Лицевая сторона знака (текстура парковки)
@@ -9925,7 +10188,7 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	sign_front.material_override = _parking_sign_front_mat
 	sign_front.position = Vector3(0, 2.3, -0.051)
 	sign_front.rotation.y = PI
-	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_front)
 
 	# Обратная сторона (серый изношенный металл)
@@ -9935,7 +10198,7 @@ func _create_parking_sign_immediate(pos: Vector2, elevation: float, rotation_y: 
 	sign_back.mesh = back_mesh
 	sign_back.material_override = _crossing_sign_back_mat
 	sign_back.position = Vector3(0, 2.3, -0.029)
-	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_back)
 
 	if _draw_call_logging_enabled:
@@ -10009,6 +10272,16 @@ func _enqueue_crossing_signs(crossing_pts: PackedVector2Array, parent: Node3D, c
 	var rot_b: float = atan2(-road_dir.x, -road_dir.y)
 	_enqueue_single_crossing_sign(pos_b, rot_b, parent)
 
+	# Урна на тротуаре у перехода — не на каждом («изредка»), детерминированно по позиции
+	if enable_clutter and (int(absf(mid.x * 3.0 + mid.y * 5.0)) % 10) < 7:
+		var bin_pos: Vector2 = mid + road_dir * (sign_offset_along + 1.3) \
+			+ Vector2(road_dir.y, -road_dir.x) * (half_road_w + 2.3)
+		_enqueue_clutter_bin(bin_pos, parent)
+		# Мешок мусора у урны (переполнение) — ещё реже, детерминированно по позиции.
+		if (int(absf(mid.x * 7.0 + mid.y * 11.0)) % 10) < 4:
+			var bag_pos: Vector2 = bin_pos + road_dir * 0.85
+			_enqueue_clutter_bag(bag_pos, parent)
+
 
 func _enqueue_single_crossing_sign(pos: Vector2, rotation_y: float, parent: Node3D) -> void:
 	var safe_pos := _move_object_off_road(pos, 0.3, 3)
@@ -10062,7 +10335,7 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Лицевая сторона знака (текстура пешеходного перехода)
@@ -10072,7 +10345,7 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 	sign_front.mesh = front_mesh
 	sign_front.material_override = _crossing_sign_front_mat
 	sign_front.position = Vector3(0, 2.3, 0.051)
-	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_front)
 
 	# Обратная сторона (серый изношенный металл)
@@ -10083,13 +10356,946 @@ func _create_crossing_sign_immediate(pos: Vector2, elevation: float, rotation_y:
 	sign_back.material_override = _crossing_sign_back_mat
 	sign_back.position = Vector3(0, 2.3, 0.029)
 	sign_back.rotation.y = PI
-	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_back)
 
 	if _draw_call_logging_enabled:
 		_draw_call_stats["signs"] += 2
 
 	parent.add_child(body)
+
+
+# ============================ ИНТЕРАКТИВНЫЙ КЛАТТЕР ============================
+
+## Грузит и измеряет модели клаттера один раз. Автоскейл по высоте (как на стенде).
+func _init_clutter_assets() -> void:
+	var bin_path := "res://models/green_metal_waste_bin/green_metal_waste_bin.glb"
+	if ResourceLoader.exists(bin_path):
+		var d := _measure_clutter_model(bin_path, 1.0)
+		_bin_scene = d["scene"]
+		_bin_visual_xform = d["xform"]
+		_bin_size = d["size"]
+	# Конус — piece index 1 из road_works_pack (тренога=0, конус=1, люк=2)
+	var pack_path := "res://models/road_works_pack/road_works_stylized_pack.glb"
+	if ResourceLoader.exists(pack_path):
+		var c := _extract_pack_mesh(pack_path, 1, 0.8)
+		_cone_mesh = c["mesh"]
+		_cone_visual_xform = c["xform"]
+		_cone_size = c["size"]
+	# Мешок мусора — мягкая «помойка» у урн (переполнение). Авто-скейл к ~0.6 м.
+	var bag_path := "res://models/low_poly_trash_bag/low_poly_trash_bag.glb"
+	if ResourceLoader.exists(bag_path):
+		var b := _measure_clutter_model(bag_path, 0.6)
+		_bag_scene = b["scene"]
+		_bag_visual_xform = b["xform"]
+		_bag_size = b["size"]
+	# Обрывки бумаги (6 вариантов) — на них разлетается мешок при наезде на 60+ км/ч.
+	var paper_path := "res://models/crumpled_paper/dirty_crumpled_pieces_of_paper.glb"
+	if ResourceLoader.exists(paper_path):
+		_paper_variants.clear()
+		for pi in range(6):
+			var pv := _extract_pack_mesh(paper_path, pi, 0.22)
+			if pv["mesh"] == null:
+				continue
+			# Часть вариантов — плоские ШИРОКИЕ листы (X/Z до ~2.8 м при высоте 0.22):
+			# _extract масштабирует по высоте, поэтому ширина остаётся гигантской. Дожимаем
+			# по САМОЙ БОЛЬШОЙ стороне до ~0.28 м, иначе разлетаются «простыни».
+			var sz: Vector3 = pv["size"]
+			var maxd: float = maxf(sz.x, maxf(sz.y, sz.z))
+			if maxd > 0.28:
+				var k: float = 0.28 / maxd
+				var xf: Transform3D = pv["xform"]
+				xf.basis = xf.basis.scaled(Vector3(k, k, k))
+				xf.origin *= k
+				pv["xform"] = xf
+				pv["size"] = sz * k
+			_paper_variants.append(pv)
+	# Постоянный менеджер реквизита — ребёнок OSMTerrain (переживает перегенерацию чанков)
+	_clutter_manager = ClutterManagerScript.new()
+	_clutter_manager.name = "ClutterManager"
+	add_child(_clutter_manager)
+	_clutter_manager.setup(self)
+
+	# Звуки удара/падения. Ключи: <тип>_hit / <тип>_drop.
+	var sfx := {
+		"bin_hit": "res://audio/sfx/clutter_bin_hit.mp3",
+		"bin_drop": "res://audio/sfx/clutter_bin_drop.mp3",
+		"cone_hit": "res://audio/sfx/clutter_cone_hit.mp3",
+		"cone_drop": "res://audio/sfx/clutter_cone_drop.mp3",
+		"bag_hit": "res://audio/sfx/clutter_bag_hit.mp3",
+		"bag_drop": "res://audio/sfx/clutter_bag_drop.mp3",
+		"paper_drop": "res://audio/sfx/clutter_paper_drop.mp3",
+	}
+	for key in sfx:
+		var p: String = sfx[key]
+		if ResourceLoader.exists(p):
+			var stream: AudioStream = load(p)
+			if stream is AudioStreamMP3:
+				(stream as AudioStreamMP3).loop = false  # SFX не зациклить
+			_clutter_sfx[key] = stream
+
+
+## Возвращает {scene, xform, size}: PackedScene + трансформ визуала (скейл к target_h,
+## центр по XZ, основание в y=0) + габариты после скейла.
+func _measure_clutter_model(path: String, target_h: float) -> Dictionary:
+	var ps: PackedScene = load(path)
+	var tmp: Node3D = ps.instantiate()
+	add_child(tmp)
+	var aabb := _clutter_node_aabb(tmp)
+	remove_child(tmp)
+	tmp.queue_free()
+	var s: float = target_h / maxf(aabb.size.y, 0.0001)
+	var origin := Vector3(
+		-(aabb.position.x + aabb.size.x * 0.5) * s,
+		-aabb.position.y * s,
+		-(aabb.position.z + aabb.size.z * 0.5) * s)
+	return {"scene": ps, "xform": Transform3D(Basis().scaled(Vector3(s, s, s)), origin), "size": aabb.size * s}
+
+
+## Слитый AABB всех мешей узла в его собственном локальном пространстве.
+func _clutter_node_aabb(node: Node3D) -> AABB:
+	var out := AABB()
+	var first := true
+	var root_inv := node.global_transform.affine_inverse()
+	for mi in node.find_children("*", "MeshInstance3D", true, false):
+		var a: AABB = mi.get_aabb()
+		var gt: Transform3D = mi.global_transform
+		for i in range(8):
+			var corner := a.position + Vector3(
+				a.size.x if (i & 1) else 0.0,
+				a.size.y if (i & 2) else 0.0,
+				a.size.z if (i & 4) else 0.0)
+			var local := root_inv * (gt * corner)
+			if first:
+				out = AABB(local, Vector3.ZERO)
+				first = false
+			else:
+				out = out.expand(local)
+	return out
+
+
+## Извлекает один меш из пака по индексу (порядок find_children). Возвращает
+## {mesh, xform, size}: Mesh + трансформ визуала (скейл к target_h, центр XZ, база y=0).
+func _extract_pack_mesh(path: String, index: int, target_h: float) -> Dictionary:
+	var ps: PackedScene = load(path)
+	var tmp: Node3D = ps.instantiate()
+	add_child(tmp)
+	var result := {"mesh": null, "xform": Transform3D.IDENTITY, "size": Vector3.ONE}
+	var mis := tmp.find_children("*", "MeshInstance3D", true, false)
+	if index < mis.size():
+		var mi: MeshInstance3D = mis[index]
+		var mesh_in_root := tmp.global_transform.affine_inverse() * mi.global_transform
+		# AABB по ФАКТИЧЕСКИМ вершинам, а НЕ mi.get_aabb(): у road_works_pack бокс
+		# меша раздут на ~0.25м ВНИЗ (мусорный import-bounds). Из-за этого конус
+		# «левитировал» — низ раздутого бокса садился на дорогу, а реальная геометрия
+		# висела выше; заодно конус выходил мелким (раздутая высота съедала масштаб).
+		var msh: Mesh = mi.mesh
+		var aabb := AABB()
+		var first := true
+		for si in range(msh.get_surface_count()):
+			var sarr: Array = msh.surface_get_arrays(si)
+			var sverts: PackedVector3Array = sarr[Mesh.ARRAY_VERTEX]
+			for v in sverts:
+				var p := mesh_in_root * v
+				if first:
+					aabb = AABB(p, Vector3.ZERO)
+					first = false
+				else:
+					aabb = aabb.expand(p)
+		if first:
+			aabb = mesh_in_root * mi.get_aabb()  # fallback: меш без вершин
+		var s: float = target_h / maxf(aabb.size.y, 0.0001)
+		var recenter := Vector3(
+			-(aabb.position.x + aabb.size.x * 0.5) * s,
+			-aabb.position.y * s,
+			-(aabb.position.z + aabb.size.z * 0.5) * s)
+		var scale_recenter := Transform3D(Basis().scaled(Vector3(s, s, s)), recenter)
+		result["mesh"] = mi.mesh
+		result["xform"] = scale_recenter * mesh_in_root
+		result["size"] = aabb.size * s
+	remove_child(tmp)
+	tmp.queue_free()
+	return result
+
+
+## Контакт реквизита. Первый контакт с игроком → удар (звук hit; урна ещё и отлетает).
+## Последующий контакт с НЕ-игроком после взлёта → приземление (звук drop).
+func _on_clutter_hit(other_body: Node, rigid_body: RigidBody3D, hit_key: String, drop_key: String) -> void:
+	if not is_instance_valid(rigid_body):
+		return
+
+	var is_player: bool = other_body is Node and other_body.is_in_group("player")
+	if rigid_body.freeze:
+		# ЗАМОРОЖЕННЫЙ (урна): игрок размораживает + импульс + звук удара.
+		if not is_player:
+			return
+		rigid_body.freeze = false
+		rigid_body.set_meta("clutter_airborne", true)
+		rigid_body.set_meta("clutter_hit_ms", Time.get_ticks_msec())
+		var car_speed := 0.0
+		if other_body is RigidBody3D:
+			car_speed = (other_body as RigidBody3D).linear_velocity.length()
+		elif other_body is VehicleBody3D:
+			car_speed = (other_body as VehicleBody3D).linear_velocity.length()
+		var dir: Vector3 = (rigid_body.global_position - other_body.global_position)
+		dir.y = 0.0
+		if dir.length_squared() < 0.0001:
+			dir = Vector3(0.0, 0.0, 1.0)
+		dir = dir.normalized()
+		dir.y = 0.25
+		var dv: float = clampf(car_speed, 2.0, 14.0)
+		rigid_body.apply_central_impulse(dir * dv * rigid_body.mass)
+		rigid_body.apply_torque_impulse(Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * dv * rigid_body.mass * 0.12)
+		_play_clutter_sfx(rigid_body, hit_key)
+	elif is_player:
+		# ДИНАМИЧЕСКИЙ (конус): отлёт даёт само столкновение (лёгкая масса → машина не тормозит),
+		# мы только проигрываем звук удара один раз и отмечаем «в полёте».
+		if not bool(rigid_body.get_meta("clutter_hit_done", false)):
+			rigid_body.set_meta("clutter_hit_done", true)
+			rigid_body.set_meta("clutter_airborne", true)
+			rigid_body.set_meta("clutter_hit_ms", Time.get_ticks_msec())
+			_play_clutter_sfx(rigid_body, hit_key)
+	else:
+		# Контакт НЕ с игроком после взлёта → приземление (звук drop)
+		if not bool(rigid_body.get_meta("clutter_airborne", false)):
+			return
+		if Time.get_ticks_msec() - int(rigid_body.get_meta("clutter_hit_ms", 0)) < 200:
+			return
+		rigid_body.set_meta("clutter_airborne", false)
+		_play_clutter_sfx(rigid_body, drop_key)
+
+
+func _play_clutter_sfx(body: Node3D, key: String) -> void:
+	var stream: AudioStream = _clutter_sfx.get(key)
+	if stream == null or not is_instance_valid(body):
+		return
+	var p := AudioStreamPlayer3D.new()
+	p.stream = stream
+	p.max_distance = 70.0
+	p.unit_size = 8.0
+	body.add_child(p)
+	p.play()
+	p.finished.connect(p.queue_free)
+
+
+## Регистрирует урну в постоянном менеджере реквизита (вне жизненного цикла чанков).
+func _enqueue_clutter_bin(pos: Vector2, _parent: Node3D) -> void:
+	if _clutter_manager == null:
+		return
+	_clutter_manager.register("bin", _move_object_off_road(pos, 0.3, 3))
+
+
+## Создаёт урну: замороженный kinematic RigidBody с цилиндр-коллайдером и GLB-визуалом.
+func _create_bin_immediate(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> RigidBody3D:
+	if not is_instance_valid(parent) or _bin_scene == null:
+		return null
+	var body := RigidBody3D.new()
+	body.name = "ClutterBin"
+	# Поднимаем на уровень тротуара (ПЧ → тротуар = +0.115), чтобы урна стояла
+	# НА тротуаре, а не в кювете у бордюра.
+	body.position = Vector3(pos.x, elevation + CLUTTER_SIDEWALK_RAISE, pos.y)
+	if elevation != 0.0:
+		body.set_meta("_elevation_applied", true)
+	body.rotation.y = rotation_y
+	body.collision_layer = 4
+	body.collision_mask = 7
+	body.mass = 16.0  # потяжелее, чтобы не отлетала так далеко
+	body.freeze = true
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	body.contact_monitor = true
+	body.max_contacts_reported = 6
+	body.body_entered.connect(_on_clutter_hit.bind(body, "bin_hit", "bin_drop"))
+
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.height = _bin_size.y
+	shape.radius = maxf(_bin_size.x, _bin_size.z) * 0.5
+	collision.shape = shape
+	collision.position.y = _bin_size.y * 0.5
+	body.add_child(collision)
+
+	var vis: Node3D = _bin_scene.instantiate()
+	vis.transform = _bin_visual_xform
+	body.add_child(vis)
+
+	parent.add_child(body)
+	return body
+
+
+## Мешок мусора: мягкий тяжёлый RigidBody на тротуаре у урны. Лежит ЗАМОРОЖЕННЫЙ
+## (маска 0 — не тормозит машину), игрока ловит Area3D и будит мешок. На ударе —
+## слабый импульс + сильное демпфирование → ШЛЁПАЕТСЯ ~0.5 м и замирает (не летит).
+func _create_bag_immediate(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> RigidBody3D:
+	if _bag_scene == null or not is_instance_valid(parent):
+		return null
+	var body := RigidBody3D.new()
+	body.name = "ClutterBag"
+	body.position = Vector3(pos.x, elevation + CLUTTER_SIDEWALK_RAISE, pos.y)  # на тротуаре у урны
+	if elevation != 0.0:
+		body.set_meta("_elevation_applied", true)
+	body.rotation.y = rotation_y
+	body.mass = 6.0
+	body.linear_damp = 0.8   # летит от удара, затем плавно тормозит (не прилипает)
+	body.angular_damp = 1.5
+	body.collision_layer = 4
+	body.collision_mask = 0   # пока лежит — ни с чем не сталкивается (не тормозит машину)
+	body.freeze = true
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	var pmat := PhysicsMaterial.new()
+	pmat.bounce = 0.0   # тряпка не прыгает
+	pmat.friction = 1.0
+	body.physics_material_override = pmat
+
+	var collision := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = _bag_size
+	collision.shape = shape
+	collision.position.y = _bag_size.y * 0.5
+	body.add_child(collision)
+
+	var vis: Node3D = _bag_scene.instantiate()
+	vis.transform = _bag_visual_xform
+	body.add_child(vis)
+
+	# Тело с маской 0 не детектит контакты → игрока ловит Area3D (как у конуса).
+	var area := Area3D.new()
+	area.collision_layer = 0
+	area.collision_mask = 1  # только игрок (слой 1)
+	var acol := CollisionShape3D.new()
+	var ashape := BoxShape3D.new()
+	ashape.size = _bag_size + Vector3(0.5, 0.0, 0.5)
+	acol.shape = ashape
+	acol.position.y = _bag_size.y * 0.5
+	area.add_child(acol)
+	area.body_entered.connect(_on_bag_trigger.bind(body))
+	body.add_child(area)
+
+	parent.add_child(body)
+	return body
+
+
+## Игрок задел мешок: размораживаем, исключаем машину из коллизий (не толкает тачку),
+## слабый направленный импульс + сильное демпфирование → мягкий «шлёп» недалеко.
+func _on_bag_trigger(other_body: Node, bag: RigidBody3D) -> void:
+	if not is_instance_valid(bag):
+		return
+	if not (other_body is Node and other_body.is_in_group("player")):
+		return
+	# Кулдаун: Area может выстрелить несколько раз из перекрытия — не множим реакцию.
+	var now := Time.get_ticks_msec()
+	if bag.has_meta("bag_hit_ms") and now - int(bag.get_meta("bag_hit_ms")) < 300:
+		return
+	bag.set_meta("bag_hit_ms", now)
+
+	var car_speed := 0.0
+	if other_body is RigidBody3D:
+		car_speed = (other_body as RigidBody3D).linear_velocity.length()
+	elif other_body is VehicleBody3D:
+		car_speed = (other_body as VehicleBody3D).linear_velocity.length()
+
+	# 60+ км/ч (≈16.7 м/с) — мешок ЛОПАЕТСЯ: ~20 обрывков бумаги разлетаются.
+	if car_speed >= 16.67 and not _paper_variants.is_empty():
+		_burst_bag_into_paper(bag, other_body, car_speed)
+		return
+
+	# Иначе — мешок ОТЛЕТАЕТ и остаётся интерактивным (Area3D НЕ выключаем → реагирует
+	# на каждый наезд, а не только на первый).
+	if bag.freeze:
+		bag.freeze = false
+		bag.collision_mask = 1
+		if other_body is PhysicsBody3D:
+			bag.add_collision_exception_with(other_body)
+		bag.contact_monitor = true
+		bag.max_contacts_reported = 4
+		bag.body_entered.connect(_on_clutter_hit.bind(bag, "bag_hit", "bag_drop"))
+	var dir: Vector3 = bag.global_position - (other_body as Node3D).global_position
+	dir.y = 0.0
+	if dir.length_squared() < 0.0001:
+		dir = Vector3(0.0, 0.0, 1.0)
+	dir = dir.normalized()
+	dir.y = 0.28  # заметно подбрасываем
+	var dv: float = clampf(car_speed, 4.0, 14.0)  # летит от удара (тяжелее/мягче, чем конус 6–24)
+	bag.apply_central_impulse(dir * dv * bag.mass)
+	bag.apply_torque_impulse(Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * bag.mass * 0.2)
+	_play_clutter_sfx(bag, "bag_hit")
+
+
+## Мешок лопнул (наезд на 60+ км/ч): убираем мешок и рождаем ~20 обрывков бумаги,
+## разлетающихся вперёд по ходу машины + вверх; лёгкие, парусят и оседают, потом
+## самоудаляются. Бумажки сталкиваются только с дорогой (слой 4 / маска 1), не между
+## собой, и пропускают сквозь себя машину.
+func _burst_bag_into_paper(bag: RigidBody3D, other_body: Node, car_speed: float) -> void:
+	var parent := bag.get_parent()
+	var origin: Vector3 = bag.global_position
+	var hit_dir: Vector3 = origin - (other_body as Node3D).global_position
+	hit_dir.y = 0.0
+	if hit_dir.length_squared() < 0.0001:
+		hit_dir = Vector3(0.0, 0.0, 1.0)
+	hit_dir = hit_dir.normalized()
+	_play_clutter_sfx(bag, "bag_hit")
+	bag.queue_free()
+	if not is_instance_valid(parent):
+		return
+	for i in range(20):
+		var pv: Dictionary = _paper_variants[i % _paper_variants.size()]
+		var body := RigidBody3D.new()
+		body.name = "ClutterPaperScrap"
+		body.mass = 0.05
+		body.linear_damp = 1.2   # парусит, но реально разлетается
+		body.angular_damp = 0.8
+		body.gravity_scale = 0.55
+		body.collision_layer = 4
+		body.collision_mask = 1
+		body.position = origin + Vector3(randf_range(-0.35, 0.35), randf_range(0.05, 0.55), randf_range(-0.35, 0.35))
+		body.rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
+		var col := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		var sz: Vector3 = pv["size"]
+		box.size = Vector3(maxf(sz.x, 0.06), maxf(sz.y, 0.03), maxf(sz.z, 0.06))
+		col.shape = box
+		body.add_child(col)
+		var vis := MeshInstance3D.new()
+		vis.mesh = pv["mesh"]
+		vis.transform = pv["xform"]
+		vis.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		body.add_child(vis)
+		if other_body is PhysicsBody3D:
+			body.add_collision_exception_with(other_body)
+		parent.add_child(body)
+		# Лёгкая бумага: задаём СКОРОСТЬ напрямую. apply_central_impulse на только что
+		# добавленном теле теряется до первого физ-кадра → бумажки «висели замороженными».
+		# Разлетаются веером вперёд по ходу машины + вверх, кувыркаясь.
+		var spread := hit_dir.rotated(Vector3.UP, randf_range(-1.5, 1.5))
+		var spd: float = clampf(car_speed, 6.0, 16.0)
+		body.linear_velocity = spread * (spd * randf_range(0.35, 0.7)) + Vector3.UP * randf_range(2.5, 6.0)
+		body.angular_velocity = Vector3(randf_range(-12.0, 12.0), randf_range(-12.0, 12.0), randf_range(-12.0, 12.0))
+		var t := get_tree().create_timer(randf_range(6.0, 9.0))
+		t.timeout.connect(func() -> void:
+			if is_instance_valid(body):
+				body.queue_free())
+
+
+## Регистрирует мешок мусора в постоянном менеджере реквизита.
+func _enqueue_clutter_bag(pos: Vector2, _parent: Node3D) -> void:
+	if _clutter_manager:
+		_clutter_manager.register("bag", _move_object_off_road(pos, 0.3, 3))
+
+
+## Регистрирует конус в постоянном менеджере реквизита (вне жизненного цикла чанков).
+func _enqueue_clutter_cone(pos: Vector2, _parent: Node3D) -> void:
+	if _clutter_manager:
+		_clutter_manager.register("cone", pos)
+
+
+## Создаёт дорожный конус: ЛЁГКИЙ ДИНАМИЧЕСКИЙ RigidBody на проезжей части.
+## НЕ kinematic-замороженный (тот = бесконечная масса → машина тормозит как об стену).
+## Лёгкая масса → машина проезжает почти без потери скорости, а конус разлетается.
+func _create_cone_immediate(pos: Vector2, elevation: float, rotation_y: float, parent: Node3D) -> RigidBody3D:
+	if _cone_mesh == null or not is_instance_valid(parent):
+		return null
+	# Ставим на САМУЮ НИЗКУЮ дорожную поверхность под точкой — это проезжая часть, по
+	# которой едет машина (а не приподнятый бордюр/люк/заплатка, на которые конус
+	# залезал и левитировал). Собираем все хиты по лучу и берём минимальный «Road».
+	var base_y := elevation + 0.02
+	var space := get_world_3d().direct_space_state
+	if space:
+		var excl: Array[RID] = []
+		var lo := 1.0e20
+		var hi := -1.0e20
+		for _i in range(6):
+			var rq := PhysicsRayQueryParameters3D.create(Vector3(pos.x, elevation + 4.0, pos.y), Vector3(pos.x, elevation - 4.0, pos.y))
+			rq.collision_mask = 1
+			rq.exclude = excl
+			var hit := space.intersect_ray(rq)
+			if hit.is_empty():
+				break
+			if (hit.collider as Node).is_in_group("Road"):
+				lo = minf(lo, float(hit.position.y))
+				hi = maxf(hi, float(hit.position.y))
+			excl.append((hit.collider as Object).get_rid())
+		if lo < 1.0e19:
+			base_y = lo + 0.02  # на самой низкой дорожной поверхности = на проезжей части
+	var radius := maxf(_cone_size.x, _cone_size.z) * 0.5
+	var body := RigidBody3D.new()
+	body.name = "ClutterCone"
+	body.position = Vector3(pos.x, base_y, pos.y)
+	body.rotation.y = rotation_y
+	body.mass = 0.6  # лёгкий → почти не тормозит машину (Δv отброса = impulse/mass, от массы не зависит)
+	body.linear_damp = 0.6  # было 3.0 — слишком гасило, конус не отлетал
+	body.angular_damp = 0.9
+	# Пока стоит — ЗАМОРОЖЕН и НИ с чем не сталкивается (маска 0): не тормозит машину
+	# И не «заезжает» на приподнятые дорожные накладки (бордюр/тротуар) → стоит ровно
+	# на проезжей части. Игрока ловит дочерний Area3D (см. ниже) и будит конус.
+	body.collision_layer = 4
+	body.collision_mask = 0
+	body.freeze = true
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	var pmat := PhysicsMaterial.new()
+	pmat.bounce = 0.25
+	pmat.friction = 0.7
+	body.physics_material_override = pmat
+
+	var collision := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.height = _cone_size.y
+	shape.radius = radius
+	collision.shape = shape
+	collision.position.y = _cone_size.y * 0.5
+	body.add_child(collision)
+
+	var vis := MeshInstance3D.new()
+	vis.mesh = _cone_mesh
+	vis.transform = _cone_visual_xform
+	body.add_child(vis)
+
+	# Триггер-зона: тело с маской 0 само не детектит контакты, поэтому игрока ловит Area3D.
+	var area := Area3D.new()
+	area.collision_layer = 0
+	area.collision_mask = 1  # игрок на слое 1; NPC (слой 4) не триггерят
+	var acol := CollisionShape3D.new()
+	var ashape := CylinderShape3D.new()
+	ashape.height = _cone_size.y
+	ashape.radius = radius + 0.45  # триггерим раньше — конус улетает ДО того, как бампер в него упрётся
+	acol.shape = ashape
+	acol.position.y = _cone_size.y * 0.5
+	area.add_child(acol)
+	area.body_entered.connect(_on_cone_trigger.bind(body))
+	body.add_child(area)
+
+	parent.add_child(body)
+	return body
+
+
+## Игрок задел конус (через Area3D): размораживаем, включаем коллизию, контролируемый
+## отброс от машины + звук. Хаотичного выброса из оверлапа нет — толкаем направленно.
+func _on_cone_trigger(other_body: Node, cone: RigidBody3D) -> void:
+	if not is_instance_valid(cone) or not cone.freeze:
+		return
+	if not (other_body is Node and other_body.is_in_group("player")):
+		return
+	cone.freeze = false
+	# Конус — лёгкий пластик: он НЕ должен толкать/подбрасывать машину (на полной
+	# скорости тачка въезжала на конус как на трамплин). Дорога и машина на одном
+	# слое 1, поэтому маску оставляем 1 (конус падает и катится по дороге), но
+	# ИСКЛЮЧАЕМ конкретно эту машину из коллизий конуса → машина проходит сквозь,
+	# конус улетает только по импульсу.
+	cone.collision_mask = 1
+	if other_body is PhysicsBody3D:
+		cone.add_collision_exception_with(other_body)
+	cone.contact_monitor = true
+	cone.max_contacts_reported = 6
+	cone.set_meta("clutter_hit_done", true)
+	cone.set_meta("clutter_airborne", true)
+	cone.set_meta("clutter_hit_ms", Time.get_ticks_msec())
+	var car_speed := 0.0
+	if other_body is RigidBody3D:
+		car_speed = (other_body as RigidBody3D).linear_velocity.length()
+	elif other_body is VehicleBody3D:
+		car_speed = (other_body as VehicleBody3D).linear_velocity.length()
+	var dir: Vector3 = cone.global_position - (other_body as Node3D).global_position
+	dir.y = 0.0
+	if dir.length_squared() < 0.0001:
+		dir = Vector3(0.0, 0.0, 1.0)
+	dir = dir.normalized()
+	dir.y = 0.22  # больше горизонтали, не в небо
+	var dv: float = clampf(car_speed, 6.0, 24.0)  # пластик — летит подальше
+	cone.apply_central_impulse(dir * dv * cone.mass)
+	cone.apply_torque_impulse(Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * dv * cone.mass * 0.14)
+	cone.body_entered.connect(_on_clutter_hit.bind(cone, "cone_hit", "cone_drop"))
+	_play_clutter_sfx(cone, "cone_hit")
+	for ch in cone.get_children():
+		if ch is Area3D:
+			ch.monitoring = false
+
+
+## Дорожные работы: на части артериальных дорог ставит сужающую полосу «ёлочку» конусов.
+## Якорь — середина того участка дороги, что лежит В ЭТОМ чанке (всегда в загруженном
+## чанке, переспавнится при перезагрузке). Гейт по (way_id, чанк) — изредка. NB: конусы
+## реагируют на любой транспорт.
+func _maybe_enqueue_road_works(way_id: int, tags: Dictionary, nodes: Array, parent: Node3D, chunk_key: String) -> void:
+	if not enable_clutter or _cone_mesh == null or chunk_key.is_empty():
+		return
+	var ht: String = tags.get("highway", "")
+	if not (ht in ["primary", "secondary", "tertiary", "primary_link", "secondary_link"]):
+		return
+	var parts := chunk_key.split(",")
+	if parts.size() != 2:
+		return
+	var cx := int(parts[0])
+	var cz := int(parts[1])
+	# Гейт по (дорога, чанк) — изредка. ВАЖНО: хэшируем по АБСОЛЮТНОМУ (origin-
+	# относительному) индексу чанка, а не по сцен-относительному cx,cz. Иначе
+	# free roam и гонка спавнятся в разных точках → разный _world_offset_chunks →
+	# одна и та же реальная дорога получает разный cx,cz → работы выпадают на
+	# разных дорогах в разных сценах. abs_cx/abs_cz одинаковы в любой сцене.
+	var abs_cx := cx + _world_offset_chunks.x
+	var abs_cz := cz + _world_offset_chunks.y
+	var cmin_x: float = float(cx) * chunk_size
+	var cmin_z: float = float(cz) * chunk_size
+	var cmax_x: float = cmin_x + chunk_size
+	var cmax_z: float = cmin_z + chunk_size
+	# Полилиния дороги
+	var pts := PackedVector2Array()
+	for n in nodes:
+		pts.append(_latlon_to_local(float(n.lat), float(n.lon)))
+	if pts.size() < 2:
+		return
+	# Размещение: либо ФОРСИРОВАННАЯ точка (ручной список, всегда, минует гейт),
+	# либо процедурный гейт 1-к-20 по АБСОЛЮТНОМУ чанку (в 5 раз реже прежнего 1-к-4).
+	var anchor: Vector2
+	var dir: Vector2
+	var fres := _forced_roadwork(pts, cmin_x, cmin_z, cmax_x, cmax_z)
+	var forced: bool = fres.get("hit", false)
+	if forced:
+		anchor = fres["anchor"]
+		dir = fres["dir"]
+	else:
+		if ((int(absf(float(way_id))) + abs_cx * 92837 + abs_cz * 689287) % 20) != 0:
+			return
+		var inside_idx: Array = []
+		for i in range(pts.size()):
+			var p := pts[i]
+			if p.x >= cmin_x and p.x < cmax_x and p.y >= cmin_z and p.y < cmax_z:
+				inside_idx.append(i)
+		if inside_idx.is_empty():
+			return
+		var mi: int = inside_idx[inside_idx.size() / 2]
+		anchor = pts[mi]
+		dir = pts[mini(pts.size() - 1, mi + 1)] - pts[maxi(0, mi - 1)]
+	# Якорь должен быть достаточно далеко от краёв чанка, чтобы вся «ёлочка»
+	# (~13 м) уместилась в ЭТОМ чанке — иначе площадка рвётся между чанками.
+	var margin := 15.0
+	if anchor.x < cmin_x + margin or anchor.x > cmax_x - margin or anchor.y < cmin_z + margin or anchor.y > cmax_z - margin:
+		if not forced:
+			return
+		# форсированную точку просто поджимаем внутрь чанка, чтобы не рвалась
+		anchor.x = clampf(anchor.x, cmin_x + margin, cmax_x - margin)
+		anchor.y = clampf(anchor.y, cmin_z + margin, cmax_z - margin)
+	if dir.length_squared() < 0.01:
+		dir = Vector2(1, 0)
+	dir = dir.normalized()
+	var half_w := _worksite_half_width(anchor, chunk_key)
+	var perp := Vector2(-dir.y, dir.x)
+	var side: float = 1.0 if (int(absf(float(way_id))) % 2 == 0) else -1.0
+	var n_cones := 6
+	for i in range(n_cones):
+		var frac := float(i) / float(n_cones - 1)
+		# Держим «ёлочку» ВГЛУБИ проезжей части (а не у кромки): крайний конус — на 65%
+		# полуширины (середина полосы, не на бордюре), сужаемся к ~20% (ближе к центру).
+		var lat: float = clampf(half_w * (0.65 - frac * 0.45), 0.5, maxf(half_w - 1.3, 0.5))
+		var cpos: Vector2 = anchor + dir * (float(i) * 2.2) + perp * side * lat
+		_enqueue_clutter_cone(cpos, parent)
+
+	# Просадка асфальта в отгороженной конусами полосе (между линией конусов и бордюром).
+	if enable_road_depressions:
+		_register_road_depression(anchor, dir, perp, side, half_w, way_id, chunk_key)
+
+
+## Ручной список «всегда здесь» точек дорожных работ (lat, lon) — минуют
+## процедурный гейт. Сюда кладём трассовые/дебажные споты. Координаты реальные
+## (origin-независимые), так что работают одинаково в free roam и в гонках.
+const FORCED_ROADWORKS: Array[Vector2] = [
+	Vector2(59.144900, 37.939466),  # дебаг/трасса: конусная ёлочка + яма
+]
+
+## Если форсированная точка лежит НА этой дороге внутри чанка — возвращает
+## {hit:true, anchor:Vector2 (проекция на дорогу), dir:Vector2 (вдоль дороги)},
+## иначе {hit:false}. Расстояние «точка на дороге» — point-to-segment (узлы OSM
+## редкие, поэтому считаем до отрезков, а не до вершин).
+func _forced_roadwork(pts: PackedVector2Array, cmin_x: float, cmin_z: float, cmax_x: float, cmax_z: float) -> Dictionary:
+	for fll in FORCED_ROADWORKS:
+		var fp := _latlon_to_local(fll.x, fll.y)
+		if not (fp.x >= cmin_x and fp.x < cmax_x and fp.y >= cmin_z and fp.y < cmax_z):
+			continue
+		var best_d := 1.0e30
+		var best_proj := Vector2.ZERO
+		var best_dir := Vector2(1, 0)
+		for i in range(pts.size() - 1):
+			var a := pts[i]
+			var b := pts[i + 1]
+			var ab := b - a
+			var l2 := ab.length_squared()
+			var t := 0.0
+			if l2 > 0.0001:
+				t = clampf((fp - a).dot(ab) / l2, 0.0, 1.0)
+			var proj := a + ab * t
+			var d := proj.distance_squared_to(fp)
+			if d < best_d:
+				best_d = d
+				best_proj = proj
+				best_dir = ab
+		if best_d < 15.0 * 15.0:  # точка действительно на этой дороге
+			return {"hit": true, "anchor": best_proj, "dir": best_dir}
+	return {"hit": false}
+
+
+## Полуширина ближайшего дорожного сегмента в точке (из дорожного spatial-hash).
+func _worksite_half_width(p: Vector2, ck: String) -> float:
+	var cell_x := int(floor(p.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(p.y / ROAD_CELL_SIZE))
+	var best := 6.0
+	var best_dist := 999.0
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var segs := _query_road_hash(Vector2i(cell_x + dx, cell_y + dy), ck)
+			for seg in segs:
+				var closest := Geometry2D.get_closest_point_to_segment(p, seg.p1, seg.p2)
+				var d: float = p.distance_to(closest)
+				if d < best_dist:
+					best_dist = d
+					best = float(seg.width) * 0.5
+	return best
+
+
+# ============================================================================
+# Дорожная просадка («повреждённый асфальт») в отгороженной конусами полосе.
+# Регистрируется на дорожных работах, врезается в дорожный батч на финализации.
+# ============================================================================
+
+## Кандидат-просадка для чанка (детерминированно по way_id). Кладём её в полосу
+## МЕЖДУ линией конусов и бордюром (на стороне side), оставаясь на асфальте.
+func _register_road_depression(anchor: Vector2, dir: Vector2, perp: Vector2, side: float, half_w: float, way_id: int, chunk_key: String) -> void:
+	var station := anchor + dir * (4.0 * 2.2)            # ~у конуса №4
+	var cone_lat := half_w * (0.65 - 0.8 * 0.45)         # боковое смещение конуса здесь (~0.29·hw)
+	var inner_edge := cone_lat + 0.35                    # отступ от линии конусов
+	var outer_edge := half_w - 0.45                      # отступ от бордюра (остаёмся на асфальте)
+	if outer_edge - inner_edge < 0.7:
+		return                                           # узкая дорога — места нет
+	var foot_w: float = clampf(outer_edge - inner_edge, 0.7, 1.5)   # поперёк дороги
+	var center_lat := (inner_edge + outer_edge) * 0.5
+	var c := station + perp * side * center_lat
+	if not _road_depressions.has(chunk_key):
+		_road_depressions[chunk_key] = []
+	for d in _road_depressions[chunk_key]:
+		if (d["c"] as Vector2).distance_to(c) < 0.5:
+			return
+	_road_depressions[chunk_key].append({
+		"c": c, "u": dir, "v": perp * side,
+		"L": 1.6, "W": foot_w, "depth": 0.12, "slope": 0.22,
+		"seed": int(absf(float(way_id))) % 100000 + 7,
+		"done": false,
+	})
+
+
+## На финализации батча врезаем непросаженные просадки этого чанка (центр в батче).
+func _apply_road_depressions(chunk_key: String, texture_key: String, batch: Dictionary) -> void:
+	if texture_key in ["path", "tram_bed", "tram_rails"]:
+		return
+	var deps: Array = _road_depressions[chunk_key]
+	for dep in deps:
+		# Carve into EVERY road batch whose triangles overlap the footprint. A pit
+		# can sit where two road surfaces overlap (through road + intersection/
+		# crosswalk apron, or two ways batched under different texture_keys). The old
+		# dep["done"] gate stopped after the FIRST batch, leaving the other batch flat
+		# — it then covered part of the carved pit (the visible "road patch over the
+		# pit"). _carve_road_depression self-filters: it returns false without touching
+		# the batch when no triangle overlaps, so calling it on every batch is safe.
+		if debug_road_depressions:
+			print("[DEPRESSION] try carve tk=%s c=(%.2f,%.2f)" % [texture_key, dep["c"].x, dep["c"].y])
+		_carve_road_depression(batch, dep)
+
+
+func _xz_in_batch(batch: Dictionary, px: float, pz: float) -> bool:
+	var verts: PackedVector3Array = batch["vertices"]
+	var idx: PackedInt32Array = batch["indices"]
+	var i := 0
+	while i < idx.size():
+		if not is_nan(_bary_y(verts[idx[i]], verts[idx[i + 1]], verts[idx[i + 2]], px, pz)):
+			return true
+		i += 3
+	return false
+
+
+## Barycentric Y треугольника (a,b,cc) в точке (px,pz) по XZ; NAN если снаружи.
+func _bary_y(a: Vector3, b: Vector3, cc: Vector3, px: float, pz: float) -> float:
+	var d := (b.x - a.x) * (cc.z - a.z) - (cc.x - a.x) * (b.z - a.z)
+	if absf(d) < 1.0e-9:
+		return NAN
+	var s := ((px - a.x) * (cc.z - a.z) - (cc.x - a.x) * (pz - a.z)) / d
+	var t := ((b.x - a.x) * (pz - a.z) - (px - a.x) * (b.z - a.z)) / d
+	if s < -0.0005 or t < -0.0005 or s + t > 1.0005:
+		return NAN
+	return a.y + s * (b.y - a.y) + t * (cc.y - a.y)
+
+
+func _uv_of(p: Vector3, c: Vector2, u: Vector2, v: Vector2) -> Vector2:
+	var d := Vector2(p.x, p.z) - c
+	return Vector2(d.dot(u), d.dot(v))
+
+
+func _pt_in_tri(p: Vector2, a: Vector2, b: Vector2, c: Vector2) -> bool:
+	var den := (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y)
+	if absf(den) < 1.0e-12:
+		return false
+	var s := ((b.y - c.y) * (p.x - c.x) + (c.x - b.x) * (p.y - c.y)) / den
+	var t := ((c.y - a.y) * (p.x - c.x) + (a.x - c.x) * (p.y - c.y)) / den
+	return s >= 0.0 and t >= 0.0 and s + t <= 1.0
+
+
+func _seg_x_seg(a: Vector2, b: Vector2, c: Vector2, d: Vector2) -> bool:
+	var r := b - a
+	var s := d - c
+	var rxs := r.x * s.y - r.y * s.x
+	if absf(rxs) < 1.0e-12:
+		return false
+	var t := ((c.x - a.x) * s.y - (c.y - a.y) * s.x) / rxs
+	var uu := ((c.x - a.x) * r.y - (c.y - a.y) * r.x) / rxs
+	return t >= 0.0 and t <= 1.0 and uu >= 0.0 and uu <= 1.0
+
+
+## Пересекает ли треугольник (в uv-кадре) прямоугольник [-ha,ha]×[-hb,hb].
+func _tri_overlaps_rect(p0: Vector2, p1: Vector2, p2: Vector2, ha: float, hb: float) -> bool:
+	for p in [p0, p1, p2]:
+		if absf(p.x) <= ha and absf(p.y) <= hb:
+			return true
+	var cs := [Vector2(-ha, -hb), Vector2(ha, -hb), Vector2(ha, hb), Vector2(-ha, hb)]
+	for cr in cs:
+		if _pt_in_tri(cr, p0, p1, p2):
+			return true
+	var te := [[p0, p1], [p1, p2], [p2, p0]]
+	var re := [[cs[0], cs[1]], [cs[1], cs[2]], [cs[2], cs[3]], [cs[3], cs[0]]]
+	for e1 in te:
+		for e2 in re:
+			if _seg_x_seg(e1[0], e1[1], e2[0], e2[1]):
+				return true
+	return false
+
+
+func _road_y_over(verts: PackedVector3Array, rem: Array, px: float, pz: float) -> float:
+	for t in rem:
+		var y := _bary_y(verts[t[0]], verts[t[1]], verts[t[2]], px, pz)
+		if not is_nan(y):
+			return y
+	return NAN
+
+
+## Добавляет треугольник в обмотке дороги (фронт-грань вверх = геом. нормаль ВНИЗ;
+## так намотаны дорожные треугольники — иначе чаша получается back-face: сквозная
+## дыра в визуале и промах рейкаста коллизии).
+func _push_tri(out: PackedInt32Array, verts: PackedVector3Array, a: int, b: int, c: int) -> void:
+	var nrm := (verts[b] - verts[a]).cross(verts[c] - verts[a])
+	if nrm.y <= 0.0:
+		out.append(a); out.append(b); out.append(c)
+	else:
+		out.append(a); out.append(c); out.append(b)
+
+
+## Врезает одну просадку в батч (vertices/uvs/uv2s/normals/indices). true при успехе.
+## На любой вырожденности — false, батч НЕ трогается (COW: пишем только в конце).
+func _carve_road_depression(batch: Dictionary, dep: Dictionary) -> bool:
+	var verts: PackedVector3Array = batch["vertices"]
+	var idx: PackedInt32Array = batch["indices"]
+	var uvs: PackedVector2Array = batch["uvs"]
+	var uv2s: PackedVector2Array = batch["uv2s"]
+	var norms: PackedVector3Array = batch["normals"]
+	var has_uv2: bool = uv2s.size() == verts.size()
+
+	var c: Vector2 = dep["c"]
+	var u: Vector2 = dep["u"]
+	var v: Vector2 = dep["v"]
+	var depth: float = dep["depth"]
+	var slope: float = dep["slope"]
+	var a_out: float = float(dep["L"]) * 0.5
+	var b_out: float = float(dep["W"]) * 0.5
+	var a_in: float = maxf(a_out - slope, 0.10)
+	var b_in: float = maxf(b_out - slope, 0.10)
+	var seed: int = int(dep["seed"])
+
+	# 1) делим треугольники на «убрать» (пересекают след) и «оставить»
+	var keep := PackedInt32Array()
+	var rem: Array = []
+	var i := 0
+	while i < idx.size():
+		var i0 := idx[i]; var i1 := idx[i + 1]; var i2 := idx[i + 2]
+		if _tri_overlaps_rect(_uv_of(verts[i0], c, u, v), _uv_of(verts[i1], c, u, v), _uv_of(verts[i2], c, u, v), a_out + 0.25, b_out + 0.25):
+			rem.append([i0, i1, i2])
+		else:
+			keep.append(i0); keep.append(i1); keep.append(i2)
+		i += 3
+	if rem.is_empty():
+		if debug_road_depressions: print("[DEPRESSION] FAIL: no triangles overlap footprint")
+		return false
+	var road_y_center := _road_y_over(verts, rem, c.x, c.y)  # для лога
+
+	# 2) Перетессилируем КАЖДЫЙ убираемый треугольник равномерной barycentric-сеткой и
+	#    проседаем вершины по гладкому depth-полю. Сетка ВСЕГДА полностью замощает
+	#    треугольник → сквозной дыры быть не может; вне эллипса глубина = 0 (плоский
+	#    асфальт). UV/uv2 интерполируются → текстура без разрывов.
+	var ni := PackedInt32Array(keep)
+	var added := 0
+	for tri in rem:
+		var A: Vector3 = verts[tri[0]]
+		var B: Vector3 = verts[tri[1]]
+		var C: Vector3 = verts[tri[2]]
+		var uvA: Vector2 = uvs[tri[0]]
+		var uvB: Vector2 = uvs[tri[1]]
+		var uvC: Vector2 = uvs[tri[2]]
+		var u2A := Vector2(2.0, 1.0)
+		var u2B := Vector2(2.0, 1.0)
+		var u2C := Vector2(2.0, 1.0)
+		if has_uv2:
+			u2A = uv2s[tri[0]]; u2B = uv2s[tri[1]]; u2C = uv2s[tri[2]]
+		var emax := maxf(maxf((B - A).length(), (C - B).length()), (A - C).length())
+		var R := clampi(int(ceil(emax / 0.12)), 6, 40)  # 0.12m grid: fine enough to sample the pit's flat bottom (was 0.25m → grid straddled the bottom, carving only the shallow rim → looked ~1cm instead of full depth)
+		var stride := R + 1
+		var gidx: PackedInt32Array = PackedInt32Array()
+		gidx.resize(stride * stride)
+		for ii in range(R + 1):
+			for jj in range(R + 1 - ii):
+				var bi := float(ii) / float(R)
+				var bj := float(jj) / float(R)
+				var bk := 1.0 - bi - bj
+				var pos := A * bk + B * bi + C * bj
+				var pxz := Vector2(pos.x, pos.z)
+				var dv := _depression_depth(pxz, c, u, v, a_out, b_out, depth, slope, seed)
+				# Нормаль из градиента depth-поля → стенки ямы дают затенение (иначе плоско).
+				var eps := 0.06
+				var ddx := (_depression_depth(pxz + Vector2(eps, 0.0), c, u, v, a_out, b_out, depth, slope, seed) - dv) / eps
+				var ddz := (_depression_depth(pxz + Vector2(0.0, eps), c, u, v, a_out, b_out, depth, slope, seed) - dv) / eps
+				verts.append(Vector3(pos.x, pos.y - dv, pos.z))
+				uvs.append(uvA * bk + uvB * bi + uvC * bj)
+				if has_uv2: uv2s.append(u2A * bk + u2B * bi + u2C * bj)
+				norms.append(Vector3(ddx, 1.0, ddz).normalized())
+				gidx[ii * stride + jj] = verts.size() - 1
+		for ii in range(R):
+			for jj in range(R - ii):
+				var v00 := gidx[ii * stride + jj]
+				var v10 := gidx[(ii + 1) * stride + jj]
+				var v01 := gidx[ii * stride + (jj + 1)]
+				_push_tri(ni, verts, v00, v10, v01)
+				added += 1
+				if jj < R - ii - 1:
+					var v11 := gidx[(ii + 1) * stride + (jj + 1)]
+					_push_tri(ni, verts, v10, v11, v01)
+					added += 1
+
+	# 3) коммит — visual и collision возьмут ОДНИ И ТЕ ЖЕ массивы
+	batch["vertices"] = verts
+	batch["uvs"] = uvs
+	if has_uv2:
+		batch["uv2s"] = uv2s
+	batch["normals"] = norms
+	batch["indices"] = ni
+	if debug_road_depressions:
+		print("[DEPRESSION] seed=%d c=(%.2f,%.2f) road_y=%.3f bottom_y=%.3f depth=%.2f L=%.2f W=%.2f rem_tris=%d new_tris=%d" % [seed, c.x, c.y, road_y_center, road_y_center - depth, depth, a_out * 2.0, b_out * 2.0, rem.size(), added])
+	return true
+
+
+## Глубина просадки в точке (px,pz): 0 вне эллипса (плоский асфальт), плавно до
+## depth_max ко дну. Эллипс с детерминированным гладким джиттером контура (seed).
+func _depression_depth(p: Vector2, c: Vector2, u: Vector2, v: Vector2, a_out: float, b_out: float, depth_max: float, slope: float, seed: int) -> float:
+	var d := p - c
+	var lu := d.dot(u) / maxf(a_out, 0.05)
+	var lv := d.dot(v) / maxf(b_out, 0.05)
+	var ang := atan2(lv, lu)
+	var jit := 1.0 + 0.16 * sin(3.0 * ang + float(seed) * 0.7) + 0.10 * sin(5.0 * ang - float(seed) * 0.3)
+	var r := sqrt(lu * lu + lv * lv) / maxf(jit, 0.4)
+	if r >= 1.0:
+		return 0.0
+	var slope_frac := clampf(slope / maxf(a_out, 0.1), 0.15, 0.9)
+	var f := clampf((1.0 - r) / slope_frac, 0.0, 1.0)
+	f = f * f * (3.0 - 2.0 * f)  # smoothstep
+	return depth_max * f
 
 
 func _enqueue_tram_stop_sign(pos: Vector2, parent: Node3D, chunk_key: String) -> void:
@@ -10174,7 +11380,7 @@ func _create_tram_stop_sign_immediate(pos: Vector2, elevation: float, rotation_y
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Лицевая сторона знака (текстура трамвайной остановки)
@@ -10184,7 +11390,7 @@ func _create_tram_stop_sign_immediate(pos: Vector2, elevation: float, rotation_y
 	sign_front.mesh = front_mesh
 	sign_front.material_override = _tram_stop_sign_front_mat
 	sign_front.position = Vector3(0, 2.3, 0.051)
-	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_front.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_front)
 
 	# Обратная сторона (серый изношенный металл)
@@ -10195,7 +11401,7 @@ func _create_tram_stop_sign_immediate(pos: Vector2, elevation: float, rotation_y
 	sign_back.material_override = _crossing_sign_back_mat
 	sign_back.position = Vector3(0, 2.3, 0.029)
 	sign_back.rotation.y = PI
-	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_back.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_back)
 
 	if _draw_call_logging_enabled:
@@ -10907,7 +12113,7 @@ func _register_water_polygon(points: PackedVector2Array, parent: Node3D) -> void
 				cw_hash[cell].append({"idx": local_water_idx, "p1": p1, "p2": p2})
 
 
-## Генерирует наклонный берег вокруг водного полигона (от Y=0.22 до Y=-1.0)
+## Генерирует наклонный берег вокруг водного полигона (от Y=0.11 до Y=-1.0)
 func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 	if water_poly.size() < 3:
 		return
@@ -10927,7 +12133,7 @@ func _create_shore_mesh(water_poly: PackedVector2Array, parent: Node3D) -> void:
 		has_chunk_rect = true
 
 	var pn := poly.size()
-	var sidewalk_h := 0.22  # Верхний край берега (уровень тротуара/террейна)
+	var sidewalk_h := 0.11  # Верхний край берега (уровень тротуара/террейна)
 	var water_h := WATER_Y  # Нижний край берега (уровень воды)
 
 	# Определяем направление полигона для правильной ориентации наружных нормалей
@@ -16034,7 +17240,7 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 	for i in range(lamp_count):
 		mm.set_instance_transform(i, batch.transforms[i])
 	mm_inst.multimesh = mm
-	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	lamp_container.add_child(mm_inst)
 
 	# Collision bodies for each lamp pole
@@ -16107,9 +17313,38 @@ func _update_lamp_night_mode(is_night: bool) -> void:
 	print("OSM: Updated lamp night mode (is_night=%s) by_chunk=%d immediate=%d deferred_pending=%d" % [is_night, total_by_chunk, _lamp_batch_lights.size(), _deferred_total_size(_deferred_lamp_lights)])
 
 ## Add tree to batch for MultiMesh rendering
+var _tree_clear_zones: Array = []   # [{pos: Vector2, r2: float}] — радиусы очистки от деревьев
+var _tree_clear_zones_built := false
+
+
+## Лениво строит зоны очистки от деревьев из custom_models (clear_trees_radius>0).
+## Не фиксируем зоны, пока decoration_layer не загружен — иначе при ранней
+## генерации список останется пустым навсегда.
+func _ensure_tree_clear_zones() -> void:
+	if _tree_clear_zones_built or _decoration_layer == null:
+		return
+	for md in _decoration_layer.get_custom_models():
+		var r: float = float(md.get("clear_trees_radius", 0.0))
+		if r > 0.0:
+			var lp := _latlon_to_local(float(md.get("lat", 0.0)), float(md.get("lon", 0.0)))
+			_tree_clear_zones.append({"pos": lp, "r2": r * r})
+	_tree_clear_zones_built = true
+
+
+func _point_in_tree_clear_zone(pos: Vector2) -> bool:
+	_ensure_tree_clear_zones()
+	for z in _tree_clear_zones:
+		if pos.distance_squared_to(z.pos) < z.r2:
+			return true
+	return false
+
+
 func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, parent: Node3D, is_pine: bool = false) -> void:
 	if not enable_vegetation:
 		return
+
+	# Зоны очистки от деревьев применяются позже, в _finalize_tree_batches_for_chunk
+	# (главный поток) — здесь мы в рабочем потоке и decoration_layer ещё не виден.
 
 	if not _tree_batch_data.has(chunk_key):
 		_tree_batch_data[chunk_key] = {
@@ -16157,6 +17392,24 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 	if total_trees == 0:
 		_tree_batch_data.erase(chunk_key)
 		return
+
+	# Удаляем деревья, попавшие в зоны очистки вокруг кастомных моделей
+	# (напр. травяная фигура «Ладья»). Делаем это на главном потоке —
+	# per-tree проверка в _add_tree_to_batch идёт в рабочем потоке и не
+	# успевает увидеть загруженный decoration_layer.
+	_ensure_tree_clear_zones()
+	if not _tree_clear_zones.is_empty():
+		var keep_t := func(t): return not _point_in_tree_clear_zone(Vector2(t.origin.x, t.origin.z))
+		leaf_transforms = leaf_transforms.filter(keep_t)
+		pine_transforms = pine_transforms.filter(keep_t)
+		batch["leaf_transforms"] = leaf_transforms
+		batch["pine_transforms"] = pine_transforms
+		batch["collisions"] = (batch["collisions"] as Array).filter(
+			func(c): return not _point_in_tree_clear_zone(Vector2(c.position.x, c.position.z)))
+		total_trees = leaf_transforms.size() + pine_transforms.size()
+		if total_trees == 0:
+			_tree_batch_data.erase(chunk_key)
+			return
 
 	# Создаём LOD0 + LOD1 + LOD2(billboard) MultiMesh для каждого типа дерева
 	var draw_calls := 0
@@ -16439,7 +17692,7 @@ func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, pare
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Знак - красный/белый диск
@@ -16465,7 +17718,7 @@ func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, pare
 	sign_plate.material_override = sign_mat
 	sign_plate.position.y = 2.3
 	sign_plate.rotation.x = PI / 2  # Повернуть горизонтально
-	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	sign_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(sign_plate)
 
 	parent.add_child(body)
@@ -16515,7 +17768,7 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 
 	var mm_inst := MultiMeshInstance3D.new()
 	mm_inst.multimesh = mm
-	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	lamp_root.add_child(mm_inst)
 
 	# Collision for the pole
@@ -16831,8 +18084,8 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 	var height := max_y - min_y
 	var area := width * height
 
-	const TREE_DENSITY_FOREST := 0.012
-	const TREE_DENSITY_PARK := 0.005
+	const TREE_DENSITY_FOREST := 0.015
+	const TREE_DENSITY_PARK := 0.0075  # Гуще зелень на газонах/во дворах (как в референсах) — capped ниже
 	const MAX_TREES_PER_POLYGON := 600
 
 	var density := TREE_DENSITY_FOREST if dense else TREE_DENSITY_PARK
@@ -17583,7 +18836,7 @@ func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void
 		for ix in range(grid_res + 1):
 			var x := min_x + ix * step
 			var z := min_z + iz * step
-			var y := 0.22 + _sample_elevation_local(x, z, ft_has_elev, ft_grid, ft_grid_res, ft_base_x, ft_base_z, ft_step)
+			var y := 0.11 + _sample_elevation_local(x, z, ft_has_elev, ft_grid, ft_grid_res, ft_base_x, ft_base_z, ft_step)
 			vertices.append(Vector3(x, y, z))
 			uvs.append(Vector2(x * uv_scale, z * uv_scale))
 			normals.append(Vector3.UP)
@@ -17673,7 +18926,7 @@ func _generate_lod2_buildings(chunk_key: String, osm_data: Dictionary, min_x: fl
 
 		var building_height := _compute_building_height(tags)
 		var color := _compute_building_color(tags)
-		var base_elev := 0.22 + _sample_elevation(center_x2, center_z2)
+		var base_elev := 0.11 + _sample_elevation(center_x2, center_z2)
 		var is_ccw := _is_polygon_ccw(points)
 		var normal_sign := -1.0 if is_ccw else 1.0
 
@@ -17916,7 +19169,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 	var max_x := min_x + chunk_size
 	var min_z := float(chunk_z) * chunk_size
 	var max_z := min_z + chunk_size
-	var sidewalk_height := 0.22
+	var sidewalk_height := 0.11
 
 	# Use this chunk's own elevation data directly to avoid float precision
 	# issues at chunk boundaries where floor(pos / chunk_size) might map
@@ -18271,7 +19524,7 @@ func _generate_industrial_buildings(points: PackedVector2Array, parent: Node3D) 
 			var bld_max_elev := _sample_elevation(bld_ctr.x, bld_ctr.y)
 			for bp in bld_points:
 				bld_max_elev = maxf(bld_max_elev, _sample_elevation(bp.x, bp.y))
-			var base_elev := 0.22 + bld_max_elev
+			var base_elev := 0.11 + bld_max_elev
 			_create_3d_building(bld_points, building_color, bld_height, parent, base_elev)
 
 
@@ -18457,7 +19710,7 @@ func _add_residential_entrances(points: PackedVector2Array, parent: Node3D, base
 	# Facade-driven buildings own their entrances — skip the OSM lat/lon
 	# system here so the full ResidentialEntrance group (with doors, green
 	# wall, canopy etc.) doesn't spawn alongside the facade's bare stairs.
-	if way_id == Facade111_125.TARGET_WAY_ID:
+	if Facade111_125.is_target_way(way_id):
 		return
 	var override = _decoration_layer.get_building_override_for_way(way_id)
 	if not override or override.entrances.is_empty():
@@ -18637,6 +19890,11 @@ func _create_pending_parking_signs() -> void:
 	var created := 0
 	for sign_data in _pending_parking_signs:
 		var points: PackedVector2Array = sign_data.points
+		# Chunk node may have been freed if its chunk unloaded while signs were
+		# still pending — skip those instead of assigning a freed instance
+		# (which throws "invalid previously freed instance" and breaks the debugger).
+		if not is_instance_valid(sign_data.parent):
+			continue
 		var parent: Node3D = sign_data.parent
 
 		var sign_result = _find_parking_sign_position(points)
@@ -18794,7 +20052,7 @@ func _create_traffic_light_immediate(pos: Vector2, elevation: float, parent: Nod
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 2.25
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	traffic_light.add_child(pole)
 
 	# Корпус светофора - чёрный бокс
@@ -18807,7 +20065,7 @@ func _create_traffic_light_immediate(pos: Vector2, elevation: float, parent: Nod
 	box_mat.albedo_color = Color(0.1, 0.1, 0.1)
 	box.material_override = box_mat
 	box.position.y = 4.2
-	box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	traffic_light.add_child(box)
 
 	# Красный сигнал
@@ -18951,7 +20209,7 @@ func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D
 	pole_mat.metallic = 0.8
 	pole.material_override = pole_mat
 	pole.position.y = 1.1
-	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(pole)
 
 	# Треугольный знак: красный ободок + белый центр + серая спинка
@@ -18966,7 +20224,7 @@ func _create_yield_sign_immediate(pos: Vector2, elevation: float, parent: Node3D
 	border_plate.position.y = 2.3
 	border_plate.rotation.y = -PI / 2
 	border_plate.rotation.z = PI
-	border_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	border_plate.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	body.add_child(border_plate)
 
 	# 2) Белый треугольник (центр, чуть меньше, чуть впереди)
@@ -19104,13 +20362,25 @@ func set_wet_mode(enabled: bool, is_night: bool = true) -> void:
 	if _ground_shader_material_lod2:
 		_ground_shader_material_lod2.set_shader_parameter("is_night", is_night)
 
+	# Мокрый асфальт зеркалит сцену (здания/машины) → включаем SSR ТОЛЬКО пока мокро.
+	# В сухой день SSR выключен (perf + чистый дневной грейд). Это чинит регрессию:
+	# без SSR мокрая дорога отражала только небо, а не сцену (см. example-rain).
+	var world_env := get_tree().current_scene.find_child("WorldEnvironment", true, false) as WorldEnvironment
+	if world_env and world_env.environment:
+		var ssr_env := world_env.environment
+		ssr_env.ssr_enabled = enabled
+		if enabled:
+			ssr_env.ssr_max_steps = 28  # умеренно — SSR работает только в дождь
+			ssr_env.ssr_fade_in = 0.2
+			ssr_env.ssr_fade_out = 4.0
+
 	# Плавный переход wetness_global за 5 секунд (один вызов RenderingServer на кадр)
 	var target := 1.0 if enabled else 0.0
 	if _wetness_tween:
 		_wetness_tween.kill()
 	_wetness_tween = create_tween()
 	_wetness_tween.tween_method(_apply_wetness_global, _wetness_value, target, 5.0)
-	print("OSM: Wet mode %s (tweening %.1f → %.1f)" % ["enabled" if enabled else "disabled", _wetness_value, target])
+	print("OSM: Wet mode %s (tweening %.1f → %.1f), SSR=%s" % ["enabled" if enabled else "disabled", _wetness_value, target, str(enabled)])
 
 
 func _apply_wetness_global(value: float) -> void:
@@ -19204,10 +20474,10 @@ func _setup_render_distance() -> void:
 	var dir_light := get_tree().current_scene.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
 	if dir_light:
 		dir_light.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
-		dir_light.directional_shadow_max_distance = render_distance
+		dir_light.directional_shadow_max_distance = 150.0
 		dir_light.directional_shadow_split_1 = 0.3
 		dir_light.shadow_normal_bias = 2.0
-		print("OSM: Shadow: 2 cascades, max distance %.0f, bias %.1f" % [render_distance, dir_light.shadow_normal_bias])
+		print("OSM: Shadow: 2 cascades, max distance %.0f, bias %.1f" % [150.0, dir_light.shadow_normal_bias])
 
 	# Туман: лёгкая атмосферная дымка для 2км обзора
 	if fog_enabled:
@@ -19215,10 +20485,11 @@ func _setup_render_distance() -> void:
 		if world_env and world_env.environment:
 			var env := world_env.environment
 			env.fog_enabled = true
-			env.fog_density = 0.0003  # Лёгкий туман для 2км видимости
-			env.fog_light_color = Color(0.7, 0.75, 0.85)
+			env.fog_density = 0.0015  # Дальняя тёплая дымка — силуэты вдали тают в атмосфере
+			env.fog_light_color = Color(0.82, 0.78, 0.68)  # Тёплая пыльная дымка (не холодный синий)
 			env.fog_light_energy = 1.0
-			env.fog_aerial_perspective = 0.7  # Усиленная дымка для ощущения глубины
+			env.fog_aerial_perspective = 0.6  # Сильная воздушная перспектива на дальних силуэтах
+			env.fog_sky_affect = 0.0  # Небо не размывается туманом
 			print("OSM: Fog enabled (density: %.4f for %.0fm LOD view)" % [env.fog_density, lod2_distance])
 
 
@@ -19582,7 +20853,7 @@ func _add_building_windows(points: PackedVector2Array, height: float, rng: Rando
 ## BUSINESS SIGNS (вывески для заведений)
 ## ============================================================================
 
-func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, parent: Node3D, building_height: float, base_elev: float = 0.0, loader: Node = null, way_id: int = 0, entrance_nodes: Array = [], poi_nodes: Array = []) -> void:
+func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, parent: Node3D, building_height: float, base_elev: float = 0.0, loader: Node = null, way_id: int = 0, entrance_nodes: Array = [], poi_nodes: Array = [], fa_bays: Dictionary = {}) -> void:
 	"""
 	Добавление вывесок для заведений
 	Приоритет: вход (entrance) > POI node > самая длинная стена
@@ -19612,6 +20883,18 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 				print("BusinessSign: Skipping POI %s (suppressed by override for way %d)" % [str(poi_id_val), way_id])
 				continue
 		businesses_to_process.append({"tags": poi.tags, "poi_position": poi.position, "poi_id": poi_id_val})
+
+	# Многоквартирный дом с 3+ магазинами на первом этаже → процедурный ряд
+	# витрин (входные группы mid-блоками встык). НЕ применяется к самостоятельным
+	# магазинам/супермаркетам (отдельно стоящее здание-магазин) — у них одна вывеска.
+	if not (tags.has("amenity") or tags.has("shop")) and _is_apartment_building(tags, building_height):
+		var storefront_shops: Array = []
+		for b in businesses_to_process:
+			if b.get("poi_position") != null:
+				storefront_shops.append(b)
+		if storefront_shops.size() >= 3:
+			_add_storefront_row(points, storefront_shops, parent, base_elev, building_height, way_id, fa_bays)
+			return
 
 	if businesses_to_process.is_empty():
 		return
@@ -19723,6 +21006,461 @@ func _add_business_signs_simple(points: PackedVector2Array, tags: Dictionary, pa
 			parent.add_child(back_wall)
 
 		parent.add_child(sign)
+
+
+## True для многоквартирного/жилого дома (не отдельно стоящий магазин/супермаркет).
+func _is_apartment_building(tags: Dictionary, building_height: float) -> bool:
+	var b := str(tags.get("building", ""))
+	# Отдельно стоящие магазины/коммерция/гаражи — НЕ ряд витрин
+	if b in ["retail", "commercial", "supermarket", "warehouse", "industrial",
+			"kiosk", "garage", "garages", "shed", "hangar", "service", "roof",
+			"construction", "hut", "container"]:
+		return false
+	# Явно жилые
+	if b in ["apartments", "residential", "dormitory"]:
+		return true
+	# Многоэтажность как признак квартирного дома
+	var levels := int(tags.get("building:levels", "0"))
+	if levels >= 3:
+		return true
+	if building_height >= 9.0:
+		return true
+	return false
+
+
+## Находит фасадную стену под витрины: ребро, к которому ближе всего большинство
+## POI-магазинов (уличный фронт). Fallback — самая длинная стена.
+func _find_storefront_wall(points: PackedVector2Array, shops: Array, block_w: float) -> Dictionary:
+	var n_edges := points.size()
+	if n_edges < 3:
+		return {}
+	var votes := {}
+	for shop in shops:
+		var pt: Vector2 = shop.poi_position
+		var best_i := -1
+		var best_d := 1.0e9
+		for i in range(n_edges):
+			var a: Vector2 = points[i]
+			var c := points[(i + 1) % n_edges]
+			var cp := Geometry2D.get_closest_point_to_segment(pt, a, c)
+			var d := pt.distance_to(cp)
+			if d < best_d:
+				best_d = d
+				best_i = i
+		if best_i >= 0:
+			votes[best_i] = int(votes.get(best_i, 0)) + 1
+	# Среди рёбер, к которым тяготеют магазины, берём САМОЕ ДЛИННОЕ (чтобы влез
+	# весь ряд витрин), а не просто с большинством голосов.
+	var best_edge := -1
+	var best_len := 0.0
+	for i in votes.keys():
+		var a: Vector2 = points[i]
+		var c: Vector2 = points[(i + 1) % n_edges]
+		var L := a.distance_to(c)
+		if L < block_w + 1.0:
+			continue
+		if L > best_len:
+			best_len = L
+			best_edge = i
+	if best_edge < 0:
+		return {}
+	var p1: Vector2 = points[best_edge]
+	var p2: Vector2 = points[(best_edge + 1) % n_edges]
+	var dir := (p2 - p1).normalized()
+	# Нормаль ДОЛЖНА смотреть наружу от центра здания (иначе витрины уходят внутрь
+	# дома и не видны). Тот же приём, что в _find_closest_wall_to_point.
+	var center := Vector2.ZERO
+	for pt in points:
+		center += pt
+	center /= float(n_edges)
+	var nrm := Vector2(dir.y, -dir.x)
+	var wall_center := (p1 + p2) * 0.5
+	if nrm.dot(center - wall_center) > 0.0:
+		nrm = -nrm
+	return {"p1": p1, "p2": p2, "normal": Vector3(nrm.x, 0, nrm.y), "length": best_len, "edge": best_edge}
+
+
+# Phase S: цветовые наборы вывесок по типу заведения (+ override по названию).
+const STOREFRONT_COLORS := {
+	"supermarket": Color(0.78, 0.13, 0.13), "convenience": Color(0.78, 0.13, 0.13),
+	"grocery": Color(0.72, 0.18, 0.16), "greengrocer": Color(0.30, 0.55, 0.25),
+	"pharmacy": Color(0.13, 0.55, 0.27), "chemist": Color(0.13, 0.55, 0.27),
+	"bank": Color(0.13, 0.30, 0.62), "atm": Color(0.13, 0.30, 0.62),
+	"variety_store": Color(0.90, 0.45, 0.10),
+	"hardware": Color(0.20, 0.42, 0.60), "doityourself": Color(0.20, 0.42, 0.60),
+	"bathroom_furnishing": Color(0.22, 0.40, 0.58),
+	"bakery": Color(0.66, 0.42, 0.16), "confectionery": Color(0.75, 0.45, 0.55),
+	"clothes": Color(0.52, 0.18, 0.48), "shoes": Color(0.45, 0.22, 0.30),
+	"hairdresser": Color(0.45, 0.25, 0.55), "beauty": Color(0.60, 0.30, 0.45),
+	"mobile_phone": Color(0.85, 0.50, 0.05), "electronics": Color(0.10, 0.45, 0.70),
+	"alcohol": Color(0.40, 0.12, 0.16), "florist": Color(0.30, 0.55, 0.30),
+	"books": Color(0.30, 0.35, 0.55), "optician": Color(0.15, 0.50, 0.55),
+}
+const STOREFRONT_NAME_OVERRIDES := {
+	"пятёрочка": Color(0.85, 0.20, 0.10), "пятерочка": Color(0.85, 0.20, 0.10),
+	"магнит": Color(0.80, 0.10, 0.10), "fix price": Color(0.95, 0.45, 0.05),
+	"антей": Color(0.10, 0.50, 0.30), "вкусвилл": Color(0.30, 0.55, 0.20),
+}
+# Сочетания фон+шрифт для текстовых вывесок (разноцветно как в примере).
+const STOREFRONT_COMBOS := [
+	{"bg": Color(0.78, 0.14, 0.14), "fg": Color(1, 1, 1)},          # красный / белый
+	{"bg": Color(0.13, 0.32, 0.62), "fg": Color(1, 0.92, 0.35)},    # синий / жёлтый
+	{"bg": Color(0.95, 0.78, 0.10), "fg": Color(0.15, 0.15, 0.18)}, # жёлтый / тёмный
+	{"bg": Color(0.16, 0.50, 0.28), "fg": Color(1, 1, 1)},          # зелёный / белый
+	{"bg": Color(0.90, 0.45, 0.08), "fg": Color(1, 1, 1)},          # оранжевый / белый
+	{"bg": Color(0.90, 0.90, 0.92), "fg": Color(0.16, 0.22, 0.48)}, # белый / синий
+	{"bg": Color(0.36, 0.14, 0.46), "fg": Color(1, 0.86, 0.32)},    # фиолетовый / жёлтый
+	{"bg": Color(0.10, 0.45, 0.55), "fg": Color(1, 1, 1)},          # бирюзовый / белый
+	{"bg": Color(0.20, 0.22, 0.26), "fg": Color(0.95, 0.75, 0.20)}, # тёмный / янтарный
+]
+
+
+func _contrast_fg(bg: Color) -> Color:
+	var lum := 0.299 * bg.r + 0.587 * bg.g + 0.114 * bg.b
+	return Color(0.12, 0.12, 0.14) if lum > 0.62 else Color(1, 1, 1)
+
+
+## Сочетание фон+шрифт для вывески: override по названию → цвет по типу → хэш по way_id+bay.
+func _storefront_sign_combo(tags: Dictionary, way_id: int, bay_idx: int) -> Dictionary:
+	var nm := str(tags.get("name", "")).to_lower()
+	for key in STOREFRONT_NAME_OVERRIDES:
+		if key in nm:
+			var bg: Color = STOREFRONT_NAME_OVERRIDES[key]
+			return {"bg": bg, "fg": _contrast_fg(bg)}
+	var t := str(tags.get("shop", ""))
+	if t == "":
+		t = str(tags.get("amenity", ""))
+	if STOREFRONT_COLORS.has(t):
+		var bg2: Color = STOREFRONT_COLORS[t]
+		return {"bg": bg2, "fg": _contrast_fg(bg2)}
+	var h := absi(way_id * 2654435761 + bay_idx * 40503)
+	return STOREFRONT_COMBOS[h % STOREFRONT_COMBOS.size()]
+
+
+## Вывеска фиксированной высоты сегмента: контент вписан внутрь (лого — пропорц.,
+## длинный текст — в 2 строки меньшим шрифтом). Возвращает {node, bg}.
+func _storefront_make_sign(tags: Dictionary, way_id: int, bay_idx: int, seg_w: float, seg_h: float) -> Dictionary:
+	var inner_w := seg_w * 0.93
+	var inner_h := seg_h * 0.85
+	var root := Node3D.new()
+	var logo := BusinessSignGenerator._find_brand_logo(tags)
+	if logo != "" and ResourceLoader.exists(logo):
+		var tex: Texture2D = load(logo)
+		var sp := Sprite3D.new()
+		sp.texture = tex
+		sp.shaded = false
+		sp.double_sided = true
+		sp.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+		var tw := maxf(1.0, float(tex.get_width()))
+		var th := maxf(1.0, float(tex.get_height()))
+		sp.pixel_size = minf(inner_w / tw, inner_h / th)
+		root.add_child(sp)
+		return {"node": root, "bg": Color(0.95, 0.95, 0.96)}  # лого на белой подложке
+	# Текст
+	var combo := _storefront_sign_combo(tags, way_id, bay_idx)
+	var txt := BusinessSignGenerator.get_sign_text(tags).to_upper()
+	if txt == "":
+		return {"node": root, "bg": combo.bg}
+	var lbl := Label3D.new()
+	lbl.text = txt
+	lbl.modulate = combo.fg
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	lbl.font_size = 96
+	lbl.double_sided = true
+	var nlines := 1 if txt.length() <= 9 else 2
+	if nlines == 2:
+		lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	var cpl := txt.length() if nlines == 1 else int(ceil(float(txt.length()) / 2.0))
+	var text_w_px := float(cpl) * float(lbl.font_size) * 0.55
+	var text_h_px := float(nlines) * float(lbl.font_size) * 1.12
+	var ps := minf(inner_w / maxf(text_w_px, 1.0), inner_h / maxf(text_h_px, 1.0))
+	lbl.pixel_size = ps
+	if nlines == 2:
+		lbl.width = inner_w / ps
+	root.add_child(lbl)
+	return {"node": root, "bg": combo.bg}
+
+
+## Точка фасада в world-координатах: t — вдоль стены, h — высота над base_elev, d — наружу.
+func _sfp(p1: Vector2, wdir: Vector2, nrm2: Vector2, base_elev: float, t: float, h: float, d: float) -> Vector3:
+	return Vector3(p1.x + wdir.x * t + nrm2.x * d, base_elev + h, p1.y + wdir.y * t + nrm2.y * d)
+
+
+func _sf_add_quad(bucket: Dictionary, a: Vector3, b: Vector3, c: Vector3, d: Vector3, nrm: Vector3) -> void:
+	var kv: PackedVector3Array = bucket["v"]
+	var kn: PackedVector3Array = bucket["n"]
+	var ki: PackedInt32Array = bucket["i"]
+	var base := kv.size()
+	kv.append(a); kv.append(b); kv.append(c); kv.append(d)
+	for _j in 4: kn.append(nrm)
+	ki.append(base + 0); ki.append(base + 1); ki.append(base + 2)
+	ki.append(base + 0); ki.append(base + 2); ki.append(base + 3)
+
+
+func _sf_commit(bucket: Dictionary, mat: Material, nm: String, parent: Node3D) -> void:
+	var kv: PackedVector3Array = bucket["v"]
+	if kv.size() == 0:
+		return
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = kv
+	arr[Mesh.ARRAY_NORMAL] = bucket["n"]
+	arr[Mesh.ARRAY_INDEX] = bucket["i"]
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = mat
+	mi.name = nm
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mi)
+
+
+## Тонкая горизонтальная планка рамы/импоста (front-facing).
+func _sf_hbar(bucket: Dictionary, p1: Vector2, wdir: Vector2, nrm2: Vector2, base_elev: float, t0: float, t1: float, y: float, d: float, th: float = 0.05) -> void:
+	_sf_add_quad(bucket, _sfp(p1,wdir,nrm2,base_elev,t0,y-th,d), _sfp(p1,wdir,nrm2,base_elev,t1,y-th,d), _sfp(p1,wdir,nrm2,base_elev,t1,y+th,d), _sfp(p1,wdir,nrm2,base_elev,t0,y+th,d), Vector3(nrm2.x,0,nrm2.y))
+
+
+## Тонкая вертикальная планка рамы/импоста.
+func _sf_vbar(bucket: Dictionary, p1: Vector2, wdir: Vector2, nrm2: Vector2, base_elev: float, t: float, y0: float, y1: float, d: float, th: float = 0.05) -> void:
+	_sf_add_quad(bucket, _sfp(p1,wdir,nrm2,base_elev,t-th,y0,d), _sfp(p1,wdir,nrm2,base_elev,t+th,y0,d), _sfp(p1,wdir,nrm2,base_elev,t+th,y1,d), _sfp(p1,wdir,nrm2,base_elev,t-th,y1,d), Vector3(nrm2.x,0,nrm2.y))
+
+
+## Phase S: непрерывная торговая лента по первому этажу. K магазинов = K смежных bay,
+## выровненных по РЕАЛЬНОЙ сетке фасада (со швами). Один выдающийся козырёк со сплошной
+## разноцветной лентой вывесок, витрины с рамой/расстекловкой, одна дверь — в bay с
+## максимальным elevation, со ступенями. Остальной первый этаж — обычный фасад.
+func _add_storefront_row(points: PackedVector2Array, shops: Array, parent: Node3D, base_elev: float, building_height: float, way_id: int, fa_bays: Dictionary = {}) -> void:
+	var wall := _find_storefront_wall(points, shops, 3.2)
+	if wall.is_empty():
+		return
+	var p1: Vector2 = wall.p1
+	var p2: Vector2 = wall.p2
+	var edge_idx := int(wall.get("edge", -1))
+	var wdir := (p2 - p1).normalized()
+	var wlen: float = p1.distance_to(p2)
+	var nrm3: Vector3 = wall.normal
+	var nrm2 := Vector2(nrm3.x, nrm3.z)
+
+	# Границы bay (t от p1). Берём РЕАЛЬНУЮ сетку фасада (слоты молекулы со швами),
+	# чтобы витрины точно совпадали с фасадом; иначе равномерный фолбэк 3.2м.
+	var bnds: Array = []
+	if fa_bays.has(edge_idx):
+		var pat: Array = fa_bays[edge_idx]
+		for slot in pat:
+			bnds.append(float(slot["t_left"]))
+		if pat.size() > 0:
+			bnds.append(float(pat[pat.size() - 1]["t_right"]))
+	if bnds.size() < 2:
+		var nb := maxi(1, int(round(wlen / 3.2)))
+		bnds.clear()
+		for i in range(nb + 1):
+			bnds.append(wlen * float(i) / float(nb))
+	var nbays := bnds.size() - 1
+	var k := mini(shops.size(), nbays)
+	if k < 1:
+		return
+
+	shops.sort_custom(func(a, b): return (a.poi_position - p1).dot(wdir) < (b.poi_position - p1).dot(wdir))
+	var run_shops: Array = shops.slice(0, k)
+
+	# Якорь: bay с центроидом POI, прогон из k bay вокруг него
+	var cen := Vector2.ZERO
+	for s in run_shops:
+		cen += s.poi_position
+	cen /= float(run_shops.size())
+	var t_cen := (cen - p1).dot(wdir)
+	var cbay := 0
+	for i in range(nbays):
+		if t_cen >= float(bnds[i]) and t_cen < float(bnds[i + 1]):
+			cbay = i
+			break
+	var start_bay := clampi(cbay - k / 2, 0, nbays - k)
+
+	var run_bays: Array = []
+	for i in range(k):
+		run_bays.append({"t0": float(bnds[start_bay + i]), "t1": float(bnds[start_bay + i + 1])})
+
+	# Дверь — в bay с максимальным elevation
+	var door_idx := 0
+	var max_e := -1.0e9
+	for i in range(k):
+		var ct: float = (run_bays[i].t0 + run_bays[i].t1) * 0.5
+		var cc := p1 + wdir * ct
+		var e := _sample_elevation(cc.x, cc.y)
+		if e > max_e:
+			max_e = e
+			door_idx = i
+
+	_build_storefront_frontage(p1, wdir, nrm2, base_elev, run_bays, run_shops, door_idx, parent, way_id)
+
+
+func _build_storefront_frontage(p1: Vector2, wdir: Vector2, nrm2: Vector2, base_elev: float, run_bays: Array, shops: Array, door_idx: int, parent: Node3D, way_id: int) -> void:
+	var k := run_bays.size()
+	var STALL := 0.55       # высота цоколя под витриной
+	var WIN_TOP := 2.45     # верх витрины = низ козырька
+	var CAN_TOP := 3.2      # верх козырька (лента вывесок WIN_TOP..CAN_TOP)
+	var CAN_DEPTH := 1.25   # вынос козырька вперёд
+	var PIL := 0.16         # простенок между витринами
+	var FR := 0.085         # глубина рамы/импостов (перед стеклом 0.06)
+	var t_a: float = run_bays[0].t0
+	var t_b: float = run_bays[k - 1].t1
+	var outn := Vector3(nrm2.x, 0.0, nrm2.y)
+	var perp := Vector3(-wdir.x, 0.0, -wdir.y)
+
+	var concrete := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+	var glass := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+	var frame := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+	var door := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+
+	# Козырёк: низ, верх, торцы
+	_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,t_a,WIN_TOP,0.0), _sfp(p1,wdir,nrm2,base_elev,t_b,WIN_TOP,0.0), _sfp(p1,wdir,nrm2,base_elev,t_b,WIN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_a,WIN_TOP,CAN_DEPTH), Vector3.DOWN)
+	_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,t_a,CAN_TOP,0.0), _sfp(p1,wdir,nrm2,base_elev,t_a,CAN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_b,CAN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_b,CAN_TOP,0.0), Vector3.UP)
+	_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,t_a,WIN_TOP,0.0), _sfp(p1,wdir,nrm2,base_elev,t_a,WIN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_a,CAN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_a,CAN_TOP,0.0), perp)
+	_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,t_b,WIN_TOP,0.0), _sfp(p1,wdir,nrm2,base_elev,t_b,WIN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_b,CAN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,t_b,CAN_TOP,0.0), -perp)
+
+	# Цоколь под витринами
+	_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,t_a,0.0,0.1), _sfp(p1,wdir,nrm2,base_elev,t_b,0.0,0.1), _sfp(p1,wdir,nrm2,base_elev,t_b,STALL,0.1), _sfp(p1,wdir,nrm2,base_elev,t_a,STALL,0.1), outn)
+
+	if _storefront_sign_shader == null:
+		_storefront_sign_shader = Shader.new()
+		_storefront_sign_shader.code = """
+shader_type spatial;
+render_mode cull_disabled;
+uniform vec4 albedo_color : source_color = vec4(0.8, 0.8, 0.8, 1.0);
+uniform float roughness_value : hint_range(0.0, 1.0) = 0.7;
+uniform float night_factor : hint_range(0.0, 1.0) = 0.0;
+void fragment() {
+	ALBEDO = albedo_color.rgb;
+	ROUGHNESS = roughness_value;
+	// Мягкое свечение короба ночью: не пересвечивать, чтобы текст/лого читались.
+	EMISSION = albedo_color.rgb * night_factor * 0.45;
+	if (!FRONT_FACING) { NORMAL = -NORMAL; }
+}
+"""
+	var fascia_shader := _storefront_sign_shader
+
+	var band_h := CAN_TOP - WIN_TOP
+	for i in range(k):
+		var bt0: float = run_bays[i].t0
+		var bt1: float = run_bays[i].t1
+		var bw_local := bt1 - bt0
+
+		var sgn := _storefront_make_sign(shops[i].tags, way_id, i, bw_local, band_h)
+		var col: Color = sgn.bg
+
+		if i > 0:
+			_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,bt0-PIL*0.5,0.0,0.12), _sfp(p1,wdir,nrm2,base_elev,bt0+PIL*0.5,0.0,0.12), _sfp(p1,wdir,nrm2,base_elev,bt0+PIL*0.5,WIN_TOP,0.12), _sfp(p1,wdir,nrm2,base_elev,bt0-PIL*0.5,WIN_TOP,0.12), outn)
+
+		var gx0 := bt0 + PIL
+		var gx1 := bt1 - PIL
+		var gxm := (gx0 + gx1) * 0.5
+		if i == door_idx:
+			# Алюминиевая стеклянная ДВУСТВОРЧАТАЯ дверь: рама по периметру, центральная
+			# стойка (2 створки), замковый импост, вертикальные ручки, нижняя цокольная
+			# панель (металл), фрамуга сверху.
+			var dtop := 2.05
+			var kick := 0.34   # высота нижней цокольной панели
+			# стекло двери (выше цоколя) + фрамуга сверху
+			_sf_add_quad(door, _sfp(p1,wdir,nrm2,base_elev,gx0,kick,0.055), _sfp(p1,wdir,nrm2,base_elev,gx1,kick,0.055), _sfp(p1,wdir,nrm2,base_elev,gx1,dtop,0.055), _sfp(p1,wdir,nrm2,base_elev,gx0,dtop,0.055), outn)
+			_sf_add_quad(glass, _sfp(p1,wdir,nrm2,base_elev,gx0,dtop,0.06), _sfp(p1,wdir,nrm2,base_elev,gx1,dtop,0.06), _sfp(p1,wdir,nrm2,base_elev,gx1,WIN_TOP,0.06), _sfp(p1,wdir,nrm2,base_elev,gx0,WIN_TOP,0.06), outn)
+			# цокольная панель внизу двери (металл)
+			_sf_add_quad(frame, _sfp(p1,wdir,nrm2,base_elev,gx0,0.02,0.07), _sfp(p1,wdir,nrm2,base_elev,gx1,0.02,0.07), _sfp(p1,wdir,nrm2,base_elev,gx1,kick,0.07), _sfp(p1,wdir,nrm2,base_elev,gx0,kick,0.07), outn)
+			# рама по периметру + импост фрамуги + центральная стойка
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, 0.02, FR)
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, dtop, FR)
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, WIN_TOP, FR)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gx0, 0.02, WIN_TOP, FR)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gx1, 0.02, WIN_TOP, FR)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gxm, 0.02, dtop, FR)
+			# замковый горизонтальный импост на створках
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, 1.05, FR * 0.8)
+			# вертикальные ручки у центральной стойки (выступают сильнее)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gxm - 0.14, 0.92, 1.34, 0.14, 0.035)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gxm + 0.14, 0.92, 1.34, 0.14, 0.035)
+		else:
+			# Витрина: стекло + рама + расстекловка (импост + вертик. перемычка)
+			_sf_add_quad(glass, _sfp(p1,wdir,nrm2,base_elev,gx0,STALL,0.06), _sfp(p1,wdir,nrm2,base_elev,gx1,STALL,0.06), _sfp(p1,wdir,nrm2,base_elev,gx1,WIN_TOP,0.06), _sfp(p1,wdir,nrm2,base_elev,gx0,WIN_TOP,0.06), outn)
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, STALL, FR)
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, WIN_TOP, FR)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gx0, STALL, WIN_TOP, FR)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gx1, STALL, WIN_TOP, FR)
+			var my := STALL + (WIN_TOP - STALL) * 0.6
+			_sf_hbar(frame, p1,wdir,nrm2,base_elev, gx0,gx1, my, FR)
+			_sf_vbar(frame, p1,wdir,nrm2,base_elev, gxm, STALL, WIN_TOP, FR)
+
+		# Фронт козырька = цветной сегмент ленты вывесок
+		var fb := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+		_sf_add_quad(fb, _sfp(p1,wdir,nrm2,base_elev,bt0,WIN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,bt1,WIN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,bt1,CAN_TOP,CAN_DEPTH), _sfp(p1,wdir,nrm2,base_elev,bt0,CAN_TOP,CAN_DEPTH), outn)
+		var fmat := ShaderMaterial.new()
+		fmat.shader = fascia_shader
+		fmat.set_shader_parameter("albedo_color", col)
+		fmat.set_shader_parameter("roughness_value", 0.7)
+		fmat.set_shader_parameter("night_factor", 0.0)
+		_facade_emission_materials.append(fmat)  # подсветка коробов ночью (как окна)
+		_sf_commit(fb, fmat, "StorefrontFascia_%d_%d" % [way_id, i], parent)
+
+		var snode: Node3D = sgn.node
+		if snode.get_child_count() > 0:
+			var sc := p1 + wdir * ((bt0 + bt1) * 0.5)
+			snode.position = Vector3(sc.x, base_elev + (WIN_TOP + CAN_TOP) * 0.5, sc.y) + outn * (CAN_DEPTH + 0.04)
+			snode.rotation.y = atan2(outn.x, outn.z)
+			snode.name = "StorefrontSign_%d_%d" % [way_id, i]
+			parent.add_child(snode)
+		else:
+			snode.queue_free()
+
+	# Ступени ко входу (bay двери): от террейна до порога, если цоколь не нулевой
+	var dbt0: float = run_bays[door_idx].t0
+	var dbt1: float = run_bays[door_idx].t1
+	var door_cx := p1 + wdir * ((dbt0 + dbt1) * 0.5)
+	var ground_h := _sample_elevation(door_cx.x, door_cx.y) - base_elev
+	if ground_h < -0.06:
+		var n_steps := clampi(int(ceil(-ground_h / 0.16)), 1, 8)
+		var step_h := -ground_h / float(n_steps)
+		var dw0 := dbt0 + PIL
+		var dw1 := dbt1 - PIL
+		for s in range(n_steps):
+			var y_top := ground_h + step_h * float(s + 1)
+			var d_far := 0.06 + float(n_steps - s) * 0.30
+			var d_near := 0.06 + float(n_steps - 1 - s) * 0.30
+			_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,dw0,y_top,d_near), _sfp(p1,wdir,nrm2,base_elev,dw1,y_top,d_near), _sfp(p1,wdir,nrm2,base_elev,dw1,y_top,d_far), _sfp(p1,wdir,nrm2,base_elev,dw0,y_top,d_far), Vector3.UP)
+			_sf_add_quad(concrete, _sfp(p1,wdir,nrm2,base_elev,dw0,y_top-step_h,d_far), _sfp(p1,wdir,nrm2,base_elev,dw1,y_top-step_h,d_far), _sfp(p1,wdir,nrm2,base_elev,dw1,y_top,d_far), _sfp(p1,wdir,nrm2,base_elev,dw0,y_top,d_far), outn)
+
+	# Материалы
+	var concrete_mat := StandardMaterial3D.new()
+	concrete_mat.albedo_color = Color(0.82, 0.80, 0.77)
+	concrete_mat.roughness = 0.9
+	concrete_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_sf_commit(concrete, concrete_mat, "StorefrontStruct_%d" % way_id, parent)
+
+	var glass_mat := StandardMaterial3D.new()
+	glass_mat.albedo_color = Color(0.46, 0.54, 0.58, 1.0)
+	glass_mat.metallic = 0.25
+	glass_mat.roughness = 0.12
+	glass_mat.emission_enabled = true
+	glass_mat.emission = Color(0.62, 0.56, 0.44)
+	glass_mat.emission_energy_multiplier = 0.28
+	glass_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_sf_commit(glass, glass_mat, "StorefrontGlass_%d" % way_id, parent)
+
+	var frame_mat := StandardMaterial3D.new()
+	frame_mat.albedo_color = Color(0.30, 0.30, 0.33)  # тёмный металл рам/импостов
+	frame_mat.metallic = 0.5
+	frame_mat.roughness = 0.5
+	frame_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_sf_commit(frame, frame_mat, "StorefrontFrame_%d" % way_id, parent)
+
+	var door_mat := StandardMaterial3D.new()
+	door_mat.albedo_color = Color(0.12, 0.16, 0.20, 1.0)  # тёмное стекло двери
+	door_mat.metallic = 0.45
+	door_mat.roughness = 0.1
+	door_mat.emission_enabled = true
+	door_mat.emission = Color(0.35, 0.32, 0.26)
+	door_mat.emission_energy_multiplier = 0.18
+	door_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_sf_commit(door, door_mat, "StorefrontDoor_%d" % way_id, parent)
 
 
 func _add_shop_entrances_from_override(points: PackedVector2Array, parent: Node3D, building_height: float, base_elev: float, way_id: int) -> void:
@@ -20768,9 +22506,21 @@ func _find_pois_inside_building(building_points: PackedVector2Array, _loader: No
 			continue
 
 		# Точная проверка point-in-polygon
-		if _point_in_polygon(poi_pos, building_points):
-			var name = poi.tags.get("name", "unknown")
-			print("POI_DEBUG: Found '%s' (id=%s) inside building at local (%.1f, %.1f)" % [name, str(poi.get("id", 0)), poi_pos.x, poi_pos.y])
+		var is_in := _point_in_polygon(poi_pos, building_points)
+		if not is_in:
+			# POI может быть ВЕРШИНОЙ контура здания (магазин затегован на узле
+			# самого полигона, напр. Пятёрочка на way 45417773) — ray casting для
+			# граничных точек ненадёжен и отбрасывает их. Включаем, если точка
+			# вплотную к любому ребру здания.
+			var bnd_eps := 0.6
+			var npts := building_points.size()
+			for k in range(npts):
+				var a: Vector2 = building_points[k]
+				var b: Vector2 = building_points[(k + 1) % npts]
+				if poi_pos.distance_to(Geometry2D.get_closest_point_to_segment(poi_pos, a, b)) <= bnd_eps:
+					is_in = true
+					break
+		if is_in:
 			result.append({
 				"position": poi_pos,
 				"tags": poi.tags,
@@ -22170,6 +23920,27 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 
 	if vertices.is_empty():
 		return
+
+	# Carve any registered road depression that overlaps this junction patch. The
+	# patch is a SEPARATE raised mesh (not part of _road_batch_data), so the normal
+	# road-batch carve never touches it — without this it stays flat and covers the
+	# pit (the "road patch sitting over the pit"). _carve_road_depression self-filters:
+	# it returns false without modifying the batch when no triangle overlaps.
+	if enable_road_depressions and not _road_depressions.is_empty():
+		var pbatch := {
+			"vertices": vertices, "uvs": uvs, "uv2s": PackedVector2Array(),
+			"normals": normals, "indices": indices,
+		}
+		var patch_carved := false
+		for dck in _road_depressions:
+			for dep in _road_depressions[dck]:
+				if _carve_road_depression(pbatch, dep):
+					patch_carved = true
+		if patch_carved:
+			vertices = pbatch["vertices"]
+			uvs = pbatch["uvs"]
+			normals = pbatch["normals"]
+			indices = pbatch["indices"]
 
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)

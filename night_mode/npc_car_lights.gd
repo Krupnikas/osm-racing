@@ -31,7 +31,7 @@ var _lights_enabled := false
 var _taillight_mat: StandardMaterial3D
 
 # Тип модели машины (синхронизировано с car_lights.gd)
-enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109, VAZ_2107, POLO }
+enum CarModel { DEFAULT, NEXIA, PAZ, LADA_2109, VAZ_2107, POLO, FORD_FOCUS, HONDA_CIVIC, MAZDA_RX8, AUDI_TT, VOLGA, LANCER_EVO, SUBARU_STI, MERCEDES_CLK, PORSCHE_CAYENNE, CHEVY_AVEO, CHEVY_SPARK }
 var _car_model: CarModel = CarModel.DEFAULT
 
 
@@ -59,6 +59,39 @@ func _detect_car_model() -> void:
 			return
 		elif child.name == "PoloModel":
 			_car_model = CarModel.POLO
+			return
+		elif child.name == "FocusModel":
+			_car_model = CarModel.FORD_FOCUS
+			return
+		elif child.name == "CivicModel":
+			_car_model = CarModel.HONDA_CIVIC
+			return
+		elif child.name == "RX8Model":
+			_car_model = CarModel.MAZDA_RX8
+			return
+		elif child.name == "TTModel":
+			_car_model = CarModel.AUDI_TT
+			return
+		elif child.name == "VolgaModel":
+			_car_model = CarModel.VOLGA
+			return
+		elif child.name == "EvoModel":
+			_car_model = CarModel.LANCER_EVO
+			return
+		elif child.name == "STIModel":
+			_car_model = CarModel.SUBARU_STI
+			return
+		elif child.name == "CLKModel":
+			_car_model = CarModel.MERCEDES_CLK
+			return
+		elif child.name == "CayenneModel":
+			_car_model = CarModel.PORSCHE_CAYENNE
+			return
+		elif child.name == "AveoModel":
+			_car_model = CarModel.CHEVY_AVEO
+			return
+		elif child.name == "SparkModel":
+			_car_model = CarModel.CHEVY_SPARK
 			return
 		elif child.name == "Model":
 			# Lada 2109 (taxi, DPS) uses "Model" node name
@@ -108,6 +141,94 @@ func _create_headlight() -> void:
 		_use_split_lights = true
 		var left_pos = Vector3(-0.50, 0.55, 1.5)
 		var right_pos = Vector3(0.50, 0.55, 1.5)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.FORD_FOCUS:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.62, 0.72, 1.85)
+		var right_pos = Vector3(0.62, 0.72, 1.85)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.HONDA_CIVIC:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.62, 0.70, 1.90)
+		var right_pos = Vector3(0.62, 0.70, 1.90)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.MAZDA_RX8:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.62, 0.58, 1.95)
+		var right_pos = Vector3(0.62, 0.58, 1.95)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.AUDI_TT:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.58, 0.62, 1.80)
+		var right_pos = Vector3(0.58, 0.62, 1.80)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.VOLGA:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.70, 0.64, 2.20)
+		var right_pos = Vector3(0.70, 0.64, 2.20)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.LANCER_EVO:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.66, 0.72, 1.95)
+		var right_pos = Vector3(0.66, 0.72, 1.95)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.SUBARU_STI:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.55, 0.64, 1.94)
+		var right_pos = Vector3(0.55, 0.64, 1.94)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.MERCEDES_CLK:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.60, 0.50, 2.05)
+		var right_pos = Vector3(0.60, 0.50, 2.05)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.PORSCHE_CAYENNE:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.70, 0.85, 2.20)
+		var right_pos = Vector3(0.70, 0.85, 2.20)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.CHEVY_AVEO:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.62, 0.78, 1.78)
+		var right_pos = Vector3(0.62, 0.78, 1.78)
+		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
+		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
+		return
+
+	if _car_model == CarModel.CHEVY_SPARK:
+		_use_split_lights = true
+		var left_pos = Vector3(-0.60, 0.82, 1.75)
+		var right_pos = Vector3(0.60, 0.82, 1.75)
 		headlight_left = _create_single_headlight("NPCHeadlightL", left_pos)
 		headlight_right = _create_single_headlight("NPCHeadlightR", right_pos)
 		return
@@ -171,6 +292,83 @@ func _create_taillight() -> void:
 		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
 		return
 
+	if _car_model == CarModel.FORD_FOCUS:
+		var left_pos = Vector3(-0.60, 0.85, -1.90)
+		var right_pos = Vector3(0.60, 0.85, -1.90)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
+	if _car_model == CarModel.HONDA_CIVIC:
+		var left_pos = Vector3(-0.60, 0.82, -1.95)
+		var right_pos = Vector3(0.60, 0.82, -1.95)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
+	if _car_model == CarModel.MAZDA_RX8:
+		var left_pos = Vector3(-0.60, 0.58, -1.95)
+		var right_pos = Vector3(0.60, 0.58, -1.95)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
+	if _car_model == CarModel.AUDI_TT:
+		var left_pos = Vector3(-0.55, 0.65, -1.68)
+		var right_pos = Vector3(0.55, 0.65, -1.68)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
+	if _car_model == CarModel.VOLGA:
+		var left_pos = Vector3(-0.65, 0.72, -2.25)
+		var right_pos = Vector3(0.65, 0.72, -2.25)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
+	if _car_model == CarModel.LANCER_EVO:
+		var left_pos = Vector3(-0.62, 0.78, -1.95)
+		var right_pos = Vector3(0.62, 0.78, -1.95)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
+	if _car_model == CarModel.SUBARU_STI:
+		var left_pos = Vector3(-0.68, 0.85, -1.88)
+		var right_pos = Vector3(0.68, 0.85, -1.88)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
+	if _car_model == CarModel.MERCEDES_CLK:
+		var left_pos = Vector3(-0.61, 0.66, -2.08)
+		var right_pos = Vector3(0.61, 0.66, -2.08)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
+	if _car_model == CarModel.PORSCHE_CAYENNE:
+		var left_pos = Vector3(-0.65, 0.92, -2.20)
+		var right_pos = Vector3(0.65, 0.92, -2.20)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
+	if _car_model == CarModel.CHEVY_AVEO:
+		var left_pos = Vector3(-0.60, 0.86, -1.78)
+		var right_pos = Vector3(0.60, 0.86, -1.78)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
+	if _car_model == CarModel.CHEVY_SPARK:
+		var left_pos = Vector3(-0.58, 0.95, -1.72)
+		var right_pos = Vector3(0.58, 0.95, -1.72)
+		taillight_left = _create_single_taillight("NPCTaillightL", left_pos)
+		taillight_right = _create_single_taillight("NPCTaillightR", right_pos)
+		return
+
 	# Блочные машинки используют одну центральную фару
 	taillight = _create_single_taillight("NPCTaillight", Vector3(0, 0.4, -2.2))
 
@@ -201,6 +399,28 @@ func _create_reverse_light() -> void:
 		pos = Vector3(0, 0.3, -1.23)
 	elif _car_model == CarModel.POLO:
 		pos = Vector3(0, 0.55, -1.5)
+	elif _car_model == CarModel.FORD_FOCUS:
+		pos = Vector3(0, 0.6, -1.95)
+	elif _car_model == CarModel.HONDA_CIVIC:
+		pos = Vector3(0, 0.6, -1.98)
+	elif _car_model == CarModel.MAZDA_RX8:
+		pos = Vector3(0, 0.55, -1.98)
+	elif _car_model == CarModel.AUDI_TT:
+		pos = Vector3(0, 0.58, -1.70)
+	elif _car_model == CarModel.VOLGA:
+		pos = Vector3(0, 0.62, -2.28)
+	elif _car_model == CarModel.LANCER_EVO:
+		pos = Vector3(0, 0.7, -1.98)
+	elif _car_model == CarModel.SUBARU_STI:
+		pos = Vector3(0, 0.7, -1.90)
+	elif _car_model == CarModel.MERCEDES_CLK:
+		pos = Vector3(0, 0.66, -2.10)
+	elif _car_model == CarModel.PORSCHE_CAYENNE:
+		pos = Vector3(0, 0.85, -2.22)
+	elif _car_model == CarModel.CHEVY_AVEO:
+		pos = Vector3(0, 0.7, -1.80)
+	elif _car_model == CarModel.CHEVY_SPARK:
+		pos = Vector3(0, 0.85, -1.74)
 	else:
 		pos = Vector3(0, 0.35, -2.2)
 
@@ -216,6 +436,12 @@ func _create_reverse_light() -> void:
 
 
 func _create_light_meshes() -> void:
+	# Cars whose model-setup script makes the REAL lamp lens meshes emissive
+	# (lens-shaped glow, matching the car body) set this meta and must NOT get the
+	# rectangular proxy boxes — they would mismatch the lens shape. The SpotLight beams
+	# and taillight OmniLights are still created; only the proxy meshes are skipped.
+	if _npc and _npc.has_meta("real_lens_lights"):
+		return
 	# Материал для светящихся фар
 	var headlight_mat := StandardMaterial3D.new()
 	headlight_mat.albedo_color = Color(1.0, 1.0, 0.9)
@@ -260,6 +486,39 @@ func _create_light_meshes() -> void:
 	elif _car_model == CarModel.POLO:
 		reverse_pos = Vector3(0, 0.55, -1.52)
 		reverse_size = Vector3(0.10, 0.05, 0.03)
+	elif _car_model == CarModel.FORD_FOCUS:
+		reverse_pos = Vector3(0, 0.6, -1.97)
+		reverse_size = Vector3(0.12, 0.05, 0.03)
+	elif _car_model == CarModel.HONDA_CIVIC:
+		reverse_pos = Vector3(0, 0.6, -2.0)
+		reverse_size = Vector3(0.12, 0.05, 0.03)
+	elif _car_model == CarModel.MAZDA_RX8:
+		reverse_pos = Vector3(0, 0.55, -1.98)
+		reverse_size = Vector3(0.12, 0.05, 0.03)
+	elif _car_model == CarModel.AUDI_TT:
+		reverse_pos = Vector3(0, 0.58, -1.70)
+		reverse_size = Vector3(0.12, 0.05, 0.03)
+	elif _car_model == CarModel.VOLGA:
+		reverse_pos = Vector3(0, 0.62, -2.28)
+		reverse_size = Vector3(0.14, 0.06, 0.03)
+	elif _car_model == CarModel.LANCER_EVO:
+		reverse_pos = Vector3(0, 0.7, -1.98)
+		reverse_size = Vector3(0.12, 0.05, 0.03)
+	elif _car_model == CarModel.SUBARU_STI:
+		reverse_pos = Vector3(0, 0.7, -1.90)
+		reverse_size = Vector3(0.12, 0.05, 0.03)
+	elif _car_model == CarModel.MERCEDES_CLK:
+		reverse_pos = Vector3(0, 0.66, -2.12)
+		reverse_size = Vector3(0.12, 0.05, 0.03)
+	elif _car_model == CarModel.PORSCHE_CAYENNE:
+		reverse_pos = Vector3(0, 0.85, -2.24)
+		reverse_size = Vector3(0.14, 0.06, 0.03)
+	elif _car_model == CarModel.CHEVY_AVEO:
+		reverse_pos = Vector3(0, 0.7, -1.82)
+		reverse_size = Vector3(0.12, 0.05, 0.03)
+	elif _car_model == CarModel.CHEVY_SPARK:
+		reverse_pos = Vector3(0, 0.85, -1.76)
+		reverse_size = Vector3(0.11, 0.05, 0.03)
 	else:
 		reverse_pos = Vector3(0, 0.35, -2.22)
 		reverse_size = Vector3(0.12, 0.05, 0.03)
@@ -319,6 +578,83 @@ func _create_split_light_meshes(headlight_mat: StandardMaterial3D) -> void:
 		tl_left_pos = Vector3(-0.45, 0.55, -1.57)
 		tl_right_pos = Vector3(0.45, 0.55, -1.57)
 		tl_size = Vector3(0.16, 0.08, 0.03)
+	elif _car_model == CarModel.FORD_FOCUS:
+		hl_left_pos = Vector3(-0.62, 0.72, 1.95)
+		hl_right_pos = Vector3(0.62, 0.72, 1.95)
+		hl_size = Vector3(0.26, 0.12, 0.05)
+		tl_left_pos = Vector3(-0.60, 0.88, -1.97)
+		tl_right_pos = Vector3(0.60, 0.88, -1.97)
+		tl_size = Vector3(0.20, 0.16, 0.04)
+	elif _car_model == CarModel.HONDA_CIVIC:
+		hl_left_pos = Vector3(-0.62, 0.70, 1.95)
+		hl_right_pos = Vector3(0.62, 0.70, 1.95)
+		hl_size = Vector3(0.26, 0.12, 0.05)
+		tl_left_pos = Vector3(-0.60, 0.82, -1.97)
+		tl_right_pos = Vector3(0.60, 0.82, -1.97)
+		tl_size = Vector3(0.20, 0.14, 0.04)
+	elif _car_model == CarModel.MAZDA_RX8:
+		hl_left_pos = Vector3(-0.62, 0.58, 1.97)
+		hl_right_pos = Vector3(0.62, 0.58, 1.97)
+		hl_size = Vector3(0.26, 0.10, 0.05)
+		tl_left_pos = Vector3(-0.60, 0.58, -1.97)
+		tl_right_pos = Vector3(0.60, 0.58, -1.97)
+		tl_size = Vector3(0.22, 0.14, 0.04)
+	elif _car_model == CarModel.AUDI_TT:
+		hl_left_pos = Vector3(-0.58, 0.62, 1.82)
+		hl_right_pos = Vector3(0.58, 0.62, 1.82)
+		hl_size = Vector3(0.24, 0.12, 0.05)
+		tl_left_pos = Vector3(-0.55, 0.65, -1.68)
+		tl_right_pos = Vector3(0.55, 0.65, -1.68)
+		tl_size = Vector3(0.20, 0.14, 0.04)
+	elif _car_model == CarModel.VOLGA:
+		hl_left_pos = Vector3(-0.70, 0.64, 2.22)
+		hl_right_pos = Vector3(0.70, 0.64, 2.22)
+		hl_size = Vector3(0.22, 0.12, 0.05)
+		tl_left_pos = Vector3(-0.65, 0.72, -2.27)
+		tl_right_pos = Vector3(0.65, 0.72, -2.27)
+		tl_size = Vector3(0.22, 0.14, 0.05)
+	elif _car_model == CarModel.LANCER_EVO:
+		hl_left_pos = Vector3(-0.66, 0.72, 1.97)
+		hl_right_pos = Vector3(0.66, 0.72, 1.97)
+		hl_size = Vector3(0.24, 0.12, 0.05)
+		tl_left_pos = Vector3(-0.62, 0.78, -1.97)
+		tl_right_pos = Vector3(0.62, 0.78, -1.97)
+		tl_size = Vector3(0.22, 0.14, 0.05)
+	elif _car_model == CarModel.SUBARU_STI:
+		hl_left_pos = Vector3(-0.55, 0.64, 1.96)
+		hl_right_pos = Vector3(0.55, 0.64, 1.96)
+		hl_size = Vector3(0.22, 0.12, 0.05)
+		tl_left_pos = Vector3(-0.68, 0.85, -1.90)
+		tl_right_pos = Vector3(0.68, 0.85, -1.90)
+		tl_size = Vector3(0.18, 0.22, 0.04)
+	elif _car_model == CarModel.MERCEDES_CLK:
+		hl_left_pos = Vector3(-0.60, 0.50, 2.07)
+		hl_right_pos = Vector3(0.60, 0.50, 2.07)
+		hl_size = Vector3(0.24, 0.10, 0.05)
+		tl_left_pos = Vector3(-0.61, 0.66, -2.10)
+		tl_right_pos = Vector3(0.61, 0.66, -2.10)
+		tl_size = Vector3(0.22, 0.12, 0.04)
+	elif _car_model == CarModel.PORSCHE_CAYENNE:
+		hl_left_pos = Vector3(-0.70, 0.85, 2.22)
+		hl_right_pos = Vector3(0.70, 0.85, 2.22)
+		hl_size = Vector3(0.26, 0.14, 0.06)
+		tl_left_pos = Vector3(-0.65, 0.92, -2.22)
+		tl_right_pos = Vector3(0.65, 0.92, -2.22)
+		tl_size = Vector3(0.24, 0.16, 0.05)
+	elif _car_model == CarModel.CHEVY_AVEO:
+		hl_left_pos = Vector3(-0.62, 0.78, 1.80)
+		hl_right_pos = Vector3(0.62, 0.78, 1.80)
+		hl_size = Vector3(0.22, 0.12, 0.05)
+		tl_left_pos = Vector3(-0.60, 0.86, -1.80)
+		tl_right_pos = Vector3(0.60, 0.86, -1.80)
+		tl_size = Vector3(0.18, 0.20, 0.04)
+	elif _car_model == CarModel.CHEVY_SPARK:
+		hl_left_pos = Vector3(-0.60, 0.82, 1.75)
+		hl_right_pos = Vector3(0.60, 0.82, 1.75)
+		hl_size = Vector3(0.20, 0.13, 0.05)
+		tl_left_pos = Vector3(-0.58, 0.98, -1.72)
+		tl_right_pos = Vector3(0.58, 0.98, -1.72)
+		tl_size = Vector3(0.14, 0.26, 0.04)  # tall vertical Spark taillights
 	else:
 		return  # Не должно случиться
 

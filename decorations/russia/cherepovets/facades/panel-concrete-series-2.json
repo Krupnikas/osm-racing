@@ -1,0 +1,124 @@
+{
+  "id": "panel-concrete-series-2",
+  "category": "panel",
+  "material_tags": [
+    "panel",
+    "large_panel"
+  ],
+  "min_floors": 4,
+  "max_floors": 20,
+  "has_seams": true,
+  "has_roofbottom": true,
+  "balcony_placement": "centre",
+  "atom_dir": "res://decorations/russia/cherepovets/panel-concrete-series-2-atoms/",
+  "atoms": {
+    "wall": [
+      "wall-1"
+    ],
+    "long-wall": [
+      "long-wall-1"
+    ],
+    "window": {
+      "dir": "res://decorations/russia/cherepovets/default-panels-atoms/",
+      "files": [
+        "window-1",
+        "window-2",
+        "window-3",
+        "window-4",
+        "window-5",
+        "window-6"
+      ]
+    },
+    "long-balcony": [
+      "long-balcony-1",
+      "long-balcony-2",
+      "long-balcony-3",
+      "long-balcony-4"
+    ],
+    "horizontal-seam": [
+      "horizontal-seam-1"
+    ],
+    "horizontal-long-seam": [
+      "horizontal-long-seam-1"
+    ],
+    "vertical-seam": [
+      "vertical-seam-1"
+    ],
+    "roofbottom": [
+      "roofbottom-1"
+    ],
+    "long-roofbottom": [
+      "long-roofbottom-1"
+    ]
+  },
+  "forbidden": [
+    "mid-wall",
+    "mid-window",
+    "mid-balcony",
+    "horizontal-mid-seam"
+  ],
+  "molecules": [
+    {
+      "id": "win-longbal-win",
+      "slots": [
+        "window",
+        "long-balcony",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "longbal-only",
+      "slots": [
+        "long-balcony"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "win-win",
+      "slots": [
+        "window",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "win-win-longbal-win-win",
+      "slots": [
+        "window",
+        "window",
+        "long-balcony",
+        "window",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "longbal-win-longbal-win-longbal",
+      "slots": [
+        "long-balcony",
+        "window",
+        "long-balcony",
+        "window",
+        "long-balcony"
+      ],
+      "tags": [
+        "any"
+      ]
+    }
+  ],
+  "slot_extrusion": {
+    "mid-balcony": {
+      "depth_m": 0.8,
+      "shape": "box"
+    }
+  }
+}

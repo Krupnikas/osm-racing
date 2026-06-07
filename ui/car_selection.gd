@@ -22,6 +22,21 @@ const CAR_SPEC_LINES := {
 	"polo":       "2009 · 1.6L · 105 HP · FWD · 1135 KG",
 	"beetle":     "1968 · 1.5L · 53 HP · RWD · 880 KG",
 	"bmw_m3_gtr": "2001 · 3.2L · 380 HP · RWD · 1350 KG",
+	"ford_focus_st_2006": "2006 · 2.5L · 225 HP · FWD · 1392 KG",
+	"honda_civic_si_2006": "2006 · 2.0L · 197 HP · FWD · 1270 KG",
+	"mazda_rx8_2006": "2006 · 1.3L Rotary · 232 HP · RWD · 1310 KG",
+	"audi_tt_32_2003": "2003 · 3.2L VR6 · 250 HP · AWD · 1510 KG",
+	"volga_gaz3110": "2000 · 2.3L · 150 HP · RWD · 1400 KG",
+	"lancer_evo_x_2008": "2008 · 2.0L Turbo · 291 HP · AWD · 1560 KG",
+	"subaru_sti_2011": "2011 · 2.5L Turbo · 305 HP · AWD · 1505 KG",
+	"mercedes_clk55_2003": "2003 · 5.4L V8 · 367 HP · RWD · 1635 KG",
+	"porsche_cayenne_turbo_s_2009": "2009 · 4.8L TT V8 · 550 HP · AWD · 2355 KG",
+	"chevrolet_aveo_5_lt_2009": "2009 · 1.6L · 106 HP · FWD · 1100 KG",
+	"chevrolet_spark_12_lt_2011": "2011 · 1.2L · 81 HP · FWD · 930 KG",
+	"lada_2171_priora_2009": "2009 · 1.6L 16V · 98 HP · FWD · 1160 KG",
+	"lada_2114_samara_2001": "2001 · 1.6L · 81 HP · FWD · 985 KG",
+	"lada_2110_1995": "1995 · 1.6L · 89 HP · FWD · 1010 KG",
+	"mini_cooper_s_f56_2014": "2014 · 2.0L Turbo · 189 HP · FWD · 1160 KG",
 }
 
 # — Tunnel car-select (NFS Underground style) feature flag —
@@ -69,7 +84,7 @@ var _wheel_nodes: Array[Node3D] = []
 
 
 func _ready() -> void:
-	_car_ids = CarSettings.get_car_ids()
+	_car_ids = CareerState.sort_car_ids_by_price(CarSettings.get_car_ids())
 	_initial_car_id = CarSettings.selected_car_id
 	_current_index = max(0, _car_ids.find(CarSettings.selected_car_id))
 	_build_ui()
@@ -788,11 +803,9 @@ func _on_back_pressed() -> void:
 func show_selection(owned_only: bool = false, initial_car_id: String = "") -> void:
 	_owned_only = owned_only
 	if owned_only:
-		_car_ids = []
-		for cid in CareerState.owned_cars:
-			_car_ids.append(cid)
+		_car_ids = CareerState.sort_car_ids_by_price(CareerState.owned_cars)
 	else:
-		_car_ids = CarSettings.get_car_ids()
+		_car_ids = CareerState.sort_car_ids_by_price(CarSettings.get_car_ids())
 
 	if initial_car_id == "":
 		initial_car_id = (CareerState.selected_car if owned_only

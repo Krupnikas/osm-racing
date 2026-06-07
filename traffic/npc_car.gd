@@ -54,6 +54,8 @@ signal request_despawn
 # Night mode lights
 var _lights: Node3D
 var _lights_enabled := false
+var _is_night := false
+var _is_raining := false
 
 # Wheel rotation
 var _wheel_mesh_nodes: Array[MeshInstance3D] = []
@@ -691,16 +693,31 @@ func _setup_lights() -> void:
 
 func _connect_to_night_mode() -> void:
 	"""Подключается к NightModeManager"""
-	var night_manager := get_tree().current_scene.find_child("NightModeManager", true, false)
+	var scene := get_tree().current_scene
+	if scene == null:
+		return
+	var night_manager := scene.find_child("NightModeManager", true, false)
 	if night_manager:
 		night_manager.night_mode_changed.connect(_on_night_mode_changed)
-		# Если уже ночь - включаем свет
-		if night_manager.is_night:
-			enable_lights()
+		night_manager.rain_changed.connect(_on_rain_changed)
+		# Свет включён ночью ИЛИ в дождь (как в example-rain — встречка с фарами)
+		_is_night = night_manager.is_night
+		_is_raining = night_manager.is_raining
+		_refresh_lights()
 
 
 func _on_night_mode_changed(enabled: bool) -> void:
-	if enabled:
+	_is_night = enabled
+	_refresh_lights()
+
+
+func _on_rain_changed(enabled: bool) -> void:
+	_is_raining = enabled
+	_refresh_lights()
+
+
+func _refresh_lights() -> void:
+	if _is_night or _is_raining:
 		enable_lights()
 	else:
 		disable_lights()
@@ -798,6 +815,11 @@ func _merge_meshes() -> void:
 		var mname: String = mi.name.to_lower()
 		if "wheel" in mname or "tire" in mname or "rim" in mname or "brakedisk" in mname or "brake_disc" in mname:
 			_wheel_mesh_nodes.append(mi)
+		elif mi.has_meta("npc_keep_unmerged"):
+			# Real lamp lens meshes: kept separate & visible so a per-surface emissive
+			# override (front white / rear red, set by the car's NPC setup) renders as a
+			# lens-shaped glow instead of a rectangular proxy box.
+			pass
 		else:
 			body_meshes.append(mi)
 

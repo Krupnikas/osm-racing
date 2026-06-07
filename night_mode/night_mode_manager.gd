@@ -60,14 +60,16 @@ var _day_vfog_ambient_inject := 0.0
 var _day_vfog_gi_inject := 0.0
 var _day_vfog_detail_spread := 0.8
 var _day_vfog_length := 200.0
+var _day_vfog_enabled := false  # Днём объёмный туман выключен (молочная пелена убрана)
+var _day_saturation := 1.0  # adjustment_saturation ясного дня (для возврата после дождя)
 
 # Ночные настройки в стиле NFS Underground
 const NIGHT_SUN_ENERGY := 0.02
-const MOON_LIGHT_ENERGY := 0.12
+const MOON_LIGHT_ENERGY := 0.2
 const MOON_LIGHT_COLOR := Color(0.7, 0.8, 1.0)
-const NIGHT_AMBIENT_COLOR := Color(0.015, 0.02, 0.04)
-const NIGHT_AMBIENT_ENERGY := 0.15
-const NIGHT_FOG_COLOR := Color(0.08, 0.04, 0.12)
+const NIGHT_AMBIENT_COLOR := Color(0.03, 0.04, 0.08)
+const NIGHT_AMBIENT_ENERGY := 0.25
+const NIGHT_FOG_COLOR := Color(0.05, 0.06, 0.10)  # Нейтральная тёмно-синяя ночь (без NFS-фиолета), как в example-night
 const NIGHT_FOG_DENSITY := 0.003
 
 # Transition
@@ -92,11 +94,15 @@ const CAR_WET_DARKEN := 0.2  # На сколько затемнить albedo
 
 # Дневной дождь — приглушённое освещение
 var _rain_light_tween: Tween
-const RAIN_SUN_ENERGY_MULT := 0.35  # Солнце на 65% слабее
-const RAIN_AMBIENT_ENERGY_MULT := 0.4  # Ambient на 60% слабее
-const RAIN_BG_ENERGY_MULT := 0.4  # HDRI небо на 60% слабее (главный источник света)
+# Пасмурный дождь = ЯРКИЙ рассеянный день (небо — главный источник), а не сумерки.
+# Солнце приглушено (нет жёстких теней), но ambient/HDRI остаются высокими.
+const RAIN_SUN_ENERGY_MULT := 0.45  # Солнце слабее (мягкий рассеянный свет)
+const RAIN_AMBIENT_ENERGY_MULT := 0.85  # Ambient почти полный — пасмурно, но светло
+const RAIN_BG_ENERGY_MULT := 0.65  # HDRI небо чуть тусклее
 const RAIN_FOG_DENSITY_MULT := 1.5  # Туман чуть гуще
 const RAIN_VFOG_DENSITY_MULT := 2.0  # Объёмный туман гуще при дожде
+const RAIN_FOG_COLOR := Color(0.62, 0.66, 0.72)  # Холодная серо-синяя дымка (пасмурно), вместо тёплой дневной
+const RAIN_SATURATION := 0.78  # Десатурация в дождь (тусклый пасмурный грейд)
 
 
 func _ready() -> void:
@@ -163,6 +169,12 @@ func _find_scene_components() -> void:
 			_day_vfog_gi_inject = _environment.volumetric_fog_gi_inject
 			_day_vfog_detail_spread = _environment.volumetric_fog_detail_spread
 			_day_vfog_length = _environment.volumetric_fog_length
+			_day_vfog_enabled = _environment.volumetric_fog_enabled
+			# Capture day ambient so night→day restore returns to the scene's
+			# real values (sky-source @ 1.35), not the var defaults (1.0 grey).
+			_day_ambient_color = _environment.ambient_light_color
+			_day_ambient_energy = _environment.ambient_light_energy
+			_day_saturation = _environment.adjustment_saturation
 
 	_sun_light = get_tree().current_scene.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
 	if _sun_light:
@@ -318,13 +330,13 @@ void sky() {
 	float city_glow_orange = smoothstep(0.15, -0.1, dir.y);
 	col += vec3(0.25, 0.12, 0.02) * city_glow_orange * 0.8;
 
-	// Неоновое розово-фиолетовое свечение
+	// Лёгкий розово-фиолетовый неон (приглушён — без тяжёлого NFS-фиолета)
 	float neon_glow = smoothstep(0.1, -0.15, dir.y);
-	col += vec3(0.15, 0.05, 0.2) * neon_glow * 0.5;
+	col += vec3(0.12, 0.06, 0.14) * neon_glow * 0.15;
 
 	// Синее свечение от рекламы
 	float blue_glow = smoothstep(0.08, -0.08, dir.y) * (0.5 + 0.5 * sin(dir.x * 10.0));
-	col += vec3(0.02, 0.08, 0.15) * blue_glow * 0.3;
+	col += vec3(0.02, 0.08, 0.15) * blue_glow * 0.2;
 
 	COLOR = col;
 }
@@ -508,9 +520,9 @@ func enable_night_mode() -> void:
 		_environment.tonemap_exposure = 1.1
 		_environment.tonemap_white = 6.0
 
-		# Volumetric fog
+		# Volumetric fog — атмосферная подсветка фонарей, но не «суп»
 		_environment.volumetric_fog_enabled = true
-		_transition_tween.tween_property(_environment, "volumetric_fog_density", 0.015, 1.5)
+		_transition_tween.tween_property(_environment, "volumetric_fog_density", 0.008, 1.5)
 		_environment.volumetric_fog_albedo = Color(0.6, 0.65, 0.8)
 		_environment.volumetric_fog_emission = Color(0.02, 0.01, 0.03)
 		_environment.volumetric_fog_emission_energy = 0.3
@@ -591,6 +603,7 @@ func disable_night_mode() -> void:
 		_environment.volumetric_fog_gi_inject = _day_vfog_gi_inject
 		_environment.volumetric_fog_detail_spread = _day_vfog_detail_spread
 		_environment.volumetric_fog_length = _day_vfog_length
+		_environment.volumetric_fog_enabled = _day_vfog_enabled
 
 	night_mode_changed.emit(false)
 	print("Night mode disabled")
@@ -637,6 +650,9 @@ func _apply_rain_lighting(raining: bool) -> void:
 			_rain_light_tween.tween_property(_environment, "background_energy_multiplier", _day_bg_energy * RAIN_BG_ENERGY_MULT, 4.0)
 			_rain_light_tween.tween_property(_environment, "fog_density", _day_fog_density * RAIN_FOG_DENSITY_MULT, 4.0)
 			_rain_light_tween.tween_property(_environment, "volumetric_fog_density", _day_vfog_density * RAIN_VFOG_DENSITY_MULT, 4.0)
+			# Пасмурный дождь: холодная серая дымка + десатурация (вместо тёплого ясного грейда)
+			_rain_light_tween.tween_property(_environment, "fog_light_color", RAIN_FOG_COLOR, 4.0)
+			_rain_light_tween.tween_property(_environment, "adjustment_saturation", RAIN_SATURATION, 4.0)
 	else:
 		if _sun_light:
 			_rain_light_tween.tween_property(_sun_light, "light_energy", _day_sun_energy, 4.0)
@@ -645,6 +661,9 @@ func _apply_rain_lighting(raining: bool) -> void:
 			_rain_light_tween.tween_property(_environment, "background_energy_multiplier", _day_bg_energy, 4.0)
 			_rain_light_tween.tween_property(_environment, "fog_density", _day_fog_density, 4.0)
 			_rain_light_tween.tween_property(_environment, "volumetric_fog_density", _day_vfog_density, 4.0)
+			# Возврат к тёплому ясному грейду
+			_rain_light_tween.tween_property(_environment, "fog_light_color", _day_fog_color, 4.0)
+			_rain_light_tween.tween_property(_environment, "adjustment_saturation", _day_saturation, 4.0)
 
 
 # === Мокрая машина ===

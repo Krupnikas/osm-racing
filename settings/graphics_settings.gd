@@ -6,7 +6,7 @@ class_name GraphicsSettings
 signal settings_changed
 
 # Настройки по умолчанию
-var ssr_enabled := true
+var ssr_enabled := false  # SSR выключен: дорого, на матовой сцене почти не виден (Soviet vibe / perf)
 var fog_enabled := true
 var glow_enabled := true
 var ssao_enabled := true
@@ -14,10 +14,12 @@ var sdfgi_enabled := false  # SDFGI выключен по умолчанию (с
 var normal_maps_enabled := true
 var clouds_enabled := true
 
-# Antialiasing - MSAA 2X + TAA для баланса качества и чёткости
-var msaa_mode := Viewport.MSAA_2X  # MSAA 2X
-var taa_enabled := true  # TAA включен
-var fxaa_enabled := false  # FXAA выключен
+# Antialiasing — MSAA 4X + anisotropic, БЕЗ TAA.
+# TAA давал шлейфы (ghosting) на текстурах за движущимися объектами (фонари) и
+# рябь на оконных сетках; MSAA+anisotropic чётче и без temporal-артефактов.
+var msaa_mode := Viewport.MSAA_4X  # MSAA 4X
+var taa_enabled := false  # TAA выключен (ghosting trails)
+var fxaa_enabled := false  # FXAA выключен (размывает, не нужен без TAA)
 var taa_jitter_amount := 0.5  # Сила TAA (0.0-1.0): меньше = четче но больше шума, больше = размытие
 
 # Дополнительные эффекты
@@ -190,9 +192,12 @@ func _apply_render_distance() -> void:
 		_camera.far = render_distance * 1.5
 
 	# Настраиваем туман (Godot 4 экспоненциальный)
+	# Тоньше прежнего: чистый передний/средний план, тёплая дымка только вдали (Soviet vibe)
 	if _environment and fog_enabled:
-		_environment.fog_density = 0.8 / render_distance
-		_environment.fog_aerial_perspective = 0.5
+		# Дальняя тёплая дымка: силуэты вдали тают в атмосфере (skyline haze),
+		# передний/средний план остаётся чистым. Плотность обратна дальности обзора.
+		_environment.fog_density = 0.9 / render_distance
+		_environment.fog_aerial_perspective = 0.6
 
 	# Обновляем terrain generator (включая дистанции чанков)
 	var terrain := get_tree().current_scene.find_child("OSMTerrainGenerator", true, false)
@@ -495,7 +500,7 @@ func _load_settings() -> void:
 	var err := config.load("user://graphics.cfg")
 	if err == OK:
 		print("GraphicsSettings: Loading settings from file...")
-		ssr_enabled = config.get_value("graphics", "ssr", true)
+		ssr_enabled = config.get_value("graphics", "ssr", false)
 		fog_enabled = config.get_value("graphics", "fog", true)
 		glow_enabled = config.get_value("graphics", "glow", true)
 		ssao_enabled = config.get_value("graphics", "ssao", true)
@@ -504,7 +509,7 @@ func _load_settings() -> void:
 		clouds_enabled = config.get_value("graphics", "clouds", true)
 		msaa_mode = config.get_value("graphics", "msaa", Viewport.MSAA_4X)
 		taa_enabled = config.get_value("graphics", "taa", false)
-		fxaa_enabled = config.get_value("graphics", "fxaa", true)
+		fxaa_enabled = config.get_value("graphics", "fxaa", false)
 		motion_blur_enabled = config.get_value("graphics", "motion_blur", false)
 		dof_enabled = config.get_value("graphics", "dof", false)
 		vignette_enabled = config.get_value("graphics", "vignette", false)  # Дефолт false как при инициализации

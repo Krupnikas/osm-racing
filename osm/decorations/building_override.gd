@@ -78,6 +78,10 @@ var pediments: Array = []
 # Custom 3D model (replaces entire building geometry)
 var custom_model_path: String = ""  # res:// path to GLB/GLTF
 var custom_model_scale: float = 1.0
+
+# Per-slot extrusion config: role → {depth_m: float, shape: String}
+# Used by FacadeAssembler and Facade111_125 to add 3D geometry to balcony slots.
+var slot_extrusion: Dictionary = {}
 var custom_model_rotation_y: float = 0.0  # degrees
 var custom_model_y_offset: float = 0.0
 var custom_model_visibility_range: float = 500.0  # LOD visibility range

@@ -208,6 +208,10 @@ func _load_building_overrides_json(path: String) -> void:
 		if od.has("pediments"):
 			override.pediments = od["pediments"]
 
+		# Per-slot extrusion config (balcony box geometry)
+		if od.has("slot_extrusion"):
+			override.slot_extrusion = od["slot_extrusion"]
+
 		# Custom 3D model (replaces entire building)
 		if od.has("custom_model"):
 			override.custom_model_path = od["custom_model"]
@@ -228,7 +232,8 @@ func _load_building_overrides_json(path: String) -> void:
 			"rotation_y": md.get("rotation_y", 0.0),
 			"scale": md.get("scale", 1.0),
 			"y_offset": md.get("y_offset", 0.0),
-			"visibility_range": md.get("visibility_range", 150.0)
+			"visibility_range": md.get("visibility_range", 150.0),
+			"clear_trees_radius": md.get("clear_trees_radius", 0.0)
 		})
 
 	# Landuse overrides (деревья на конкретных landuse зонах)

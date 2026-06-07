@@ -11,6 +11,9 @@
         "short": 1.0,
         "long": 3.0
       },
+      "slot_extrusion": {
+        "mid-balcony": {"depth_m": 0.8, "shape": "box"}
+      },
       "entrances": [
         {"lat": 59.149725, "lon": 37.949874},
         {"lat": 59.149537, "lon": 37.949379}
@@ -27,6 +30,9 @@
         "short": 1.0,
         "long": 3.0
       },
+      "slot_extrusion": {
+        "mid-balcony": {"depth_m": 0.8, "shape": "box"}
+      },
       "entrances": [
         {"lat": 59.149631, "lon": 37.951059},
         {"lat": 59.149442, "lon": 37.950574}
@@ -42,6 +48,9 @@
         "enabled": true,
         "short": 1.0,
         "long": 3.0
+      },
+      "slot_extrusion": {
+        "mid-balcony": {"depth_m": 0.8, "shape": "box"}
       },
       "entrances": [
         {"lat": 59.149533, "lon": 37.952277},
@@ -759,6 +768,17 @@
       "scale": 77.0,
       "y_offset": 60.0,
       "visibility_range": 2000.0
+    },
+    {
+      "comment": "Травяная фигура «Ладья» на кольце (OSM node 1379644438)",
+      "model": "res://models/sailboat_grass_sculpture/sailboat-grass-sculpture.glb",
+      "lat": 59.1308758,
+      "lon": 37.9797967,
+      "rotation_y": 0,
+      "scale": 10.5,
+      "y_offset": 8.65,
+      "clear_trees_radius": 25.0,
+      "visibility_range": 600.0
     }
   ],
   "landuse_overrides": [

@@ -2,7 +2,9 @@
 .godot/
 
 # Godot-specific ignores
-*.import
+# NOTE: *.import IS versioned (Godot best practice) — it stores per-asset import
+# settings (e.g. mipmaps) that must travel with the repo. Only .godot/imported/
+# (the generated cache) is ignored, via the .godot/ rule above.
 export.cfg
 
 # Imported translations (automatically generated from CSV files)

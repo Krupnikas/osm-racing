@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" path="res://traffic/npc_car.gd" id="1_npc_logan"]
 [ext_resource type="PackedScene" path="res://car/models/logan/scene.gltf" id="2_logan_model"]
-[ext_resource type="Script" path="res://car/logan_setup.gd" id="3_logan_setup"]
+[ext_resource type="Script" path="res://car/logan_npc_setup.gd" id="3_logan_setup"]
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_logan"]
 size = Vector3(1.5, 0.88, 3.9)

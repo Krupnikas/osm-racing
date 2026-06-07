@@ -20,6 +20,21 @@ var npc_vaz2107_scene: PackedScene
 var npc_polo_scene: PackedScene
 var npc_matiz_scene: PackedScene
 var npc_logan_scene: PackedScene
+var npc_focus_scene: PackedScene
+var npc_civic_scene: PackedScene
+var npc_rx8_scene: PackedScene
+var npc_tt_scene: PackedScene
+var npc_volga_scene: PackedScene
+var npc_evo_scene: PackedScene
+var npc_sti_scene: PackedScene
+var npc_clk_scene: PackedScene
+var npc_cayenne_scene: PackedScene
+var npc_aveo_scene: PackedScene
+var npc_spark_scene: PackedScene
+var npc_priora_scene: PackedScene
+var npc_samara_scene: PackedScene
+var npc_2110_scene: PackedScene
+var npc_mini_scene: PackedScene
 var road_network: Node  # RoadNetwork
 var terrain_generator: Node  # OSMTerrainGenerator
 var player_car: Node3D
@@ -55,6 +70,22 @@ func _ready() -> void:
 	npc_polo_scene = preload("res://traffic/npc_polo.tscn")
 	npc_matiz_scene = preload("res://traffic/npc_matiz.tscn")
 	npc_logan_scene = preload("res://traffic/npc_logan.tscn")
+	npc_focus_scene = preload("res://traffic/npc_ford_focus_st.tscn")
+	npc_civic_scene = preload("res://traffic/npc_honda_civic_si.tscn")
+	npc_rx8_scene = preload("res://traffic/npc_mazda_rx8.tscn")
+	npc_tt_scene = preload("res://traffic/npc_audi_tt.tscn")
+	npc_volga_scene = preload("res://traffic/npc_volga_gaz3110.tscn")
+	npc_evo_scene = preload("res://traffic/npc_lancer_evo_x.tscn")
+	npc_sti_scene = preload("res://traffic/npc_subaru_sti.tscn")
+	# Mercedes CLK 55 disabled in traffic: glitchy wheels. Re-enable when fixed.
+	# npc_clk_scene = preload("res://traffic/npc_mercedes_clk55.tscn")
+	npc_cayenne_scene = preload("res://traffic/npc_cayenne.tscn")
+	npc_aveo_scene = preload("res://traffic/npc_aveo.tscn")
+	npc_spark_scene = preload("res://traffic/npc_spark.tscn")
+	npc_priora_scene = preload("res://traffic/npc_lada_priora.tscn")
+	npc_samara_scene = preload("res://traffic/npc_lada_samara.tscn")
+	npc_2110_scene = preload("res://traffic/npc_lada_2110.tscn")
+	npc_mini_scene = preload("res://traffic/npc_mini_cooper.tscn")
 
 	# Создаём RoadNetwork
 	var RoadNetworkScript = preload("res://traffic/road_network.gd")
@@ -108,6 +139,21 @@ func _warmup_mesh_cache() -> void:
 	if npc_polo_scene: scenes.append(npc_polo_scene)
 	if npc_matiz_scene: scenes.append(npc_matiz_scene)
 	if npc_logan_scene: scenes.append(npc_logan_scene)
+	if npc_focus_scene: scenes.append(npc_focus_scene)
+	if npc_civic_scene: scenes.append(npc_civic_scene)
+	if npc_rx8_scene: scenes.append(npc_rx8_scene)
+	if npc_tt_scene: scenes.append(npc_tt_scene)
+	if npc_volga_scene: scenes.append(npc_volga_scene)
+	if npc_evo_scene: scenes.append(npc_evo_scene)
+	if npc_sti_scene: scenes.append(npc_sti_scene)
+	if npc_clk_scene: scenes.append(npc_clk_scene)
+	if npc_cayenne_scene: scenes.append(npc_cayenne_scene)
+	if npc_aveo_scene: scenes.append(npc_aveo_scene)
+	if npc_spark_scene: scenes.append(npc_spark_scene)
+	if npc_priora_scene: scenes.append(npc_priora_scene)
+	if npc_samara_scene: scenes.append(npc_samara_scene)
+	if npc_2110_scene: scenes.append(npc_2110_scene)
+	if npc_mini_scene: scenes.append(npc_mini_scene)
 	for scene in scenes:
 		var instance := scene.instantiate() as Node3D
 		instance.visible = false
@@ -406,7 +452,7 @@ func _get_npc_from_pool():
 		return npc
 
 	if active_npcs.size() < max_npcs:
-		# Распределение: 5% DPS, 10% Такси, 10% ПАЗ, 25% ВАЗ-2107, 20% Polo, 2% Logan, 28% блочные
+		# Распределение: 5% DPS, 10% Такси, 10% ПАЗ, 25% ВАЗ-2107, 10% Polo, 10% Matiz, 2% Logan, 3% Focus ST, 25% блочные
 		var rand := randf()
 		var scene_to_use: PackedScene
 		var car_type: String
@@ -439,10 +485,68 @@ func _get_npc_from_pool():
 			# 2% - Renault Logan
 			scene_to_use = npc_logan_scene
 			car_type = "Renault Logan"
+		elif rand < 0.75:
+			# 3% - Ford Focus ST (rare hot-hatch)
+			scene_to_use = npc_focus_scene
+			car_type = "Ford Focus ST"
+		elif rand < 0.77:
+			# 2% - Honda Civic Si (rare hot compact)
+			scene_to_use = npc_civic_scene
+			car_type = "Honda Civic Si"
+		elif rand < 0.78:
+			# 1% - Mazda RX-8 (very rare rotary sports)
+			scene_to_use = npc_rx8_scene
+			car_type = "Mazda RX-8"
+		elif rand < 0.79:
+			# 1% - Audi TT 3.2 quattro (very rare)
+			scene_to_use = npc_tt_scene
+			car_type = "Audi TT"
+		elif rand < 0.83:
+			# 4% - Volga GAZ-3110 (common older Russian sedan)
+			scene_to_use = npc_volga_scene
+			car_type = "Volga GAZ-3110"
+		elif rand < 0.84:
+			# 1% - Mitsubishi Lancer Evo X (very rare performance sedan)
+			scene_to_use = npc_evo_scene
+			car_type = "Lancer Evo X"
+		elif rand < 0.85:
+			# 1% - Subaru WRX STI (very rare performance hatch)
+			scene_to_use = npc_sti_scene
+			car_type = "Subaru WRX STI"
+		# Mercedes CLK 55 disabled (glitchy wheels) — its 0.85–0.86 band falls
+		# through to the next car so no null scene is ever selected.
+		elif rand < 0.87:
+			# 1% - Porsche Cayenne Turbo S (very rare luxury SUV)
+			scene_to_use = npc_cayenne_scene
+			car_type = "Porsche Cayenne"
+		elif rand < 0.90:
+			# 3% - Chevrolet Aveo (common economy hatch)
+			scene_to_use = npc_aveo_scene
+			car_type = "Chevrolet Aveo"
+		elif rand < 0.93:
+			# 3% - Chevrolet Spark (common city hatch)
+			scene_to_use = npc_spark_scene
+			car_type = "Chevrolet Spark"
+		elif rand < 0.95:
+			# 3% - LADA 2171 Priora (common Russian car)
+			scene_to_use = npc_priora_scene
+			car_type = "LADA Priora"
+		elif rand < 0.975:
+			# 2.5% - LADA 2114 Samara (common Russian car)
+			scene_to_use = npc_samara_scene
+			car_type = "LADA Samara"
+		elif rand < 0.985:
+			# 2% - LADA 2110 (common Russian car)
+			scene_to_use = npc_2110_scene
+			car_type = "LADA 2110"
+		elif rand < 0.995:
+			# 1% - Mini Cooper S (rare premium hatch)
+			scene_to_use = npc_mini_scene
+			car_type = "Mini Cooper S"
 		else:
-			# 28% - блочные машинки
-			scene_to_use = npc_car_scene
-			car_type = "box car"
+			# block cars disabled — fall back to a common real car (VAZ-2107)
+			scene_to_use = npc_vaz2107_scene if npc_vaz2107_scene else npc_car_scene
+			car_type = "VAZ-2107"
 
 		var npc = scene_to_use.instantiate()
 		get_parent().add_child(npc)
