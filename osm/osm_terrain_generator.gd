@@ -508,6 +508,33 @@ var _deferred_road_collisions: Dictionary = {}  # chunk_key → Array[{body, ver
 var _deferred_terrain_collisions: Dictionary = {}  # chunk_key → Array[{parent, vertices, indices}]
 var _deferred_footway_queue: Dictionary = {}  # chunk_key → Array[{smoothed_points, width, tags, parent}]
 var _deferred_billboard_queue: Dictionary = {}  # chunk_key → Array[{billboard, elevation, parent}]
+
+# ── Procedural roadside billboards (along trunk/primary) ────────────────────
+@export var enable_road_billboards := true
+const BILLBOARD_TEX_DIR := "res://textures/billboards/small-city/"
+const BILLBOARD_FOOTPRINT_CELL := 32.0     # spatial-hash cell for the global footprint index
+const BILLBOARD_CLIP_MARGIN := 4.5         # reject within this of ANY building (anti-clip)
+const BILLBOARD_RESIDENTIAL_RADIUS := 22.0 # reject within this of RESIDENTIAL buildings
+const BILLBOARD_VERGE_SETBACK := 2.5       # extra offset past the carriageway edge
+const BILLBOARD_SPACING_TRUNK := 120.0
+const BILLBOARD_SPACING_PRIMARY := 150.0
+const BILLBOARD_YAW_OFFSET_DEG := 20.0     # 0 = pure perpendicular; ~15-25 = slight turn toward lane (tunable)
+const BILLBOARD_DONE := 1000000000         # incremental sentinel = way fully walked
+var billboard_debug_dense := false         # debug: smaller spacing + relaxed gates (M7 validation only)
+var _deferred_billboard_road_queue: Dictionary = {}  # chunk_key → Array[{points, way_id, highway, width, _bb_idx}]
+var _created_billboard_keys: Dictionary = {}         # semantic dedup key → true (placed billboards only)
+var _billboard_keys_by_chunk: Dictionary = {}        # chunk_key → Array[String] (for unload key cleanup)
+# Global, neighbor-aware building footprint index (deduped by way_id):
+var _building_footprint_hash: Dictionary = {}        # Vector2i cell → Array[{bbox: Rect2, residential: bool}]
+var _building_footprint_way_ids: Dictionary = {}     # way_id → true (dedup add)
+var _billboard_tex_paths: Array[String] = []
+var _billboard_pool_scanned := false
+const _BILLBOARD_RESIDENTIAL_TYPES := ["apartments", "residential", "house", "detached", "dormitory", "terrace"]
+const BILLBOARD_MIN_SPACING := 100.0       # global min distance between ANY two boards
+const BILLBOARD_MEDIAN_CHECK := 6.0        # reject if another road is this close behind the board
+var _billboard_pos_hash: Dictionary = {}      # 100 m cell (Vector2i) → Array[Vector2] placed positions
+var _billboard_pos_by_chunk: Dictionary = {}  # chunk_key → Array[Vector2] (unload cleanup)
+
 var _finalize_phase: int = 0  # Round-robin: 0=roads, 1=curbs, 2=lamps, 3=buildings, 4=windows, 5=trees, 6=billboards
 var _chunk_activation_pending: Dictionary = {}  # chunk_key -> state (-1=waiting, >=0=RS activation index)
 var _chunk_culling_cooldown: Dictionary = {}  # chunk_key -> timestamp (ms) — don't cull recently activated chunks
@@ -1943,6 +1970,13 @@ func start_loading() -> void:
 	_deferred_tram_queue.clear()
 	_dispatched_tram_network.clear()
 	_deferred_billboard_queue.clear()
+	_deferred_billboard_road_queue.clear()
+	_created_billboard_keys.clear()
+	_billboard_keys_by_chunk.clear()
+	_billboard_pos_hash.clear()
+	_billboard_pos_by_chunk.clear()
+	_building_footprint_hash.clear()
+	_building_footprint_way_ids.clear()
 	_deferred_footway_queue.clear()
 	_deferred_building_collisions.clear()
 	_deferred_tree_collisions.clear()
@@ -3001,6 +3035,21 @@ func _unload_chunk(chunk_key: String) -> void:
 		_deferred_terrain_collisions.erase(chunk_key)
 		_deferred_footway_queue.erase(chunk_key)
 		_deferred_billboard_queue.erase(chunk_key)
+		_deferred_billboard_road_queue.erase(chunk_key)
+		# Clear procedural-billboard dedup keys for this chunk so they re-place on
+		# reload (the billboard NODES auto-free with chunk_node.queue_free() below).
+		if _billboard_keys_by_chunk.has(chunk_key):
+			for _bkey in _billboard_keys_by_chunk[chunk_key]:
+				_created_billboard_keys.erase(_bkey)
+			_billboard_keys_by_chunk.erase(chunk_key)
+		if _billboard_pos_by_chunk.has(chunk_key):
+			for _bpos in _billboard_pos_by_chunk[chunk_key]:
+				var _bcell := Vector2i(int(floor(_bpos.x / BILLBOARD_MIN_SPACING)), int(floor(_bpos.y / BILLBOARD_MIN_SPACING)))
+				if _billboard_pos_hash.has(_bcell):
+					(_billboard_pos_hash[_bcell] as Array).erase(_bpos)
+					if (_billboard_pos_hash[_bcell] as Array).is_empty():
+						_billboard_pos_hash.erase(_bcell)
+			_billboard_pos_by_chunk.erase(chunk_key)
 		_deferred_lamp_queue.erase(chunk_key)
 		_deferred_manhole_queue.erase(chunk_key)
 		_deferred_add_child_queue = _deferred_add_child_queue.filter(
@@ -3199,6 +3248,13 @@ func reset_terrain() -> void:
 	_deferred_tram_queue.clear()
 	_dispatched_tram_network.clear()
 	_deferred_billboard_queue.clear()
+	_deferred_billboard_road_queue.clear()
+	_created_billboard_keys.clear()
+	_billboard_keys_by_chunk.clear()
+	_billboard_pos_hash.clear()
+	_billboard_pos_by_chunk.clear()
+	_building_footprint_hash.clear()
+	_building_footprint_way_ids.clear()
 	_chunk_activation_pending.clear()
 	_chunk_culling_cooldown.clear()
 
@@ -3603,7 +3659,12 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 			for pcx in range(int(floor(pmin_x / BUILDING_CELL_SIZE)), int(floor(pmax_x / BUILDING_CELL_SIZE)) + 1):
 				for pcy in range(int(floor(pmin_y / BUILDING_CELL_SIZE)), int(floor(pmax_y / BUILDING_CELL_SIZE)) + 1):
 					pcells.append(Vector2i(pcx, pcy))
-			building_poly_entries.append({"poly": bpoints, "cells": pcells})
+			building_poly_entries.append({
+				"poly": bpoints, "cells": pcells, "is_building": true,
+				"way_id": int(way.get("id", 0)),
+				"bbox": Rect2(pmin_x, pmin_y, pmax_x - pmin_x, pmax_y - pmin_y),
+				"residential": _is_residential_building_tags(tags),
+			})
 
 	# Pedestrian areas — register in building poly hash to block trees
 	var ped_areas: Array = osm_data.get("pedestrian_areas", [])
@@ -3628,7 +3689,7 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 		for pcx in range(int(floor(pp_min_x / BUILDING_CELL_SIZE)), int(floor(pp_max_x / BUILDING_CELL_SIZE)) + 1):
 			for pcy in range(int(floor(pp_min_y / BUILDING_CELL_SIZE)), int(floor(pp_max_y / BUILDING_CELL_SIZE)) + 1):
 				pp_cells.append(Vector2i(pcx, pcy))
-		building_poly_entries.append({"poly": ped_pts, "cells": pp_cells})
+		building_poly_entries.append({"poly": ped_pts, "cells": pp_cells, "is_building": false})
 
 	# ========== PHASE 2: Intersection detection ==========
 	var node_usage: Dictionary = {}
@@ -3962,6 +4023,9 @@ func _apply_single_terrain_gen_result(result: Dictionary) -> void:
 			if not chunk_building_poly_hash.has(cell):
 				chunk_building_poly_hash[cell] = []
 			chunk_building_poly_hash[cell].append(bpe.poly)
+		# Global neighbor-aware footprint index for billboard gates (dedup by way_id)
+		if bpe.get("is_building", false):
+			_register_building_footprint(bpe.get("bbox", Rect2()), bool(bpe.get("residential", false)), int(bpe.get("way_id", 0)))
 	_chunk_road_hashes[chunk_key] = chunk_road_hash
 	_chunk_building_hashes[chunk_key] = chunk_building_hash
 	_chunk_building_poly_hashes[chunk_key] = chunk_building_poly_hash
@@ -5257,6 +5321,16 @@ func _apply_road_result(result: Dictionary) -> void:
 		var lamp_pts := _clip_polyline_to_rect(smoothed_points, lamp_rect.position.x, lamp_rect.end.x, lamp_rect.position.y, lamp_rect.end.y)
 		if lamp_pts.size() >= 2:
 			_deferred_append(_deferred_lamp_queue, lamp_ck, {"points": lamp_pts, "width": width, "parent": parent})
+
+	# Procedural billboards (trunk/primary only) — FULL unclipped points so spacing
+	# is global arc-length; each candidate is assigned to its own chunk during the walk.
+	if enable_road_billboards and _decoration_layer != null and highway_type in ["trunk", "primary"] and not is_bridge:
+		var bb_full: PackedVector2Array = result.get("full_smoothed_points", smoothed_points)
+		if bb_full.size() >= 2:
+			_deferred_append(_deferred_billboard_road_queue, _get_chunk_key_from_node(parent), {
+				"points": bb_full, "way_id": int(result.get("way_id", 0)),
+				"highway": highway_type, "width": width, "_bb_idx": 1,
+			})
 
 	# Manholes - clip to chunk rect, deferred
 	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
@@ -13700,6 +13774,29 @@ func _process_road_queue() -> void:
 	for bb_ck in bb_done_keys:
 		_deferred_billboard_queue.erase(bb_ck)
 
+	# Process deferred PROCEDURAL road-billboard walking (budgeted, global spacing)
+	_ensure_billboard_pool()
+	if (Time.get_ticks_usec() - queue_start) <= TOTAL_BUDGET_USEC and not _billboard_tex_paths.is_empty():
+		var bbr_done_keys: Array[String] = []
+		for bbr_ck in _get_prioritized_keys(_deferred_billboard_road_queue):
+			if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+				break
+			var bbr_arr: Array = _deferred_billboard_road_queue[bbr_ck]
+			while not bbr_arr.is_empty():
+				if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+					break
+				var bbr_item: Dictionary = bbr_arr[0]
+				var bbr_next: int = _generate_road_billboards_incremental(bbr_item.points, int(bbr_item.way_id), str(bbr_item.highway), float(bbr_item.get("width", 7.0)), int(bbr_item.get("_bb_idx", 1)), queue_start, TOTAL_BUDGET_USEC)
+				if bbr_next >= BILLBOARD_DONE:
+					bbr_arr.pop_front()
+				else:
+					bbr_item["_bb_idx"] = bbr_next
+					break
+			if bbr_arr.is_empty():
+				bbr_done_keys.append(bbr_ck)
+		for bbr_ck in bbr_done_keys:
+			_deferred_billboard_road_queue.erase(bbr_ck)
+
 	# Dispatch roads to worker threads — no time budget needed on main thread!
 	# Limit concurrent tasks to avoid overwhelming thread pool
 	# During initial loading: unlimited dispatch so all roads run in parallel.
@@ -19605,6 +19702,229 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 		next_lamp_dist += lamp_spacing
 
 	return n_pts  # Fully processed
+
+
+# ══ Procedural roadside billboards ══════════════════════════════════════════
+
+static func _is_residential_building_tags(tags: Dictionary) -> bool:
+	return str(tags.get("building", "")) in _BILLBOARD_RESIDENTIAL_TYPES
+
+func _ensure_billboard_pool() -> void:
+	if _billboard_pool_scanned:
+		return
+	_billboard_pool_scanned = true
+	var dir := DirAccess.open(BILLBOARD_TEX_DIR)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var fname := dir.get_next()
+	while fname != "":
+		var low := fname.to_lower()
+		if low.ends_with(".jpg") or low.ends_with(".jpeg") or low.ends_with(".png"):
+			_billboard_tex_paths.append(BILLBOARD_TEX_DIR + fname)
+		fname = dir.get_next()
+	dir.list_dir_end()
+	_billboard_tex_paths.sort()  # deterministic order; selection then keyed by way_id+idx
+	print("OSM: billboard texture pool = %d images" % _billboard_tex_paths.size())
+
+func _billboard_spacing_for(highway: String) -> float:
+	if billboard_debug_dense:
+		return 45.0
+	return BILLBOARD_SPACING_TRUNK if highway == "trunk" else BILLBOARD_SPACING_PRIMARY
+
+# Register one building footprint in the GLOBAL neighbor-aware index (dedup by way_id).
+func _register_building_footprint(bbox: Rect2, residential: bool, way_id: int) -> void:
+	# Guard against pathological/relation bboxes (bad data) — real buildings are well
+	# under a few hundred metres. Without this a huge bbox would loop millions of
+	# cells on the MAIN thread and freeze the game.
+	if not (is_finite(bbox.position.x) and is_finite(bbox.position.y) and is_finite(bbox.size.x) and is_finite(bbox.size.y)):
+		return
+	if bbox.size.x > 600.0 or bbox.size.y > 600.0 or bbox.size.x < 0.0 or bbox.size.y < 0.0:
+		return
+	if way_id != 0:
+		if _building_footprint_way_ids.has(way_id):
+			return
+		_building_footprint_way_ids[way_id] = true
+	var entry := {"bbox": bbox, "residential": residential}
+	var cmin_x := int(floor(bbox.position.x / BILLBOARD_FOOTPRINT_CELL))
+	var cmin_y := int(floor(bbox.position.y / BILLBOARD_FOOTPRINT_CELL))
+	var cmax_x := int(floor(bbox.end.x / BILLBOARD_FOOTPRINT_CELL))
+	var cmax_y := int(floor(bbox.end.y / BILLBOARD_FOOTPRINT_CELL))
+	for cx in range(cmin_x, cmax_x + 1):
+		for cy in range(cmin_y, cmax_y + 1):
+			var ckey := Vector2i(cx, cy)
+			if not _building_footprint_hash.has(ckey):
+				_building_footprint_hash[ckey] = []
+			_building_footprint_hash[ckey].append(entry)
+
+func _rect_point_distance(r: Rect2, p: Vector2) -> float:
+	var dx := maxf(maxf(r.position.x - p.x, p.x - r.end.x), 0.0)
+	var dy := maxf(maxf(r.position.y - p.y, p.y - r.end.y), 0.0)
+	return sqrt(dx * dx + dy * dy)
+
+# Neighbor-aware: the footprint hash is GLOBAL (cells, not per-chunk), so a
+# building parsed by a neighbouring chunk's fetch is seen regardless of which
+# chunk evaluates the candidate → gate outcome is load-order independent.
+func _building_clip_within(point: Vector2, margin: float) -> bool:
+	var cmin_x := int(floor((point.x - margin) / BILLBOARD_FOOTPRINT_CELL))
+	var cmin_y := int(floor((point.y - margin) / BILLBOARD_FOOTPRINT_CELL))
+	var cmax_x := int(floor((point.x + margin) / BILLBOARD_FOOTPRINT_CELL))
+	var cmax_y := int(floor((point.y + margin) / BILLBOARD_FOOTPRINT_CELL))
+	for cx in range(cmin_x, cmax_x + 1):
+		for cy in range(cmin_y, cmax_y + 1):
+			var arr: Array = _building_footprint_hash.get(Vector2i(cx, cy), [])
+			for e in arr:
+				if _rect_point_distance(e.bbox, point) <= margin:
+					return true
+	return false
+
+func _residential_within(point: Vector2, radius: float) -> bool:
+	var cmin_x := int(floor((point.x - radius) / BILLBOARD_FOOTPRINT_CELL))
+	var cmin_y := int(floor((point.y - radius) / BILLBOARD_FOOTPRINT_CELL))
+	var cmax_x := int(floor((point.x + radius) / BILLBOARD_FOOTPRINT_CELL))
+	var cmax_y := int(floor((point.y + radius) / BILLBOARD_FOOTPRINT_CELL))
+	for cx in range(cmin_x, cmax_x + 1):
+		for cy in range(cmin_y, cmax_y + 1):
+			var arr: Array = _building_footprint_hash.get(Vector2i(cx, cy), [])
+			for e in arr:
+				if e.residential and _rect_point_distance(e.bbox, point) <= radius:
+					return true
+	return false
+
+# Gates for a candidate at world-XZ `pos` whose chunk `ck` is loaded (cheap → expensive).
+# `outward` = unit direction from the road toward the board (used to detect medians).
+func _billboard_candidate_ok(pos: Vector2, ck: String, outward: Vector2) -> bool:
+	if _is_point_near_road(pos, 0.5, ck):           # not on / crossing a road
+		return false
+	# Not in a median / between two roads: reject if another road sits just behind it.
+	var behind := pos + outward * BILLBOARD_MEDIAN_CHECK
+	if _is_point_near_road(behind, 1.0, _bb_chunk_key_at(behind)):
+		return false
+	if _is_point_in_intersection_shape(pos, false, ck) >= 0:  # not in a junction
+		return false
+	if _is_point_on_bridge_deck(pos):               # never on a bridge deck
+		return false
+	if _is_point_in_water(pos, ck):
+		return false
+	if _is_point_in_any_parking(pos, ck):
+		return false
+	if _billboard_too_close(pos):                   # ≥ 100 m between any two boards (always)
+		return false
+	if billboard_debug_dense:
+		return true  # relaxed: skip building gates only (validation)
+	if _building_clip_within(pos, BILLBOARD_CLIP_MARGIN):   # never clip/hug ANY facade
+		return false
+	if _residential_within(pos, BILLBOARD_RESIDENTIAL_RADIUS):  # keep off residential
+		return false
+	return true
+
+# ≥ BILLBOARD_MIN_SPACING between any two placed boards (across all roads/chunks).
+func _billboard_too_close(pos: Vector2) -> bool:
+	var cx := int(floor(pos.x / BILLBOARD_MIN_SPACING))
+	var cy := int(floor(pos.y / BILLBOARD_MIN_SPACING))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var arr: Array = _billboard_pos_hash.get(Vector2i(cx + dx, cy + dy), [])
+			for q in arr:
+				if pos.distance_to(q) < BILLBOARD_MIN_SPACING:
+					return true
+	return false
+
+func _billboard_register_pos(pos: Vector2, ck: String) -> void:
+	var cell := Vector2i(int(floor(pos.x / BILLBOARD_MIN_SPACING)), int(floor(pos.y / BILLBOARD_MIN_SPACING)))
+	if not _billboard_pos_hash.has(cell):
+		_billboard_pos_hash[cell] = []
+	_billboard_pos_hash[cell].append(pos)
+	if not _billboard_pos_by_chunk.has(ck):
+		_billboard_pos_by_chunk[ck] = []
+	_billboard_pos_by_chunk[ck].append(pos)
+
+func _bb_chunk_key_at(pos: Vector2) -> String:
+	return "%d,%d" % [int(floor(pos.x / chunk_size)), int(floor(pos.y / chunk_size))]
+
+# Walk the FULL way by global cumulative arc-length; drop one board every `spacing` m
+# on the open verge. Returns the next candidate idx to resume from, or BILLBOARD_DONE.
+func _generate_road_billboards_incremental(points: PackedVector2Array, way_id: int, highway: String, width: float, start_idx: int, budget_start: int, budget_usec: int) -> int:
+	if not enable_road_billboards or points.size() < 2 or _billboard_tex_paths.is_empty():
+		return BILLBOARD_DONE
+	var spacing := _billboard_spacing_for(highway)
+	var n := points.size()
+	var cumulative := PackedFloat64Array()
+	cumulative.resize(n)
+	cumulative[0] = 0.0
+	for i in range(1, n):
+		cumulative[i] = cumulative[i - 1] + points[i - 1].distance_to(points[i])
+	var total: float = cumulative[n - 1]
+	var idx := maxi(start_idx, 1)
+	var seg := 0
+	while true:
+		var d := float(idx) * spacing
+		if d >= total:
+			return BILLBOARD_DONE
+		if (Time.get_ticks_usec() - budget_start) > budget_usec:
+			return idx
+		var key := "bb_proc_%d_%d" % [way_id, idx]
+		if _created_billboard_keys.has(key):
+			idx += 1
+			continue
+		while seg < n - 2 and cumulative[seg + 1] < d:
+			seg += 1
+		var seg_len: float = cumulative[seg + 1] - cumulative[seg]
+		if seg_len < 0.001:
+			idx += 1
+			continue
+		var t: float = (d - cumulative[seg]) / seg_len
+		var p1: Vector2 = points[seg]
+		var p2: Vector2 = points[seg + 1]
+		var road_pos: Vector2 = p1.lerp(p2, t)
+		var dir: Vector2 = (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)
+		var offset: float = width / 2.0 + BILLBOARD_VERGE_SETBACK
+		_try_place_road_billboard(road_pos, dir, perp, offset, way_id, idx, key)
+		idx += 1
+	return BILLBOARD_DONE
+
+# Deterministic side choice (independent of chunk load order): preferred side from
+# the way/idx hash. Defer if the preferred side's chunk isn't loaded yet (so the
+# gate, which needs that chunk's data, is evaluated region-complete) — never place
+# the other side just because it loaded first.
+func _try_place_road_billboard(road_pos: Vector2, dir: Vector2, perp: Vector2, offset: float, way_id: int, idx: int, key: String) -> void:
+	var hash_val := (way_id * 2654435761 + idx * 40503) & 0x7FFFFFFF
+	var prefer_left: bool = (hash_val & 1) == 0
+	var perps: Array = [perp, -perp] if prefer_left else [-perp, perp]
+	var signs: Array = [1.0, -1.0] if prefer_left else [-1.0, 1.0]
+	# Try the preferred verge side first, then the other; place on the first side whose
+	# chunk is loaded AND passes the gates (so a board still appears even when the
+	# preferred side is blocked or its chunk isn't loaded yet — an unloaded side simply
+	# retries on the next way re-walk). No dedup mark unless actually placed.
+	for si in range(2):
+		var op: Vector2 = perps[si]
+		var pos: Vector2 = road_pos + op * offset
+		var ck := _bb_chunk_key_at(pos)
+		if not _loaded_chunks.has(ck):
+			continue
+		if _billboard_candidate_ok(pos, ck, op):
+			_place_road_billboard(pos, dir, float(signs[si]), ck, hash_val, key)
+			return
+
+func _place_road_billboard(pos: Vector2, dir: Vector2, side_sign: float, ck: String, hash_val: int, key: String) -> void:
+	# Orientation: board plane ⊥ road; front-face normal (+Z) aligned with road dir.
+	var base_yaw := atan2(dir.x, dir.y)
+	var yaw := base_yaw + deg_to_rad(BILLBOARD_YAW_OFFSET_DEG) * side_sign
+	var elev := get_surface_y(pos.x, pos.y)
+	var pn := _billboard_tex_paths.size()
+	var tex_f: String = _billboard_tex_paths[hash_val % pn]
+	var tex_b: String = _billboard_tex_paths[(hash_val / 7 + 1) % pn]
+	var bb: Node3D = _decoration_layer.create_road_billboard_mesh(pos.x, pos.y, elev, yaw, tex_f, tex_b)
+	var lamp := bb.find_child("LampLight", true, false)
+	if lamp and lamp is Node3D:
+		(lamp as Node3D).visible = _is_night_mode
+	_budgeted_add_child(_loaded_chunks[ck], bb)
+	_created_billboard_keys[key] = true
+	if not _billboard_keys_by_chunk.has(ck):
+		_billboard_keys_by_chunk[ck] = []
+	_billboard_keys_by_chunk[ck].append(key)
+	_billboard_register_pos(pos, ck)
 
 
 func _generate_manholes_along_road(nodes: Array, road_width: float, parent: Node3D) -> void:
