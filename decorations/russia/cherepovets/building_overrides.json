@@ -792,6 +792,8 @@
       "visibility_range": 400.0
     }
   ],
+  "roadside_props": [
+  ],
   "landuse_overrides": [
     {
       "osm_way_id": 694466407,

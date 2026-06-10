@@ -374,6 +374,25 @@ var _lamp_batch_data: Dictionary = {}  # key: chunk_key -> batch data
 #   light_data: Array[Dictionary]  # {position: Vector3, broken: bool}
 #   parent: Node3D
 var _lamp_batches_to_finalize: Array[String] = []  # Chunk keys ready for finalization
+# TEMP streaming-lamp diagnosis (remove after fix)
+var lamp_debug := false   # debug logging for lamp/wire streaming (LAMP-FIN/UNLOAD/WIRE-ENQ/LAMP-DBG) — off in shipped builds
+var _lamp_dbg_skip_road := 0
+var _lamp_dbg_skip_budget := 0
+var _lamp_dbg_walk_skip := 0
+var _lamp_dbg_drop_unloaded := 0
+var _lamp_dbg_frame := 0
+var _wire_dbg_walked := 0
+var _wire_dbg_placed := 0
+var _wire_dbg_skip_invalid := 0
+var _wire_dbg_sect_skip := 0
+var _wire_dbg_ran_frames := 0
+var _wire_dbg_spans := 0
+var _wire_dbg_already := 0
+var _wire_dbg_notwired := 0
+var _wire_dbg_nullanchor := 0
+var _wire_dbg_spancap := 0
+var _wire_dbg_intersection := 0
+var _wire_dbg_building := 0
 
 # Street lamp model mesh (loaded from GLB, decimated)
 var _lamp_model_mesh: ArrayMesh
@@ -382,6 +401,25 @@ var _lamp_debug_visible := false  # Видимость debug шариков и �
 
 # Keep for night mode updates and chunk association
 var _lamp_lights_by_chunk: Dictionary = {}  # chunk_key -> Array[OmniLight3D]
+# Lamp lights live under THIS global node, NOT the chunk node — the behind-camera chunk
+# cull sets chunk_node.visible=false, which would hide the (scene-tree) SpotLights while
+# the RS pole instances stay. A light still illuminates the scene from behind the camera,
+# so it must not be culled with the chunk mesh. Freed per-chunk in the unload cleanup.
+var _lamp_lights_root: Node3D = null
+# Cap simultaneously-active lamp lights to the nearest N — the Forward+ clustered
+# renderer drops lights when too many pack into a screen region (now that streets are
+# densely lit), causing the lamps near you to flicker off while driving. Keeping only
+# the nearest N lit avoids the overflow (distant lamps are dim/far anyway).
+var LAMP_MAX_ACTIVE_LIGHTS := 48   # runtime-tunable (was const) so the cluster cap can be tuned live
+var lamp_cull_enabled := true       # debug: set false to let the cull stop overwriting manual visibility
+var _lamp_cull_frame := 0
+# Guaranteed per-frame time slice (µs) for the overhead-wire drain during gameplay.
+# Wires sit late in _process_road_queue's section order, so the shared 4 ms frame
+# budget was almost always spent before they ran — starving them on streamed chunks
+# (walked/placed froze after initial load). This slice is measured from when the wire
+# section is reached, so wires always make progress regardless of earlier sections.
+# Costs nothing when the wire queue is empty.
+const WIRE_SLICE_USEC := 2500
 
 # Billboard batching - created from DecorationLayer
 var _billboard_batches_to_finalize: Array[String] = []  # Chunk keys ready for billboard finalization
@@ -564,10 +602,11 @@ const WIRE_RUNGAP := {
 	"trunk": [2, 4, 5, 9], "primary": [3, 5, 4, 7],
 	"secondary": [4, 7, 3, 5], "tertiary": [4, 8, 2, 4],
 }
-const SPARK_JOINT_DENOM := 20           # ~1-in-20 wired joints is ever spark-eligible
-const SPARK_POOL_SIZE := 5              # hard cap on concurrent spark emitters
-const SPARK_INTERVAL := 4.0             # seconds between burst attempts (global)
-const SPARK_VIEW_DIST := 90.0           # only spark within this of the camera
+const SPARK_JOINT_DENOM := 20           # (legacy) old wire-joint eligibility — broken lamps drive sparks now
+const SPARK_POOL_SIZE := 9              # hard cap on concurrent spark emitters
+const SPARK_INTERVAL := 1.4             # seconds between burst attempts (global)
+const SPARK_BURSTS_PER_TICK := 3        # fire several nearby broken lamps each tick (more activity)
+const SPARK_VIEW_DIST := 95.0           # only spark within this of the camera
 var enable_wire_twin := true            # WIRE_TWIN_ENABLE — kill twin cables if too busy
 var wire_debug_dense := false           # bypass run/gap: every valid consecutive pair
 var wire_debug_show_joints := false     # drop a marker at each spark-eligible joint
@@ -588,6 +627,41 @@ var _smoke_pool: Array = []                       # Array[GPUParticles3D] (paire
 var _spark_pool_root: Node3D = null
 var _spark_elapsed := 0.0
 var _spark_last_bucket := -1
+
+# ── Roadside props (kiosks + transformer boxes) ─────────────────────────────
+# See docs/ROADSIDE_PROPS_PLAN.md. Config-driven; mirrors the billboard road-walk.
+# Models normalized + grounded from REAL vertices (center XZ + base-Y baked at load
+# in _init_prop_defs) so off-origin models (e.g. the box) centre on the placement
+# point and sit flush — same lesson as the lamp pole offset.
+@export var enable_roadside_props := true
+const PROP_DONE := 1000000000           # incremental sentinel = road fully walked
+const PROP_MIN_SPACING := 25.0          # global min distance between ANY two props
+const PROP_FURNITURE_CLEAR := 7.0       # min distance from lamps/billboards/bus-stops/signs
+const PROP_LIFT := 0.05                 # lift above the surface so it doesn't z-fight the sidewalk
+var roadside_props_debug_dense := false # bypass siting+spacing gates (physical gates still apply)
+var roadside_props_debug_reasons := false
+# Per-type config. Model prep fields (base_y/cx/cz/foot/scale) filled by _init_prop_defs().
+var _prop_defs: Dictionary = {
+	"kiosk": {
+		"paths": ["res://models/roadside_props/newspaper-kiosk-1.glb", "res://models/roadside_props/newspaper-kiosk-2.glb"],
+		"target_h": 2.2, "roads": ["primary", "secondary", "tertiary"],
+		"spacing": 40.0, "setback": 2.5, "faces_road": true, "night_glow": true,
+		"build_margin": 1.0, "front_yaw_deg": 0.0,
+	},
+	"ebox": {
+		"paths": ["res://models/roadside_props/dirty_electrical_box.glb"],
+		"target_h": 1.8, "roads": ["secondary", "tertiary", "residential", "unclassified"],
+		"spacing": 240.0, "setback": 1.5, "faces_road": false, "night_glow": false,
+		"build_margin": 0.4, "front_yaw_deg": 0.0,
+	},
+}
+var _prop_defs_ready := false
+var _prop_scene_cache: Dictionary = {}   # path → PackedScene
+var _deferred_prop_road_queue: Dictionary = {}  # chunk_key → Array[{points, way_id, highway, width, type, _idx}]
+var _created_prop_keys: Dictionary = {}          # global semantic key → true
+var _prop_keys_by_chunk: Dictionary = {}         # chunk_key → Array[String]
+var _prop_pos_hash: Dictionary = {}              # PROP_MIN_SPACING cell → Array[Vector2]
+var _prop_pos_by_chunk: Dictionary = {}          # chunk_key → Array[Vector2]
 
 var _finalize_phase: int = 0  # Round-robin: 0=roads, 1=curbs, 2=lamps, 3=buildings, 4=windows, 5=trees, 6=billboards
 var _chunk_activation_pending: Dictionary = {}  # chunk_key -> state (-1=waiting, >=0=RS activation index)
@@ -1804,6 +1878,11 @@ func _process(delta: float) -> void:
 	# Лампы — отдельно
 	t0 = Time.get_ticks_usec()
 	_process_deferred_lamp_lights()
+	# Cap simultaneously-visible lamp lights to the nearest N so the Forward+ clustered
+	# renderer doesn't overflow in dense lamp areas (Моченкова) — that overflow made the
+	# lamps NEAREST the car stop being shaded ("dark right where I am", poles intact).
+	# Internally throttled (every 6 frames) and night-only; near-zero cost otherwise.
+	_cull_lamp_lights()
 	_record_perf("lamp_lights", Time.get_ticks_usec() - t0)
 
 	# Применяем готовые результаты клиппинга террейна из worker threads
@@ -2035,6 +2114,7 @@ func start_loading() -> void:
 	_building_footprint_hash.clear()
 	_building_footprint_way_ids.clear()
 	_reset_wire_state()
+	_reset_prop_state()
 	_deferred_footway_queue.clear()
 	_deferred_building_collisions.clear()
 	_deferred_tree_collisions.clear()
@@ -2293,7 +2373,7 @@ func _check_initial_load_complete() -> void:
 						light.position = light_data.position
 						light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
 						light.rotation_degrees.x = -75
-						light.spot_range = 15.0
+						light.spot_range = 12.0
 						light.spot_angle = 70.0
 						light.spot_attenuation = 1.0
 						light.light_energy = 2.6
@@ -2309,7 +2389,8 @@ func _check_initial_load_complete() -> void:
 						light.set_meta("broken", light_data.broken)
 						light.add_child(_create_lamp_bulb())
 						light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
-						container.add_child(light)
+						_ensure_lamp_lights_root()
+						_lamp_lights_root.add_child(light)  # global node — not culled with the chunk
 						if _lamp_lights_by_chunk.has(chunk_key):
 							_lamp_lights_by_chunk[chunk_key].append(light)
 						lamp_light_count += 1
@@ -2961,6 +3042,10 @@ func _unload_chunk(chunk_key: String) -> void:
 		_chunk_culling_cooldown.erase(chunk_key)
 		# NEW: Clean up lamp batch data if not yet finalized
 		if _lamp_batch_data.has(chunk_key):
+			if lamp_debug:
+				var _ln: int = (_lamp_batch_data[chunk_key].get("transforms", []) as Array).size()
+				if _ln > 0:
+					print("LAMP-DBG LOST chunk=%s transforms=%d (UNFINALIZED at unload)" % [chunk_key, _ln])
 			_lamp_batch_data.erase(chunk_key)
 		var lamp_finalize_idx := _lamp_batches_to_finalize.find(chunk_key)
 		if lamp_finalize_idx >= 0:
@@ -2968,6 +3053,8 @@ func _unload_chunk(chunk_key: String) -> void:
 
 		# NEW: Explicitly free lamp lights to prevent memory leak
 		if _lamp_lights_by_chunk.has(chunk_key):
+			if lamp_debug and _lamp_lights_by_chunk[chunk_key].size() > 0:
+				print("LAMP-UNLOAD chunk=%s freed %d lights" % [chunk_key, _lamp_lights_by_chunk[chunk_key].size()])
 			for light in _lamp_lights_by_chunk[chunk_key]:
 				if is_instance_valid(light):
 					light.queue_free()
@@ -3122,6 +3209,26 @@ func _unload_chunk(chunk_key: String) -> void:
 				_spark_joint_seen.erase(_jk)
 			_spark_joint_keys_by_chunk.erase(chunk_key)
 		_spark_joints_by_chunk.erase(chunk_key)
+		# Roadside props: free dedup keys + position registry (prop nodes free with chunk).
+		_deferred_prop_road_queue.erase(chunk_key)
+		if _prop_keys_by_chunk.has(chunk_key):
+			for _pk in _prop_keys_by_chunk[chunk_key]:
+				_created_prop_keys.erase(_pk)
+			_prop_keys_by_chunk.erase(chunk_key)
+		if _prop_pos_by_chunk.has(chunk_key):
+			for _pp in _prop_pos_by_chunk[chunk_key]:
+				var _pcell := Vector2i(int(floor(_pp.x / PROP_MIN_SPACING)), int(floor(_pp.y / PROP_MIN_SPACING)))
+				if _prop_pos_hash.has(_pcell):
+					(_prop_pos_hash[_pcell] as Array).erase(_pp)
+					if (_prop_pos_hash[_pcell] as Array).is_empty():
+						_prop_pos_hash.erase(_pcell)
+			_prop_pos_by_chunk.erase(chunk_key)
+		if lamp_debug and _deferred_lamp_queue.has(chunk_key):
+			var _lq: int = 0
+			for _it in (_deferred_lamp_queue[chunk_key] as Array):
+				_lq += int((_it.get("points", PackedVector2Array()) as PackedVector2Array).size())
+			if not (_deferred_lamp_queue[chunk_key] as Array).is_empty():
+				print("LAMP-DBG QUEUE-DROP chunk=%s jobs=%d (walker never ran before unload)" % [chunk_key, (_deferred_lamp_queue[chunk_key] as Array).size()])
 		_deferred_lamp_queue.erase(chunk_key)
 		_deferred_manhole_queue.erase(chunk_key)
 		_deferred_add_child_queue = _deferred_add_child_queue.filter(
@@ -3328,6 +3435,7 @@ func reset_terrain() -> void:
 	_building_footprint_hash.clear()
 	_building_footprint_way_ids.clear()
 	_reset_wire_state()
+	_reset_prop_state()
 	_chunk_activation_pending.clear()
 	_chunk_culling_cooldown.clear()
 
@@ -3335,6 +3443,9 @@ func reset_terrain() -> void:
 	_lamp_batch_data.clear()
 	_lamp_batches_to_finalize.clear()
 	_lamp_lights_by_chunk.clear()
+	if is_instance_valid(_lamp_lights_root):  # lights are global now — free them on reset
+		_lamp_lights_root.queue_free()
+		_lamp_lights_root = null
 	_lamp_batch_lights.clear()
 	_tree_batch_data.clear()
 	_tree_batches_to_finalize.clear()
@@ -4496,6 +4607,7 @@ func _process_phase3_queue() -> bool:
 	if phase == "finalize":
 		if chunk_key != "":
 			_place_custom_models_for_chunk(chunk_key, target)
+			_place_manual_props_for_chunk(chunk_key, target)
 			_generate_trees_for_chunk(chunk_key, target)
 		var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
 		if not _pending_batch_chunks.has(batch_chunk_key):
@@ -5404,6 +5516,8 @@ func _apply_road_result(result: Dictionary) -> void:
 			var wire_rect := _get_chunk_rect_from_key(wire_ck)
 			var wire_pts := _clip_polyline_to_rect(smoothed_points, wire_rect.position.x, wire_rect.end.x, wire_rect.position.y, wire_rect.end.y)
 			if wire_pts.size() >= 2:
+				if lamp_debug and not _initial_loading:
+					print("WIRE-ENQ chunk='%s' loadedNow=%s way=%d hw=%s" % [wire_ck, str(_loaded_chunks.has(wire_ck)), int(result.get("way_id", 0)), highway_type])
 				_deferred_append(_deferred_wire_road_queue, wire_ck, {
 					"points": wire_pts, "way_id": int(result.get("way_id", 0)),
 					"highway": highway_type, "width": width, "_wire_idx": 1,
@@ -5418,6 +5532,21 @@ func _apply_road_result(result: Dictionary) -> void:
 				"points": bb_full, "way_id": int(result.get("way_id", 0)),
 				"highway": highway_type, "width": width, "_bb_idx": 1,
 			})
+
+	# Roadside props (kiosks/boxes) — FULL unclipped points (global arc-length); one
+	# job per prop type this road qualifies for. Excludes bridges/tunnels.
+	if enable_roadside_props and not is_bridge:
+		var pr_tunnel := str(result.get("tags", {}).get("tunnel", ""))
+		if pr_tunnel == "" or pr_tunnel == "no":
+			var pr_full: PackedVector2Array = result.get("full_smoothed_points", smoothed_points)
+			if pr_full.size() >= 2:
+				var pr_ck := _get_chunk_key_from_node(parent)
+				for pr_type in _prop_defs:
+					if highway_type in _prop_defs[pr_type]["roads"]:
+						_deferred_append(_deferred_prop_road_queue, pr_ck, {
+							"points": pr_full, "way_id": int(result.get("way_id", 0)),
+							"highway": highway_type, "width": width, "type": pr_type, "_idx": 1,
+						})
 
 	# Manholes - clip to chunk rect, deferred
 	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
@@ -9505,7 +9634,7 @@ func _process_deferred_lamp_lights() -> void:
 				light.position = light_data.position
 				light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
 				light.rotation_degrees.x = -75
-				light.spot_range = 15.0
+				light.spot_range = 12.0
 				light.spot_angle = 70.0
 				light.spot_attenuation = 1.0
 				light.light_energy = 2.6
@@ -9521,7 +9650,8 @@ func _process_deferred_lamp_lights() -> void:
 				light.set_meta("broken", light_data.broken)
 				light.add_child(_create_lamp_bulb())
 				light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
-				container.add_child(light)
+				_ensure_lamp_lights_root()
+				_lamp_lights_root.add_child(light)  # global node — not culled with the chunk
 				if _lamp_lights_by_chunk.has(chunk_key):
 					_lamp_lights_by_chunk[chunk_key].append(light)
 			ll_arr.pop_front()
@@ -13755,6 +13885,8 @@ func _process_road_queue() -> void:
 		_deferred_footway_queue.erase(fw_ck)
 
 	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+		if lamp_debug and not _deferred_lamp_queue.is_empty():
+			_lamp_dbg_walk_skip += 1
 		return
 
 	# Process deferred lamp/manhole generation with time budget
@@ -13884,23 +14016,43 @@ func _process_road_queue() -> void:
 		for bbr_ck in bbr_done_keys:
 			_deferred_billboard_road_queue.erase(bbr_ck)
 
-	# Process deferred OVERHEAD-WIRE walking (budgeted). Wires share the lamp clip,
-	# so anchors line up with the placed lamps. One merged mesh per owning chunk.
-	if enable_overhead_wires and (Time.get_ticks_usec() - queue_start) <= TOTAL_BUDGET_USEC:
+	# Process deferred OVERHEAD-WIRE walking. Wires share the lamp clip so anchors line
+	# up with the placed lamps. They sit late in the drain, so during gameplay the shared
+	# 4 ms budget was usually spent before reaching here — which starved them entirely on
+	# streamed chunks (walked/placed froze after initial load). Give wires a GUARANTEED
+	# slice measured from NOW, independent of what earlier sections consumed, so they
+	# always make progress. Costs nothing when the queue is empty.
+	if enable_overhead_wires and not _deferred_wire_road_queue.is_empty():
+		var wire_deadline: int = Time.get_ticks_usec() + (500000 if _initial_loading else WIRE_SLICE_USEC)
+		var wire_budget_usec: int = wire_deadline - queue_start  # so the incremental walk's own (now-queue_start)>budget check lines up with wire_deadline
+		if lamp_debug:
+			_wire_dbg_ran_frames += 1
 		var wire_dirty: Dictionary = {}
 		var wr_done_keys: Array[String] = []
 		for wr_ck in _get_prioritized_keys(_deferred_wire_road_queue):
-			if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+			if Time.get_ticks_usec() > wire_deadline:
 				break
-			var wr_arr: Array = _deferred_wire_road_queue[wr_ck]
+			# A road result can be applied (and its wire job enqueued) a few frames BEFORE the
+			# owning chunk is registered in _loaded_chunks (worker-thread race). The old code
+			# CLEARED jobs for any not-loaded chunk — which permanently dropped them in that
+			# window, so streamed chunks never got wires. Instead SKIP (keep the jobs) and wait
+			# for the chunk to load; _unload_chunk erases the queue entry for chunks truly gone.
 			if not _loaded_chunks.has(wr_ck):
-				wr_arr.clear()  # owning chunk gone — drop all its wire jobs
+				continue
+			var wr_arr: Array = _deferred_wire_road_queue[wr_ck]
 			while not wr_arr.is_empty():
-				if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+				if Time.get_ticks_usec() > wire_deadline:
 					break
 				var wr_item: Dictionary = wr_arr[0]
-				var wr_next: int = _generate_road_wires_incremental(wr_item.points, int(wr_item.way_id), str(wr_item.highway), float(wr_item.get("width", 7.0)), int(wr_item.get("_wire_idx", 1)), wr_ck, queue_start, TOTAL_BUDGET_USEC, wire_dirty)
+				var wr_next: int = _generate_road_wires_incremental(wr_item.points, int(wr_item.way_id), str(wr_item.highway), float(wr_item.get("width", 7.0)), int(wr_item.get("_wire_idx", 1)), wr_ck, queue_start, wire_budget_usec, wire_dirty)
 				if wr_next >= WIRE_DONE:
+					# Re-walk a few frames (dedup-safe) so wires catch up to lamps that
+					# stream in over the next frames — else streamed chunks lose wires.
+					var wr_rt: int = int(wr_item.get("_retries", 0))
+					if wr_rt < 5 and _loaded_chunks.has(wr_ck):
+						wr_item["_retries"] = wr_rt + 1
+						wr_item["_wire_idx"] = 1
+						break
 					wr_arr.pop_front()
 				else:
 					wr_item["_wire_idx"] = wr_next
@@ -13912,6 +14064,28 @@ func _process_road_queue() -> void:
 		# Rebuild the single merged wire mesh for chunks that gained wires this frame.
 		for dck in wire_dirty:
 			_commit_wire_mesh(dck)
+
+	# Process deferred ROADSIDE-PROP walking (budgeted), mirrors the billboard walk.
+	if enable_roadside_props and (Time.get_ticks_usec() - queue_start) <= TOTAL_BUDGET_USEC:
+		var pr_done_keys: Array[String] = []
+		for pr_ck in _get_prioritized_keys(_deferred_prop_road_queue):
+			if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+				break
+			var pr_arr: Array = _deferred_prop_road_queue[pr_ck]
+			while not pr_arr.is_empty():
+				if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+					break
+				var pr_item: Dictionary = pr_arr[0]
+				var pr_next: int = _generate_road_props_incremental(str(pr_item.type), pr_item.points, int(pr_item.way_id), str(pr_item.highway), float(pr_item.get("width", 7.0)), int(pr_item.get("_idx", 1)), queue_start, TOTAL_BUDGET_USEC)
+				if pr_next >= PROP_DONE:
+					pr_arr.pop_front()
+				else:
+					pr_item["_idx"] = pr_next
+					break
+			if pr_arr.is_empty():
+				pr_done_keys.append(pr_ck)
+		for pr_ck in pr_done_keys:
+			_deferred_prop_road_queue.erase(pr_ck)
 
 	# Dispatch roads to worker threads — no time budget needed on main thread!
 	# Limit concurrent tasks to avoid overwhelming thread pool
@@ -13970,11 +14144,31 @@ func _process_road_queue() -> void:
 	var has_road_results := not _road_results.is_empty()
 	var pending_tasks := _pending_road_tasks
 	_road_mutex.unlock()
+	if lamp_debug:
+		_lamp_dbg_frame += 1
+		if _lamp_dbg_frame % 90 == 0:
+			# count lamp lights: total vs currently-rendered (visible up the whole parent chain)
+			var ll_total := 0
+			var ll_own := 0     # own .visible flag true
+			var ll_tree := 0    # actually rendered (whole parent chain visible)
+			for lck in _lamp_lights_by_chunk:
+				for L in _lamp_lights_by_chunk[lck]:
+					if is_instance_valid(L):
+						ll_total += 1
+						if (L as Node3D).visible:
+							ll_own += 1
+						if (L as Node3D).is_visible_in_tree():
+							ll_tree += 1
+			print("LAMP-DBG: lampLights total=%d rendered=%d activeCap=%d | WIRES keys=%d walked=%d spans=%d placed=%d ranFrames=%d Q=%d | reject: already=%d notwired=%d nullanchor=%d invalid=%d spancap=%d isect=%d bldg=%d" % [ll_total, ll_tree, LAMP_MAX_ACTIVE_LIGHTS, _created_wire_keys.size(), _wire_dbg_walked, _wire_dbg_spans, _wire_dbg_placed, _wire_dbg_ran_frames, _deferred_total_size(_deferred_wire_road_queue), _wire_dbg_already, _wire_dbg_notwired, _wire_dbg_nullanchor, _wire_dbg_skip_invalid, _wire_dbg_spancap, _wire_dbg_intersection, _wire_dbg_building])
 	if has_road_results or pending_tasks > 0:
+		if lamp_debug and not _lamp_batches_to_finalize.is_empty():
+			_lamp_dbg_skip_road += 1
 		return  # Still computing or applying road geometry
 
 	# Budget gate: skip finalization if deferred work already consumed most budget
 	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+		if lamp_debug and not _lamp_batches_to_finalize.is_empty():
+			_lamp_dbg_skip_budget += 1
 		return
 
 	# Round-robin finalization. Normally one phase per frame to avoid scene-tree stutter,
@@ -17377,6 +17571,13 @@ func _create_lamp_collision(xform: Transform3D) -> StaticBody3D:
 	body.add_child(shape)
 	return body
 
+## Deterministic ~1-in-20 "broken" street lamp, keyed by world position so it's stable
+## across chunk reloads. Broken lamps don't glow AND become spark/smoke emitters.
+const LAMP_BROKEN_DENOM := 19
+func _lamp_is_broken(lamp_pos: Vector3) -> bool:
+	var h := absi(int(round(lamp_pos.x)) * 73856093 + int(round(lamp_pos.z)) * 19349663 + 83492791)
+	return (h % LAMP_BROKEN_DENOM) == 0
+
 ## Add lamp to batch for chunk with pre-calculated transforms
 func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3, parent: Node3D) -> void:
 	if not enable_street_lamps:
@@ -17407,7 +17608,9 @@ func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3,
 
 	# Light position: top of model, in world space
 	var light_world_pos := lamp_pos + lamp_basis * _lamp_light_offset
-	var is_broken := randf() < 0.05
+	# Broken lamps (~every 20th) are deterministic by world position — so the SAME lamps are
+	# always the dark/sparking ones (stable across chunk reloads) instead of re-rolling.
+	var is_broken := _lamp_is_broken(lamp_pos)
 	_lamp_batch_data[chunk_key]["light_data"].append({
 		"position": light_world_pos,
 		"broken": is_broken,
@@ -17435,6 +17638,8 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 		return
 
 	var lamp_count: int = batch.transforms.size()
+	if lamp_debug and lamp_count > 0:
+		print("LAMP-DBG FINALIZED chunk=%s count=%d" % [chunk_key, lamp_count])
 	if lamp_count == 0:
 		_lamp_batch_data.erase(chunk_key)
 		return
@@ -17469,12 +17674,16 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 	# Add entire subtree to scene tree in one budgeted call
 	_budgeted_add_child(parent, lamp_container)
 
-	# Free any existing lights for this chunk (safety: prevents duplicates if finalized twice)
-	if _lamp_lights_by_chunk.has(chunk_key):
-		for old_light in _lamp_lights_by_chunk[chunk_key]:
-			if is_instance_valid(old_light):
-				old_light.queue_free()
-	_lamp_lights_by_chunk[chunk_key] = []
+	# Finalize is ADDITIVE. While streaming, a chunk's lamps arrive across several frames
+	# (multiple roads applied over time), so this runs more than once per chunk — each call
+	# carries ONLY the lamps batched since the last finalize (batch_data is erased at the
+	# end). The old code FREED the chunk's existing lights here and rebuilt from the partial
+	# batch, which destroyed the lamps made by the earlier finalize while leaving their pole
+	# MultiMesh behind → "poles but no light" on the streets you drive onto. So we keep the
+	# existing lights and append the new batch's lights below (poles accumulate the same way:
+	# this finalize adds only its batch's pole container, never touching earlier ones).
+	if not _lamp_lights_by_chunk.has(chunk_key):
+		_lamp_lights_by_chunk[chunk_key] = []
 
 	var is_night: bool = false
 	if _night_mode_manager and is_instance_valid(_night_mode_manager):
@@ -17487,24 +17696,85 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 		else:
 			is_night = _is_night_mode
 
-	# Lights — отложенное создание через очередь
-	if batch.light_data.size() > 0:
-		_deferred_append(_deferred_lamp_lights, chunk_key, {
-			"container": lights_container,
-			"lights": batch.light_data,
-			"idx": 0,
-			"chunk_key": chunk_key,
-			"is_night": is_night
-		})
+	# Lights — created INLINE with the poles (not deferred): the 2 ms/frame deferred queue
+	# was starved while driving and chunks dropped their queued lights before creation,
+	# leaving most streamed lamps dark. Inline keeps lights in lock-step with the poles.
+	for ld in batch.light_data:
+		_spawn_lamp_light(ld, chunk_key)
 
 	if _draw_call_logging_enabled:
 		_draw_call_stats["lamps"] += 1  # Single MultiMesh per chunk
 
-	print("OSM: Finalized lamp batch for chunk %s: %d lamps, 1 draw call" % [chunk_key, lamp_count])
+	if lamp_debug:
+		print("LAMP-FIN chunk=%s poles=%d lights=%d (light_data=%d) night=%s initLoad=%s" % [chunk_key, lamp_count, _lamp_lights_by_chunk[chunk_key].size(), batch.light_data.size(), str(_is_night_mode), str(_initial_loading)])
 
 	_lamp_batch_data.erase(chunk_key)
 
 ## Update lamp globe colors and light visibility for night mode
+func _ensure_lamp_lights_root() -> void:
+	if _lamp_lights_root == null or not is_instance_valid(_lamp_lights_root):
+		_lamp_lights_root = Node3D.new()
+		_lamp_lights_root.name = "LampLightsRoot"
+		add_child(_lamp_lights_root)
+
+## Create one lamp SpotLight immediately (parented to the global, non-culled root) and
+## register it under its chunk. Used inline by finalization so lights appear WITH the
+## poles instead of via the 2 ms/frame deferred queue that streaming starves+drops.
+func _spawn_lamp_light(light_data: Dictionary, chunk_key: String) -> void:
+	var light := SpotLight3D.new()
+	light.position = light_data.position
+	light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
+	light.rotation_degrees.x = -75
+	light.spot_range = 12.0
+	light.spot_angle = 70.0
+	light.spot_attenuation = 1.0
+	light.light_energy = 2.6
+	light.light_color = Color(1.0, 0.65, 0.2)
+	light.light_volumetric_fog_energy = 16.0
+	light.shadow_enabled = false
+	light.light_bake_mode = Light3D.BAKE_DISABLED
+	light.distance_fade_enabled = true
+	light.distance_fade_begin = 120.0
+	light.distance_fade_shadow = 30.0
+	light.distance_fade_length = 30.0
+	light.visible = _is_night_mode and not light_data.broken
+	light.set_meta("broken", light_data.broken)
+	light.add_child(_create_lamp_bulb())
+	_ensure_lamp_lights_root()
+	_lamp_lights_root.add_child(light)
+	if not _lamp_lights_by_chunk.has(chunk_key):
+		_lamp_lights_by_chunk[chunk_key] = []
+	_lamp_lights_by_chunk[chunk_key].append(light)
+	# A broken lamp is the spark/smoke source: register its top so _update_wire_sparks
+	# emits a bluish arc + vapour there at night (replaces the old wire-joint trigger).
+	if light_data.broken:
+		_register_spark_source(light_data.position, chunk_key)
+
+
+## Cap simultaneously-visible lamp lights to the nearest LAMP_MAX_ACTIVE_LIGHTS so the
+## Forward+ clustered renderer doesn't drop lights (flicker) in densely-lit areas.
+## Throttled; only acts at night (day visibility handled by _update_lamp_night_mode).
+func _cull_lamp_lights() -> void:
+	if not lamp_cull_enabled:
+		return
+	_lamp_cull_frame += 1
+	if _lamp_cull_frame % 6 != 0 or not _is_night_mode:
+		return
+	var all: Array = []
+	for ck in _lamp_lights_by_chunk:
+		for L in _lamp_lights_by_chunk[ck]:
+			if is_instance_valid(L) and not L.get_meta("broken", false):
+				all.append(L)
+	if all.size() <= LAMP_MAX_ACTIVE_LIGHTS:
+		for L in all:
+			(L as Node3D).visible = true
+		return
+	var cam := _cached_cam_pos
+	all.sort_custom(func(a, b): return (a as Node3D).global_position.distance_squared_to(cam) < (b as Node3D).global_position.distance_squared_to(cam))
+	for i in range(all.size()):
+		(all[i] as Node3D).visible = (i < LAMP_MAX_ACTIVE_LIGHTS)
+
+
 func _update_lamp_night_mode(is_night: bool) -> void:
 	# Update light visibility for batched lamps (deferred path)
 	for chunk_key in _lamp_lights_by_chunk.keys():
@@ -17996,7 +18266,7 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	# lamp_root уже повёрнут по Y (модель боком), компенсируем +90° чтобы -Z смотрела к дороге
 	lamp_light.rotation_degrees.y = 90.0 + 180.0
 	lamp_light.rotation_degrees.x = -75  # 15° наклон к дороге от вертикали
-	lamp_light.spot_range = 15.0
+	lamp_light.spot_range = 12.0
 	lamp_light.spot_angle = 70.0
 	lamp_light.spot_attenuation = 1.0
 	lamp_light.light_energy = 2.6
@@ -19750,6 +20020,10 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 	var lamp_spacing := LAMP_SPACING
 	var lamp_offset := road_width / 2 + LAMP_SIDE_OFFSET_PAD
 	var n_pts: int = local_points.size()
+	# The road's own chunk — always loaded while this job runs. Lamps whose offset point
+	# falls in a neighbour chunk that hasn't STREAMED IN yet are placed here instead of
+	# being dropped (the streaming-lamps bug: driving in left whole streets dark).
+	var job_ck := _get_chunk_key_from_node(parent)
 
 	# Pre-compute cumulative distances (fast, needed for correct spacing)
 	var cumulative := PackedFloat64Array()
@@ -19804,16 +20078,28 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 		# Skip lamps inside intersection contours (where bezier curbs are)
 		var left_in_intersection := _is_point_in_intersection_shape(lamp_pos_left, false, left_ck) >= 0
 		if not left_in_intersection and not _is_point_in_any_parking(lamp_pos_left, left_ck) and not _is_point_near_road(lamp_pos_left, 0.1, left_ck) and not _is_point_in_water(lamp_pos_left, left_ck):
-			if _loaded_chunks.has(left_ck):
-				var left_y: float = get_surface_y(lamp_pos_left.x, lamp_pos_left.y)
-				_add_lamp_to_batch(left_ck, Vector3(lamp_pos_left.x, left_y, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[left_ck])
+			var lck := left_ck
+			var lnode: Node3D = _loaded_chunks.get(left_ck)
+			if lnode == null:
+				lck = job_ck            # neighbour not streamed in → keep lamp on the road's own chunk
+				lnode = parent          # use the job's node directly (valid; finalize guards it)
+				if lamp_debug:
+					_lamp_dbg_drop_unloaded += 1  # now counts RESCUED-via-fallback, not dropped
+			var left_y: float = get_surface_y(lamp_pos_left.x, lamp_pos_left.y)
+			_add_lamp_to_batch(lck, Vector3(lamp_pos_left.x, left_y, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), lnode)
 
 		if both_sides:
 			var right_ck := "%d,%d" % [int(floor(lamp_pos_right.x / chunk_size)), int(floor(lamp_pos_right.y / chunk_size))]
 			if _is_point_in_intersection_shape(lamp_pos_right, false, right_ck) < 0 and not _is_point_in_any_parking(lamp_pos_right, right_ck) and not _is_point_near_road(lamp_pos_right, 0.1, right_ck) and not _is_point_in_water(lamp_pos_right, right_ck):
-				if _loaded_chunks.has(right_ck):
-					var right_y: float = get_surface_y(lamp_pos_right.x, lamp_pos_right.y)
-					_add_lamp_to_batch(right_ck, Vector3(lamp_pos_right.x, right_y, lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[right_ck])
+				var rck := right_ck
+				var rnode: Node3D = _loaded_chunks.get(right_ck)
+				if rnode == null:
+					rck = job_ck
+					rnode = parent
+					if lamp_debug:
+						_lamp_dbg_drop_unloaded += 1
+				var right_y: float = get_surface_y(lamp_pos_right.x, lamp_pos_right.y)
+				_add_lamp_to_batch(rck, Vector3(lamp_pos_right.x, right_y, lamp_pos_right.y), Vector3(perp.x, 0, perp.y), rnode)
 
 		next_lamp_dist += lamp_spacing
 
@@ -20097,6 +20383,11 @@ func _make_lamp_anchor(pos: Vector2, side: int, idx: int, dir: Vector2) -> Dicti
 # A wire endpoint is REAL iff a lamp would have been placed here — same gates the
 # lamp walker uses (intersection / parking / near-road / water / chunk loaded).
 func _wire_anchor_valid(pos: Vector2) -> bool:
+	# Valid iff a lamp is really there: prefer the placed-lamp set (so wires survive
+	# streaming like lamps do), but fall back to the live gates when the lamp for this
+	# anchor hasn't been walked yet (so spawn/initial-load wires aren't lost to ordering).
+	if _created_lamp_positions.has("%d_%d" % [int(pos.x), int(pos.y)]):
+		return true
 	var ck := _bb_chunk_key_at(pos)
 	if not _loaded_chunks.has(ck):
 		return false
@@ -20115,28 +20406,12 @@ func _wire_attach_height() -> float:
 
 # Deterministic run/gap (plan §3,§5): span index k is "wired" iff it lands in a run
 # block. Run/gap lengths are per road class and seeded by (way_id, side). O(k), k small.
-func _wire_span_wired(way_id: int, side_id: int, highway: String, k: int) -> bool:
-	if wire_debug_dense:
-		return true
-	var rg: Array = WIRE_RUNGAP.get(highway, [4, 7, 3, 5])
-	var run_min: int = rg[0]
-	var run_span: int = rg[1] - rg[0] + 1
-	var gap_min: int = rg[2]
-	var gap_span: int = rg[3] - rg[2] + 1
-	var pos := 1
-	var block := 0
-	while pos <= k:
-		var hr := (way_id * 2654435761 + side_id * 668265263 + block * 40503) & 0x7FFFFFFF
-		var run_len: int = run_min + (hr % run_span)
-		if k >= pos and k < pos + run_len:
-			return true
-		var hg := (way_id * 2654435761 + side_id * 374761393 + block * 40503 + 17) & 0x7FFFFFFF
-		var gap_len: int = gap_min + (hg % gap_span)
-		pos += run_len + gap_len
-		block += 1
-		if block > 4096:
-			break
-	return false
+func _wire_span_wired(_way_id: int, _side_id: int, _highway: String, _k: int) -> bool:
+	# Wires are now CONTINUOUS along every lamped side — no run/gap pattern (user request:
+	# "no gaps on the same side of the road"). Each consecutive lamp pair connects; the
+	# per-span safety checks in _try_wire_span (intersection / bridge / building / max-span /
+	# valid anchors) still reject spans that shouldn't exist, so junctions stay clear.
+	return true
 
 func _wire_span_twin(way_id: int, side_id: int, k: int) -> bool:
 	if not enable_wire_twin:
@@ -20159,6 +20434,8 @@ func _wire_span_hits_building(a: Vector2, b: Vector2) -> bool:
 func _generate_road_wires_incremental(points: PackedVector2Array, way_id: int, highway: String, width: float, start_idx: int, ck: String, budget_start: int, budget_usec: int, wire_dirty: Dictionary) -> int:
 	if not enable_overhead_wires or points.size() < 2 or not _loaded_chunks.has(ck):
 		return WIRE_DONE
+	if lamp_debug and start_idx <= 1:
+		_wire_dbg_walked += 1
 	var anchors := _compute_lamp_anchors(points, width)
 	if anchors.is_empty():
 		return WIRE_DONE
@@ -20179,29 +20456,45 @@ func _generate_road_wires_incremental(points: PackedVector2Array, way_id: int, h
 	return WIRE_DONE
 
 func _try_wire_span(side_dict: Dictionary, side_id: int, way_id: int, highway: String, k: int, ck: String, wire_dirty: Dictionary) -> void:
-	var key := "w_%d_%d_%d" % [way_id, side_id, k]
-	if _created_wire_keys.has(key):
-		return
+	if lamp_debug:
+		_wire_dbg_spans += 1
 	if not _wire_span_wired(way_id, side_id, highway, k):
+		if lamp_debug: _wire_dbg_notwired += 1
 		return
 	var a0: Variant = side_dict.get(k)
 	var a1: Variant = side_dict.get(k + 1)
 	if a0 == null or a1 == null:
+		if lamp_debug: _wire_dbg_nullanchor += 1
+		return
+	# Key by the two anchor WORLD positions (globally unique per physical span). The old
+	# (way,side,k) key collided across chunks — k resets to 1 in each chunk-clip, so every
+	# chunk past the first re-derived the same keys → all rejected as "already". Position
+	# keys mean each real span is placed once, by whichever chunk owns its midpoint.
+	var key := "w_%d_%d_%d_%d" % [int(a0.pos.x), int(a0.pos.y), int(a1.pos.x), int(a1.pos.y)]
+	if _created_wire_keys.has(key):
+		if lamp_debug: _wire_dbg_already += 1
 		return
 	if not _wire_anchor_valid(a0.pos) or not _wire_anchor_valid(a1.pos):
+		if lamp_debug:
+			_wire_dbg_skip_invalid += 1
 		return
 	if a0.pos.distance_to(a1.pos) > WIRE_MAX_SPAN:
+		if lamp_debug: _wire_dbg_spancap += 1
 		return
 	var mid: Vector2 = a0.pos.lerp(a1.pos, 0.5)
 	if _is_point_in_intersection_shape(mid, false, _bb_chunk_key_at(mid)) >= 0:
+		if lamp_debug: _wire_dbg_intersection += 1
 		return
 	if _is_point_on_bridge_deck(mid):
 		return
 	if _wire_span_hits_building(a0.pos, a1.pos):
+		if lamp_debug: _wire_dbg_building += 1
 		return
 	_place_wire(a0, a1, way_id, side_id, k, ck, key, wire_dirty)
 
 func _place_wire(a0: Dictionary, a1: Dictionary, way_id: int, side_id: int, k: int, ck: String, key: String, wire_dirty: Dictionary) -> void:
+	if lamp_debug:
+		_wire_dbg_placed += 1
 	# Attach at the POLE SHAFT world XZ (a*.pole), on the straight shaft below the arm.
 	var q0: Vector2 = a0.pole
 	var q1: Vector2 = a1.pole
@@ -20227,8 +20520,8 @@ func _place_wire(a0: Dictionary, a1: Dictionary, way_id: int, side_id: int, k: i
 		_wire_keys_by_chunk[ck] = []
 	_wire_keys_by_chunk[ck].append(key)
 	wire_dirty[ck] = true
-	_register_spark_joint(way_id, side_id, k, p0, ck)
-	_register_spark_joint(way_id, side_id, k + 1, p1, ck)
+	# Spark/smoke emitters are no longer tied to wire joints — broken lamps are the source
+	# now (registered in _spawn_lamp_light via _register_spark_source).
 	if wire_debug_reasons:
 		_wire_dbg_check_lamp(a0.pos)
 		_wire_dbg_check_lamp(a1.pos)
@@ -20242,10 +20535,10 @@ func _wire_dbg_check_lamp(pos: Vector2) -> void:
 	if (_wire_dbg_lamp_hit + _wire_dbg_lamp_miss) % 50 == 0:
 		print("WIRE-VERIFY: anchors with a real placed lamp = %d, without = %d" % [_wire_dbg_lamp_hit, _wire_dbg_lamp_miss])
 
-func _register_spark_joint(way_id: int, side_id: int, k: int, world_pos: Vector3, ck: String) -> void:
-	if not _joint_spark_eligible(way_id, side_id, k):
-		return
-	var jkey := "j_%d_%d_%d" % [way_id, side_id, k]
+## Register a spark/smoke emitter position for a chunk (a broken lamp top). Position-keyed
+## + deduped; cleaned up with the chunk on unload (see _spark_joint_keys_by_chunk).
+func _register_spark_source(world_pos: Vector3, ck: String) -> void:
+	var jkey := "j_%d_%d" % [int(world_pos.x), int(world_pos.z)]
 	if _spark_joint_seen.has(jkey):
 		return
 	_spark_joint_seen[jkey] = true
@@ -20452,16 +20745,9 @@ func _update_wire_sparks(delta: float) -> void:
 	if bucket == _spark_last_bucket:
 		return
 	_spark_last_bucket = bucket
-	var idx := -1
-	for i in range(_spark_pool.size()):
-		if not _spark_pool[i].emitting:
-			idx = i
-			break
-	if idx == -1:
-		return
-	var emitter: GPUParticles3D = _spark_pool[idx]
 	var cam := _cached_cam_pos
 	var fwd := _cached_cam_fwd
+	# Collect in-view broken-lamp emitters (within range, not far behind the camera).
 	var candidates: Array = []
 	for cck in _spark_joints_by_chunk:
 		for jp in _spark_joints_by_chunk[cck]:
@@ -20474,18 +20760,27 @@ func _update_wire_sparks(delta: float) -> void:
 			candidates.append(jp)
 	if candidates.is_empty():
 		return
-	var pick := absi(bucket * 2654435761 + 12345) % candidates.size()
-	var jpos: Vector3 = candidates[pick]
-	emitter.global_position = jpos
-	emitter.visible = true
-	emitter.restart()
-	emitter.emitting = true
-	if idx < _smoke_pool.size():
-		var smoke: GPUParticles3D = _smoke_pool[idx]
-		smoke.global_position = jpos
-		smoke.visible = true
-		smoke.restart()
-		smoke.emitting = true
+	# Fire several distinct nearby broken lamps this tick, each on a free pool emitter.
+	var fired := 0
+	for i in range(_spark_pool.size()):
+		if fired >= SPARK_BURSTS_PER_TICK:
+			break
+		if _spark_pool[i].emitting:
+			continue
+		var pick := absi(bucket * 2654435761 + fired * 1013904223 + 12345) % candidates.size()
+		var jpos: Vector3 = candidates[pick]
+		var emitter: GPUParticles3D = _spark_pool[i]
+		emitter.global_position = jpos
+		emitter.visible = true
+		emitter.restart()
+		emitter.emitting = true
+		if i < _smoke_pool.size():
+			var smoke: GPUParticles3D = _smoke_pool[i]
+			smoke.global_position = jpos
+			smoke.visible = true
+			smoke.restart()
+			smoke.emitting = true
+		fired += 1
 
 func _stop_wire_sparks() -> void:
 	for p in _spark_pool:
@@ -20509,6 +20804,315 @@ func _reset_wire_state() -> void:
 	_spark_joint_seen.clear()
 	_spark_joint_keys_by_chunk.clear()
 	_stop_wire_sparks()
+
+
+# ══ Roadside props (kiosks + transformer boxes) ══════════════════════════════
+# One-time: load each model, compute its REAL-vertex AABB → grounding/centre/scale/
+# footprint so off-origin models centre on the placement point and sit flush.
+func _init_prop_defs() -> void:
+	if _prop_defs_ready:
+		return
+	_prop_defs_ready = true
+	for type in _prop_defs:
+		var def: Dictionary = _prop_defs[type]
+		var preps: Array = []
+		for path in def["paths"]:
+			if not ResourceLoader.exists(path):
+				push_warning("Roadside prop model missing: " + path)
+				continue
+			var scene: PackedScene = load(path)
+			_prop_scene_cache[path] = scene
+			var inst: Node3D = scene.instantiate()
+			var b := _prop_compute_bounds(inst)
+			inst.free()
+			var amin: Vector3 = b["min"]
+			var amax: Vector3 = b["max"]
+			var size: Vector3 = amax - amin
+			var scl: float = def["target_h"] / maxf(size.y, 0.01)
+			preps.append({
+				"path": path, "scale": scl, "base_y": amin.y,
+				"cx": (amin.x + amax.x) * 0.5, "cz": (amin.z + amax.z) * 0.5,
+				"foot": Vector2(size.x, size.z) * 0.5 * scl, "height": size.y * scl,
+			})
+		def["preps"] = preps
+		_prop_defs[type] = def
+	print("OSM: roadside prop defs ready (%d types)" % _prop_defs.size())
+
+func _prop_compute_bounds(inst: Node3D) -> Dictionary:
+	var have := false
+	var amin := Vector3.ZERO
+	var amax := Vector3.ZERO
+	var stack: Array = [inst]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		for c in n.get_children():
+			stack.push_back(c)
+		if n is MeshInstance3D and (n as MeshInstance3D).mesh != null:
+			var t := Transform3D.IDENTITY
+			var cur: Node = n
+			while cur != null and cur != inst:
+				t = (cur as Node3D).transform * t
+				cur = cur.get_parent()
+			var mesh: Mesh = (n as MeshInstance3D).mesh
+			for s in range(mesh.get_surface_count()):
+				var arr: Array = mesh.surface_get_arrays(s)
+				var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+				for v in verts:
+					var wp: Vector3 = t * v
+					if not have:
+						amin = wp; amax = wp; have = true
+					else:
+						amin = Vector3(minf(amin.x, wp.x), minf(amin.y, wp.y), minf(amin.z, wp.z))
+						amax = Vector3(maxf(amax.x, wp.x), maxf(amax.y, wp.y), maxf(amax.z, wp.z))
+	return {"min": amin, "max": amax}
+
+# Build one grounded, centred, collidable prop. Shared by procedural + manual placement.
+func _spawn_prop(type: String, model_idx: int, world_xz: Vector2, yaw: float, parent: Node3D) -> Node3D:
+	_init_prop_defs()
+	var def: Dictionary = _prop_defs.get(type, {})
+	var preps: Array = def.get("preps", [])
+	if preps.is_empty():
+		return null
+	var prep: Dictionary = preps[model_idx % preps.size()]
+	var scene: PackedScene = _prop_scene_cache.get(prep["path"])
+	if scene == null:
+		return null
+	var scl: float = prep["scale"]
+	var surf := get_surface_y(world_xz.x, world_xz.y)
+	# Holder carries world pos + yaw (unscaled); model is centred + grounded within it.
+	var holder := Node3D.new()
+	holder.name = "Prop_%s" % type
+	holder.position = Vector3(world_xz.x, surf + PROP_LIFT, world_xz.y)
+	holder.rotation.y = yaw
+	var inst: Node3D = scene.instantiate()
+	inst.scale = Vector3.ONE * scl
+	inst.position = Vector3(-prep["cx"] * scl, -prep["base_y"] * scl, -prep["cz"] * scl)
+	_set_no_shadow_recursive(inst)
+	_set_visibility_range_recursive(inst, 180.0)
+	holder.add_child(inst)
+	# Collision box from real footprint — layer like street lamps so cars stop on it.
+	var body := StaticBody3D.new()
+	body.name = "PropCol"
+	var shape := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	var foot: Vector2 = prep["foot"]
+	box.size = Vector3(maxf(foot.x * 2.0, 0.3), maxf(prep["height"], 0.5), maxf(foot.y * 2.0, 0.3))
+	shape.shape = box
+	shape.position.y = prep["height"] * 0.5
+	body.add_child(shape)
+	holder.add_child(body)
+	# Subtle warm interior glow for kiosks — "LampLight" so the night system toggles it.
+	if def.get("night_glow", false):
+		var lamp := OmniLight3D.new()
+		lamp.name = "LampLight"
+		lamp.light_color = Color(1.0, 0.82, 0.5)
+		lamp.light_energy = 1.1
+		lamp.omni_range = 5.0
+		lamp.shadow_enabled = false
+		lamp.distance_fade_enabled = true
+		lamp.distance_fade_begin = 45.0
+		lamp.distance_fade_length = 15.0
+		lamp.position = Vector3(0.0, prep["height"] * 0.55, 0.0)
+		lamp.set_meta("is_broken", false)
+		lamp.visible = _is_night_mode
+		holder.add_child(lamp)
+	_budgeted_add_child(parent, holder)
+	return holder
+
+# ── Procedural placement (mirrors the billboard road-walk) ──────────────────
+func _generate_road_props_incremental(type: String, points: PackedVector2Array, way_id: int, highway: String, width: float, start_idx: int, budget_start: int, budget_usec: int) -> int:
+	if not enable_roadside_props:
+		return PROP_DONE
+	_init_prop_defs()
+	var def: Dictionary = _prop_defs.get(type, {})
+	if def.get("preps", []).is_empty() or points.size() < 2:
+		return PROP_DONE
+	var spacing: float = def["spacing"]
+	var n := points.size()
+	var cumulative := PackedFloat64Array()
+	cumulative.resize(n)
+	cumulative[0] = 0.0
+	for i in range(1, n):
+		cumulative[i] = cumulative[i - 1] + points[i - 1].distance_to(points[i])
+	var total: float = cumulative[n - 1]
+	var idx := maxi(start_idx, 1)
+	var seg := 0
+	while true:
+		var d := float(idx) * spacing
+		if d >= total:
+			return PROP_DONE
+		if (Time.get_ticks_usec() - budget_start) > budget_usec:
+			return idx
+		var key := "pr_%s_%d_%d" % [type, way_id, idx]
+		if _created_prop_keys.has(key):
+			idx += 1
+			continue
+		while seg < n - 2 and cumulative[seg + 1] < d:
+			seg += 1
+		var seg_len: float = cumulative[seg + 1] - cumulative[seg]
+		if seg_len < 0.001:
+			idx += 1
+			continue
+		var t: float = (d - cumulative[seg]) / seg_len
+		var road_pos: Vector2 = points[seg].lerp(points[seg + 1], t)
+		var dir: Vector2 = (points[seg + 1] - points[seg]).normalized()
+		var perp := Vector2(-dir.y, dir.x)
+		_try_place_prop(type, def, road_pos, dir, perp, width, way_id, idx, key)
+		idx += 1
+	return PROP_DONE
+
+func _try_place_prop(type: String, def: Dictionary, road_pos: Vector2, dir: Vector2, perp: Vector2, width: float, way_id: int, idx: int, key: String) -> void:
+	var h := (way_id * 2654435761 + idx * 40503) & 0x7FFFFFFF
+	var offset: float = width / 2.0 + def["setback"]
+	var prefer_left: bool = (h & 1) == 0
+	var perps: Array = [perp, -perp] if prefer_left else [-perp, perp]
+	for op in perps:
+		var pos: Vector2 = road_pos + op * offset
+		var ck := _bb_chunk_key_at(pos)
+		if not _loaded_chunks.has(ck):
+			continue
+		if _prop_candidate_ok(type, def, pos, ck):
+			var yaw: float
+			if def["faces_road"]:
+				var toward: Vector2 = -op  # from prop toward the road
+				yaw = atan2(toward.x, toward.y) + deg_to_rad(def["front_yaw_deg"])
+			else:
+				yaw = atan2(dir.x, dir.y)  # long axis parallel to road
+			yaw += deg_to_rad(float(h % 13) - 6.0)  # tiny deterministic jitter
+			var model_idx := int(h / 7) % maxi(def["preps"].size(), 1)
+			if _spawn_prop(type, model_idx, pos, yaw, _loaded_chunks[ck]) != null:
+				_created_prop_keys[key] = true
+				if not _prop_keys_by_chunk.has(ck):
+					_prop_keys_by_chunk[ck] = []
+				_prop_keys_by_chunk[ck].append(key)
+				_prop_register_pos(pos, ck)
+			return
+
+func _prop_candidate_ok(type: String, def: Dictionary, pos: Vector2, ck: String) -> bool:
+	if _is_point_near_road(pos, 1.5, ck):
+		return false
+	if _is_point_in_intersection_shape(pos, false, ck) >= 0:
+		return false
+	if _is_point_on_bridge_deck(pos):
+		return false
+	if _is_point_in_water(pos, ck):
+		return false
+	if _is_point_in_any_parking(pos, ck):
+		return false
+	if _prop_too_close(pos):
+		return false
+	if _prop_near_furniture(pos):
+		return false
+	if roadside_props_debug_dense:
+		return true
+	if _building_clip_within(pos, def["build_margin"]):
+		return false
+	# Siting ("where it makes sense")
+	if type == "kiosk":
+		if not _near_bus_stop(pos, 28.0):  # kiosks cluster at transit stops
+			return false
+	elif type == "ebox":
+		if not _building_clip_within(pos, 25.0):  # only on verges near buildings it feeds
+			return false
+	return true
+
+func _prop_too_close(pos: Vector2) -> bool:
+	var cx := int(floor(pos.x / PROP_MIN_SPACING))
+	var cy := int(floor(pos.y / PROP_MIN_SPACING))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for q in _prop_pos_hash.get(Vector2i(cx + dx, cy + dy), []):
+				if pos.distance_to(q) < PROP_MIN_SPACING:
+					return true
+	return false
+
+# Keep clear of lamps / billboards / bus stops / signs already placed.
+func _prop_near_furniture(pos: Vector2) -> bool:
+	var r := PROP_FURNITURE_CLEAR
+	# billboards (own spatial hash)
+	var bcx := int(floor(pos.x / BILLBOARD_MIN_SPACING))
+	var bcy := int(floor(pos.y / BILLBOARD_MIN_SPACING))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for q in _billboard_pos_hash.get(Vector2i(bcx + dx, bcy + dy), []):
+				if pos.distance_to(q) < r:
+					return true
+	# lamps / bus stops / signs (int-keyed dicts) — scan a ±r integer neighbourhood
+	var ri := int(ceil(r))
+	for dx in range(-ri, ri + 1):
+		for dz in range(-ri, ri + 1):
+			var kx := int(pos.x) + dx
+			var kz := int(pos.y) + dz
+			if _created_lamp_positions.has("%d_%d" % [kx, kz]):
+				return true
+			if _created_bus_stop_positions.has("bs_%d_%d" % [kx, kz]):
+				return true
+			if _created_sign_positions.has("ts_%d_%d" % [kx, kz]):
+				return true
+	return false
+
+func _prop_register_pos(pos: Vector2, ck: String) -> void:
+	var cell := Vector2i(int(floor(pos.x / PROP_MIN_SPACING)), int(floor(pos.y / PROP_MIN_SPACING)))
+	if not _prop_pos_hash.has(cell):
+		_prop_pos_hash[cell] = []
+	_prop_pos_hash[cell].append(pos)
+	if not _prop_pos_by_chunk.has(ck):
+		_prop_pos_by_chunk[ck] = []
+	_prop_pos_by_chunk[ck].append(pos)
+
+func _near_bus_stop(pos: Vector2, r: float) -> bool:
+	for k in _created_bus_stop_positions:
+		var parts: PackedStringArray = k.split("_")  # bs, x, y
+		if parts.size() == 3 and Vector2(float(parts[1]), float(parts[2])).distance_to(pos) <= r:
+			return true
+	return false
+
+func _near_junction(pos: Vector2, r: float) -> bool:
+	for a in range(0, 360, 45):
+		var p: Vector2 = pos + Vector2(cos(deg_to_rad(a)), sin(deg_to_rad(a))) * r
+		if _is_point_in_intersection_shape(p, false, _bb_chunk_key_at(p)) >= 0:
+			return true
+	return false
+
+func _reset_prop_state() -> void:
+	_deferred_prop_road_queue.clear()
+	_created_prop_keys.clear()
+	_prop_keys_by_chunk.clear()
+	_prop_pos_hash.clear()
+	_prop_pos_by_chunk.clear()
+
+# Manual props placed by coordinate (decorations JSON `roadside_props`). Bypass the
+# procedural siting/spacing gates (you chose the spot) but still ground correctly and
+# register their position so procedural props keep clear. Parented to the chunk → freed
+# + re-placed on unload/reload (deterministic, no persistent dedup needed).
+func _place_manual_props_for_chunk(chunk_key: String, parent: Node3D) -> void:
+	if not enable_roadside_props or _decoration_layer == null:
+		return
+	var list: Array = _decoration_layer.get_roadside_props()
+	if list.is_empty():
+		return
+	_init_prop_defs()
+	for entry in list:
+		var lat: float = entry.get("lat", 0.0)
+		var lon: float = entry.get("lon", 0.0)
+		if lat == 0.0 or lon == 0.0:
+			continue
+		var pos := _latlon_to_local(lat, lon)
+		var ck := "%d,%d" % [int(floor(pos.x / chunk_size)), int(floor(pos.y / chunk_size))]
+		if ck != chunk_key:
+			continue
+		var type := str(entry.get("type", "kiosk"))
+		var def: Dictionary = _prop_defs.get(type, {})
+		if def.is_empty() or def.get("preps", []).is_empty():
+			push_warning("roadside_props: unknown type '%s'" % type)
+			continue
+		var yaw := deg_to_rad(float(entry.get("rotation_y", 0.0)))
+		var midx := int(entry.get("variant", -1))
+		if midx < 0:
+			midx = absi(int(pos.x) * 73856093 + int(pos.y) * 19349663) % maxi(def["preps"].size(), 1)
+		if _spawn_prop(type, midx, pos, yaw, parent) != null:
+			_prop_register_pos(pos, chunk_key)
+			print("OSM: placed manual %s at (%.1f, %.1f)" % [type, pos.x, pos.y])
 
 
 func _generate_manholes_along_road(nodes: Array, road_width: float, parent: Node3D) -> void:
