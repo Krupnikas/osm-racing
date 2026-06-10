@@ -49,6 +49,7 @@ func _ready() -> void:
 	_setup_taillights()
 	_setup_headlights()
 	_setup_underglow()
+	_hide_misplaced_tuning_lights()
 
 	print("Matiz model setup complete")
 
@@ -156,6 +157,19 @@ func _find_all_meshes(node: Node) -> Array:
 	for child in node.get_children():
 		meshes.append_array(_find_all_meshes(child))
 	return meshes
+
+
+## The Matiz GLB ships an emissive "tune light" underbody-neon strip baked ~2 m below the
+## body — at night it glows UNDER THE GROUND ("headlights under the ground"). The car already
+## gets proper headlights (_setup_headlights) and its own underglow (_setup_underglow), so this
+## stray mesh is redundant; hide it. Matched by the model's surface name "tune light".
+func _hide_misplaced_tuning_lights() -> void:
+	for mesh in _find_all_meshes(self):
+		if not (mesh is MeshInstance3D):
+			continue
+		if "tune light" in String(mesh.name).to_lower():
+			(mesh as MeshInstance3D).visible = false
+			print("Matiz: hid misplaced under-ground tuning-light mesh '%s'" % mesh.name)
 
 
 func _change_body_color() -> void:
