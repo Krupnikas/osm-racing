@@ -535,6 +535,60 @@ const BILLBOARD_MEDIAN_CHECK := 6.0        # reject if another road is this clos
 var _billboard_pos_hash: Dictionary = {}      # 100 m cell (Vector2i) → Array[Vector2] placed positions
 var _billboard_pos_by_chunk: Dictionary = {}  # chunk_key → Array[Vector2] (unload cleanup)
 
+# ── Procedural overhead utility wires between street lamps ───────────────────
+# See docs/OVERHEAD_WIRES_PLAN.md. ADAPTATION (documented): the lamp walker places
+# lamps from CLIPPED per-chunk polylines with the 17 m phase reset at each chunk
+# boundary, so the plan's "recompute from FULL polyline" would not reproduce real
+# lamp positions (→ floating wires). We instead walk the SAME clipped points the
+# lamp enqueue uses, so wire anchors are bit-identical to the placed lamps. Anchor
+# validity replicates the exact lamp gates. Trade-off: a wire gap at chunk borders.
+@export var enable_overhead_wires := true
+const LAMP_SPACING := 17.0              # shared with the lamp walker (was a literal)
+const LAMP_SIDE_OFFSET_PAD := 0.5       # offset = road_width/2 + pad
+const LAMP_BOTH_SIDES_WIDTH := 12.0     # both sides only on roads this wide
+const WIRE_DONE := 1000000000           # incremental sentinel = chunk's ways fully walked
+const WIRE_MAX_SPAN := 40.0             # skip spans longer than this (dropped lamp)
+# The lamp model's POLE SHAFT is offset from the model origin: verified from mesh, the
+# shaft centroid is at local (+0.77, 0) and stays vertical up to ~5.0 m (the arm/head
+# overhang the origin at -0.6). So wires attach at the pole shaft (rotated by lamp yaw),
+# NOT at the origin (which floats between pole and head), and BELOW the arm.
+const WIRE_POLE_LOCAL_X := 0.77         # pole-shaft X offset in the lamp model's local space
+const WIRE_ATTACH_Y := 4.6              # attach height on the straight pole shaft (below the arm)
+const WIRE_RADIUS := 0.025
+const WIRE_SEGMENTS := 8                # catenary length segments
+const WIRE_TWIN_OFFSET := 0.16          # spacing between the two cables of a twin span
+const WIRE_TWIN_DENOM := 3              # ~1/3 of wired spans become twin cables
+const WIRE_COLOR := Color(0.06, 0.06, 0.07)
+# Per road class: [run_min, run_max, gap_min, gap_max] in spans (deterministic runs).
+const WIRE_RUNGAP := {
+	"trunk": [2, 4, 5, 9], "primary": [3, 5, 4, 7],
+	"secondary": [4, 7, 3, 5], "tertiary": [4, 8, 2, 4],
+}
+const SPARK_JOINT_DENOM := 20           # ~1-in-20 wired joints is ever spark-eligible
+const SPARK_POOL_SIZE := 5              # hard cap on concurrent spark emitters
+const SPARK_INTERVAL := 4.0             # seconds between burst attempts (global)
+const SPARK_VIEW_DIST := 90.0           # only spark within this of the camera
+var enable_wire_twin := true            # WIRE_TWIN_ENABLE — kill twin cables if too busy
+var wire_debug_dense := false           # bypass run/gap: every valid consecutive pair
+var wire_debug_show_joints := false     # drop a marker at each spark-eligible joint
+var wire_debug_reasons := false         # verify anchors vs real placed lamp positions
+var _wire_dbg_lamp_hit := 0
+var _wire_dbg_lamp_miss := 0
+var _deferred_wire_road_queue: Dictionary = {}  # chunk_key → Array[{points, way_id, highway, width, _wire_idx}]
+var _created_wire_keys: Dictionary = {}          # global semantic key "w_<way>_<side>_<idx>" → true
+var _wire_keys_by_chunk: Dictionary = {}         # chunk_key → Array[String] (unload key cleanup)
+var _wire_geo_by_chunk: Dictionary = {}          # chunk_key → {v:PackedVector3Array, n, i}
+var _wire_node_by_chunk: Dictionary = {}         # chunk_key → MeshInstance3D (one merged mesh)
+var _wire_material: StandardMaterial3D = null
+var _spark_joints_by_chunk: Dictionary = {}      # chunk_key → Array[Vector3] (eligible joints)
+var _spark_joint_seen: Dictionary = {}           # joint key → true (dedup across re-walks)
+var _spark_joint_keys_by_chunk: Dictionary = {}  # chunk_key → Array[String] (unload cleanup)
+var _spark_pool: Array = []                      # Array[GPUParticles3D] (spark bursts)
+var _smoke_pool: Array = []                       # Array[GPUParticles3D] (paired smoke puffs)
+var _spark_pool_root: Node3D = null
+var _spark_elapsed := 0.0
+var _spark_last_bucket := -1
+
 var _finalize_phase: int = 0  # Round-robin: 0=roads, 1=curbs, 2=lamps, 3=buildings, 4=windows, 5=trees, 6=billboards
 var _chunk_activation_pending: Dictionary = {}  # chunk_key -> state (-1=waiting, >=0=RS activation index)
 var _chunk_culling_cooldown: Dictionary = {}  # chunk_key -> timestamp (ms) — don't cull recently activated chunks
@@ -1646,6 +1700,9 @@ func _process(delta: float) -> void:
 	else:
 		_cached_velocity_dir = _cached_cam_fwd
 
+	# Night-only wire sparks — early-returns in daytime (zero cost).
+	_update_wire_sparks(delta)
+
 	# Reset add_child budget and drain deferred queue (with time budget)
 	_add_child_budget = 9999 if _initial_loading else ADD_CHILD_BUDGET_NORMAL
 	_add_child_count = 0
@@ -1977,6 +2034,7 @@ func start_loading() -> void:
 	_billboard_pos_by_chunk.clear()
 	_building_footprint_hash.clear()
 	_building_footprint_way_ids.clear()
+	_reset_wire_state()
 	_deferred_footway_queue.clear()
 	_deferred_building_collisions.clear()
 	_deferred_tree_collisions.clear()
@@ -3050,6 +3108,20 @@ func _unload_chunk(chunk_key: String) -> void:
 					if (_billboard_pos_hash[_bcell] as Array).is_empty():
 						_billboard_pos_hash.erase(_bcell)
 			_billboard_pos_by_chunk.erase(chunk_key)
+		# Overhead wires: free dedup keys + per-chunk geo/node/joint state (the wire
+		# MeshInstance + joint markers free with chunk_node.queue_free() below).
+		_deferred_wire_road_queue.erase(chunk_key)
+		if _wire_keys_by_chunk.has(chunk_key):
+			for _wk in _wire_keys_by_chunk[chunk_key]:
+				_created_wire_keys.erase(_wk)
+			_wire_keys_by_chunk.erase(chunk_key)
+		_wire_geo_by_chunk.erase(chunk_key)
+		_wire_node_by_chunk.erase(chunk_key)
+		if _spark_joint_keys_by_chunk.has(chunk_key):
+			for _jk in _spark_joint_keys_by_chunk[chunk_key]:
+				_spark_joint_seen.erase(_jk)
+			_spark_joint_keys_by_chunk.erase(chunk_key)
+		_spark_joints_by_chunk.erase(chunk_key)
 		_deferred_lamp_queue.erase(chunk_key)
 		_deferred_manhole_queue.erase(chunk_key)
 		_deferred_add_child_queue = _deferred_add_child_queue.filter(
@@ -3255,6 +3327,7 @@ func reset_terrain() -> void:
 	_billboard_pos_by_chunk.clear()
 	_building_footprint_hash.clear()
 	_building_footprint_way_ids.clear()
+	_reset_wire_state()
 	_chunk_activation_pending.clear()
 	_chunk_culling_cooldown.clear()
 
@@ -5321,6 +5394,20 @@ func _apply_road_result(result: Dictionary) -> void:
 		var lamp_pts := _clip_polyline_to_rect(smoothed_points, lamp_rect.position.x, lamp_rect.end.x, lamp_rect.position.y, lamp_rect.end.y)
 		if lamp_pts.size() >= 2:
 			_deferred_append(_deferred_lamp_queue, lamp_ck, {"points": lamp_pts, "width": width, "parent": parent})
+
+	# Overhead wires — SAME clipped points as lamps (so anchors == real lamps).
+	# Excludes motorway / bridges / tunnels; per-class density handled in the walk.
+	if enable_overhead_wires and highway_type in ["trunk", "primary", "secondary", "tertiary"] and not is_bridge:
+		var w_tunnel := str(result.get("tags", {}).get("tunnel", ""))
+		if w_tunnel == "" or w_tunnel == "no":
+			var wire_ck := _get_chunk_key_from_node(parent)
+			var wire_rect := _get_chunk_rect_from_key(wire_ck)
+			var wire_pts := _clip_polyline_to_rect(smoothed_points, wire_rect.position.x, wire_rect.end.x, wire_rect.position.y, wire_rect.end.y)
+			if wire_pts.size() >= 2:
+				_deferred_append(_deferred_wire_road_queue, wire_ck, {
+					"points": wire_pts, "way_id": int(result.get("way_id", 0)),
+					"highway": highway_type, "width": width, "_wire_idx": 1,
+				})
 
 	# Procedural billboards (trunk/primary only) — FULL unclipped points so spacing
 	# is global arc-length; each candidate is assigned to its own chunk during the walk.
@@ -13797,6 +13884,35 @@ func _process_road_queue() -> void:
 		for bbr_ck in bbr_done_keys:
 			_deferred_billboard_road_queue.erase(bbr_ck)
 
+	# Process deferred OVERHEAD-WIRE walking (budgeted). Wires share the lamp clip,
+	# so anchors line up with the placed lamps. One merged mesh per owning chunk.
+	if enable_overhead_wires and (Time.get_ticks_usec() - queue_start) <= TOTAL_BUDGET_USEC:
+		var wire_dirty: Dictionary = {}
+		var wr_done_keys: Array[String] = []
+		for wr_ck in _get_prioritized_keys(_deferred_wire_road_queue):
+			if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+				break
+			var wr_arr: Array = _deferred_wire_road_queue[wr_ck]
+			if not _loaded_chunks.has(wr_ck):
+				wr_arr.clear()  # owning chunk gone — drop all its wire jobs
+			while not wr_arr.is_empty():
+				if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+					break
+				var wr_item: Dictionary = wr_arr[0]
+				var wr_next: int = _generate_road_wires_incremental(wr_item.points, int(wr_item.way_id), str(wr_item.highway), float(wr_item.get("width", 7.0)), int(wr_item.get("_wire_idx", 1)), wr_ck, queue_start, TOTAL_BUDGET_USEC, wire_dirty)
+				if wr_next >= WIRE_DONE:
+					wr_arr.pop_front()
+				else:
+					wr_item["_wire_idx"] = wr_next
+					break
+			if wr_arr.is_empty():
+				wr_done_keys.append(wr_ck)
+		for wr_ck in wr_done_keys:
+			_deferred_wire_road_queue.erase(wr_ck)
+		# Rebuild the single merged wire mesh for chunks that gained wires this frame.
+		for dck in wire_dirty:
+			_commit_wire_mesh(dck)
+
 	# Dispatch roads to worker threads — no time budget needed on main thread!
 	# Limit concurrent tasks to avoid overwhelming thread pool
 	# During initial loading: unlimited dispatch so all roads run in parallel.
@@ -19631,8 +19747,8 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 	if not enable_street_lamps or local_points.size() < 2:
 		return local_points.size()
 
-	var lamp_spacing := 17.0
-	var lamp_offset := road_width / 2 + 0.5
+	var lamp_spacing := LAMP_SPACING
+	var lamp_offset := road_width / 2 + LAMP_SIDE_OFFSET_PAD
 	var n_pts: int = local_points.size()
 
 	# Pre-compute cumulative distances (fast, needed for correct spacing)
@@ -19680,7 +19796,7 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 
 		var lamp_pos_left := road_pos + perp * lamp_offset
 		var lamp_pos_right := road_pos - perp * lamp_offset
-		var both_sides := road_width >= 12.0  # primary and wider — both sides
+		var both_sides := road_width >= LAMP_BOTH_SIDES_WIDTH  # primary and wider — both sides
 
 		# Compute chunk_key once, pass to all spatial checks (single-chunk O(1) lookup)
 		var left_ck := "%d,%d" % [int(floor(lamp_pos_left.x / chunk_size)), int(floor(lamp_pos_left.y / chunk_size))]
@@ -19925,6 +20041,474 @@ func _place_road_billboard(pos: Vector2, dir: Vector2, side_sign: float, ck: Str
 		_billboard_keys_by_chunk[ck] = []
 	_billboard_keys_by_chunk[ck].append(key)
 	_billboard_register_pos(pos, ck)
+
+
+# ══ Overhead utility wires between street lamps ══════════════════════════════
+# Pure helper (plan §2): ordered candidate lamp anchors for ONE road polyline.
+# Replicates the lamp walker's geometry EXACTLY (same spacing/offset/perp/both-sides)
+# so — given the same clipped points the lamp walker uses — its output is the set of
+# placed lamps (before gates). No node access, no randf. Returns [{pos,side,idx,dir}].
+func _compute_lamp_anchors(points: PackedVector2Array, road_width: float) -> Array:
+	var out: Array = []
+	var n: int = points.size()
+	if n < 2:
+		return out
+	var lamp_offset := road_width / 2.0 + LAMP_SIDE_OFFSET_PAD
+	var both_sides := road_width >= LAMP_BOTH_SIDES_WIDTH
+	var cumulative := PackedFloat64Array()
+	cumulative.resize(n)
+	cumulative[0] = 0.0
+	for i in range(1, n):
+		cumulative[i] = cumulative[i - 1] + points[i - 1].distance_to(points[i])
+	var total: float = cumulative[n - 1]
+	var seg := 0
+	var k := 1
+	while float(k) * LAMP_SPACING < total:
+		var d := float(k) * LAMP_SPACING
+		while seg < n - 2 and cumulative[seg + 1] < d:
+			seg += 1
+		var seg_len: float = cumulative[seg + 1] - cumulative[seg]
+		if seg_len < 0.001:
+			k += 1
+			continue
+		var t: float = (d - cumulative[seg]) / seg_len
+		var p1: Vector2 = points[seg]
+		var p2: Vector2 = points[seg + 1]
+		var road_pos: Vector2 = p1.lerp(p2, t)
+		var dir: Vector2 = (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)
+		out.append(_make_lamp_anchor(road_pos + perp * lamp_offset, 1, k, dir))
+		if both_sides:
+			out.append(_make_lamp_anchor(road_pos - perp * lamp_offset, -1, k, dir))
+		k += 1
+	return out
+
+# Build one anchor: `pos` is the lamp model origin (used for gate validity, matching the
+# lamp walker), `pole` is the actual pole-shaft world XZ — origin + the local pole offset
+# rotated by the SAME yaw `_add_lamp_to_batch` applies. Wires attach at `pole`, not `pos`.
+func _make_lamp_anchor(pos: Vector2, side: int, idx: int, dir: Vector2) -> Dictionary:
+	var perp := Vector2(-dir.y, dir.x)
+	var road_dir3: Vector3 = Vector3(-perp.x, 0.0, -perp.y) if side == 1 else Vector3(perp.x, 0.0, perp.y)
+	var fwd := road_dir3.normalized()
+	var yaw := atan2(fwd.x, fwd.z) + PI / 2.0
+	var po: Vector3 = Basis(Vector3.UP, yaw) * Vector3(WIRE_POLE_LOCAL_X, 0.0, 0.0)
+	return {"pos": pos, "pole": Vector2(pos.x + po.x, pos.y + po.z), "side": side, "idx": idx, "dir": dir}
+
+# A wire endpoint is REAL iff a lamp would have been placed here — same gates the
+# lamp walker uses (intersection / parking / near-road / water / chunk loaded).
+func _wire_anchor_valid(pos: Vector2) -> bool:
+	var ck := _bb_chunk_key_at(pos)
+	if not _loaded_chunks.has(ck):
+		return false
+	if _is_point_in_intersection_shape(pos, false, ck) >= 0:
+		return false
+	if _is_point_in_any_parking(pos, ck):
+		return false
+	if _is_point_near_road(pos, 0.1, ck):
+		return false
+	if _is_point_in_water(pos, ck):
+		return false
+	return true
+
+func _wire_attach_height() -> float:
+	return WIRE_ATTACH_Y
+
+# Deterministic run/gap (plan §3,§5): span index k is "wired" iff it lands in a run
+# block. Run/gap lengths are per road class and seeded by (way_id, side). O(k), k small.
+func _wire_span_wired(way_id: int, side_id: int, highway: String, k: int) -> bool:
+	if wire_debug_dense:
+		return true
+	var rg: Array = WIRE_RUNGAP.get(highway, [4, 7, 3, 5])
+	var run_min: int = rg[0]
+	var run_span: int = rg[1] - rg[0] + 1
+	var gap_min: int = rg[2]
+	var gap_span: int = rg[3] - rg[2] + 1
+	var pos := 1
+	var block := 0
+	while pos <= k:
+		var hr := (way_id * 2654435761 + side_id * 668265263 + block * 40503) & 0x7FFFFFFF
+		var run_len: int = run_min + (hr % run_span)
+		if k >= pos and k < pos + run_len:
+			return true
+		var hg := (way_id * 2654435761 + side_id * 374761393 + block * 40503 + 17) & 0x7FFFFFFF
+		var gap_len: int = gap_min + (hg % gap_span)
+		pos += run_len + gap_len
+		block += 1
+		if block > 4096:
+			break
+	return false
+
+func _wire_span_twin(way_id: int, side_id: int, k: int) -> bool:
+	if not enable_wire_twin:
+		return false
+	var ht := (way_id * 2654435761 + side_id * 2246822519 + k * 40503) & 0x7FFFFFFF
+	return (ht % WIRE_TWIN_DENOM) == 0
+
+func _joint_spark_eligible(way_id: int, side_id: int, k: int) -> bool:
+	var hs := (way_id * 2654435761 + k * 40503 + side_id * 668265263) & 0x7FFFFFFF
+	return (hs % SPARK_JOINT_DENOM) == 0
+
+# Soft building avoidance (plan §3): reject only a clear through-footprint crossing.
+func _wire_span_hits_building(a: Vector2, b: Vector2) -> bool:
+	for s in [0.2, 0.4, 0.6, 0.8]:
+		if _building_clip_within(a.lerp(b, s), 0.3):
+			return true
+	return false
+
+# Budgeted per-chunk wire walk. `points` are CLIPPED to chunk `ck` (== lamp clip).
+func _generate_road_wires_incremental(points: PackedVector2Array, way_id: int, highway: String, width: float, start_idx: int, ck: String, budget_start: int, budget_usec: int, wire_dirty: Dictionary) -> int:
+	if not enable_overhead_wires or points.size() < 2 or not _loaded_chunks.has(ck):
+		return WIRE_DONE
+	var anchors := _compute_lamp_anchors(points, width)
+	if anchors.is_empty():
+		return WIRE_DONE
+	var by_side := {1: {}, -1: {}}
+	var max_k := 0
+	for a in anchors:
+		by_side[a.side][a.idx] = a
+		if a.idx > max_k:
+			max_k = a.idx
+	var k := maxi(start_idx, 1)
+	while k < max_k:
+		if (Time.get_ticks_usec() - budget_start) > budget_usec:
+			return k
+		for side in [1, -1]:
+			var side_id := 0 if side == 1 else 1
+			_try_wire_span(by_side[side], side_id, way_id, highway, k, ck, wire_dirty)
+		k += 1
+	return WIRE_DONE
+
+func _try_wire_span(side_dict: Dictionary, side_id: int, way_id: int, highway: String, k: int, ck: String, wire_dirty: Dictionary) -> void:
+	var key := "w_%d_%d_%d" % [way_id, side_id, k]
+	if _created_wire_keys.has(key):
+		return
+	if not _wire_span_wired(way_id, side_id, highway, k):
+		return
+	var a0: Variant = side_dict.get(k)
+	var a1: Variant = side_dict.get(k + 1)
+	if a0 == null or a1 == null:
+		return
+	if not _wire_anchor_valid(a0.pos) or not _wire_anchor_valid(a1.pos):
+		return
+	if a0.pos.distance_to(a1.pos) > WIRE_MAX_SPAN:
+		return
+	var mid: Vector2 = a0.pos.lerp(a1.pos, 0.5)
+	if _is_point_in_intersection_shape(mid, false, _bb_chunk_key_at(mid)) >= 0:
+		return
+	if _is_point_on_bridge_deck(mid):
+		return
+	if _wire_span_hits_building(a0.pos, a1.pos):
+		return
+	_place_wire(a0, a1, way_id, side_id, k, ck, key, wire_dirty)
+
+func _place_wire(a0: Dictionary, a1: Dictionary, way_id: int, side_id: int, k: int, ck: String, key: String, wire_dirty: Dictionary) -> void:
+	# Attach at the POLE SHAFT world XZ (a*.pole), on the straight shaft below the arm.
+	var q0: Vector2 = a0.pole
+	var q1: Vector2 = a1.pole
+	var attach := _wire_attach_height()
+	var p0 := Vector3(q0.x, get_surface_y(q0.x, q0.y) + attach, q0.y)
+	var p1 := Vector3(q1.x, get_surface_y(q1.x, q1.y) + attach, q1.y)
+	var span := q0.distance_to(q1)
+	var sag := clampf(span * 0.05, 0.25, 1.2)
+	if not _wire_geo_by_chunk.has(ck):
+		_wire_geo_by_chunk[ck] = {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+	var geo: Dictionary = _wire_geo_by_chunk[ck]
+	if _wire_span_twin(way_id, side_id, k):
+		var off := (p1 - p0)
+		off.y = 0.0
+		off = (off.normalized().cross(Vector3.UP)) * (WIRE_TWIN_OFFSET * 0.6) if off.length() > 0.001 else Vector3(WIRE_TWIN_OFFSET * 0.6, 0, 0)
+		_append_wire_tube(geo, p0 + off, p1 + off, sag)
+		_append_wire_tube(geo, p0 - off, p1 - off, sag * 1.06)
+	else:
+		_append_wire_tube(geo, p0, p1, sag)
+	_wire_geo_by_chunk[ck] = geo
+	_created_wire_keys[key] = true
+	if not _wire_keys_by_chunk.has(ck):
+		_wire_keys_by_chunk[ck] = []
+	_wire_keys_by_chunk[ck].append(key)
+	wire_dirty[ck] = true
+	_register_spark_joint(way_id, side_id, k, p0, ck)
+	_register_spark_joint(way_id, side_id, k + 1, p1, ck)
+	if wire_debug_reasons:
+		_wire_dbg_check_lamp(a0.pos)
+		_wire_dbg_check_lamp(a1.pos)
+
+func _wire_dbg_check_lamp(pos: Vector2) -> void:
+	var lk := "%d_%d" % [int(pos.x), int(pos.y)]
+	if _created_lamp_positions.has(lk):
+		_wire_dbg_lamp_hit += 1
+	else:
+		_wire_dbg_lamp_miss += 1
+	if (_wire_dbg_lamp_hit + _wire_dbg_lamp_miss) % 50 == 0:
+		print("WIRE-VERIFY: anchors with a real placed lamp = %d, without = %d" % [_wire_dbg_lamp_hit, _wire_dbg_lamp_miss])
+
+func _register_spark_joint(way_id: int, side_id: int, k: int, world_pos: Vector3, ck: String) -> void:
+	if not _joint_spark_eligible(way_id, side_id, k):
+		return
+	var jkey := "j_%d_%d_%d" % [way_id, side_id, k]
+	if _spark_joint_seen.has(jkey):
+		return
+	_spark_joint_seen[jkey] = true
+	if not _spark_joints_by_chunk.has(ck):
+		_spark_joints_by_chunk[ck] = []
+	_spark_joints_by_chunk[ck].append(world_pos)
+	if not _spark_joint_keys_by_chunk.has(ck):
+		_spark_joint_keys_by_chunk[ck] = []
+	_spark_joint_keys_by_chunk[ck].append(jkey)
+	if wire_debug_show_joints and _loaded_chunks.has(ck):
+		var m := MeshInstance3D.new()
+		var sm := SphereMesh.new()
+		sm.radius = 0.25
+		sm.height = 0.5
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(1.0, 0.2, 1.0)
+		sm.material = mat
+		m.mesh = sm
+		m.position = world_pos
+		m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_loaded_chunks[ck].add_child(m)
+
+# Append one 3-sided catenary tube (p0→p1, dipping by `sag`) into the chunk's arrays.
+func _append_wire_tube(geo: Dictionary, p0: Vector3, p1: Vector3, sag: float) -> void:
+	var d := p1 - p0
+	d.y = 0.0
+	var dir := d.normalized() if d.length() > 0.001 else Vector3(1, 0, 0)
+	var R := dir.cross(Vector3.UP)
+	R = R.normalized() if R.length() > 0.001 else Vector3(1, 0, 0)
+	var U := R.cross(dir).normalized()
+	var r := WIRE_RADIUS
+	var angs := [PI * 0.5, PI * 7.0 / 6.0, PI * 11.0 / 6.0]
+	var v: PackedVector3Array = geo.v
+	var nrm: PackedVector3Array = geo.n
+	var idx: PackedInt32Array = geo.i
+	var base := v.size()
+	for i in range(WIRE_SEGMENTS + 1):
+		var t := float(i) / float(WIRE_SEGMENTS)
+		var c := p0.lerp(p1, t)
+		c.y -= sag * 4.0 * t * (1.0 - t)
+		for a in angs:
+			var radial: Vector3 = (cos(a) * R + sin(a) * U)
+			v.append(c + radial * r)
+			nrm.append(radial)
+	for i in range(WIRE_SEGMENTS):
+		var r0 := base + i * 3
+		var r1 := base + (i + 1) * 3
+		for s in range(3):
+			var s2 := (s + 1) % 3
+			idx.append(r0 + s); idx.append(r1 + s); idx.append(r0 + s2)
+			idx.append(r0 + s2); idx.append(r1 + s); idx.append(r1 + s2)
+	geo.v = v
+	geo.n = nrm
+	geo.i = idx
+
+func _ensure_wire_material() -> StandardMaterial3D:
+	if _wire_material == null:
+		_wire_material = StandardMaterial3D.new()
+		_wire_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_wire_material.albedo_color = WIRE_COLOR
+	return _wire_material
+
+# Rebuild the one merged wire MeshInstance for chunk `ck` (mesh-swap, no node churn).
+func _commit_wire_mesh(ck: String) -> void:
+	if not _loaded_chunks.has(ck) or not _wire_geo_by_chunk.has(ck):
+		return
+	var geo: Dictionary = _wire_geo_by_chunk[ck]
+	if geo.v.is_empty():
+		return
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = geo.v
+	arr[Mesh.ARRAY_NORMAL] = geo.n
+	arr[Mesh.ARRAY_INDEX] = geo.i
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	var mi: MeshInstance3D
+	if _wire_node_by_chunk.has(ck) and is_instance_valid(_wire_node_by_chunk[ck]):
+		mi = _wire_node_by_chunk[ck]
+	else:
+		mi = MeshInstance3D.new()
+		mi.name = "OverheadWires"
+		mi.material_override = _ensure_wire_material()
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.visibility_range_end = 250.0
+		mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		_wire_node_by_chunk[ck] = mi
+		_loaded_chunks[ck].add_child(mi)
+	mi.mesh = mesh
+
+# ── Night-only pooled spark bursts (plan §6) ────────────────────────────────
+func _ensure_spark_pool() -> void:
+	if not _spark_pool.is_empty():
+		return
+	_spark_pool_root = Node3D.new()
+	_spark_pool_root.name = "WireSparkPool"
+	add_child(_spark_pool_root)
+	var mesh := QuadMesh.new()
+	mesh.size = Vector2(0.05, 0.05)
+	var smat := StandardMaterial3D.new()
+	smat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	smat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	smat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	smat.vertex_color_use_as_albedo = true
+	smat.emission_enabled = true
+	smat.emission = Color(0.45, 0.72, 1.0)
+	smat.emission_energy_multiplier = 4.0
+	smat.albedo_color = Color(0.55, 0.8, 1.0)
+	mesh.material = smat
+	var grad := Gradient.new()
+	grad.set_color(0, Color(0.6, 0.85, 1.0, 1.0))
+	grad.set_color(1, Color(0.3, 0.6, 1.0, 0.0))
+	var gtex := GradientTexture1D.new()
+	gtex.gradient = grad
+	var scurve := Curve.new()
+	scurve.add_point(Vector2(0.0, 1.0))
+	scurve.add_point(Vector2(1.0, 0.0))
+	var sctex := CurveTexture.new()
+	sctex.curve = scurve
+	# --- Smoke puff look (subtle grey, drifts up, grows, fades) ---
+	var smoke_mesh := QuadMesh.new()
+	smoke_mesh.size = Vector2(0.24, 0.24)
+	var smoke_mat := StandardMaterial3D.new()
+	smoke_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	smoke_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	smoke_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	smoke_mat.vertex_color_use_as_albedo = true
+	smoke_mat.albedo_color = Color(0.9, 0.92, 0.96, 1.0)
+	# soft pale self-glow → light "vape"-like vapour readable at night
+	smoke_mat.emission_enabled = true
+	smoke_mat.emission = Color(0.8, 0.84, 0.92)
+	smoke_mat.emission_energy_multiplier = 1.1
+	smoke_mesh.material = smoke_mat
+	var smoke_grad := Gradient.new()
+	smoke_grad.set_color(0, Color(0.93, 0.95, 0.99, 0.68))  # light, soft puff when born
+	smoke_grad.set_color(1, Color(0.85, 0.88, 0.95, 0.0))   # fades away
+	var smoke_gtex := GradientTexture1D.new()
+	smoke_gtex.gradient = smoke_grad
+	var smoke_scurve := Curve.new()
+	smoke_scurve.add_point(Vector2(0.0, 0.5))
+	smoke_scurve.add_point(Vector2(1.0, 1.6))  # grows as it rises
+	var smoke_sctex := CurveTexture.new()
+	smoke_sctex.curve = smoke_scurve
+	for _i in range(SPARK_POOL_SIZE):
+		var p := GPUParticles3D.new()
+		p.amount = 10
+		p.lifetime = 0.7  # short enough that sparks fade mid-air, not on the pavement
+		p.one_shot = true
+		p.explosiveness = 0.85
+		p.emitting = false
+		p.visible = false
+		p.local_coords = false
+		p.draw_pass_1 = mesh
+		var pm := ParticleProcessMaterial.new()
+		pm.direction = Vector3(0, -1, 0)
+		pm.spread = 22.0
+		pm.gravity = Vector3(0, -9.0, 0)
+		pm.initial_velocity_min = 1.2
+		pm.initial_velocity_max = 3.0
+		pm.scale_min = 0.6
+		pm.scale_max = 1.2
+		pm.color = Color(0.55, 0.8, 1.0, 1.0)
+		pm.color_ramp = gtex
+		pm.scale_curve = sctex
+		p.process_material = pm
+		_spark_pool_root.add_child(p)
+		_spark_pool.append(p)
+		# paired smoke puff
+		var sk := GPUParticles3D.new()
+		sk.amount = 9
+		sk.lifetime = 1.5
+		sk.one_shot = true
+		sk.explosiveness = 0.55
+		sk.emitting = false
+		sk.visible = false
+		sk.local_coords = false
+		sk.draw_pass_1 = smoke_mesh
+		var skm := ParticleProcessMaterial.new()
+		skm.direction = Vector3(0, 1, 0)
+		skm.spread = 18.0
+		skm.gravity = Vector3(0, 0.35, 0)   # drifts gently upward
+		skm.initial_velocity_min = 0.25
+		skm.initial_velocity_max = 0.7
+		skm.damping_min = 0.4
+		skm.damping_max = 0.9
+		skm.scale_min = 0.7
+		skm.scale_max = 1.3
+		skm.color = Color(0.35, 0.36, 0.38, 1.0)
+		skm.color_ramp = smoke_gtex
+		skm.scale_curve = smoke_sctex
+		sk.process_material = skm
+		_spark_pool_root.add_child(sk)
+		_smoke_pool.append(sk)
+
+func _update_wire_sparks(delta: float) -> void:
+	if not _is_night_mode:
+		return
+	if _spark_joints_by_chunk.is_empty():
+		return
+	_ensure_spark_pool()
+	_spark_elapsed += delta
+	var bucket := int(_spark_elapsed / SPARK_INTERVAL)
+	if bucket == _spark_last_bucket:
+		return
+	_spark_last_bucket = bucket
+	var idx := -1
+	for i in range(_spark_pool.size()):
+		if not _spark_pool[i].emitting:
+			idx = i
+			break
+	if idx == -1:
+		return
+	var emitter: GPUParticles3D = _spark_pool[idx]
+	var cam := _cached_cam_pos
+	var fwd := _cached_cam_fwd
+	var candidates: Array = []
+	for cck in _spark_joints_by_chunk:
+		for jp in _spark_joints_by_chunk[cck]:
+			var to: Vector3 = jp - cam
+			if to.length() > SPARK_VIEW_DIST:
+				continue
+			var toh := Vector3(to.x, 0, to.z)
+			if toh.length() > 0.1 and toh.normalized().dot(fwd) < -0.25:
+				continue
+			candidates.append(jp)
+	if candidates.is_empty():
+		return
+	var pick := absi(bucket * 2654435761 + 12345) % candidates.size()
+	var jpos: Vector3 = candidates[pick]
+	emitter.global_position = jpos
+	emitter.visible = true
+	emitter.restart()
+	emitter.emitting = true
+	if idx < _smoke_pool.size():
+		var smoke: GPUParticles3D = _smoke_pool[idx]
+		smoke.global_position = jpos
+		smoke.visible = true
+		smoke.restart()
+		smoke.emitting = true
+
+func _stop_wire_sparks() -> void:
+	for p in _spark_pool:
+		if is_instance_valid(p):
+			p.emitting = false
+			p.visible = false
+	for s in _smoke_pool:
+		if is_instance_valid(s):
+			s.emitting = false
+			s.visible = false
+	_spark_last_bucket = -1
+
+# Clear all per-world wire/spark bookkeeping on regen/reset (nodes free with chunks).
+func _reset_wire_state() -> void:
+	_deferred_wire_road_queue.clear()
+	_created_wire_keys.clear()
+	_wire_keys_by_chunk.clear()
+	_wire_geo_by_chunk.clear()
+	_wire_node_by_chunk.clear()
+	_spark_joints_by_chunk.clear()
+	_spark_joint_seen.clear()
+	_spark_joint_keys_by_chunk.clear()
+	_stop_wire_sparks()
 
 
 func _generate_manholes_along_road(nodes: Array, road_width: float, parent: Node3D) -> void:
@@ -20826,6 +21410,10 @@ func _on_night_mode_changed(enabled: bool) -> void:
 
 	# NEW: Update lamp night mode
 	_update_lamp_night_mode(enabled)
+
+	# Stop wire sparks immediately when day returns (night re-arms in _process).
+	if not enabled:
+		_stop_wire_sparks()
 
 	# Обновляем все фонари и неоновые вывески
 	for chunk_key in _loaded_chunks.keys():

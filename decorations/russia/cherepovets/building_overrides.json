@@ -779,6 +779,17 @@
       "y_offset": 8.65,
       "clear_trees_radius": 25.0,
       "visibility_range": 600.0
+    },
+    {
+      "comment": "Royal Vio stand (стенд) у кольца — 3 м высотой",
+      "model": "res://models/royal-vio-stand.glb",
+      "lat": 59.131303,
+      "lon": 37.980509,
+      "rotation_y": 0,
+      "scale": 4.3305,
+      "y_offset": 1.5,
+      "clear_trees_radius": 5.0,
+      "visibility_range": 400.0
     }
   ],
   "landuse_overrides": [
