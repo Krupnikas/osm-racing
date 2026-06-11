@@ -619,6 +619,19 @@ var _wire_keys_by_chunk: Dictionary = {}         # chunk_key → Array[String] (
 var _wire_geo_by_chunk: Dictionary = {}          # chunk_key → {v:PackedVector3Array, n, i}
 var _wire_node_by_chunk: Dictionary = {}         # chunk_key → MeshInstance3D (one merged mesh)
 var _wire_material: StandardMaterial3D = null
+# ── Rare hanging sneakers on overhead wires (cheap static prop) ──────────────
+var enable_wire_sneakers := true                  # master toggle
+const SNEAKER_SCENE_PATH := "res://models/wire_props/sneakers.glb"
+var sneaker_probability := 1.0 / 30.0             # at most ~1 in 30 eligible spans
+var sneaker_max_visible_distance := 55.0          # cull beyond this (close-up only)
+var sneaker_base_scale := 0.28                    # model is ~1.9 units tall → scale to ~0.5 m drop
+var sneaker_scale_range := Vector2(0.9, 1.12)     # per-instance scale jitter ×base
+var sneaker_random_rotation_range := 0.55         # radians (~31°) yaw jitter; roll = 0.3× this
+var sneaker_attach_offset := Vector3(0.0, 0.04, 0.0)  # fine-tune so the lace knot kisses the wire
+var _sneaker_scene: PackedScene = null
+var _sneaker_loaded := false
+var _sneaker_top_y := 0.95                        # real-vertex top (lace loop) in model-local space
+var _sneaker_keys_by_chunk: Dictionary = {}       # chunk_key → Array[String] (placed-span dedup/cleanup)
 var _spark_joints_by_chunk: Dictionary = {}      # chunk_key → Array[Vector3] (eligible joints)
 var _spark_joint_seen: Dictionary = {}           # joint key → true (dedup across re-walks)
 var _spark_joint_keys_by_chunk: Dictionary = {}  # chunk_key → Array[String] (unload cleanup)
@@ -1644,6 +1657,10 @@ func _init_tree_billboards() -> void:
 	_tree_shadow_mesh_pine.surface_set_material(0, shadow_mat_pine)
 
 	call_deferred("_render_billboard_textures_async")
+	# Preload the (heavy) hanging-sneakers GLB once at init so the first wire span that
+	# selects it doesn't load 13 MB synchronously mid-drive (a frame hitch).
+	if enable_wire_sneakers:
+		call_deferred("_ensure_sneaker_asset")
 
 	print("OSM: Tree billboard meshes ready (SubViewport render deferred)")
 
@@ -3204,6 +3221,7 @@ func _unload_chunk(chunk_key: String) -> void:
 			_wire_keys_by_chunk.erase(chunk_key)
 		_wire_geo_by_chunk.erase(chunk_key)
 		_wire_node_by_chunk.erase(chunk_key)
+		_sneaker_keys_by_chunk.erase(chunk_key)  # sneaker prop nodes free with chunk_node below
 		if _spark_joint_keys_by_chunk.has(chunk_key):
 			for _jk in _spark_joint_keys_by_chunk[chunk_key]:
 				_spark_joint_seen.erase(_jk)
@@ -20520,6 +20538,9 @@ func _place_wire(a0: Dictionary, a1: Dictionary, way_id: int, side_id: int, k: i
 		_wire_keys_by_chunk[ck] = []
 	_wire_keys_by_chunk[ck].append(key)
 	wire_dirty[ck] = true
+	# Rare hanging sneakers at the sagging span's lowest point (deterministic, ~1/30 spans).
+	if enable_wire_sneakers:
+		_maybe_place_sneaker(p0, p1, sag, key, ck)
 	# Spark/smoke emitters are no longer tied to wire joints — broken lamps are the source
 	# now (registered in _spawn_lamp_light via _register_spark_source).
 	if wire_debug_reasons:
@@ -20601,6 +20622,92 @@ func _ensure_wire_material() -> StandardMaterial3D:
 		_wire_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		_wire_material.albedo_color = WIRE_COLOR
 	return _wire_material
+
+
+# Load the sneaker scene once and cache the real-vertex top Y (the lace-loop, which glues to
+# the wire). Uses mesh.get_aabb() — NOT the node's stored AABB — per the imported-GLB gotcha.
+func _ensure_sneaker_asset() -> bool:
+	if _sneaker_loaded:
+		return _sneaker_scene != null
+	_sneaker_loaded = true
+	if not enable_wire_sneakers:
+		return false
+	_sneaker_scene = load(SNEAKER_SCENE_PATH) as PackedScene
+	if _sneaker_scene == null:
+		push_warning("wire sneakers: failed to load " + SNEAKER_SCENE_PATH)
+		return false
+	var inst: Node = _sneaker_scene.instantiate()
+	add_child(inst)  # so global_transform is valid while measuring
+	var top := -INF
+	var stack: Array = [inst]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		if n is MeshInstance3D and (n as MeshInstance3D).mesh != null:
+			var top_local: float = ((n as MeshInstance3D).global_transform * (n as MeshInstance3D).mesh.get_aabb()).end.y
+			top = maxf(top, top_local)
+		for c in n.get_children():
+			stack.append(c)
+	inst.queue_free()
+	if top > -INF:
+		_sneaker_top_y = top
+	return true
+
+
+# Deterministic float in [0,1) from an integer hash + a salt — for per-span scale/rotation jitter.
+func _sneaker_hash01(h: int, salt: int) -> float:
+	var x := absi((h * 2654435761 + salt * 40503 + 0x9E3779B9) & 0x7FFFFFFF)
+	return float(x % 1000003) / 1000003.0
+
+
+# Set distance-based visibility (close-up only) on every GeometryInstance3D under `node`.
+func _sneaker_apply_visibility(node: Node, dist: float) -> void:
+	var stack: Array = [node]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		if n is GeometryInstance3D:
+			var g := n as GeometryInstance3D
+			g.visibility_range_end = dist
+			g.visibility_range_end_margin = maxf(2.0, dist * 0.15)
+			g.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		for c in n.get_children():
+			stack.append(c)
+
+
+# Place a hanging-sneakers prop at the lowest point of this sagging wire span, IF this span is
+# one of the rare (~1/30) selected ones. Deterministic per span (position key) so chunk reloads
+# keep the same wires chosen. The prop is parented to the owning chunk node → freed on unload.
+func _maybe_place_sneaker(p0: Vector3, p1: Vector3, sag: float, key: String, ck: String) -> void:
+	if not _loaded_chunks.has(ck):
+		return
+	var h := hash(key)
+	var denom := maxi(2, int(round(1.0 / maxf(sneaker_probability, 0.0001))))
+	if (absi(h) % denom) != 0:
+		return
+	if not _ensure_sneaker_asset():
+		return
+	# Lowest point of the parabolic sag: midpoint, dropped by `sag` (4*0.5*0.5 = 1.0).
+	var lowest := p0.lerp(p1, 0.5)
+	lowest.y -= sag
+	# Horizontal tangent of the span at t=0.5.
+	var d := p1 - p0
+	d.y = 0.0
+	var dir := d.normalized() if d.length() > 0.001 else Vector3(0, 0, 1)
+	# Deterministic per-span jitter.
+	var scl := sneaker_base_scale * lerpf(sneaker_scale_range.x, sneaker_scale_range.y, _sneaker_hash01(h, 1))
+	var yaw := atan2(dir.x, dir.z) + (_sneaker_hash01(h, 2) - 0.5) * 2.0 * sneaker_random_rotation_range
+	var roll := (_sneaker_hash01(h, 3) - 0.5) * 2.0 * (sneaker_random_rotation_range * 0.3)
+	var inst: Node3D = _sneaker_scene.instantiate()
+	inst.add_to_group("wire_sneaker")
+	_loaded_chunks[ck].add_child(inst)
+	# Orient along the span (+ jitter), keep model +Y up so the shoes hang under gravity.
+	var basis := Basis(Vector3.UP, yaw) * Basis(Vector3(0, 0, 1), roll) * Basis.from_scale(Vector3(scl, scl, scl))
+	# Glue the model's top (lace loop) to the wire's lowest point; the shoes hang below.
+	var pos := lowest - Vector3(0, scl * _sneaker_top_y, 0) + sneaker_attach_offset
+	inst.transform = Transform3D(basis, pos)
+	_sneaker_apply_visibility(inst, sneaker_max_visible_distance)
+	if not _sneaker_keys_by_chunk.has(ck):
+		_sneaker_keys_by_chunk[ck] = []
+	_sneaker_keys_by_chunk[ck].append(key)
 
 # Rebuild the one merged wire MeshInstance for chunk `ck` (mesh-swap, no node churn).
 func _commit_wire_mesh(ck: String) -> void:
@@ -20800,6 +20907,7 @@ func _reset_wire_state() -> void:
 	_wire_keys_by_chunk.clear()
 	_wire_geo_by_chunk.clear()
 	_wire_node_by_chunk.clear()
+	_sneaker_keys_by_chunk.clear()
 	_spark_joints_by_chunk.clear()
 	_spark_joint_seen.clear()
 	_spark_joint_keys_by_chunk.clear()
