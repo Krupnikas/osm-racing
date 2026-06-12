@@ -27,3 +27,6 @@ game.log
 # Performance test logs
 *.log
 performance*.log
+
+# Node dependency caches (vendored MCP server etc.) — never commit
+node_modules/

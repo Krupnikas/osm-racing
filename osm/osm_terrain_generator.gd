@@ -374,6 +374,25 @@ var _lamp_batch_data: Dictionary = {}  # key: chunk_key -> batch data
 #   light_data: Array[Dictionary]  # {position: Vector3, broken: bool}
 #   parent: Node3D
 var _lamp_batches_to_finalize: Array[String] = []  # Chunk keys ready for finalization
+# TEMP streaming-lamp diagnosis (remove after fix)
+var lamp_debug := false   # debug logging for lamp/wire streaming (LAMP-FIN/UNLOAD/WIRE-ENQ/LAMP-DBG) — off in shipped builds
+var _lamp_dbg_skip_road := 0
+var _lamp_dbg_skip_budget := 0
+var _lamp_dbg_walk_skip := 0
+var _lamp_dbg_drop_unloaded := 0
+var _lamp_dbg_frame := 0
+var _wire_dbg_walked := 0
+var _wire_dbg_placed := 0
+var _wire_dbg_skip_invalid := 0
+var _wire_dbg_sect_skip := 0
+var _wire_dbg_ran_frames := 0
+var _wire_dbg_spans := 0
+var _wire_dbg_already := 0
+var _wire_dbg_notwired := 0
+var _wire_dbg_nullanchor := 0
+var _wire_dbg_spancap := 0
+var _wire_dbg_intersection := 0
+var _wire_dbg_building := 0
 
 # Street lamp model mesh (loaded from GLB, decimated)
 var _lamp_model_mesh: ArrayMesh
@@ -382,6 +401,25 @@ var _lamp_debug_visible := false  # Видимость debug шариков и �
 
 # Keep for night mode updates and chunk association
 var _lamp_lights_by_chunk: Dictionary = {}  # chunk_key -> Array[OmniLight3D]
+# Lamp lights live under THIS global node, NOT the chunk node — the behind-camera chunk
+# cull sets chunk_node.visible=false, which would hide the (scene-tree) SpotLights while
+# the RS pole instances stay. A light still illuminates the scene from behind the camera,
+# so it must not be culled with the chunk mesh. Freed per-chunk in the unload cleanup.
+var _lamp_lights_root: Node3D = null
+# Cap simultaneously-active lamp lights to the nearest N — the Forward+ clustered
+# renderer drops lights when too many pack into a screen region (now that streets are
+# densely lit), causing the lamps near you to flicker off while driving. Keeping only
+# the nearest N lit avoids the overflow (distant lamps are dim/far anyway).
+var LAMP_MAX_ACTIVE_LIGHTS := 48   # runtime-tunable (was const) so the cluster cap can be tuned live
+var lamp_cull_enabled := true       # debug: set false to let the cull stop overwriting manual visibility
+var _lamp_cull_frame := 0
+# Guaranteed per-frame time slice (µs) for the overhead-wire drain during gameplay.
+# Wires sit late in _process_road_queue's section order, so the shared 4 ms frame
+# budget was almost always spent before they ran — starving them on streamed chunks
+# (walked/placed froze after initial load). This slice is measured from when the wire
+# section is reached, so wires always make progress regardless of earlier sections.
+# Costs nothing when the wire queue is empty.
+const WIRE_SLICE_USEC := 2500
 
 # Billboard batching - created from DecorationLayer
 var _billboard_batches_to_finalize: Array[String] = []  # Chunk keys ready for billboard finalization
@@ -508,6 +546,188 @@ var _deferred_road_collisions: Dictionary = {}  # chunk_key → Array[{body, ver
 var _deferred_terrain_collisions: Dictionary = {}  # chunk_key → Array[{parent, vertices, indices}]
 var _deferred_footway_queue: Dictionary = {}  # chunk_key → Array[{smoothed_points, width, tags, parent}]
 var _deferred_billboard_queue: Dictionary = {}  # chunk_key → Array[{billboard, elevation, parent}]
+
+# ── Procedural roadside billboards (along trunk/primary) ────────────────────
+@export var enable_road_billboards := true
+const BILLBOARD_TEX_DIR := "res://textures/billboards/small-city/"
+const BILLBOARD_FOOTPRINT_CELL := 32.0     # spatial-hash cell for the global footprint index
+const BILLBOARD_CLIP_MARGIN := 4.5         # reject within this of ANY building (anti-clip)
+const BILLBOARD_RESIDENTIAL_RADIUS := 22.0 # reject within this of RESIDENTIAL buildings
+const BILLBOARD_VERGE_SETBACK := 2.5       # extra offset past the carriageway edge
+const BILLBOARD_SPACING_TRUNK := 120.0
+const BILLBOARD_SPACING_PRIMARY := 150.0
+const BILLBOARD_YAW_OFFSET_DEG := 20.0     # 0 = pure perpendicular; ~15-25 = slight turn toward lane (tunable)
+const BILLBOARD_DONE := 1000000000         # incremental sentinel = way fully walked
+var billboard_debug_dense := false         # debug: smaller spacing + relaxed gates (M7 validation only)
+var _deferred_billboard_road_queue: Dictionary = {}  # chunk_key → Array[{points, way_id, highway, width, _bb_idx}]
+var _created_billboard_keys: Dictionary = {}         # semantic dedup key → true (placed billboards only)
+var _billboard_keys_by_chunk: Dictionary = {}        # chunk_key → Array[String] (for unload key cleanup)
+# Global, neighbor-aware building footprint index (deduped by way_id):
+var _building_footprint_hash: Dictionary = {}        # Vector2i cell → Array[{bbox: Rect2, residential: bool}]
+var _building_footprint_way_ids: Dictionary = {}     # way_id → true (dedup add)
+var _billboard_tex_paths: Array[String] = []
+var _billboard_pool_scanned := false
+const _BILLBOARD_RESIDENTIAL_TYPES := ["apartments", "residential", "house", "detached", "dormitory", "terrace"]
+const BILLBOARD_MIN_SPACING := 100.0       # global min distance between ANY two boards
+const BILLBOARD_MEDIAN_CHECK := 6.0        # reject if another road is this close behind the board
+var _billboard_pos_hash: Dictionary = {}      # 100 m cell (Vector2i) → Array[Vector2] placed positions
+var _billboard_pos_by_chunk: Dictionary = {}  # chunk_key → Array[Vector2] (unload cleanup)
+
+# ── Procedural overhead utility wires between street lamps ───────────────────
+# See docs/OVERHEAD_WIRES_PLAN.md. ADAPTATION (documented): the lamp walker places
+# lamps from CLIPPED per-chunk polylines with the 17 m phase reset at each chunk
+# boundary, so the plan's "recompute from FULL polyline" would not reproduce real
+# lamp positions (→ floating wires). We instead walk the SAME clipped points the
+# lamp enqueue uses, so wire anchors are bit-identical to the placed lamps. Anchor
+# validity replicates the exact lamp gates. Trade-off: a wire gap at chunk borders.
+@export var enable_overhead_wires := true
+const LAMP_SPACING := 17.0              # shared with the lamp walker (was a literal)
+const LAMP_SIDE_OFFSET_PAD := 0.5       # offset = road_width/2 + pad
+const LAMP_BOTH_SIDES_WIDTH := 12.0     # both sides only on roads this wide
+const WIRE_DONE := 1000000000           # incremental sentinel = chunk's ways fully walked
+const WIRE_MAX_SPAN := 40.0             # skip spans longer than this (dropped lamp)
+# The lamp model's POLE SHAFT is offset from the model origin: verified from mesh, the
+# shaft centroid is at local (+0.77, 0) and stays vertical up to ~5.0 m (the arm/head
+# overhang the origin at -0.6). So wires attach at the pole shaft (rotated by lamp yaw),
+# NOT at the origin (which floats between pole and head), and BELOW the arm.
+const WIRE_POLE_LOCAL_X := 0.77         # pole-shaft X offset in the lamp model's local space
+const WIRE_ATTACH_Y := 4.6              # attach height on the straight pole shaft (below the arm)
+const WIRE_RADIUS := 0.025
+const WIRE_SEGMENTS := 8                # catenary length segments
+const WIRE_TWIN_OFFSET := 0.16          # spacing between the two cables of a twin span
+const WIRE_TWIN_DENOM := 3              # ~1/3 of wired spans become twin cables
+const WIRE_COLOR := Color(0.06, 0.06, 0.07)
+# Per road class: [run_min, run_max, gap_min, gap_max] in spans (deterministic runs).
+const WIRE_RUNGAP := {
+	"trunk": [2, 4, 5, 9], "primary": [3, 5, 4, 7],
+	"secondary": [4, 7, 3, 5], "tertiary": [4, 8, 2, 4],
+}
+const SPARK_JOINT_DENOM := 20           # (legacy) old wire-joint eligibility — broken lamps drive sparks now
+const SPARK_POOL_SIZE := 9              # hard cap on concurrent spark emitters
+const SPARK_INTERVAL := 1.4             # seconds between burst attempts (global)
+const SPARK_BURSTS_PER_TICK := 3        # fire several nearby broken lamps each tick (more activity)
+const SPARK_VIEW_DIST := 95.0           # only spark within this of the camera
+var enable_wire_twin := true            # WIRE_TWIN_ENABLE — kill twin cables if too busy
+var wire_debug_dense := false           # bypass run/gap: every valid consecutive pair
+var wire_debug_show_joints := false     # drop a marker at each spark-eligible joint
+var wire_debug_reasons := false         # verify anchors vs real placed lamp positions
+var _wire_dbg_lamp_hit := 0
+var _wire_dbg_lamp_miss := 0
+var _deferred_wire_road_queue: Dictionary = {}  # chunk_key → Array[{points, way_id, highway, width, _wire_idx}]
+var _created_wire_keys: Dictionary = {}          # global semantic key "w_<way>_<side>_<idx>" → true
+var _wire_keys_by_chunk: Dictionary = {}         # chunk_key → Array[String] (unload key cleanup)
+var _wire_geo_by_chunk: Dictionary = {}          # chunk_key → {v:PackedVector3Array, n, i}
+var _wire_node_by_chunk: Dictionary = {}         # chunk_key → MeshInstance3D (one merged mesh)
+var _wire_material: StandardMaterial3D = null
+# ── Rare hanging sneakers on overhead wires (cheap static prop) ──────────────
+var enable_wire_sneakers := true                  # master toggle
+const SNEAKER_SCENE_PATH := "res://models/wire_props/sneakers.glb"
+var sneaker_probability := 1.0 / 30.0             # at most ~1 in 30 eligible spans
+var sneaker_max_visible_distance := 55.0          # cull beyond this (close-up only)
+var sneaker_base_scale := 0.28                    # model is ~1.9 units tall → scale to ~0.5 m drop
+var sneaker_scale_range := Vector2(0.9, 1.12)     # per-instance scale jitter ×base
+var sneaker_random_rotation_range := 0.55         # radians (~31°) yaw jitter; roll = 0.3× this
+var sneaker_attach_offset := Vector3(0.0, 0.04, 0.0)  # fine-tune so the lace knot kisses the wire
+var _sneaker_scene: PackedScene = null
+var _sneaker_loaded := false
+var _sneaker_top_y := 0.95                        # real-vertex top (lace loop) in model-local space
+var _sneaker_keys_by_chunk: Dictionary = {}       # chunk_key → Array[String] (placed-span dedup/cleanup)
+var _spark_joints_by_chunk: Dictionary = {}      # chunk_key → Array[Vector3] (eligible joints)
+var _spark_joint_seen: Dictionary = {}           # joint key → true (dedup across re-walks)
+var _spark_joint_keys_by_chunk: Dictionary = {}  # chunk_key → Array[String] (unload cleanup)
+var _spark_pool: Array = []                      # Array[GPUParticles3D] (spark bursts)
+var _smoke_pool: Array = []                       # Array[GPUParticles3D] (paired smoke puffs)
+var _spark_pool_root: Node3D = null
+var _spark_elapsed := 0.0
+var _spark_last_bucket := -1
+
+# ── Roadside props (kiosks + transformer boxes) ─────────────────────────────
+# See docs/ROADSIDE_PROPS_PLAN.md. Config-driven; mirrors the billboard road-walk.
+# Models normalized + grounded from REAL vertices (center XZ + base-Y baked at load
+# in _init_prop_defs) so off-origin models (e.g. the box) centre on the placement
+# point and sit flush — same lesson as the lamp pole offset.
+@export var enable_roadside_props := true
+const PROP_DONE := 1000000000           # incremental sentinel = road fully walked
+const PROP_MIN_SPACING := 25.0          # global min distance between ANY two props
+const PROP_FURNITURE_CLEAR := 7.0       # min distance from lamps/billboards/bus-stops/signs
+const PROP_LIFT := 0.05                 # lift above the surface so it doesn't z-fight the sidewalk
+var roadside_props_debug_dense := false # bypass siting+spacing gates (physical gates still apply)
+var roadside_props_debug_reasons := false
+# Per-type config. Model prep fields (base_y/cx/cz/foot/scale) filled by _init_prop_defs().
+var _prop_defs: Dictionary = {
+	"kiosk": {
+		"paths": ["res://models/roadside_props/newspaper-kiosk-1.glb", "res://models/roadside_props/newspaper-kiosk-2.glb"],
+		"target_h": 2.2, "roads": ["primary", "secondary", "tertiary"],
+		"spacing": 40.0, "setback": 2.5, "faces_road": true, "night_glow": true,
+		"build_margin": 1.0, "front_yaw_deg": 0.0,
+	},
+	"ebox": {
+		"paths": ["res://models/roadside_props/dirty_electrical_box.glb"],
+		"target_h": 1.8, "roads": ["secondary", "tertiary", "residential", "unclassified"],
+		"spacing": 240.0, "setback": 1.5, "faces_road": false, "night_glow": false,
+		"build_margin": 0.4, "front_yaw_deg": 0.0,
+	},
+}
+var _prop_defs_ready := false
+var _prop_scene_cache: Dictionary = {}   # path → PackedScene
+var _deferred_prop_road_queue: Dictionary = {}  # chunk_key → Array[{points, way_id, highway, width, type, _idx}]
+var _created_prop_keys: Dictionary = {}          # global semantic key → true
+var _prop_keys_by_chunk: Dictionary = {}         # chunk_key → Array[String]
+var _prop_pos_hash: Dictionary = {}              # PROP_MIN_SPACING cell → Array[Vector2]
+var _prop_pos_by_chunk: Dictionary = {}          # chunk_key → Array[Vector2]
+
+# ── Pedestrian guard-rail fences (russian_city_fence.glb) ───────────────────
+# v1 = STATIC placement only (Phase 2 shatter is out of scope). Full spec:
+# docs/PEDESTRIAN_FENCE_PLAN.md. Namespaced `pfence` to stay clear of the
+# unrelated iron-bar perimeter fences (`enable_fences`, _fence_*).
+@export var enable_pedestrian_fences := true
+const PFENCE_SCENE_PATH := "res://models/pedestrian_fence/russian_city_fence.glb"
+const PFENCE_INSTANCES_PER_CURB := 3     # NON-NEGOTIABLE: 3 instances × 4 bays = 12 bays per curb
+const PFENCE_BAYS_PER_INSTANCE := 4
+const PFENCE_MAJOR_ROADS := ["trunk", "primary", "secondary"]  # tertiary/residential/... excluded
+const PFENCE_ROAD_CLEAR := 0.15  # a fence footprint point must be at least this far OUTSIDE any road
+const PFENCE_DROP := 0    # site rejected permanently
+const PFENCE_RETRY := 1   # not anchorable yet (or mid-block until retries exhausted) — keep + retry
+const PFENCE_BUILT := 2   # placed this frame
+# Model bays are ~square (raw 0.88 long × 0.22 tall), so width-driven scaling to 2 m would make
+# it 2 m tall. We scale so one instance length = PFENCE_BAYS_PER_INSTANCE * bay_width; with 1.1 m
+# the fence ends up ~1.1 m tall — a realistic guard-rail. (Plan §10: tune bay width visually.)
+var pfence_bay_width := 1.1               # m per bay → instance length L = 4 * this
+var pfence_sidewalk_offset := 0.6         # outward from carriageway edge onto the sidewalk side
+var pfence_after_crossing_gap := 0.6      # gap past the far zebra edge before the run starts
+var pfence_zebra_half_depth := 2.5        # half the zebra marking depth along the road (clear it)
+var pfence_intersection_radius := 30.0    # anchoring search radius around a crossing
+var pfence_ambiguous_min := 3.0           # |dot(center-inter, axis)| below this → side ambiguous → skip
+var pfence_max_retries := 300             # drain retries before a still-unanchored site is dropped (mid-block)
+var pfence_debug := false                 # default-off: log site decisions + spawn debug markers
+# Pre-merged asset (built once): single ArrayMesh, structural surfaces only (Material_133 stripped),
+# along-axis baked to local +X, pivot at the run START (min X), depth centred on Z, base at Y=0.
+var _pfence_mesh: ArrayMesh = null
+var _pfence_loaded := false
+var _pfence_length := 0.0                 # scaled instance length L (along +X)
+var _pfence_depth := 0.0                  # scaled depth (Z)
+var _pfence_height := 0.0                 # scaled height (Y)
+var _deferred_pfence_queue: Dictionary = {}   # chunk_key → Array[{strip, cw_id, _retries}]
+var _pfence_batch_data: Dictionary = {}       # chunk_key → {parent, transforms: Array[Transform3D]}
+var _created_pfence_keys: Dictionary = {}     # global stable site key → true (dedup)
+var _pfence_keys_by_chunk: Dictionary = {}    # chunk_key → Array[String] (cleared on unload → reload rebuilds)
+var _pfence_dbg := {"enq": 0, "nonmajor": 0, "noroad": 0, "noanchor": 0, "ambiguous": 0, "built": 0}  # debug funnel
+# Phase 2 — разлёт (shatter on impact ≥ 40 km/h). See docs/PEDESTRIAN_FENCE_PLAN.md §8.
+@export var enable_pfence_shatter := true
+# m/s; ~38 km/h. Slightly under 40 so a genuine 40 km/h hit still shatters AFTER the car decelerates
+# on contact (we check the recent APPROACH speed, not the dropped instantaneous speed at body_entered).
+var pfence_shatter_speed := 10.5
+var _pfence_player: Node = null              # cached live player car (survives the Matiz swap)
+var _pfence_speed_hist: Array = []           # last ~10 frames of player linear_velocity (for approach speed)
+var pfence_shatter_impulse := 7.0            # impulse scale (× car-speed direction blend)
+var pfence_shatter_torque := 5.0             # random tumble torque
+var pfence_piece_ttl := 9.0                  # seconds a flown piece lives before despawn
+const PFENCE_MAX_SHATTERED := 6              # cap on concurrently-shattered instances (FIFO)
+var _pfence_segments: Array = []             # per-leaf {mesh(centered), offset, shape, mass} in instance-local space
+var _pfence_shattered: Dictionary = {}       # chunk_key → {instance_index → true} (cleared on unload = no persistence)
+var _pfence_shatter_order: Array = []        # FIFO [{ck, idx}] for the concurrent cap
+var _pfence_last_site := {}  # debug: last built site geometry (center/away/inter)
+
 var _finalize_phase: int = 0  # Round-robin: 0=roads, 1=curbs, 2=lamps, 3=buildings, 4=windows, 5=trees, 6=billboards
 var _chunk_activation_pending: Dictionary = {}  # chunk_key -> state (-1=waiting, >=0=RS activation index)
 var _chunk_culling_cooldown: Dictionary = {}  # chunk_key -> timestamp (ms) — don't cull recently activated chunks
@@ -1489,6 +1709,10 @@ func _init_tree_billboards() -> void:
 	_tree_shadow_mesh_pine.surface_set_material(0, shadow_mat_pine)
 
 	call_deferred("_render_billboard_textures_async")
+	# Preload the (heavy) hanging-sneakers GLB once at init so the first wire span that
+	# selects it doesn't load 13 MB synchronously mid-drive (a frame hitch).
+	if enable_wire_sneakers:
+		call_deferred("_ensure_sneaker_asset")
 
 	print("OSM: Tree billboard meshes ready (SubViewport render deferred)")
 
@@ -1619,6 +1843,21 @@ func _process(delta: float) -> void:
 	else:
 		_cached_velocity_dir = _cached_cam_fwd
 
+	# Track the player's recent velocity so a fence hit can use the APPROACH speed (the instantaneous
+	# speed at body_entered has already dropped from contact — a real 40 km/h hit would read too low).
+	if enable_pfence_shatter:
+		if _pfence_player == null or not is_instance_valid(_pfence_player):
+			_pfence_player = get_tree().get_first_node_in_group("player")
+			if _pfence_player == null:
+				_pfence_player = get_tree().get_first_node_in_group("car")
+		if _pfence_player is RigidBody3D:
+			_pfence_speed_hist.append((_pfence_player as RigidBody3D).linear_velocity)
+			if _pfence_speed_hist.size() > 10:
+				_pfence_speed_hist.pop_front()
+
+	# Night-only wire sparks — early-returns in daytime (zero cost).
+	_update_wire_sparks(delta)
+
 	# Reset add_child budget and drain deferred queue (with time budget)
 	_add_child_budget = 9999 if _initial_loading else ADD_CHILD_BUDGET_NORMAL
 	_add_child_count = 0
@@ -1720,6 +1959,11 @@ func _process(delta: float) -> void:
 	# Лампы — отдельно
 	t0 = Time.get_ticks_usec()
 	_process_deferred_lamp_lights()
+	# Cap simultaneously-visible lamp lights to the nearest N so the Forward+ clustered
+	# renderer doesn't overflow in dense lamp areas (Моченкова) — that overflow made the
+	# lamps NEAREST the car stop being shaded ("dark right where I am", poles intact).
+	# Internally throttled (every 6 frames) and night-only; near-zero cost otherwise.
+	_cull_lamp_lights()
 	_record_perf("lamp_lights", Time.get_ticks_usec() - t0)
 
 	# Применяем готовые результаты клиппинга террейна из worker threads
@@ -1943,6 +2187,15 @@ func start_loading() -> void:
 	_deferred_tram_queue.clear()
 	_dispatched_tram_network.clear()
 	_deferred_billboard_queue.clear()
+	_deferred_billboard_road_queue.clear()
+	_created_billboard_keys.clear()
+	_billboard_keys_by_chunk.clear()
+	_billboard_pos_hash.clear()
+	_billboard_pos_by_chunk.clear()
+	_building_footprint_hash.clear()
+	_building_footprint_way_ids.clear()
+	_reset_wire_state()
+	_reset_prop_state()
 	_deferred_footway_queue.clear()
 	_deferred_building_collisions.clear()
 	_deferred_tree_collisions.clear()
@@ -2201,7 +2454,7 @@ func _check_initial_load_complete() -> void:
 						light.position = light_data.position
 						light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
 						light.rotation_degrees.x = -75
-						light.spot_range = 15.0
+						light.spot_range = 12.0
 						light.spot_angle = 70.0
 						light.spot_attenuation = 1.0
 						light.light_energy = 2.6
@@ -2217,7 +2470,8 @@ func _check_initial_load_complete() -> void:
 						light.set_meta("broken", light_data.broken)
 						light.add_child(_create_lamp_bulb())
 						light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
-						container.add_child(light)
+						_ensure_lamp_lights_root()
+						_lamp_lights_root.add_child(light)  # global node — not culled with the chunk
 						if _lamp_lights_by_chunk.has(chunk_key):
 							_lamp_lights_by_chunk[chunk_key].append(light)
 						lamp_light_count += 1
@@ -2869,6 +3123,10 @@ func _unload_chunk(chunk_key: String) -> void:
 		_chunk_culling_cooldown.erase(chunk_key)
 		# NEW: Clean up lamp batch data if not yet finalized
 		if _lamp_batch_data.has(chunk_key):
+			if lamp_debug:
+				var _ln: int = (_lamp_batch_data[chunk_key].get("transforms", []) as Array).size()
+				if _ln > 0:
+					print("LAMP-DBG LOST chunk=%s transforms=%d (UNFINALIZED at unload)" % [chunk_key, _ln])
 			_lamp_batch_data.erase(chunk_key)
 		var lamp_finalize_idx := _lamp_batches_to_finalize.find(chunk_key)
 		if lamp_finalize_idx >= 0:
@@ -2876,6 +3134,8 @@ func _unload_chunk(chunk_key: String) -> void:
 
 		# NEW: Explicitly free lamp lights to prevent memory leak
 		if _lamp_lights_by_chunk.has(chunk_key):
+			if lamp_debug and _lamp_lights_by_chunk[chunk_key].size() > 0:
+				print("LAMP-UNLOAD chunk=%s freed %d lights" % [chunk_key, _lamp_lights_by_chunk[chunk_key].size()])
 			for light in _lamp_lights_by_chunk[chunk_key]:
 				if is_instance_valid(light):
 					light.queue_free()
@@ -3001,6 +3261,64 @@ func _unload_chunk(chunk_key: String) -> void:
 		_deferred_terrain_collisions.erase(chunk_key)
 		_deferred_footway_queue.erase(chunk_key)
 		_deferred_billboard_queue.erase(chunk_key)
+		_deferred_billboard_road_queue.erase(chunk_key)
+		# Clear procedural-billboard dedup keys for this chunk so they re-place on
+		# reload (the billboard NODES auto-free with chunk_node.queue_free() below).
+		if _billboard_keys_by_chunk.has(chunk_key):
+			for _bkey in _billboard_keys_by_chunk[chunk_key]:
+				_created_billboard_keys.erase(_bkey)
+			_billboard_keys_by_chunk.erase(chunk_key)
+		if _billboard_pos_by_chunk.has(chunk_key):
+			for _bpos in _billboard_pos_by_chunk[chunk_key]:
+				var _bcell := Vector2i(int(floor(_bpos.x / BILLBOARD_MIN_SPACING)), int(floor(_bpos.y / BILLBOARD_MIN_SPACING)))
+				if _billboard_pos_hash.has(_bcell):
+					(_billboard_pos_hash[_bcell] as Array).erase(_bpos)
+					if (_billboard_pos_hash[_bcell] as Array).is_empty():
+						_billboard_pos_hash.erase(_bcell)
+			_billboard_pos_by_chunk.erase(chunk_key)
+		# Overhead wires: free dedup keys + per-chunk geo/node/joint state (the wire
+		# MeshInstance + joint markers free with chunk_node.queue_free() below).
+		_deferred_wire_road_queue.erase(chunk_key)
+		if _wire_keys_by_chunk.has(chunk_key):
+			for _wk in _wire_keys_by_chunk[chunk_key]:
+				_created_wire_keys.erase(_wk)
+			_wire_keys_by_chunk.erase(chunk_key)
+		_wire_geo_by_chunk.erase(chunk_key)
+		_wire_node_by_chunk.erase(chunk_key)
+		_sneaker_keys_by_chunk.erase(chunk_key)  # sneaker prop nodes free with chunk_node below
+		# Pedestrian fences: free dedup keys + batch data (the PedFences node frees with chunk_node).
+		_deferred_pfence_queue.erase(chunk_key)
+		_pfence_batch_data.erase(chunk_key)
+		_pfence_shattered.erase(chunk_key)  # no persistence — fence rebuilds intact on reload
+		if _pfence_keys_by_chunk.has(chunk_key):
+			for _pk in _pfence_keys_by_chunk[chunk_key]:
+				_created_pfence_keys.erase(_pk)
+			_pfence_keys_by_chunk.erase(chunk_key)
+		if _spark_joint_keys_by_chunk.has(chunk_key):
+			for _jk in _spark_joint_keys_by_chunk[chunk_key]:
+				_spark_joint_seen.erase(_jk)
+			_spark_joint_keys_by_chunk.erase(chunk_key)
+		_spark_joints_by_chunk.erase(chunk_key)
+		# Roadside props: free dedup keys + position registry (prop nodes free with chunk).
+		_deferred_prop_road_queue.erase(chunk_key)
+		if _prop_keys_by_chunk.has(chunk_key):
+			for _pk in _prop_keys_by_chunk[chunk_key]:
+				_created_prop_keys.erase(_pk)
+			_prop_keys_by_chunk.erase(chunk_key)
+		if _prop_pos_by_chunk.has(chunk_key):
+			for _pp in _prop_pos_by_chunk[chunk_key]:
+				var _pcell := Vector2i(int(floor(_pp.x / PROP_MIN_SPACING)), int(floor(_pp.y / PROP_MIN_SPACING)))
+				if _prop_pos_hash.has(_pcell):
+					(_prop_pos_hash[_pcell] as Array).erase(_pp)
+					if (_prop_pos_hash[_pcell] as Array).is_empty():
+						_prop_pos_hash.erase(_pcell)
+			_prop_pos_by_chunk.erase(chunk_key)
+		if lamp_debug and _deferred_lamp_queue.has(chunk_key):
+			var _lq: int = 0
+			for _it in (_deferred_lamp_queue[chunk_key] as Array):
+				_lq += int((_it.get("points", PackedVector2Array()) as PackedVector2Array).size())
+			if not (_deferred_lamp_queue[chunk_key] as Array).is_empty():
+				print("LAMP-DBG QUEUE-DROP chunk=%s jobs=%d (walker never ran before unload)" % [chunk_key, (_deferred_lamp_queue[chunk_key] as Array).size()])
 		_deferred_lamp_queue.erase(chunk_key)
 		_deferred_manhole_queue.erase(chunk_key)
 		_deferred_add_child_queue = _deferred_add_child_queue.filter(
@@ -3199,6 +3517,15 @@ func reset_terrain() -> void:
 	_deferred_tram_queue.clear()
 	_dispatched_tram_network.clear()
 	_deferred_billboard_queue.clear()
+	_deferred_billboard_road_queue.clear()
+	_created_billboard_keys.clear()
+	_billboard_keys_by_chunk.clear()
+	_billboard_pos_hash.clear()
+	_billboard_pos_by_chunk.clear()
+	_building_footprint_hash.clear()
+	_building_footprint_way_ids.clear()
+	_reset_wire_state()
+	_reset_prop_state()
 	_chunk_activation_pending.clear()
 	_chunk_culling_cooldown.clear()
 
@@ -3206,6 +3533,9 @@ func reset_terrain() -> void:
 	_lamp_batch_data.clear()
 	_lamp_batches_to_finalize.clear()
 	_lamp_lights_by_chunk.clear()
+	if is_instance_valid(_lamp_lights_root):  # lights are global now — free them on reset
+		_lamp_lights_root.queue_free()
+		_lamp_lights_root = null
 	_lamp_batch_lights.clear()
 	_tree_batch_data.clear()
 	_tree_batches_to_finalize.clear()
@@ -3558,6 +3888,7 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 					"width": road_w,
 					"way_id": rseg_way_id,
 					"bridge": rseg_is_bridge,
+					"highway": str(tags.get("highway", "")),  # for the pedestrian-fence major-road gate
 				}
 				var p1: Vector2 = rseg.p1
 				var p2: Vector2 = rseg.p2
@@ -3603,7 +3934,12 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 			for pcx in range(int(floor(pmin_x / BUILDING_CELL_SIZE)), int(floor(pmax_x / BUILDING_CELL_SIZE)) + 1):
 				for pcy in range(int(floor(pmin_y / BUILDING_CELL_SIZE)), int(floor(pmax_y / BUILDING_CELL_SIZE)) + 1):
 					pcells.append(Vector2i(pcx, pcy))
-			building_poly_entries.append({"poly": bpoints, "cells": pcells})
+			building_poly_entries.append({
+				"poly": bpoints, "cells": pcells, "is_building": true,
+				"way_id": int(way.get("id", 0)),
+				"bbox": Rect2(pmin_x, pmin_y, pmax_x - pmin_x, pmax_y - pmin_y),
+				"residential": _is_residential_building_tags(tags),
+			})
 
 	# Pedestrian areas — register in building poly hash to block trees
 	var ped_areas: Array = osm_data.get("pedestrian_areas", [])
@@ -3628,7 +3964,7 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 		for pcx in range(int(floor(pp_min_x / BUILDING_CELL_SIZE)), int(floor(pp_max_x / BUILDING_CELL_SIZE)) + 1):
 			for pcy in range(int(floor(pp_min_y / BUILDING_CELL_SIZE)), int(floor(pp_max_y / BUILDING_CELL_SIZE)) + 1):
 				pp_cells.append(Vector2i(pcx, pcy))
-		building_poly_entries.append({"poly": ped_pts, "cells": pp_cells})
+		building_poly_entries.append({"poly": ped_pts, "cells": pp_cells, "is_building": false})
 
 	# ========== PHASE 2: Intersection detection ==========
 	var node_usage: Dictionary = {}
@@ -3962,6 +4298,9 @@ func _apply_single_terrain_gen_result(result: Dictionary) -> void:
 			if not chunk_building_poly_hash.has(cell):
 				chunk_building_poly_hash[cell] = []
 			chunk_building_poly_hash[cell].append(bpe.poly)
+		# Global neighbor-aware footprint index for billboard gates (dedup by way_id)
+		if bpe.get("is_building", false):
+			_register_building_footprint(bpe.get("bbox", Rect2()), bool(bpe.get("residential", false)), int(bpe.get("way_id", 0)))
 	_chunk_road_hashes[chunk_key] = chunk_road_hash
 	_chunk_building_hashes[chunk_key] = chunk_building_hash
 	_chunk_building_poly_hashes[chunk_key] = chunk_building_poly_hash
@@ -4300,7 +4639,7 @@ func _process_phase3_queue() -> bool:
 			if filter_by_chunk:
 				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
 					continue
-			_create_bus_stop(local, 0.0, tags, target)
+			_create_bus_stop(local, _sample_elevation(local.x, local.y), tags, target)
 		# Done with bus stops — move to tram stops
 		entry.phase = "tram_stops"
 		entry.way_idx = 0
@@ -4359,6 +4698,7 @@ func _process_phase3_queue() -> bool:
 	if phase == "finalize":
 		if chunk_key != "":
 			_place_custom_models_for_chunk(chunk_key, target)
+			_place_manual_props_for_chunk(chunk_key, target)
 			_generate_trees_for_chunk(chunk_key, target)
 		var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
 		if not _pending_batch_chunks.has(batch_chunk_key):
@@ -5257,6 +5597,47 @@ func _apply_road_result(result: Dictionary) -> void:
 		var lamp_pts := _clip_polyline_to_rect(smoothed_points, lamp_rect.position.x, lamp_rect.end.x, lamp_rect.position.y, lamp_rect.end.y)
 		if lamp_pts.size() >= 2:
 			_deferred_append(_deferred_lamp_queue, lamp_ck, {"points": lamp_pts, "width": width, "parent": parent})
+
+	# Overhead wires — SAME clipped points as lamps (so anchors == real lamps).
+	# Excludes motorway / bridges / tunnels; per-class density handled in the walk.
+	if enable_overhead_wires and highway_type in ["trunk", "primary", "secondary", "tertiary"] and not is_bridge:
+		var w_tunnel := str(result.get("tags", {}).get("tunnel", ""))
+		if w_tunnel == "" or w_tunnel == "no":
+			var wire_ck := _get_chunk_key_from_node(parent)
+			var wire_rect := _get_chunk_rect_from_key(wire_ck)
+			var wire_pts := _clip_polyline_to_rect(smoothed_points, wire_rect.position.x, wire_rect.end.x, wire_rect.position.y, wire_rect.end.y)
+			if wire_pts.size() >= 2:
+				if lamp_debug and not _initial_loading:
+					print("WIRE-ENQ chunk='%s' loadedNow=%s way=%d hw=%s" % [wire_ck, str(_loaded_chunks.has(wire_ck)), int(result.get("way_id", 0)), highway_type])
+				_deferred_append(_deferred_wire_road_queue, wire_ck, {
+					"points": wire_pts, "way_id": int(result.get("way_id", 0)),
+					"highway": highway_type, "width": width, "_wire_idx": 1,
+				})
+
+	# Procedural billboards (trunk/primary only) — FULL unclipped points so spacing
+	# is global arc-length; each candidate is assigned to its own chunk during the walk.
+	if enable_road_billboards and _decoration_layer != null and highway_type in ["trunk", "primary"] and not is_bridge:
+		var bb_full: PackedVector2Array = result.get("full_smoothed_points", smoothed_points)
+		if bb_full.size() >= 2:
+			_deferred_append(_deferred_billboard_road_queue, _get_chunk_key_from_node(parent), {
+				"points": bb_full, "way_id": int(result.get("way_id", 0)),
+				"highway": highway_type, "width": width, "_bb_idx": 1,
+			})
+
+	# Roadside props (kiosks/boxes) — FULL unclipped points (global arc-length); one
+	# job per prop type this road qualifies for. Excludes bridges/tunnels.
+	if enable_roadside_props and not is_bridge:
+		var pr_tunnel := str(result.get("tags", {}).get("tunnel", ""))
+		if pr_tunnel == "" or pr_tunnel == "no":
+			var pr_full: PackedVector2Array = result.get("full_smoothed_points", smoothed_points)
+			if pr_full.size() >= 2:
+				var pr_ck := _get_chunk_key_from_node(parent)
+				for pr_type in _prop_defs:
+					if highway_type in _prop_defs[pr_type]["roads"]:
+						_deferred_append(_deferred_prop_road_queue, pr_ck, {
+							"points": pr_full, "way_id": int(result.get("way_id", 0)),
+							"highway": highway_type, "width": width, "type": pr_type, "_idx": 1,
+						})
 
 	# Manholes - clip to chunk rect, deferred
 	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
@@ -8015,6 +8396,10 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 							_pending_batch_chunks.append(ck)
 						if enable_crossing_signs:
 							_enqueue_crossing_signs(cross_pts, parent, ck)
+						# Pedestrian guard-rail fence: only at TAGGED zebras (#8). Anchoring to an
+						# intersection + major-road gate happen later in the deferred drain.
+						if enable_pedestrian_fences and is_tagged_crossing:
+							_pfence_enqueue_site(cross_pts, int(item.get("way_id", 0)), parent, ck)
 				else:
 					last_off_road_pt = smoothed_points[i - 1]
 					has_before_off = true
@@ -8059,6 +8444,8 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 					_pending_batch_chunks.append(ck)
 				if enable_crossing_signs:
 					_enqueue_crossing_signs(current_pts, parent, ck)
+				if enable_pedestrian_fences and is_tagged_crossing:
+					_pfence_enqueue_site(cross_pts_end, int(item.get("way_id", 0)), parent, ck)
 	return true
 
 
@@ -9344,7 +9731,7 @@ func _process_deferred_lamp_lights() -> void:
 				light.position = light_data.position
 				light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
 				light.rotation_degrees.x = -75
-				light.spot_range = 15.0
+				light.spot_range = 12.0
 				light.spot_angle = 70.0
 				light.spot_attenuation = 1.0
 				light.light_energy = 2.6
@@ -9360,7 +9747,8 @@ func _process_deferred_lamp_lights() -> void:
 				light.set_meta("broken", light_data.broken)
 				light.add_child(_create_lamp_bulb())
 				light.add_child(_create_debug_light_cone(light.spot_range, light.spot_angle))
-				container.add_child(light)
+				_ensure_lamp_lights_root()
+				_lamp_lights_root.add_child(light)  # global node — not culled with the chunk
 				if _lamp_lights_by_chunk.has(chunk_key):
 					_lamp_lights_by_chunk[chunk_key].append(light)
 			ll_arr.pop_front()
@@ -10425,6 +10813,8 @@ func _init_clutter_assets() -> void:
 		"bag_hit": "res://audio/sfx/clutter_bag_hit.mp3",
 		"bag_drop": "res://audio/sfx/clutter_bag_drop.mp3",
 		"paper_drop": "res://audio/sfx/clutter_paper_drop.mp3",
+		"pfence_hit": "res://audio/sfx/pfence_hit.mp3",     # fence shatter on impact
+		"pfence_drop": "res://audio/sfx/pfence_drop.mp3",   # pieces clattering to the ground
 	}
 	for key in sfx:
 		var p: String = sfx[key]
@@ -13594,6 +13984,8 @@ func _process_road_queue() -> void:
 		_deferred_footway_queue.erase(fw_ck)
 
 	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+		if lamp_debug and not _deferred_lamp_queue.is_empty():
+			_lamp_dbg_walk_skip += 1
 		return
 
 	# Process deferred lamp/manhole generation with time budget
@@ -13700,6 +14092,105 @@ func _process_road_queue() -> void:
 	for bb_ck in bb_done_keys:
 		_deferred_billboard_queue.erase(bb_ck)
 
+	# Process deferred PROCEDURAL road-billboard walking (budgeted, global spacing)
+	_ensure_billboard_pool()
+	if (Time.get_ticks_usec() - queue_start) <= TOTAL_BUDGET_USEC and not _billboard_tex_paths.is_empty():
+		var bbr_done_keys: Array[String] = []
+		for bbr_ck in _get_prioritized_keys(_deferred_billboard_road_queue):
+			if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+				break
+			var bbr_arr: Array = _deferred_billboard_road_queue[bbr_ck]
+			while not bbr_arr.is_empty():
+				if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+					break
+				var bbr_item: Dictionary = bbr_arr[0]
+				var bbr_next: int = _generate_road_billboards_incremental(bbr_item.points, int(bbr_item.way_id), str(bbr_item.highway), float(bbr_item.get("width", 7.0)), int(bbr_item.get("_bb_idx", 1)), queue_start, TOTAL_BUDGET_USEC)
+				if bbr_next >= BILLBOARD_DONE:
+					bbr_arr.pop_front()
+				else:
+					bbr_item["_bb_idx"] = bbr_next
+					break
+			if bbr_arr.is_empty():
+				bbr_done_keys.append(bbr_ck)
+		for bbr_ck in bbr_done_keys:
+			_deferred_billboard_road_queue.erase(bbr_ck)
+
+	# Process deferred OVERHEAD-WIRE walking. Wires share the lamp clip so anchors line
+	# up with the placed lamps. They sit late in the drain, so during gameplay the shared
+	# 4 ms budget was usually spent before reaching here — which starved them entirely on
+	# streamed chunks (walked/placed froze after initial load). Give wires a GUARANTEED
+	# slice measured from NOW, independent of what earlier sections consumed, so they
+	# always make progress. Costs nothing when the queue is empty.
+	if enable_overhead_wires and not _deferred_wire_road_queue.is_empty():
+		var wire_deadline: int = Time.get_ticks_usec() + (500000 if _initial_loading else WIRE_SLICE_USEC)
+		var wire_budget_usec: int = wire_deadline - queue_start  # so the incremental walk's own (now-queue_start)>budget check lines up with wire_deadline
+		if lamp_debug:
+			_wire_dbg_ran_frames += 1
+		var wire_dirty: Dictionary = {}
+		var wr_done_keys: Array[String] = []
+		for wr_ck in _get_prioritized_keys(_deferred_wire_road_queue):
+			if Time.get_ticks_usec() > wire_deadline:
+				break
+			# A road result can be applied (and its wire job enqueued) a few frames BEFORE the
+			# owning chunk is registered in _loaded_chunks (worker-thread race). The old code
+			# CLEARED jobs for any not-loaded chunk — which permanently dropped them in that
+			# window, so streamed chunks never got wires. Instead SKIP (keep the jobs) and wait
+			# for the chunk to load; _unload_chunk erases the queue entry for chunks truly gone.
+			if not _loaded_chunks.has(wr_ck):
+				continue
+			var wr_arr: Array = _deferred_wire_road_queue[wr_ck]
+			while not wr_arr.is_empty():
+				if Time.get_ticks_usec() > wire_deadline:
+					break
+				var wr_item: Dictionary = wr_arr[0]
+				var wr_next: int = _generate_road_wires_incremental(wr_item.points, int(wr_item.way_id), str(wr_item.highway), float(wr_item.get("width", 7.0)), int(wr_item.get("_wire_idx", 1)), wr_ck, queue_start, wire_budget_usec, wire_dirty)
+				if wr_next >= WIRE_DONE:
+					# Re-walk a few frames (dedup-safe) so wires catch up to lamps that
+					# stream in over the next frames — else streamed chunks lose wires.
+					var wr_rt: int = int(wr_item.get("_retries", 0))
+					if wr_rt < 5 and _loaded_chunks.has(wr_ck):
+						wr_item["_retries"] = wr_rt + 1
+						wr_item["_wire_idx"] = 1
+						break
+					wr_arr.pop_front()
+				else:
+					wr_item["_wire_idx"] = wr_next
+					break
+			if wr_arr.is_empty():
+				wr_done_keys.append(wr_ck)
+		for wr_ck in wr_done_keys:
+			_deferred_wire_road_queue.erase(wr_ck)
+		# Rebuild the single merged wire mesh for chunks that gained wires this frame.
+		for dck in wire_dirty:
+			_commit_wire_mesh(dck)
+
+	# Process deferred PEDESTRIAN-FENCE sites (anchor to intersections, place runs). Own slice.
+	if enable_pedestrian_fences and not _deferred_pfence_queue.is_empty():
+		var pf_deadline: int = Time.get_ticks_usec() + (500000 if _initial_loading else 3000)
+		_process_pfence_queue(pf_deadline)
+
+	# Process deferred ROADSIDE-PROP walking (budgeted), mirrors the billboard walk.
+	if enable_roadside_props and (Time.get_ticks_usec() - queue_start) <= TOTAL_BUDGET_USEC:
+		var pr_done_keys: Array[String] = []
+		for pr_ck in _get_prioritized_keys(_deferred_prop_road_queue):
+			if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+				break
+			var pr_arr: Array = _deferred_prop_road_queue[pr_ck]
+			while not pr_arr.is_empty():
+				if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+					break
+				var pr_item: Dictionary = pr_arr[0]
+				var pr_next: int = _generate_road_props_incremental(str(pr_item.type), pr_item.points, int(pr_item.way_id), str(pr_item.highway), float(pr_item.get("width", 7.0)), int(pr_item.get("_idx", 1)), queue_start, TOTAL_BUDGET_USEC)
+				if pr_next >= PROP_DONE:
+					pr_arr.pop_front()
+				else:
+					pr_item["_idx"] = pr_next
+					break
+			if pr_arr.is_empty():
+				pr_done_keys.append(pr_ck)
+		for pr_ck in pr_done_keys:
+			_deferred_prop_road_queue.erase(pr_ck)
+
 	# Dispatch roads to worker threads — no time budget needed on main thread!
 	# Limit concurrent tasks to avoid overwhelming thread pool
 	# During initial loading: unlimited dispatch so all roads run in parallel.
@@ -13757,11 +14248,31 @@ func _process_road_queue() -> void:
 	var has_road_results := not _road_results.is_empty()
 	var pending_tasks := _pending_road_tasks
 	_road_mutex.unlock()
+	if lamp_debug:
+		_lamp_dbg_frame += 1
+		if _lamp_dbg_frame % 90 == 0:
+			# count lamp lights: total vs currently-rendered (visible up the whole parent chain)
+			var ll_total := 0
+			var ll_own := 0     # own .visible flag true
+			var ll_tree := 0    # actually rendered (whole parent chain visible)
+			for lck in _lamp_lights_by_chunk:
+				for L in _lamp_lights_by_chunk[lck]:
+					if is_instance_valid(L):
+						ll_total += 1
+						if (L as Node3D).visible:
+							ll_own += 1
+						if (L as Node3D).is_visible_in_tree():
+							ll_tree += 1
+			print("LAMP-DBG: lampLights total=%d rendered=%d activeCap=%d | WIRES keys=%d walked=%d spans=%d placed=%d ranFrames=%d Q=%d | reject: already=%d notwired=%d nullanchor=%d invalid=%d spancap=%d isect=%d bldg=%d" % [ll_total, ll_tree, LAMP_MAX_ACTIVE_LIGHTS, _created_wire_keys.size(), _wire_dbg_walked, _wire_dbg_spans, _wire_dbg_placed, _wire_dbg_ran_frames, _deferred_total_size(_deferred_wire_road_queue), _wire_dbg_already, _wire_dbg_notwired, _wire_dbg_nullanchor, _wire_dbg_skip_invalid, _wire_dbg_spancap, _wire_dbg_intersection, _wire_dbg_building])
 	if has_road_results or pending_tasks > 0:
+		if lamp_debug and not _lamp_batches_to_finalize.is_empty():
+			_lamp_dbg_skip_road += 1
 		return  # Still computing or applying road geometry
 
 	# Budget gate: skip finalization if deferred work already consumed most budget
 	if (Time.get_ticks_usec() - queue_start) > TOTAL_BUDGET_USEC:
+		if lamp_debug and not _lamp_batches_to_finalize.is_empty():
+			_lamp_dbg_skip_budget += 1
 		return
 
 	# Round-robin finalization. Normally one phase per frame to avoid scene-tree stutter,
@@ -17164,6 +17675,13 @@ func _create_lamp_collision(xform: Transform3D) -> StaticBody3D:
 	body.add_child(shape)
 	return body
 
+## Deterministic ~1-in-20 "broken" street lamp, keyed by world position so it's stable
+## across chunk reloads. Broken lamps don't glow AND become spark/smoke emitters.
+const LAMP_BROKEN_DENOM := 19
+func _lamp_is_broken(lamp_pos: Vector3) -> bool:
+	var h := absi(int(round(lamp_pos.x)) * 73856093 + int(round(lamp_pos.z)) * 19349663 + 83492791)
+	return (h % LAMP_BROKEN_DENOM) == 0
+
 ## Add lamp to batch for chunk with pre-calculated transforms
 func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3, parent: Node3D) -> void:
 	if not enable_street_lamps:
@@ -17194,7 +17712,9 @@ func _add_lamp_to_batch(chunk_key: String, lamp_pos: Vector3, road_dir: Vector3,
 
 	# Light position: top of model, in world space
 	var light_world_pos := lamp_pos + lamp_basis * _lamp_light_offset
-	var is_broken := randf() < 0.05
+	# Broken lamps (~every 20th) are deterministic by world position — so the SAME lamps are
+	# always the dark/sparking ones (stable across chunk reloads) instead of re-rolling.
+	var is_broken := _lamp_is_broken(lamp_pos)
 	_lamp_batch_data[chunk_key]["light_data"].append({
 		"position": light_world_pos,
 		"broken": is_broken,
@@ -17222,6 +17742,8 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 		return
 
 	var lamp_count: int = batch.transforms.size()
+	if lamp_debug and lamp_count > 0:
+		print("LAMP-DBG FINALIZED chunk=%s count=%d" % [chunk_key, lamp_count])
 	if lamp_count == 0:
 		_lamp_batch_data.erase(chunk_key)
 		return
@@ -17256,12 +17778,16 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 	# Add entire subtree to scene tree in one budgeted call
 	_budgeted_add_child(parent, lamp_container)
 
-	# Free any existing lights for this chunk (safety: prevents duplicates if finalized twice)
-	if _lamp_lights_by_chunk.has(chunk_key):
-		for old_light in _lamp_lights_by_chunk[chunk_key]:
-			if is_instance_valid(old_light):
-				old_light.queue_free()
-	_lamp_lights_by_chunk[chunk_key] = []
+	# Finalize is ADDITIVE. While streaming, a chunk's lamps arrive across several frames
+	# (multiple roads applied over time), so this runs more than once per chunk — each call
+	# carries ONLY the lamps batched since the last finalize (batch_data is erased at the
+	# end). The old code FREED the chunk's existing lights here and rebuilt from the partial
+	# batch, which destroyed the lamps made by the earlier finalize while leaving their pole
+	# MultiMesh behind → "poles but no light" on the streets you drive onto. So we keep the
+	# existing lights and append the new batch's lights below (poles accumulate the same way:
+	# this finalize adds only its batch's pole container, never touching earlier ones).
+	if not _lamp_lights_by_chunk.has(chunk_key):
+		_lamp_lights_by_chunk[chunk_key] = []
 
 	var is_night: bool = false
 	if _night_mode_manager and is_instance_valid(_night_mode_manager):
@@ -17274,24 +17800,85 @@ func _finalize_lamp_batches_for_chunk(chunk_key: String) -> void:
 		else:
 			is_night = _is_night_mode
 
-	# Lights — отложенное создание через очередь
-	if batch.light_data.size() > 0:
-		_deferred_append(_deferred_lamp_lights, chunk_key, {
-			"container": lights_container,
-			"lights": batch.light_data,
-			"idx": 0,
-			"chunk_key": chunk_key,
-			"is_night": is_night
-		})
+	# Lights — created INLINE with the poles (not deferred): the 2 ms/frame deferred queue
+	# was starved while driving and chunks dropped their queued lights before creation,
+	# leaving most streamed lamps dark. Inline keeps lights in lock-step with the poles.
+	for ld in batch.light_data:
+		_spawn_lamp_light(ld, chunk_key)
 
 	if _draw_call_logging_enabled:
 		_draw_call_stats["lamps"] += 1  # Single MultiMesh per chunk
 
-	print("OSM: Finalized lamp batch for chunk %s: %d lamps, 1 draw call" % [chunk_key, lamp_count])
+	if lamp_debug:
+		print("LAMP-FIN chunk=%s poles=%d lights=%d (light_data=%d) night=%s initLoad=%s" % [chunk_key, lamp_count, _lamp_lights_by_chunk[chunk_key].size(), batch.light_data.size(), str(_is_night_mode), str(_initial_loading)])
 
 	_lamp_batch_data.erase(chunk_key)
 
 ## Update lamp globe colors and light visibility for night mode
+func _ensure_lamp_lights_root() -> void:
+	if _lamp_lights_root == null or not is_instance_valid(_lamp_lights_root):
+		_lamp_lights_root = Node3D.new()
+		_lamp_lights_root.name = "LampLightsRoot"
+		add_child(_lamp_lights_root)
+
+## Create one lamp SpotLight immediately (parented to the global, non-culled root) and
+## register it under its chunk. Used inline by finalization so lights appear WITH the
+## poles instead of via the 2 ms/frame deferred queue that streaming starves+drops.
+func _spawn_lamp_light(light_data: Dictionary, chunk_key: String) -> void:
+	var light := SpotLight3D.new()
+	light.position = light_data.position
+	light.rotation_degrees.y = rad_to_deg(light_data.get("yaw", 0.0) - PI / 2.0 + PI)
+	light.rotation_degrees.x = -75
+	light.spot_range = 12.0
+	light.spot_angle = 70.0
+	light.spot_attenuation = 1.0
+	light.light_energy = 2.6
+	light.light_color = Color(1.0, 0.65, 0.2)
+	light.light_volumetric_fog_energy = 16.0
+	light.shadow_enabled = false
+	light.light_bake_mode = Light3D.BAKE_DISABLED
+	light.distance_fade_enabled = true
+	light.distance_fade_begin = 120.0
+	light.distance_fade_shadow = 30.0
+	light.distance_fade_length = 30.0
+	light.visible = _is_night_mode and not light_data.broken
+	light.set_meta("broken", light_data.broken)
+	light.add_child(_create_lamp_bulb())
+	_ensure_lamp_lights_root()
+	_lamp_lights_root.add_child(light)
+	if not _lamp_lights_by_chunk.has(chunk_key):
+		_lamp_lights_by_chunk[chunk_key] = []
+	_lamp_lights_by_chunk[chunk_key].append(light)
+	# A broken lamp is the spark/smoke source: register its top so _update_wire_sparks
+	# emits a bluish arc + vapour there at night (replaces the old wire-joint trigger).
+	if light_data.broken:
+		_register_spark_source(light_data.position, chunk_key)
+
+
+## Cap simultaneously-visible lamp lights to the nearest LAMP_MAX_ACTIVE_LIGHTS so the
+## Forward+ clustered renderer doesn't drop lights (flicker) in densely-lit areas.
+## Throttled; only acts at night (day visibility handled by _update_lamp_night_mode).
+func _cull_lamp_lights() -> void:
+	if not lamp_cull_enabled:
+		return
+	_lamp_cull_frame += 1
+	if _lamp_cull_frame % 6 != 0 or not _is_night_mode:
+		return
+	var all: Array = []
+	for ck in _lamp_lights_by_chunk:
+		for L in _lamp_lights_by_chunk[ck]:
+			if is_instance_valid(L) and not L.get_meta("broken", false):
+				all.append(L)
+	if all.size() <= LAMP_MAX_ACTIVE_LIGHTS:
+		for L in all:
+			(L as Node3D).visible = true
+		return
+	var cam := _cached_cam_pos
+	all.sort_custom(func(a, b): return (a as Node3D).global_position.distance_squared_to(cam) < (b as Node3D).global_position.distance_squared_to(cam))
+	for i in range(all.size()):
+		(all[i] as Node3D).visible = (i < LAMP_MAX_ACTIVE_LIGHTS)
+
+
 func _update_lamp_night_mode(is_night: bool) -> void:
 	# Update light visibility for batched lamps (deferred path)
 	for chunk_key in _lamp_lights_by_chunk.keys():
@@ -17783,7 +18370,7 @@ func _create_street_lamp_immediate(pos: Vector2, elevation: float, parent: Node3
 	# lamp_root уже повёрнут по Y (модель боком), компенсируем +90° чтобы -Z смотрела к дороге
 	lamp_light.rotation_degrees.y = 90.0 + 180.0
 	lamp_light.rotation_degrees.x = -75  # 15° наклон к дороге от вертикали
-	lamp_light.spot_range = 15.0
+	lamp_light.spot_range = 12.0
 	lamp_light.spot_angle = 70.0
 	lamp_light.spot_attenuation = 1.0
 	lamp_light.light_energy = 2.6
@@ -18486,6 +19073,8 @@ func _find_nearest_road_at_point(point: Vector2, ck: String = "") -> Dictionary:
 	var best_seg_p1 := Vector2.ZERO
 	var best_seg_p2 := Vector2.ZERO
 	var best_width := 0.0
+	var best_highway := ""
+	var best_way_id := 0
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			var key := Vector2i(cell_x + dx, cell_y + dy)
@@ -18500,6 +19089,8 @@ func _find_nearest_road_at_point(point: Vector2, ck: String = "") -> Dictionary:
 					best_seg_p1 = seg.p1
 					best_seg_p2 = seg.p2
 					best_width = seg.width
+					best_highway = str(seg.get("highway", ""))
+					best_way_id = int(seg.get("way_id", 0))
 	if best_dist > 20.0:
 		return {}
 	var road_dir: Vector2 = (best_seg_p2 - best_seg_p1).normalized()
@@ -18509,6 +19100,8 @@ func _find_nearest_road_at_point(point: Vector2, ck: String = "") -> Dictionary:
 		"road_width": best_width,
 		"road_p1": best_seg_p1,
 		"road_p2": best_seg_p2,
+		"road_highway": best_highway,
+		"road_way_id": best_way_id,
 	}
 
 
@@ -19534,9 +20127,13 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 	if not enable_street_lamps or local_points.size() < 2:
 		return local_points.size()
 
-	var lamp_spacing := 17.0
-	var lamp_offset := road_width / 2 + 0.5
+	var lamp_spacing := LAMP_SPACING
+	var lamp_offset := road_width / 2 + LAMP_SIDE_OFFSET_PAD
 	var n_pts: int = local_points.size()
+	# The road's own chunk — always loaded while this job runs. Lamps whose offset point
+	# falls in a neighbour chunk that hasn't STREAMED IN yet are placed here instead of
+	# being dropped (the streaming-lamps bug: driving in left whole streets dark).
+	var job_ck := _get_chunk_key_from_node(parent)
 
 	# Pre-compute cumulative distances (fast, needed for correct spacing)
 	var cumulative := PackedFloat64Array()
@@ -19583,7 +20180,7 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 
 		var lamp_pos_left := road_pos + perp * lamp_offset
 		var lamp_pos_right := road_pos - perp * lamp_offset
-		var both_sides := road_width >= 12.0  # primary and wider — both sides
+		var both_sides := road_width >= LAMP_BOTH_SIDES_WIDTH  # primary and wider — both sides
 
 		# Compute chunk_key once, pass to all spatial checks (single-chunk O(1) lookup)
 		var left_ck := "%d,%d" % [int(floor(lamp_pos_left.x / chunk_size)), int(floor(lamp_pos_left.y / chunk_size))]
@@ -19591,20 +20188,1746 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 		# Skip lamps inside intersection contours (where bezier curbs are)
 		var left_in_intersection := _is_point_in_intersection_shape(lamp_pos_left, false, left_ck) >= 0
 		if not left_in_intersection and not _is_point_in_any_parking(lamp_pos_left, left_ck) and not _is_point_near_road(lamp_pos_left, 0.1, left_ck) and not _is_point_in_water(lamp_pos_left, left_ck):
-			if _loaded_chunks.has(left_ck):
-				var left_y: float = get_surface_y(lamp_pos_left.x, lamp_pos_left.y)
-				_add_lamp_to_batch(left_ck, Vector3(lamp_pos_left.x, left_y, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), _loaded_chunks[left_ck])
+			var lck := left_ck
+			var lnode: Node3D = _loaded_chunks.get(left_ck)
+			if lnode == null:
+				lck = job_ck            # neighbour not streamed in → keep lamp on the road's own chunk
+				lnode = parent          # use the job's node directly (valid; finalize guards it)
+				if lamp_debug:
+					_lamp_dbg_drop_unloaded += 1  # now counts RESCUED-via-fallback, not dropped
+			var left_y: float = get_surface_y(lamp_pos_left.x, lamp_pos_left.y)
+			_add_lamp_to_batch(lck, Vector3(lamp_pos_left.x, left_y, lamp_pos_left.y), Vector3(-perp.x, 0, -perp.y), lnode)
 
 		if both_sides:
 			var right_ck := "%d,%d" % [int(floor(lamp_pos_right.x / chunk_size)), int(floor(lamp_pos_right.y / chunk_size))]
 			if _is_point_in_intersection_shape(lamp_pos_right, false, right_ck) < 0 and not _is_point_in_any_parking(lamp_pos_right, right_ck) and not _is_point_near_road(lamp_pos_right, 0.1, right_ck) and not _is_point_in_water(lamp_pos_right, right_ck):
-				if _loaded_chunks.has(right_ck):
-					var right_y: float = get_surface_y(lamp_pos_right.x, lamp_pos_right.y)
-					_add_lamp_to_batch(right_ck, Vector3(lamp_pos_right.x, right_y, lamp_pos_right.y), Vector3(perp.x, 0, perp.y), _loaded_chunks[right_ck])
+				var rck := right_ck
+				var rnode: Node3D = _loaded_chunks.get(right_ck)
+				if rnode == null:
+					rck = job_ck
+					rnode = parent
+					if lamp_debug:
+						_lamp_dbg_drop_unloaded += 1
+				var right_y: float = get_surface_y(lamp_pos_right.x, lamp_pos_right.y)
+				_add_lamp_to_batch(rck, Vector3(lamp_pos_right.x, right_y, lamp_pos_right.y), Vector3(perp.x, 0, perp.y), rnode)
 
 		next_lamp_dist += lamp_spacing
 
 	return n_pts  # Fully processed
+
+
+# ══ Procedural roadside billboards ══════════════════════════════════════════
+
+static func _is_residential_building_tags(tags: Dictionary) -> bool:
+	return str(tags.get("building", "")) in _BILLBOARD_RESIDENTIAL_TYPES
+
+func _ensure_billboard_pool() -> void:
+	if _billboard_pool_scanned:
+		return
+	_billboard_pool_scanned = true
+	var dir := DirAccess.open(BILLBOARD_TEX_DIR)
+	if dir == null:
+		return
+	dir.list_dir_begin()
+	var fname := dir.get_next()
+	while fname != "":
+		var low := fname.to_lower()
+		if low.ends_with(".jpg") or low.ends_with(".jpeg") or low.ends_with(".png"):
+			_billboard_tex_paths.append(BILLBOARD_TEX_DIR + fname)
+		fname = dir.get_next()
+	dir.list_dir_end()
+	_billboard_tex_paths.sort()  # deterministic order; selection then keyed by way_id+idx
+	print("OSM: billboard texture pool = %d images" % _billboard_tex_paths.size())
+
+func _billboard_spacing_for(highway: String) -> float:
+	if billboard_debug_dense:
+		return 45.0
+	return BILLBOARD_SPACING_TRUNK if highway == "trunk" else BILLBOARD_SPACING_PRIMARY
+
+# Register one building footprint in the GLOBAL neighbor-aware index (dedup by way_id).
+func _register_building_footprint(bbox: Rect2, residential: bool, way_id: int) -> void:
+	# Guard against pathological/relation bboxes (bad data) — real buildings are well
+	# under a few hundred metres. Without this a huge bbox would loop millions of
+	# cells on the MAIN thread and freeze the game.
+	if not (is_finite(bbox.position.x) and is_finite(bbox.position.y) and is_finite(bbox.size.x) and is_finite(bbox.size.y)):
+		return
+	if bbox.size.x > 600.0 or bbox.size.y > 600.0 or bbox.size.x < 0.0 or bbox.size.y < 0.0:
+		return
+	if way_id != 0:
+		if _building_footprint_way_ids.has(way_id):
+			return
+		_building_footprint_way_ids[way_id] = true
+	var entry := {"bbox": bbox, "residential": residential}
+	var cmin_x := int(floor(bbox.position.x / BILLBOARD_FOOTPRINT_CELL))
+	var cmin_y := int(floor(bbox.position.y / BILLBOARD_FOOTPRINT_CELL))
+	var cmax_x := int(floor(bbox.end.x / BILLBOARD_FOOTPRINT_CELL))
+	var cmax_y := int(floor(bbox.end.y / BILLBOARD_FOOTPRINT_CELL))
+	for cx in range(cmin_x, cmax_x + 1):
+		for cy in range(cmin_y, cmax_y + 1):
+			var ckey := Vector2i(cx, cy)
+			if not _building_footprint_hash.has(ckey):
+				_building_footprint_hash[ckey] = []
+			_building_footprint_hash[ckey].append(entry)
+
+func _rect_point_distance(r: Rect2, p: Vector2) -> float:
+	var dx := maxf(maxf(r.position.x - p.x, p.x - r.end.x), 0.0)
+	var dy := maxf(maxf(r.position.y - p.y, p.y - r.end.y), 0.0)
+	return sqrt(dx * dx + dy * dy)
+
+# Neighbor-aware: the footprint hash is GLOBAL (cells, not per-chunk), so a
+# building parsed by a neighbouring chunk's fetch is seen regardless of which
+# chunk evaluates the candidate → gate outcome is load-order independent.
+func _building_clip_within(point: Vector2, margin: float) -> bool:
+	var cmin_x := int(floor((point.x - margin) / BILLBOARD_FOOTPRINT_CELL))
+	var cmin_y := int(floor((point.y - margin) / BILLBOARD_FOOTPRINT_CELL))
+	var cmax_x := int(floor((point.x + margin) / BILLBOARD_FOOTPRINT_CELL))
+	var cmax_y := int(floor((point.y + margin) / BILLBOARD_FOOTPRINT_CELL))
+	for cx in range(cmin_x, cmax_x + 1):
+		for cy in range(cmin_y, cmax_y + 1):
+			var arr: Array = _building_footprint_hash.get(Vector2i(cx, cy), [])
+			for e in arr:
+				if _rect_point_distance(e.bbox, point) <= margin:
+					return true
+	return false
+
+func _residential_within(point: Vector2, radius: float) -> bool:
+	var cmin_x := int(floor((point.x - radius) / BILLBOARD_FOOTPRINT_CELL))
+	var cmin_y := int(floor((point.y - radius) / BILLBOARD_FOOTPRINT_CELL))
+	var cmax_x := int(floor((point.x + radius) / BILLBOARD_FOOTPRINT_CELL))
+	var cmax_y := int(floor((point.y + radius) / BILLBOARD_FOOTPRINT_CELL))
+	for cx in range(cmin_x, cmax_x + 1):
+		for cy in range(cmin_y, cmax_y + 1):
+			var arr: Array = _building_footprint_hash.get(Vector2i(cx, cy), [])
+			for e in arr:
+				if e.residential and _rect_point_distance(e.bbox, point) <= radius:
+					return true
+	return false
+
+# Gates for a candidate at world-XZ `pos` whose chunk `ck` is loaded (cheap → expensive).
+# `outward` = unit direction from the road toward the board (used to detect medians).
+func _billboard_candidate_ok(pos: Vector2, ck: String, outward: Vector2) -> bool:
+	if _is_point_near_road(pos, 0.5, ck):           # not on / crossing a road
+		return false
+	# Not in a median / between two roads: reject if another road sits just behind it.
+	var behind := pos + outward * BILLBOARD_MEDIAN_CHECK
+	if _is_point_near_road(behind, 1.0, _bb_chunk_key_at(behind)):
+		return false
+	if _is_point_in_intersection_shape(pos, false, ck) >= 0:  # not in a junction
+		return false
+	if _is_point_on_bridge_deck(pos):               # never on a bridge deck
+		return false
+	if _is_point_in_water(pos, ck):
+		return false
+	if _is_point_in_any_parking(pos, ck):
+		return false
+	if _billboard_too_close(pos):                   # ≥ 100 m between any two boards (always)
+		return false
+	if billboard_debug_dense:
+		return true  # relaxed: skip building gates only (validation)
+	if _building_clip_within(pos, BILLBOARD_CLIP_MARGIN):   # never clip/hug ANY facade
+		return false
+	if _residential_within(pos, BILLBOARD_RESIDENTIAL_RADIUS):  # keep off residential
+		return false
+	return true
+
+# ≥ BILLBOARD_MIN_SPACING between any two placed boards (across all roads/chunks).
+func _billboard_too_close(pos: Vector2) -> bool:
+	var cx := int(floor(pos.x / BILLBOARD_MIN_SPACING))
+	var cy := int(floor(pos.y / BILLBOARD_MIN_SPACING))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var arr: Array = _billboard_pos_hash.get(Vector2i(cx + dx, cy + dy), [])
+			for q in arr:
+				if pos.distance_to(q) < BILLBOARD_MIN_SPACING:
+					return true
+	return false
+
+func _billboard_register_pos(pos: Vector2, ck: String) -> void:
+	var cell := Vector2i(int(floor(pos.x / BILLBOARD_MIN_SPACING)), int(floor(pos.y / BILLBOARD_MIN_SPACING)))
+	if not _billboard_pos_hash.has(cell):
+		_billboard_pos_hash[cell] = []
+	_billboard_pos_hash[cell].append(pos)
+	if not _billboard_pos_by_chunk.has(ck):
+		_billboard_pos_by_chunk[ck] = []
+	_billboard_pos_by_chunk[ck].append(pos)
+
+func _bb_chunk_key_at(pos: Vector2) -> String:
+	return "%d,%d" % [int(floor(pos.x / chunk_size)), int(floor(pos.y / chunk_size))]
+
+# Walk the FULL way by global cumulative arc-length; drop one board every `spacing` m
+# on the open verge. Returns the next candidate idx to resume from, or BILLBOARD_DONE.
+func _generate_road_billboards_incremental(points: PackedVector2Array, way_id: int, highway: String, width: float, start_idx: int, budget_start: int, budget_usec: int) -> int:
+	if not enable_road_billboards or points.size() < 2 or _billboard_tex_paths.is_empty():
+		return BILLBOARD_DONE
+	var spacing := _billboard_spacing_for(highway)
+	var n := points.size()
+	var cumulative := PackedFloat64Array()
+	cumulative.resize(n)
+	cumulative[0] = 0.0
+	for i in range(1, n):
+		cumulative[i] = cumulative[i - 1] + points[i - 1].distance_to(points[i])
+	var total: float = cumulative[n - 1]
+	var idx := maxi(start_idx, 1)
+	var seg := 0
+	while true:
+		var d := float(idx) * spacing
+		if d >= total:
+			return BILLBOARD_DONE
+		if (Time.get_ticks_usec() - budget_start) > budget_usec:
+			return idx
+		var key := "bb_proc_%d_%d" % [way_id, idx]
+		if _created_billboard_keys.has(key):
+			idx += 1
+			continue
+		while seg < n - 2 and cumulative[seg + 1] < d:
+			seg += 1
+		var seg_len: float = cumulative[seg + 1] - cumulative[seg]
+		if seg_len < 0.001:
+			idx += 1
+			continue
+		var t: float = (d - cumulative[seg]) / seg_len
+		var p1: Vector2 = points[seg]
+		var p2: Vector2 = points[seg + 1]
+		var road_pos: Vector2 = p1.lerp(p2, t)
+		var dir: Vector2 = (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)
+		var offset: float = width / 2.0 + BILLBOARD_VERGE_SETBACK
+		_try_place_road_billboard(road_pos, dir, perp, offset, way_id, idx, key)
+		idx += 1
+	return BILLBOARD_DONE
+
+# Deterministic side choice (independent of chunk load order): preferred side from
+# the way/idx hash. Defer if the preferred side's chunk isn't loaded yet (so the
+# gate, which needs that chunk's data, is evaluated region-complete) — never place
+# the other side just because it loaded first.
+func _try_place_road_billboard(road_pos: Vector2, dir: Vector2, perp: Vector2, offset: float, way_id: int, idx: int, key: String) -> void:
+	var hash_val := (way_id * 2654435761 + idx * 40503) & 0x7FFFFFFF
+	var prefer_left: bool = (hash_val & 1) == 0
+	var perps: Array = [perp, -perp] if prefer_left else [-perp, perp]
+	var signs: Array = [1.0, -1.0] if prefer_left else [-1.0, 1.0]
+	# Try the preferred verge side first, then the other; place on the first side whose
+	# chunk is loaded AND passes the gates (so a board still appears even when the
+	# preferred side is blocked or its chunk isn't loaded yet — an unloaded side simply
+	# retries on the next way re-walk). No dedup mark unless actually placed.
+	for si in range(2):
+		var op: Vector2 = perps[si]
+		var pos: Vector2 = road_pos + op * offset
+		var ck := _bb_chunk_key_at(pos)
+		if not _loaded_chunks.has(ck):
+			continue
+		if _billboard_candidate_ok(pos, ck, op):
+			_place_road_billboard(pos, dir, float(signs[si]), ck, hash_val, key)
+			return
+
+func _place_road_billboard(pos: Vector2, dir: Vector2, side_sign: float, ck: String, hash_val: int, key: String) -> void:
+	# Orientation: board plane ⊥ road; front-face normal (+Z) aligned with road dir.
+	var base_yaw := atan2(dir.x, dir.y)
+	var yaw := base_yaw + deg_to_rad(BILLBOARD_YAW_OFFSET_DEG) * side_sign
+	var elev := get_surface_y(pos.x, pos.y)
+	var pn := _billboard_tex_paths.size()
+	var tex_f: String = _billboard_tex_paths[hash_val % pn]
+	var tex_b: String = _billboard_tex_paths[(hash_val / 7 + 1) % pn]
+	var bb: Node3D = _decoration_layer.create_road_billboard_mesh(pos.x, pos.y, elev, yaw, tex_f, tex_b)
+	var lamp := bb.find_child("LampLight", true, false)
+	if lamp and lamp is Node3D:
+		(lamp as Node3D).visible = _is_night_mode
+	_budgeted_add_child(_loaded_chunks[ck], bb)
+	_created_billboard_keys[key] = true
+	if not _billboard_keys_by_chunk.has(ck):
+		_billboard_keys_by_chunk[ck] = []
+	_billboard_keys_by_chunk[ck].append(key)
+	_billboard_register_pos(pos, ck)
+
+
+# ══ Overhead utility wires between street lamps ══════════════════════════════
+# Pure helper (plan §2): ordered candidate lamp anchors for ONE road polyline.
+# Replicates the lamp walker's geometry EXACTLY (same spacing/offset/perp/both-sides)
+# so — given the same clipped points the lamp walker uses — its output is the set of
+# placed lamps (before gates). No node access, no randf. Returns [{pos,side,idx,dir}].
+func _compute_lamp_anchors(points: PackedVector2Array, road_width: float) -> Array:
+	var out: Array = []
+	var n: int = points.size()
+	if n < 2:
+		return out
+	var lamp_offset := road_width / 2.0 + LAMP_SIDE_OFFSET_PAD
+	var both_sides := road_width >= LAMP_BOTH_SIDES_WIDTH
+	var cumulative := PackedFloat64Array()
+	cumulative.resize(n)
+	cumulative[0] = 0.0
+	for i in range(1, n):
+		cumulative[i] = cumulative[i - 1] + points[i - 1].distance_to(points[i])
+	var total: float = cumulative[n - 1]
+	var seg := 0
+	var k := 1
+	while float(k) * LAMP_SPACING < total:
+		var d := float(k) * LAMP_SPACING
+		while seg < n - 2 and cumulative[seg + 1] < d:
+			seg += 1
+		var seg_len: float = cumulative[seg + 1] - cumulative[seg]
+		if seg_len < 0.001:
+			k += 1
+			continue
+		var t: float = (d - cumulative[seg]) / seg_len
+		var p1: Vector2 = points[seg]
+		var p2: Vector2 = points[seg + 1]
+		var road_pos: Vector2 = p1.lerp(p2, t)
+		var dir: Vector2 = (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)
+		out.append(_make_lamp_anchor(road_pos + perp * lamp_offset, 1, k, dir))
+		if both_sides:
+			out.append(_make_lamp_anchor(road_pos - perp * lamp_offset, -1, k, dir))
+		k += 1
+	return out
+
+# Build one anchor: `pos` is the lamp model origin (used for gate validity, matching the
+# lamp walker), `pole` is the actual pole-shaft world XZ — origin + the local pole offset
+# rotated by the SAME yaw `_add_lamp_to_batch` applies. Wires attach at `pole`, not `pos`.
+func _make_lamp_anchor(pos: Vector2, side: int, idx: int, dir: Vector2) -> Dictionary:
+	var perp := Vector2(-dir.y, dir.x)
+	var road_dir3: Vector3 = Vector3(-perp.x, 0.0, -perp.y) if side == 1 else Vector3(perp.x, 0.0, perp.y)
+	var fwd := road_dir3.normalized()
+	var yaw := atan2(fwd.x, fwd.z) + PI / 2.0
+	var po: Vector3 = Basis(Vector3.UP, yaw) * Vector3(WIRE_POLE_LOCAL_X, 0.0, 0.0)
+	return {"pos": pos, "pole": Vector2(pos.x + po.x, pos.y + po.z), "side": side, "idx": idx, "dir": dir}
+
+# A wire endpoint is REAL iff a lamp would have been placed here — same gates the
+# lamp walker uses (intersection / parking / near-road / water / chunk loaded).
+func _wire_anchor_valid(pos: Vector2) -> bool:
+	# Valid iff a lamp is really there: prefer the placed-lamp set (so wires survive
+	# streaming like lamps do), but fall back to the live gates when the lamp for this
+	# anchor hasn't been walked yet (so spawn/initial-load wires aren't lost to ordering).
+	if _created_lamp_positions.has("%d_%d" % [int(pos.x), int(pos.y)]):
+		return true
+	var ck := _bb_chunk_key_at(pos)
+	if not _loaded_chunks.has(ck):
+		return false
+	if _is_point_in_intersection_shape(pos, false, ck) >= 0:
+		return false
+	if _is_point_in_any_parking(pos, ck):
+		return false
+	if _is_point_near_road(pos, 0.1, ck):
+		return false
+	if _is_point_in_water(pos, ck):
+		return false
+	return true
+
+func _wire_attach_height() -> float:
+	return WIRE_ATTACH_Y
+
+# Deterministic run/gap (plan §3,§5): span index k is "wired" iff it lands in a run
+# block. Run/gap lengths are per road class and seeded by (way_id, side). O(k), k small.
+func _wire_span_wired(_way_id: int, _side_id: int, _highway: String, _k: int) -> bool:
+	# Wires are now CONTINUOUS along every lamped side — no run/gap pattern (user request:
+	# "no gaps on the same side of the road"). Each consecutive lamp pair connects; the
+	# per-span safety checks in _try_wire_span (intersection / bridge / building / max-span /
+	# valid anchors) still reject spans that shouldn't exist, so junctions stay clear.
+	return true
+
+func _wire_span_twin(way_id: int, side_id: int, k: int) -> bool:
+	if not enable_wire_twin:
+		return false
+	var ht := (way_id * 2654435761 + side_id * 2246822519 + k * 40503) & 0x7FFFFFFF
+	return (ht % WIRE_TWIN_DENOM) == 0
+
+func _joint_spark_eligible(way_id: int, side_id: int, k: int) -> bool:
+	var hs := (way_id * 2654435761 + k * 40503 + side_id * 668265263) & 0x7FFFFFFF
+	return (hs % SPARK_JOINT_DENOM) == 0
+
+# Soft building avoidance (plan §3): reject only a clear through-footprint crossing.
+func _wire_span_hits_building(a: Vector2, b: Vector2) -> bool:
+	for s in [0.2, 0.4, 0.6, 0.8]:
+		if _building_clip_within(a.lerp(b, s), 0.3):
+			return true
+	return false
+
+# Budgeted per-chunk wire walk. `points` are CLIPPED to chunk `ck` (== lamp clip).
+func _generate_road_wires_incremental(points: PackedVector2Array, way_id: int, highway: String, width: float, start_idx: int, ck: String, budget_start: int, budget_usec: int, wire_dirty: Dictionary) -> int:
+	if not enable_overhead_wires or points.size() < 2 or not _loaded_chunks.has(ck):
+		return WIRE_DONE
+	if lamp_debug and start_idx <= 1:
+		_wire_dbg_walked += 1
+	var anchors := _compute_lamp_anchors(points, width)
+	if anchors.is_empty():
+		return WIRE_DONE
+	var by_side := {1: {}, -1: {}}
+	var max_k := 0
+	for a in anchors:
+		by_side[a.side][a.idx] = a
+		if a.idx > max_k:
+			max_k = a.idx
+	var k := maxi(start_idx, 1)
+	while k < max_k:
+		if (Time.get_ticks_usec() - budget_start) > budget_usec:
+			return k
+		for side in [1, -1]:
+			var side_id := 0 if side == 1 else 1
+			_try_wire_span(by_side[side], side_id, way_id, highway, k, ck, wire_dirty)
+		k += 1
+	return WIRE_DONE
+
+func _try_wire_span(side_dict: Dictionary, side_id: int, way_id: int, highway: String, k: int, ck: String, wire_dirty: Dictionary) -> void:
+	if lamp_debug:
+		_wire_dbg_spans += 1
+	if not _wire_span_wired(way_id, side_id, highway, k):
+		if lamp_debug: _wire_dbg_notwired += 1
+		return
+	var a0: Variant = side_dict.get(k)
+	var a1: Variant = side_dict.get(k + 1)
+	if a0 == null or a1 == null:
+		if lamp_debug: _wire_dbg_nullanchor += 1
+		return
+	# Key by the two anchor WORLD positions (globally unique per physical span). The old
+	# (way,side,k) key collided across chunks — k resets to 1 in each chunk-clip, so every
+	# chunk past the first re-derived the same keys → all rejected as "already". Position
+	# keys mean each real span is placed once, by whichever chunk owns its midpoint.
+	var key := "w_%d_%d_%d_%d" % [int(a0.pos.x), int(a0.pos.y), int(a1.pos.x), int(a1.pos.y)]
+	if _created_wire_keys.has(key):
+		if lamp_debug: _wire_dbg_already += 1
+		return
+	if not _wire_anchor_valid(a0.pos) or not _wire_anchor_valid(a1.pos):
+		if lamp_debug:
+			_wire_dbg_skip_invalid += 1
+		return
+	if a0.pos.distance_to(a1.pos) > WIRE_MAX_SPAN:
+		if lamp_debug: _wire_dbg_spancap += 1
+		return
+	var mid: Vector2 = a0.pos.lerp(a1.pos, 0.5)
+	if _is_point_in_intersection_shape(mid, false, _bb_chunk_key_at(mid)) >= 0:
+		if lamp_debug: _wire_dbg_intersection += 1
+		return
+	if _is_point_on_bridge_deck(mid):
+		return
+	if _wire_span_hits_building(a0.pos, a1.pos):
+		if lamp_debug: _wire_dbg_building += 1
+		return
+	_place_wire(a0, a1, way_id, side_id, k, ck, key, wire_dirty)
+
+func _place_wire(a0: Dictionary, a1: Dictionary, way_id: int, side_id: int, k: int, ck: String, key: String, wire_dirty: Dictionary) -> void:
+	if lamp_debug:
+		_wire_dbg_placed += 1
+	# Attach at the POLE SHAFT world XZ (a*.pole), on the straight shaft below the arm.
+	var q0: Vector2 = a0.pole
+	var q1: Vector2 = a1.pole
+	var attach := _wire_attach_height()
+	var p0 := Vector3(q0.x, get_surface_y(q0.x, q0.y) + attach, q0.y)
+	var p1 := Vector3(q1.x, get_surface_y(q1.x, q1.y) + attach, q1.y)
+	var span := q0.distance_to(q1)
+	var sag := clampf(span * 0.05, 0.25, 1.2)
+	if not _wire_geo_by_chunk.has(ck):
+		_wire_geo_by_chunk[ck] = {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+	var geo: Dictionary = _wire_geo_by_chunk[ck]
+	if _wire_span_twin(way_id, side_id, k):
+		var off := (p1 - p0)
+		off.y = 0.0
+		off = (off.normalized().cross(Vector3.UP)) * (WIRE_TWIN_OFFSET * 0.6) if off.length() > 0.001 else Vector3(WIRE_TWIN_OFFSET * 0.6, 0, 0)
+		_append_wire_tube(geo, p0 + off, p1 + off, sag)
+		_append_wire_tube(geo, p0 - off, p1 - off, sag * 1.06)
+	else:
+		_append_wire_tube(geo, p0, p1, sag)
+	_wire_geo_by_chunk[ck] = geo
+	_created_wire_keys[key] = true
+	if not _wire_keys_by_chunk.has(ck):
+		_wire_keys_by_chunk[ck] = []
+	_wire_keys_by_chunk[ck].append(key)
+	wire_dirty[ck] = true
+	# Rare hanging sneakers at the sagging span's lowest point (deterministic, ~1/30 spans).
+	if enable_wire_sneakers:
+		_maybe_place_sneaker(p0, p1, sag, key, ck)
+	# Spark/smoke emitters are no longer tied to wire joints — broken lamps are the source
+	# now (registered in _spawn_lamp_light via _register_spark_source).
+	if wire_debug_reasons:
+		_wire_dbg_check_lamp(a0.pos)
+		_wire_dbg_check_lamp(a1.pos)
+
+func _wire_dbg_check_lamp(pos: Vector2) -> void:
+	var lk := "%d_%d" % [int(pos.x), int(pos.y)]
+	if _created_lamp_positions.has(lk):
+		_wire_dbg_lamp_hit += 1
+	else:
+		_wire_dbg_lamp_miss += 1
+	if (_wire_dbg_lamp_hit + _wire_dbg_lamp_miss) % 50 == 0:
+		print("WIRE-VERIFY: anchors with a real placed lamp = %d, without = %d" % [_wire_dbg_lamp_hit, _wire_dbg_lamp_miss])
+
+## Register a spark/smoke emitter position for a chunk (a broken lamp top). Position-keyed
+## + deduped; cleaned up with the chunk on unload (see _spark_joint_keys_by_chunk).
+func _register_spark_source(world_pos: Vector3, ck: String) -> void:
+	var jkey := "j_%d_%d" % [int(world_pos.x), int(world_pos.z)]
+	if _spark_joint_seen.has(jkey):
+		return
+	_spark_joint_seen[jkey] = true
+	if not _spark_joints_by_chunk.has(ck):
+		_spark_joints_by_chunk[ck] = []
+	_spark_joints_by_chunk[ck].append(world_pos)
+	if not _spark_joint_keys_by_chunk.has(ck):
+		_spark_joint_keys_by_chunk[ck] = []
+	_spark_joint_keys_by_chunk[ck].append(jkey)
+	if wire_debug_show_joints and _loaded_chunks.has(ck):
+		var m := MeshInstance3D.new()
+		var sm := SphereMesh.new()
+		sm.radius = 0.25
+		sm.height = 0.5
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(1.0, 0.2, 1.0)
+		sm.material = mat
+		m.mesh = sm
+		m.position = world_pos
+		m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_loaded_chunks[ck].add_child(m)
+
+# Append one 3-sided catenary tube (p0→p1, dipping by `sag`) into the chunk's arrays.
+func _append_wire_tube(geo: Dictionary, p0: Vector3, p1: Vector3, sag: float) -> void:
+	var d := p1 - p0
+	d.y = 0.0
+	var dir := d.normalized() if d.length() > 0.001 else Vector3(1, 0, 0)
+	var R := dir.cross(Vector3.UP)
+	R = R.normalized() if R.length() > 0.001 else Vector3(1, 0, 0)
+	var U := R.cross(dir).normalized()
+	var r := WIRE_RADIUS
+	var angs := [PI * 0.5, PI * 7.0 / 6.0, PI * 11.0 / 6.0]
+	var v: PackedVector3Array = geo.v
+	var nrm: PackedVector3Array = geo.n
+	var idx: PackedInt32Array = geo.i
+	var base := v.size()
+	for i in range(WIRE_SEGMENTS + 1):
+		var t := float(i) / float(WIRE_SEGMENTS)
+		var c := p0.lerp(p1, t)
+		c.y -= sag * 4.0 * t * (1.0 - t)
+		for a in angs:
+			var radial: Vector3 = (cos(a) * R + sin(a) * U)
+			v.append(c + radial * r)
+			nrm.append(radial)
+	for i in range(WIRE_SEGMENTS):
+		var r0 := base + i * 3
+		var r1 := base + (i + 1) * 3
+		for s in range(3):
+			var s2 := (s + 1) % 3
+			idx.append(r0 + s); idx.append(r1 + s); idx.append(r0 + s2)
+			idx.append(r0 + s2); idx.append(r1 + s); idx.append(r1 + s2)
+	geo.v = v
+	geo.n = nrm
+	geo.i = idx
+
+func _ensure_wire_material() -> StandardMaterial3D:
+	if _wire_material == null:
+		_wire_material = StandardMaterial3D.new()
+		_wire_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		_wire_material.albedo_color = WIRE_COLOR
+	return _wire_material
+
+
+# Load the sneaker scene once and cache the real-vertex top Y (the lace-loop, which glues to
+# the wire). Uses mesh.get_aabb() — NOT the node's stored AABB — per the imported-GLB gotcha.
+func _ensure_sneaker_asset() -> bool:
+	if _sneaker_loaded:
+		return _sneaker_scene != null
+	_sneaker_loaded = true
+	if not enable_wire_sneakers:
+		return false
+	_sneaker_scene = load(SNEAKER_SCENE_PATH) as PackedScene
+	if _sneaker_scene == null:
+		push_warning("wire sneakers: failed to load " + SNEAKER_SCENE_PATH)
+		return false
+	var inst: Node = _sneaker_scene.instantiate()
+	add_child(inst)  # so global_transform is valid while measuring
+	var top := -INF
+	var stack: Array = [inst]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		if n is MeshInstance3D and (n as MeshInstance3D).mesh != null:
+			var top_local: float = ((n as MeshInstance3D).global_transform * (n as MeshInstance3D).mesh.get_aabb()).end.y
+			top = maxf(top, top_local)
+		for c in n.get_children():
+			stack.append(c)
+	inst.queue_free()
+	if top > -INF:
+		_sneaker_top_y = top
+	return true
+
+
+# Deterministic float in [0,1) from an integer hash + a salt — for per-span scale/rotation jitter.
+func _sneaker_hash01(h: int, salt: int) -> float:
+	var x := absi((h * 2654435761 + salt * 40503 + 0x9E3779B9) & 0x7FFFFFFF)
+	return float(x % 1000003) / 1000003.0
+
+
+# Set distance-based visibility (close-up only) on every GeometryInstance3D under `node`.
+func _sneaker_apply_visibility(node: Node, dist: float) -> void:
+	var stack: Array = [node]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		if n is GeometryInstance3D:
+			var g := n as GeometryInstance3D
+			g.visibility_range_end = dist
+			g.visibility_range_end_margin = maxf(2.0, dist * 0.15)
+			g.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		for c in n.get_children():
+			stack.append(c)
+
+
+# Place a hanging-sneakers prop at the lowest point of this sagging wire span, IF this span is
+# one of the rare (~1/30) selected ones. Deterministic per span (position key) so chunk reloads
+# keep the same wires chosen. The prop is parented to the owning chunk node → freed on unload.
+func _maybe_place_sneaker(p0: Vector3, p1: Vector3, sag: float, key: String, ck: String) -> void:
+	if not _loaded_chunks.has(ck):
+		return
+	var h := hash(key)
+	var denom := maxi(2, int(round(1.0 / maxf(sneaker_probability, 0.0001))))
+	if (absi(h) % denom) != 0:
+		return
+	if not _ensure_sneaker_asset():
+		return
+	# Lowest point of the parabolic sag: midpoint, dropped by `sag` (4*0.5*0.5 = 1.0).
+	var lowest := p0.lerp(p1, 0.5)
+	lowest.y -= sag
+	# Horizontal tangent of the span at t=0.5.
+	var d := p1 - p0
+	d.y = 0.0
+	var dir := d.normalized() if d.length() > 0.001 else Vector3(0, 0, 1)
+	# Deterministic per-span jitter.
+	var scl := sneaker_base_scale * lerpf(sneaker_scale_range.x, sneaker_scale_range.y, _sneaker_hash01(h, 1))
+	var yaw := atan2(dir.x, dir.z) + (_sneaker_hash01(h, 2) - 0.5) * 2.0 * sneaker_random_rotation_range
+	var roll := (_sneaker_hash01(h, 3) - 0.5) * 2.0 * (sneaker_random_rotation_range * 0.3)
+	var inst: Node3D = _sneaker_scene.instantiate()
+	inst.add_to_group("wire_sneaker")
+	_loaded_chunks[ck].add_child(inst)
+	# Orient along the span (+ jitter), keep model +Y up so the shoes hang under gravity.
+	var basis := Basis(Vector3.UP, yaw) * Basis(Vector3(0, 0, 1), roll) * Basis.from_scale(Vector3(scl, scl, scl))
+	# Glue the model's top (lace loop) to the wire's lowest point; the shoes hang below.
+	var pos := lowest - Vector3(0, scl * _sneaker_top_y, 0) + sneaker_attach_offset
+	inst.transform = Transform3D(basis, pos)
+	_sneaker_apply_visibility(inst, sneaker_max_visible_distance)
+	if not _sneaker_keys_by_chunk.has(ck):
+		_sneaker_keys_by_chunk[ck] = []
+	_sneaker_keys_by_chunk[ck].append(key)
+
+# ══════════════════════════════════════════════════════════════════════════
+# Pedestrian guard-rail fences (v1 — static placement). See docs/PEDESTRIAN_FENCE_PLAN.md.
+# ══════════════════════════════════════════════════════════════════════════
+
+# Build the pre-merged fence mesh ONCE: bake node transforms, strip the junk Material_133
+# plate (#7), bake the along-axis to local +X (pivot at run START, depth centred on Z, base
+# Y=0), and scale so one instance = PFENCE_BAYS_PER_INSTANCE * bay_width long. Scale comes
+# from REAL transformed vertices, not stored AABB (#scale, plan §10).
+func _pfence_ensure_mesh() -> bool:
+	if _pfence_loaded:
+		return _pfence_mesh != null
+	_pfence_loaded = true
+	if not enable_pedestrian_fences:
+		return false
+	var scene: PackedScene = load(PFENCE_SCENE_PATH) as PackedScene
+	if scene == null:
+		push_warning("pedestrian fence: failed to load " + PFENCE_SCENE_PATH)
+		return false
+	var inst: Node = scene.instantiate()
+	var mis: Array[MeshInstance3D] = []
+	_collect_mesh_instances(inst, mis)
+	# Collect structural surfaces with baked transforms; drop the textured backdrop plate.
+	var surfaces: Array = []  # [{arrays, material}]
+	for mi in mis:
+		var mesh: Mesh = mi.mesh
+		if mesh == null:
+			continue
+		var xform := _get_node_transform_recursive(mi)
+		var nbasis := xform.basis.inverse().transposed()
+		for s in range(mesh.get_surface_count()):
+			var mat: Material = mesh.surface_get_material(s)
+			var mname := (mat.resource_name if mat != null else "")
+			if mname.begins_with("Material_133"):
+				continue  # junk Sketchfab plate (4-vert textured quad)
+			var arrays := mesh.surface_get_arrays(s)
+			var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+			var tv := PackedVector3Array()
+			tv.resize(verts.size())
+			for i in range(verts.size()):
+				tv[i] = xform * verts[i]
+			arrays[Mesh.ARRAY_VERTEX] = tv
+			var norms = arrays[Mesh.ARRAY_NORMAL]
+			if norms != null and norms is PackedVector3Array:
+				var tn := PackedVector3Array()
+				tn.resize(norms.size())
+				for i in range(norms.size()):
+					tn[i] = (nbasis * norms[i]).normalized()
+				arrays[Mesh.ARRAY_NORMAL] = tn
+			surfaces.append({"arrays": arrays, "material": mat})
+	inst.queue_free()
+	if surfaces.is_empty():
+		push_warning("pedestrian fence: no structural surfaces after merge")
+		return false
+	# Raw baked AABB to decide along-axis (longer horizontal extent).
+	var amin := Vector3(INF, INF, INF)
+	var amax := Vector3(-INF, -INF, -INF)
+	for sf in surfaces:
+		for v in (sf.arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array):
+			amin = Vector3(minf(amin.x, v.x), minf(amin.y, v.y), minf(amin.z, v.z))
+			amax = Vector3(maxf(amax.x, v.x), maxf(amax.y, v.y), maxf(amax.z, v.z))
+	var ext := amax - amin
+	# Pre-rotate so the long axis becomes +X (depth → Z). For this asset along is already X.
+	var pre := Basis.IDENTITY
+	if ext.z > ext.x:
+		pre = Basis(Vector3.UP, PI / 2.0)  # maps +Z → +X
+	# AABB after pre-rotation.
+	var bmin := Vector3(INF, INF, INF)
+	var bmax := Vector3(-INF, -INF, -INF)
+	for sf in surfaces:
+		for v in (sf.arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array):
+			var p: Vector3 = pre * v
+			bmin = Vector3(minf(bmin.x, p.x), minf(bmin.y, p.y), minf(bmin.z, p.z))
+			bmax = Vector3(maxf(bmax.x, p.x), maxf(bmax.y, p.y), maxf(bmax.z, p.z))
+	var raw_len := bmax.x - bmin.x
+	if raw_len < 0.001:
+		return false
+	var target_len := float(PFENCE_BAYS_PER_INSTANCE) * pfence_bay_width
+	var scale_f := target_len / raw_len
+	var center_z := (bmin.z + bmax.z) * 0.5
+	# Build the merged, normalized, scaled mesh.
+	# The GLB ships every material as flat black (baseColorFactor 0,0,0). Real Soviet pedestrian
+	# guard-rails are GALVANIZED STEEL — light cool grey, semi-matte metal. Use one shared material.
+	var alu := StandardMaterial3D.new()
+	alu.albedo_color = Color(0.66, 0.68, 0.70)
+	alu.metallic = 0.7
+	alu.roughness = 0.42
+	alu.metallic_specular = 0.5
+	alu.cull_mode = BaseMaterial3D.CULL_DISABLED  # source materials are double-sided
+	var result := ArrayMesh.new()
+	_pfence_segments.clear()
+	for sf in surfaces:
+		var arrays: Array = sf.arrays
+		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var out := PackedVector3Array()
+		out.resize(verts.size())
+		for i in range(verts.size()):
+			var p: Vector3 = pre * verts[i]
+			out[i] = Vector3((p.x - bmin.x) * scale_f, (p.y - bmin.y) * scale_f, (p.z - center_z) * scale_f)
+		arrays[Mesh.ARRAY_VERTEX] = out
+		var norms = arrays[Mesh.ARRAY_NORMAL]
+		if norms != null and norms is PackedVector3Array and pre != Basis.IDENTITY:
+			var tn := PackedVector3Array()
+			tn.resize(norms.size())
+			for i in range(norms.size()):
+				tn[i] = (pre * norms[i]).normalized()
+			arrays[Mesh.ARRAY_NORMAL] = tn
+		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		result.surface_set_material(result.get_surface_count() - 1, alu)
+		# Phase 2: keep each leaf as a separate, CENTRED piece (mesh + convex shape + mass) for shatter.
+		if enable_pfence_shatter and out.size() >= 3:
+			var cen := Vector3.ZERO
+			for v in out:
+				cen += v
+			cen /= float(out.size())
+			var centered := PackedVector3Array()
+			centered.resize(out.size())
+			for j in range(out.size()):
+				centered[j] = out[j] - cen
+			var seg_arrays: Array = arrays.duplicate(true)
+			seg_arrays[Mesh.ARRAY_VERTEX] = centered
+			var seg_mesh := ArrayMesh.new()
+			seg_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, seg_arrays)
+			seg_mesh.surface_set_material(0, alu)
+			var shape := ConvexPolygonShape3D.new()
+			shape.points = centered
+			_pfence_segments.append({"mesh": seg_mesh, "offset": cen, "shape": shape, "mass": clampf(float(out.size()) * 0.03, 0.4, 5.0)})
+	_pfence_mesh = result
+	_pfence_length = raw_len * scale_f
+	_pfence_depth = (bmax.z - bmin.z) * scale_f
+	_pfence_height = (bmax.y - bmin.y) * scale_f
+	if pfence_debug:
+		print("PFENCE mesh: raw_len=%.3f scale=%.3f → L=%.2f depth=%.2f height=%.2f surfaces=%d" % [
+			raw_len, scale_f, _pfence_length, _pfence_depth, _pfence_height, result.get_surface_count()])
+	return true
+
+
+# Collect a TAGGED zebra strip as a deferred fence-site candidate (dedup by crossing id + center).
+func _pfence_enqueue_site(strip: PackedVector2Array, cw_id: int, _parent: Node3D, ck: String) -> void:
+	if strip.size() < 2:
+		return
+	if not _deferred_pfence_queue.has(ck):
+		_deferred_pfence_queue[ck] = []
+	var center := (strip[0] + strip[strip.size() - 1]) * 0.5
+	var enq_key := "%d_%d_%d" % [cw_id, int(round(center.x)), int(round(center.y))]
+	for e in _deferred_pfence_queue[ck]:
+		if str(e.get("enq_key", "")) == enq_key:
+			return
+	# strip endpoints span ACROSS the road (perpendicular to it) — used to pick the crossed road.
+	_deferred_pfence_queue[ck].append({"center": center, "p0": strip[0], "p1": strip[strip.size() - 1], "cw_id": cw_id, "enq_key": enq_key, "_retries": 0})
+	_pfence_dbg.enq += 1
+
+
+# Drain deferred fence sites. Anchoring to an intersection may not be possible yet (intersections
+# build on a worker thread AFTER crossing detection) — so RETRY, never skip-on-first-miss (#1).
+func _process_pfence_queue(deadline_usec: int) -> void:
+	if not enable_pedestrian_fences or _deferred_pfence_queue.is_empty():
+		return
+	if not _pfence_ensure_mesh():
+		return
+	var dirty: Dictionary = {}
+	var done_keys: Array[String] = []
+	for ck in _get_prioritized_keys(_deferred_pfence_queue):
+		if Time.get_ticks_usec() > deadline_usec:
+			break
+		if not _loaded_chunks.has(ck):
+			continue  # worker race — keep the jobs; _unload_chunk erases truly-gone chunks
+		var arr: Array = _deferred_pfence_queue[ck]
+		var keep: Array = []
+		for site in arr:
+			if Time.get_ticks_usec() > deadline_usec:
+				keep.append(site)
+				continue
+			var st := _pfence_build_site(site, ck)
+			if st == PFENCE_BUILT:
+				dirty[ck] = true
+			elif st == PFENCE_RETRY:
+				site["_retries"] = int(site.get("_retries", 0)) + 1
+				if int(site["_retries"]) < pfence_max_retries:
+					keep.append(site)
+				elif pfence_debug:
+					print("PFENCE drop (no anchor / mid-block) cw=%d" % int(site.get("cw_id", 0)))
+			# PFENCE_DROP → drop silently
+		if keep.is_empty():
+			done_keys.append(ck)
+		else:
+			_deferred_pfence_queue[ck] = keep
+	for ck in done_keys:
+		_deferred_pfence_queue.erase(ck)
+	for ck in dirty:
+		_pfence_finalize_chunk(ck)
+
+
+# Evaluate one site: gate by road class, anchor to a junction, pick the body-of-road side,
+# place 3 instances on each curb. Returns PFENCE_DROP / PFENCE_RETRY / PFENCE_BUILT.
+func _pfence_build_site(site: Dictionary, ck: String) -> int:
+	var center: Vector2 = site.center
+	var cw_id: int = int(site.cw_id)
+	# The zebra strip spans ACROSS the road, so its axis is ~perpendicular to the crossed road.
+	var p0: Vector2 = site.get("p0", center)
+	var p1: Vector2 = site.get("p1", center)
+	var strip_dir := (p1 - p0)
+	strip_dir = strip_dir.normalized() if strip_dir.length() > 0.01 else Vector2.ZERO
+	# Pick the MAJOR road the zebra actually crosses (perpendicular + widest), across ALL loaded
+	# chunks (not ck-scoped — crossings sit on chunk borders). NOT merely the nearest road (#A).
+	var ri := _pfence_pick_crossed_road(center, strip_dir)
+	if ri.is_empty():
+		# A major road may not be hashed yet (worker race) — retry a while before giving up.
+		var any_road := _find_nearest_road_at_point(center, "")
+		if any_road.is_empty():
+			return PFENCE_RETRY
+		# A road IS here but none is major → genuinely not a major crossing.
+		_pfence_dbg.nonmajor += 1
+		return PFENCE_DROP
+	var hw: String = str(ri.get("road_highway", ""))
+	var road_dir: Vector2 = ri.road_dir
+	var road_w: float = ri.road_width
+	var road_way_id: int = int(ri.get("road_way_id", 0))
+	# Anchor to the nearest intersection (search all loaded — crossings sit on chunk borders).
+	# Not built yet → retry (deferred, not skip).
+	var ii := _pfence_nearest_intersection(center, pfence_intersection_radius)
+	if ii < 0:
+		var rt := int(site.get("_retries", 0))
+		if rt + 1 >= pfence_max_retries:
+			_pfence_dbg.noanchor += 1
+		return PFENCE_RETRY
+	var inter_c: Vector2 = _intersection_positions[ii]
+	# Body-of-road direction: along the road, from the junction THROUGH the crossing.
+	var sdot := (center - inter_c).dot(road_dir)
+	if absf(sdot) < pfence_ambiguous_min:
+		_pfence_dbg.ambiguous += 1
+		if pfence_debug:
+			print("PFENCE skip AMBIGUOUS side cw=%d |s|=%.2f (wrong-side worse than none)" % [cw_id, absf(sdot)])
+		return PFENCE_DROP   # can't tell which side is the road body → skip (§4)
+	var away := road_dir * signf(sdot)
+	var perp := Vector2(-road_dir.y, road_dir.x)
+	var d0 := pfence_zebra_half_depth + pfence_after_crossing_gap  # start past the far zebra edge (+gap)
+	var built_any := false
+	for side in [1.0, -1.0]:
+		var run_key := "pf_%d_%d_%d_%d" % [cw_id, road_way_id, (1 if sdot >= 0.0 else 0), int(side)]
+		if _created_pfence_keys.has(run_key):
+			built_any = true
+			continue
+		if _pfence_place_run(center, away, perp, side, d0, road_w, ck, ii):
+			_created_pfence_keys[run_key] = true
+			if not _pfence_keys_by_chunk.has(ck):
+				_pfence_keys_by_chunk[ck] = []
+			_pfence_keys_by_chunk[ck].append(run_key)
+			built_any = true
+	if built_any:
+		_pfence_dbg.built += 1
+		if pfence_debug:
+			_pfence_last_site = {"center": center, "away": away, "inter": inter_c, "inter_idx": ii, "hw": hw}
+	if pfence_debug and built_any:
+		print("PFENCE site cw=%d road=%s wid=%d away=(%.2f,%.2f) center=(%.1f,%.1f)" % [cw_id, hw, road_way_id, away.x, away.y, center.x, center.y])
+	return PFENCE_BUILT if built_any else PFENCE_DROP
+
+
+# Nearest intersection to `center` within `radius`. Tries the spatial hash first; falls back to a
+# linear scan because the per-chunk intersection hash can MISS an intersection registered by a
+# neighbouring (boundary) chunk → that dropped valid crossings as "no anchor".
+func _pfence_nearest_intersection(center: Vector2, radius: float) -> int:
+	var ii := _find_nearby_intersection(center, radius, "")
+	if ii >= 0:
+		return ii
+	var best := -1
+	var best_d := radius
+	for i in range(_intersection_positions.size()):
+		var d := center.distance_to(_intersection_positions[i])
+		if d < best_d:
+			best_d = d
+			best = i
+	return best
+
+
+# Pick the MAJOR road the zebra crosses: among road segs near `center`, prefer ones whose direction
+# is ~perpendicular to the strip (the zebra spans across the road) and widest. Searches ALL loaded
+# chunks. Returns {road_dir, road_width, road_p1, road_p2, road_highway, road_way_id} or {}.
+func _pfence_pick_crossed_road(center: Vector2, strip_dir: Vector2) -> Dictionary:
+	var cell_x := int(floor(center.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(center.y / ROAD_CELL_SIZE))
+	var best_score := -1.0
+	var best: Dictionary = {}
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for seg in _query_road_hash(Vector2i(cell_x + dx, cell_y + dy), ""):
+				var hw := str(seg.get("highway", ""))
+				if not (hw in PFENCE_MAJOR_ROADS):
+					continue
+				var closest := Geometry2D.get_closest_point_to_segment(center, seg.p1, seg.p2)
+				var dist: float = center.distance_to(closest)
+				if dist > 14.0:
+					continue
+				var sdir: Vector2 = (seg.p2 - seg.p1).normalized()
+				# Perpendicularity to the strip: 1.0 = perpendicular (zebra crosses it), 0.0 = parallel.
+				var perpness := 1.0
+				if strip_dir != Vector2.ZERO:
+					perpness = 1.0 - absf(sdir.dot(strip_dir))
+				# Favor wide + perpendicular + close.
+				var score := float(seg.width) * (0.4 + 0.6 * perpness) - dist * 0.15
+				if score > best_score:
+					best_score = score
+					best = {
+						"road_dir": sdir,
+						"road_width": float(seg.width),
+						"road_p1": seg.p1,
+						"road_p2": seg.p2,
+						"road_highway": hw,
+						"road_way_id": int(seg.get("way_id", 0)),
+					}
+	return best
+
+
+# Place 3 instances CONTIGUOUSLY (end-to-end, no gaps) along one curb. The run start is anchored to
+# the REAL road edge (curve-aware, #3) past the far zebra edge, then laid colinear along the curb
+# tangent. The ENTIRE run is validated first: if ANY footprint point is on a road of any type, or
+# inside the junction contour, the whole run is rejected — better no fence than a fence on the road /
+# on the wrong (junction) side. Each instance is grounded + pitched to the local grade (#5).
+func _pfence_place_run(center: Vector2, away: Vector2, perp: Vector2, side: float, d0: float, road_w: float, ck: String, _inter_idx: int) -> bool:
+	var L := _pfence_length
+	if L < 0.1:
+		return false
+	var outward := perp * side
+	var base := _pfence_edge_point(center + away * d0, outward, ck) + outward * pfence_sidewalk_offset
+	var heading := away
+	# Plan 3 contiguous instances, FOLLOWING the curb's local tangent so the run doesn't drift onto the
+	# carriageway on a curve (#bug1). Each step re-anchors to the local edge + reads the local road
+	# direction (clamped to <~45° turns so it can't snap onto a perpendicular side street).
+	var planned: Array = []  # [{b0, fwd2, y0}]
+	for k in range(PFENCE_INSTANCES_PER_CURB):
+		var probe := base - outward * (pfence_sidewalk_offset + maxf(road_w, 6.0) * 0.25)  # toward carriageway
+		var ri := _find_nearest_road_at_point(probe, "")
+		var fwd2 := heading
+		if not ri.is_empty():
+			var rd: Vector2 = ri.road_dir
+			if rd.dot(heading) < 0.0:
+				rd = -rd
+			if rd.dot(heading) > 0.7:  # same-ish direction → follow the curve
+				fwd2 = rd
+		if _is_point_on_vehicle_road(probe, 0.0, ck):  # re-anchor to the real local edge
+			base = _find_road_edge_point(probe, true, probe + outward * 30.0, ck) + outward * pfence_sidewalk_offset
+		var y0 := get_surface_y(base.x, base.y)
+		planned.append({"b0": base, "fwd2": fwd2, "y0": y0})
+		base = base + fwd2 * L  # next instance begins exactly where this one ends → no gaps
+		heading = fwd2
+	# VALIDATE: the road-facing face must NOT touch any VEHICLE carriageway anywhere (#bug1 / #bug2:
+	# junction-side placement lands on the wide junction roadway → rejected here).
+	var half_depth := _pfence_depth * 0.5 + 0.05
+	for p in planned:
+		var b: Vector2 = p.b0
+		var f: Vector2 = p.fwd2
+		for t in [0.0, 0.5, 1.0]:
+			var face: Vector2 = b + f * (float(t) * L) - outward * half_depth
+			if _pfence_vehicle_road_clearance(face) < PFENCE_ROAD_CLEAR:
+				if pfence_debug:
+					print("PFENCE run REJECTED (on vehicle road) side=%d at (%.1f,%.1f)" % [int(side), face.x, face.y])
+				return false
+	# Passed — commit (grounded + pitched to local grade).
+	if not _pfence_batch_data.has(ck):
+		_pfence_batch_data[ck] = {"transforms": []}
+	var transforms: Array = _pfence_batch_data[ck].transforms
+	for p in planned:
+		var b0: Vector2 = p.b0
+		var f2: Vector2 = p.fwd2
+		var y0: float = p.y0
+		var end2 := b0 + f2 * L
+		var y1 := get_surface_y(end2.x, end2.y)
+		var run3 := Vector3(f2.x * L, y1 - y0, f2.y * L)  # curb tangent + grade
+		var fwd := run3.normalized()
+		var up := Vector3.UP
+		var yax := up - fwd * up.dot(fwd)
+		if yax.length() < 0.01:
+			yax = Vector3.UP
+		yax = yax.normalized()
+		var zax := fwd.cross(yax).normalized()  # depth axis; guard-rail is symmetric so facing is cosmetic
+		var basis := Basis(fwd, yax, zax)  # +X=run, +Y=up, +Z=depth; right-handed, upright on both curbs
+		transforms.append(Transform3D(basis, Vector3(b0.x, y0, b0.y)))
+		if pfence_debug:
+			_pfence_debug_marker(ck, Vector3(b0.x, y0 + 0.1, b0.y), Color(0.1, 1.0, 0.2))
+	return true
+
+
+# Find the real road edge from an on-road centerline point, casting `outward` (unit). Falls back
+# to the centerline if the projection drifts off the corridor (curve/flare).
+func _pfence_edge_point(cl: Vector2, outward: Vector2, ck: String) -> Vector2:
+	if not _is_point_on_vehicle_road(cl, 0.0, ck):
+		return cl
+	return _find_road_edge_point(cl, true, cl + outward * 30.0, ck)
+
+
+# Signed distance to the nearest VEHICLE carriageway edge (width >= 4 only). <0 = inside a road.
+# Footways/sidewalks/paths/tram (width < 4) are EXCLUDED — a pedestrian fence belongs on the sidewalk.
+func _pfence_vehicle_road_clearance(p: Vector2) -> float:
+	var cx := int(floor(p.x / ROAD_CELL_SIZE))
+	var cy := int(floor(p.y / ROAD_CELL_SIZE))
+	var best := 999.0
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for seg in _query_road_hash(Vector2i(cx + dx, cy + dy), ""):
+				if seg.width < 4.0:
+					continue
+				var cl := Geometry2D.get_closest_point_to_segment(p, seg.p1, seg.p2)
+				best = minf(best, p.distance_to(cl) - seg.width * 0.5)
+	return best
+
+
+# (Re)build the chunk's fence MultiMesh + per-instance solid colliders from accumulated transforms.
+func _pfence_finalize_chunk(ck: String) -> void:
+	if not _loaded_chunks.has(ck) or not _pfence_batch_data.has(ck):
+		return
+	if _pfence_mesh == null:
+		return
+	var parent: Node3D = _loaded_chunks[ck]
+	if not is_instance_valid(parent):
+		return
+	var old := parent.get_node_or_null("PedFences")
+	if old != null:
+		old.free()
+	var transforms: Array = _pfence_batch_data[ck].transforms
+	if transforms.is_empty():
+		return
+	var container := Node3D.new()
+	container.name = "PedFences"
+	var shattered: Dictionary = _pfence_shattered.get(ck, {})
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = _pfence_mesh
+	mm.instance_count = transforms.size()
+	for i in range(transforms.size()):
+		if shattered.has(i):
+			mm.set_instance_transform(i, Transform3D(Basis().scaled(Vector3.ZERO), transforms[i].origin))  # broken → hidden
+		else:
+			mm.set_instance_transform(i, transforms[i])
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = "PedFenceMM"
+	mmi.multimesh = mm
+	container.add_child(mmi)
+	_pfence_batch_data[ck]["mm"] = mm  # kept so a shatter can hide its slot
+	# Per-instance solid collider — layer 1 (cars stop on it), like lamps/props (#2). With shatter
+	# enabled it's a FROZEN KINEMATIC RigidBody (still solid) that reports body_entered for the hit.
+	var box_size := Vector3(_pfence_length, maxf(_pfence_height, 0.6), maxf(_pfence_depth, 0.15))
+	var box_xform := Transform3D(Basis.IDENTITY, Vector3(_pfence_length * 0.5, _pfence_height * 0.5, 0.0))
+	for i in range(transforms.size()):
+		if shattered.has(i):
+			continue  # already broken — no collider
+		var body: PhysicsBody3D
+		if enable_pfence_shatter and not _pfence_segments.is_empty():
+			var rb := RigidBody3D.new()
+			rb.freeze = true
+			rb.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+			rb.contact_monitor = true
+			rb.max_contacts_reported = 4
+			rb.body_entered.connect(_pfence_on_body_entered.bind(rb, ck, i))
+			body = rb
+		else:
+			body = StaticBody3D.new()
+		body.collision_layer = 1
+		var cs := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		box.size = box_size
+		cs.shape = box
+		cs.transform = box_xform  # pivot at run start → box centre at +L/2, +h/2
+		body.transform = transforms[i]
+		body.add_child(cs)
+		container.add_child(body)
+	parent.add_child(container)
+
+
+# Phase 2: a fence instance's kinematic collider reports the car entering. Fast enough → shatter.
+func _pfence_on_body_entered(other: Node, fence_body: Node, ck: String, idx: int) -> void:
+	if not enable_pfence_shatter or other == null:
+		return
+	# Only the car (player GEVP RigidBody or NPC VehicleBody) — never flying fence pieces.
+	var is_car := other is VehicleBody3D or other.is_in_group("car") or other.is_in_group("player")
+	if not is_car:
+		return
+	var cvel := Vector3.ZERO
+	if other is RigidBody3D:
+		cvel = (other as RigidBody3D).linear_velocity
+	# Use the APPROACH speed (recent peak) for the player — the contact instant has already slowed it.
+	var approach := cvel
+	if other.is_in_group("player") or other == _pfence_player:
+		var pk := _pfence_player_approach_vel()
+		if pk.length() > approach.length():
+			approach = pk
+	if approach.length() < pfence_shatter_speed:  # too slow → just a solid bump, no shatter
+		return
+	var contact := (other as Node3D).global_position if other is Node3D else Vector3.ZERO
+	_pfence_shatter_instance(ck, idx, contact, approach, fence_body)
+
+
+# Largest recent player velocity (over the last ~10 physics frames) — the speed BEFORE contact slowed it.
+func _pfence_player_approach_vel() -> Vector3:
+	var best := Vector3.ZERO
+	for v in _pfence_speed_hist:
+		if (v as Vector3).length() > best.length():
+			best = v
+	return best
+
+
+# Break one fence instance into flying per-leaf rigid bodies; hide its MultiMesh slot + drop its collider.
+func _pfence_shatter_instance(ck: String, idx: int, contact: Vector3, cvel: Vector3, fence_body: Node) -> void:
+	if not _loaded_chunks.has(ck) or not _pfence_batch_data.has(ck):
+		return
+	var shattered: Dictionary = _pfence_shattered.get(ck, {})
+	if shattered.has(idx):
+		return  # already broken
+	shattered[idx] = true
+	_pfence_shattered[ck] = shattered
+	var bd: Dictionary = _pfence_batch_data[ck]
+	var transforms: Array = bd.transforms
+	if idx >= transforms.size():
+		return
+	var xf: Transform3D = transforms[idx]
+	# Hide the visual slot.
+	var mm = bd.get("mm", null)
+	if mm != null and idx < mm.instance_count:
+		mm.set_instance_transform(idx, Transform3D(Basis().scaled(Vector3.ZERO), xf.origin))
+	# Drop the solid collider so the car drives through the gap.
+	if fence_body != null and is_instance_valid(fence_body):
+		fence_body.queue_free()
+	# Spawn the flying pieces.
+	var holder := _pfence_spawn_pieces(ck, xf, contact, cvel)
+	# Sound: clang on impact, then the pieces clattering down a beat later.
+	_pfence_play_sfx(contact, "pfence_hit", 0.0)
+	_pfence_play_sfx(xf * Vector3(_pfence_length * 0.5, _pfence_height * 0.5, 0.0), "pfence_drop", 0.4)
+	_pfence_shatter_order.append({"holder": holder})
+	while _pfence_shatter_order.size() > PFENCE_MAX_SHATTERED:
+		var oldest: Dictionary = _pfence_shatter_order.pop_front()
+		var h = oldest.get("holder", null)
+		if h != null and is_instance_valid(h):
+			h.queue_free()
+
+
+# Instantiate every leaf segment of one instance as a RigidBody that flies off; despawn via TTL.
+func _pfence_spawn_pieces(ck: String, xf: Transform3D, contact: Vector3, cvel: Vector3) -> Node3D:
+	var parent: Node3D = _loaded_chunks.get(ck, null)
+	if parent == null or _pfence_segments.is_empty():
+		return null
+	var holder := Node3D.new()
+	holder.name = "PedFencePieces"
+	parent.add_child(holder)  # chunk-owned → freed on unload
+	for seg in _pfence_segments:
+		var piece := RigidBody3D.new()
+		piece.collision_layer = 4          # destructible debris
+		piece.collision_mask = 1 | 2       # collide with ground + statics, not the car/other pieces
+		piece.mass = float(seg.mass)
+		piece.add_to_group("pfence_piece")
+		var mi := MeshInstance3D.new()
+		mi.mesh = seg.mesh
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		piece.add_child(mi)
+		var cs := CollisionShape3D.new()
+		cs.shape = seg.shape
+		piece.add_child(cs)
+		holder.add_child(piece)
+		var world_pos: Vector3 = xf * (seg.offset as Vector3)  # leaf centroid → world
+		piece.global_transform = Transform3D(xf.basis, world_pos)
+		# Impulse: radial away from the contact point + a slice of car velocity + an upward kick.
+		var radial := world_pos - contact
+		radial.y = maxf(radial.y, 0.0)
+		radial = radial.normalized() if radial.length() > 0.1 else Vector3.UP
+		var imp := (radial * pfence_shatter_impulse + cvel * 0.25 + Vector3(0.0, 2.2, 0.0)) * piece.mass
+		piece.apply_central_impulse(imp)
+		piece.apply_torque_impulse(Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * pfence_shatter_torque)
+		var tmr := get_tree().create_timer(pfence_piece_ttl)
+		tmr.timeout.connect(piece.queue_free)
+	return holder
+
+
+# Play a one-shot positional SFX at a world point (optionally after a delay). Parented to the
+# generator so it survives the struck chunk and frees itself when finished.
+func _pfence_play_sfx(world_pos: Vector3, key: String, delay: float) -> void:
+	var stream: AudioStream = _clutter_sfx.get(key)
+	if stream == null:
+		return
+	var p := AudioStreamPlayer3D.new()
+	p.stream = stream
+	p.max_distance = 80.0
+	p.unit_size = 9.0
+	add_child(p)
+	p.global_position = world_pos
+	p.finished.connect(p.queue_free)
+	if delay > 0.0:
+		get_tree().create_timer(delay).timeout.connect(p.play)
+	else:
+		p.play()
+
+
+# Default-off debug marker (small sphere) parented to the chunk for visual site inspection.
+func _pfence_debug_marker(ck: String, world_pos: Vector3, color: Color) -> void:
+	if not _loaded_chunks.has(ck):
+		return
+	var mi := MeshInstance3D.new()
+	var sph := SphereMesh.new()
+	sph.radius = 0.25
+	sph.height = 0.5
+	mi.mesh = sph
+	var m := StandardMaterial3D.new()
+	m.albedo_color = color
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mi.material_override = m
+	mi.position = world_pos
+	mi.add_to_group("pfence_debug")
+	_loaded_chunks[ck].add_child(mi)
+
+
+# Rebuild the one merged wire MeshInstance for chunk `ck` (mesh-swap, no node churn).
+func _commit_wire_mesh(ck: String) -> void:
+	if not _loaded_chunks.has(ck) or not _wire_geo_by_chunk.has(ck):
+		return
+	var geo: Dictionary = _wire_geo_by_chunk[ck]
+	if geo.v.is_empty():
+		return
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = geo.v
+	arr[Mesh.ARRAY_NORMAL] = geo.n
+	arr[Mesh.ARRAY_INDEX] = geo.i
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	var mi: MeshInstance3D
+	if _wire_node_by_chunk.has(ck) and is_instance_valid(_wire_node_by_chunk[ck]):
+		mi = _wire_node_by_chunk[ck]
+	else:
+		mi = MeshInstance3D.new()
+		mi.name = "OverheadWires"
+		mi.material_override = _ensure_wire_material()
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.visibility_range_end = 250.0
+		mi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		_wire_node_by_chunk[ck] = mi
+		_loaded_chunks[ck].add_child(mi)
+	mi.mesh = mesh
+
+# ── Night-only pooled spark bursts (plan §6) ────────────────────────────────
+func _ensure_spark_pool() -> void:
+	if not _spark_pool.is_empty():
+		return
+	_spark_pool_root = Node3D.new()
+	_spark_pool_root.name = "WireSparkPool"
+	add_child(_spark_pool_root)
+	var mesh := QuadMesh.new()
+	mesh.size = Vector2(0.05, 0.05)
+	var smat := StandardMaterial3D.new()
+	smat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	smat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	smat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	smat.vertex_color_use_as_albedo = true
+	smat.emission_enabled = true
+	smat.emission = Color(0.45, 0.72, 1.0)
+	smat.emission_energy_multiplier = 4.0
+	smat.albedo_color = Color(0.55, 0.8, 1.0)
+	mesh.material = smat
+	var grad := Gradient.new()
+	grad.set_color(0, Color(0.6, 0.85, 1.0, 1.0))
+	grad.set_color(1, Color(0.3, 0.6, 1.0, 0.0))
+	var gtex := GradientTexture1D.new()
+	gtex.gradient = grad
+	var scurve := Curve.new()
+	scurve.add_point(Vector2(0.0, 1.0))
+	scurve.add_point(Vector2(1.0, 0.0))
+	var sctex := CurveTexture.new()
+	sctex.curve = scurve
+	# --- Smoke puff look (subtle grey, drifts up, grows, fades) ---
+	var smoke_mesh := QuadMesh.new()
+	smoke_mesh.size = Vector2(0.24, 0.24)
+	var smoke_mat := StandardMaterial3D.new()
+	smoke_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	smoke_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	smoke_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	smoke_mat.vertex_color_use_as_albedo = true
+	smoke_mat.albedo_color = Color(0.9, 0.92, 0.96, 1.0)
+	# soft pale self-glow → light "vape"-like vapour readable at night
+	smoke_mat.emission_enabled = true
+	smoke_mat.emission = Color(0.8, 0.84, 0.92)
+	smoke_mat.emission_energy_multiplier = 1.1
+	smoke_mesh.material = smoke_mat
+	var smoke_grad := Gradient.new()
+	smoke_grad.set_color(0, Color(0.93, 0.95, 0.99, 0.68))  # light, soft puff when born
+	smoke_grad.set_color(1, Color(0.85, 0.88, 0.95, 0.0))   # fades away
+	var smoke_gtex := GradientTexture1D.new()
+	smoke_gtex.gradient = smoke_grad
+	var smoke_scurve := Curve.new()
+	smoke_scurve.add_point(Vector2(0.0, 0.5))
+	smoke_scurve.add_point(Vector2(1.0, 1.6))  # grows as it rises
+	var smoke_sctex := CurveTexture.new()
+	smoke_sctex.curve = smoke_scurve
+	for _i in range(SPARK_POOL_SIZE):
+		var p := GPUParticles3D.new()
+		p.amount = 10
+		p.lifetime = 0.7  # short enough that sparks fade mid-air, not on the pavement
+		p.one_shot = true
+		p.explosiveness = 0.85
+		p.emitting = false
+		p.visible = false
+		p.local_coords = false
+		p.draw_pass_1 = mesh
+		var pm := ParticleProcessMaterial.new()
+		pm.direction = Vector3(0, -1, 0)
+		pm.spread = 22.0
+		pm.gravity = Vector3(0, -9.0, 0)
+		pm.initial_velocity_min = 1.2
+		pm.initial_velocity_max = 3.0
+		pm.scale_min = 0.6
+		pm.scale_max = 1.2
+		pm.color = Color(0.55, 0.8, 1.0, 1.0)
+		pm.color_ramp = gtex
+		pm.scale_curve = sctex
+		p.process_material = pm
+		_spark_pool_root.add_child(p)
+		_spark_pool.append(p)
+		# paired smoke puff
+		var sk := GPUParticles3D.new()
+		sk.amount = 9
+		sk.lifetime = 1.5
+		sk.one_shot = true
+		sk.explosiveness = 0.55
+		sk.emitting = false
+		sk.visible = false
+		sk.local_coords = false
+		sk.draw_pass_1 = smoke_mesh
+		var skm := ParticleProcessMaterial.new()
+		skm.direction = Vector3(0, 1, 0)
+		skm.spread = 18.0
+		skm.gravity = Vector3(0, 0.35, 0)   # drifts gently upward
+		skm.initial_velocity_min = 0.25
+		skm.initial_velocity_max = 0.7
+		skm.damping_min = 0.4
+		skm.damping_max = 0.9
+		skm.scale_min = 0.7
+		skm.scale_max = 1.3
+		skm.color = Color(0.35, 0.36, 0.38, 1.0)
+		skm.color_ramp = smoke_gtex
+		skm.scale_curve = smoke_sctex
+		sk.process_material = skm
+		_spark_pool_root.add_child(sk)
+		_smoke_pool.append(sk)
+
+func _update_wire_sparks(delta: float) -> void:
+	if not _is_night_mode:
+		return
+	if _spark_joints_by_chunk.is_empty():
+		return
+	_ensure_spark_pool()
+	_spark_elapsed += delta
+	var bucket := int(_spark_elapsed / SPARK_INTERVAL)
+	if bucket == _spark_last_bucket:
+		return
+	_spark_last_bucket = bucket
+	var cam := _cached_cam_pos
+	var fwd := _cached_cam_fwd
+	# Collect in-view broken-lamp emitters (within range, not far behind the camera).
+	var candidates: Array = []
+	for cck in _spark_joints_by_chunk:
+		for jp in _spark_joints_by_chunk[cck]:
+			var to: Vector3 = jp - cam
+			if to.length() > SPARK_VIEW_DIST:
+				continue
+			var toh := Vector3(to.x, 0, to.z)
+			if toh.length() > 0.1 and toh.normalized().dot(fwd) < -0.25:
+				continue
+			candidates.append(jp)
+	if candidates.is_empty():
+		return
+	# Fire several distinct nearby broken lamps this tick, each on a free pool emitter.
+	var fired := 0
+	for i in range(_spark_pool.size()):
+		if fired >= SPARK_BURSTS_PER_TICK:
+			break
+		if _spark_pool[i].emitting:
+			continue
+		var pick := absi(bucket * 2654435761 + fired * 1013904223 + 12345) % candidates.size()
+		var jpos: Vector3 = candidates[pick]
+		var emitter: GPUParticles3D = _spark_pool[i]
+		emitter.global_position = jpos
+		emitter.visible = true
+		emitter.restart()
+		emitter.emitting = true
+		if i < _smoke_pool.size():
+			var smoke: GPUParticles3D = _smoke_pool[i]
+			smoke.global_position = jpos
+			smoke.visible = true
+			smoke.restart()
+			smoke.emitting = true
+		fired += 1
+
+func _stop_wire_sparks() -> void:
+	for p in _spark_pool:
+		if is_instance_valid(p):
+			p.emitting = false
+			p.visible = false
+	for s in _smoke_pool:
+		if is_instance_valid(s):
+			s.emitting = false
+			s.visible = false
+	_spark_last_bucket = -1
+
+# Clear all per-world wire/spark bookkeeping on regen/reset (nodes free with chunks).
+func _reset_wire_state() -> void:
+	_deferred_wire_road_queue.clear()
+	_created_wire_keys.clear()
+	_wire_keys_by_chunk.clear()
+	_wire_geo_by_chunk.clear()
+	_wire_node_by_chunk.clear()
+	_sneaker_keys_by_chunk.clear()
+	# Pedestrian fences share the regen/reset lifecycle.
+	_deferred_pfence_queue.clear()
+	_pfence_batch_data.clear()
+	_created_pfence_keys.clear()
+	_pfence_keys_by_chunk.clear()
+	_pfence_shattered.clear()
+	_pfence_shatter_order.clear()
+	_pfence_speed_hist.clear()
+	_pfence_player = null
+	_spark_joints_by_chunk.clear()
+	_spark_joint_seen.clear()
+	_spark_joint_keys_by_chunk.clear()
+	_stop_wire_sparks()
+
+
+# ══ Roadside props (kiosks + transformer boxes) ══════════════════════════════
+# One-time: load each model, compute its REAL-vertex AABB → grounding/centre/scale/
+# footprint so off-origin models centre on the placement point and sit flush.
+func _init_prop_defs() -> void:
+	if _prop_defs_ready:
+		return
+	_prop_defs_ready = true
+	for type in _prop_defs:
+		var def: Dictionary = _prop_defs[type]
+		var preps: Array = []
+		for path in def["paths"]:
+			if not ResourceLoader.exists(path):
+				push_warning("Roadside prop model missing: " + path)
+				continue
+			var scene: PackedScene = load(path)
+			_prop_scene_cache[path] = scene
+			var inst: Node3D = scene.instantiate()
+			var b := _prop_compute_bounds(inst)
+			inst.free()
+			var amin: Vector3 = b["min"]
+			var amax: Vector3 = b["max"]
+			var size: Vector3 = amax - amin
+			var scl: float = def["target_h"] / maxf(size.y, 0.01)
+			preps.append({
+				"path": path, "scale": scl, "base_y": amin.y,
+				"cx": (amin.x + amax.x) * 0.5, "cz": (amin.z + amax.z) * 0.5,
+				"foot": Vector2(size.x, size.z) * 0.5 * scl, "height": size.y * scl,
+			})
+		def["preps"] = preps
+		_prop_defs[type] = def
+	print("OSM: roadside prop defs ready (%d types)" % _prop_defs.size())
+
+func _prop_compute_bounds(inst: Node3D) -> Dictionary:
+	var have := false
+	var amin := Vector3.ZERO
+	var amax := Vector3.ZERO
+	var stack: Array = [inst]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		for c in n.get_children():
+			stack.push_back(c)
+		if n is MeshInstance3D and (n as MeshInstance3D).mesh != null:
+			var t := Transform3D.IDENTITY
+			var cur: Node = n
+			while cur != null and cur != inst:
+				t = (cur as Node3D).transform * t
+				cur = cur.get_parent()
+			var mesh: Mesh = (n as MeshInstance3D).mesh
+			for s in range(mesh.get_surface_count()):
+				var arr: Array = mesh.surface_get_arrays(s)
+				var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+				for v in verts:
+					var wp: Vector3 = t * v
+					if not have:
+						amin = wp; amax = wp; have = true
+					else:
+						amin = Vector3(minf(amin.x, wp.x), minf(amin.y, wp.y), minf(amin.z, wp.z))
+						amax = Vector3(maxf(amax.x, wp.x), maxf(amax.y, wp.y), maxf(amax.z, wp.z))
+	return {"min": amin, "max": amax}
+
+# Build one grounded, centred, collidable prop. Shared by procedural + manual placement.
+func _spawn_prop(type: String, model_idx: int, world_xz: Vector2, yaw: float, parent: Node3D) -> Node3D:
+	_init_prop_defs()
+	var def: Dictionary = _prop_defs.get(type, {})
+	var preps: Array = def.get("preps", [])
+	if preps.is_empty():
+		return null
+	var prep: Dictionary = preps[model_idx % preps.size()]
+	var scene: PackedScene = _prop_scene_cache.get(prep["path"])
+	if scene == null:
+		return null
+	var scl: float = prep["scale"]
+	var surf := get_surface_y(world_xz.x, world_xz.y)
+	# Holder carries world pos + yaw (unscaled); model is centred + grounded within it.
+	var holder := Node3D.new()
+	holder.name = "Prop_%s" % type
+	holder.position = Vector3(world_xz.x, surf + PROP_LIFT, world_xz.y)
+	holder.rotation.y = yaw
+	var inst: Node3D = scene.instantiate()
+	inst.scale = Vector3.ONE * scl
+	inst.position = Vector3(-prep["cx"] * scl, -prep["base_y"] * scl, -prep["cz"] * scl)
+	_set_no_shadow_recursive(inst)
+	_set_visibility_range_recursive(inst, 180.0)
+	holder.add_child(inst)
+	# Collision box from real footprint — layer like street lamps so cars stop on it.
+	var body := StaticBody3D.new()
+	body.name = "PropCol"
+	var shape := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	var foot: Vector2 = prep["foot"]
+	box.size = Vector3(maxf(foot.x * 2.0, 0.3), maxf(prep["height"], 0.5), maxf(foot.y * 2.0, 0.3))
+	shape.shape = box
+	shape.position.y = prep["height"] * 0.5
+	body.add_child(shape)
+	holder.add_child(body)
+	# Subtle warm interior glow for kiosks — "LampLight" so the night system toggles it.
+	if def.get("night_glow", false):
+		var lamp := OmniLight3D.new()
+		lamp.name = "LampLight"
+		lamp.light_color = Color(1.0, 0.82, 0.5)
+		lamp.light_energy = 1.1
+		lamp.omni_range = 5.0
+		lamp.shadow_enabled = false
+		lamp.distance_fade_enabled = true
+		lamp.distance_fade_begin = 45.0
+		lamp.distance_fade_length = 15.0
+		lamp.position = Vector3(0.0, prep["height"] * 0.55, 0.0)
+		lamp.set_meta("is_broken", false)
+		lamp.visible = _is_night_mode
+		holder.add_child(lamp)
+	_budgeted_add_child(parent, holder)
+	return holder
+
+# ── Procedural placement (mirrors the billboard road-walk) ──────────────────
+func _generate_road_props_incremental(type: String, points: PackedVector2Array, way_id: int, highway: String, width: float, start_idx: int, budget_start: int, budget_usec: int) -> int:
+	if not enable_roadside_props:
+		return PROP_DONE
+	_init_prop_defs()
+	var def: Dictionary = _prop_defs.get(type, {})
+	if def.get("preps", []).is_empty() or points.size() < 2:
+		return PROP_DONE
+	var spacing: float = def["spacing"]
+	var n := points.size()
+	var cumulative := PackedFloat64Array()
+	cumulative.resize(n)
+	cumulative[0] = 0.0
+	for i in range(1, n):
+		cumulative[i] = cumulative[i - 1] + points[i - 1].distance_to(points[i])
+	var total: float = cumulative[n - 1]
+	var idx := maxi(start_idx, 1)
+	var seg := 0
+	while true:
+		var d := float(idx) * spacing
+		if d >= total:
+			return PROP_DONE
+		if (Time.get_ticks_usec() - budget_start) > budget_usec:
+			return idx
+		var key := "pr_%s_%d_%d" % [type, way_id, idx]
+		if _created_prop_keys.has(key):
+			idx += 1
+			continue
+		while seg < n - 2 and cumulative[seg + 1] < d:
+			seg += 1
+		var seg_len: float = cumulative[seg + 1] - cumulative[seg]
+		if seg_len < 0.001:
+			idx += 1
+			continue
+		var t: float = (d - cumulative[seg]) / seg_len
+		var road_pos: Vector2 = points[seg].lerp(points[seg + 1], t)
+		var dir: Vector2 = (points[seg + 1] - points[seg]).normalized()
+		var perp := Vector2(-dir.y, dir.x)
+		_try_place_prop(type, def, road_pos, dir, perp, width, way_id, idx, key)
+		idx += 1
+	return PROP_DONE
+
+func _try_place_prop(type: String, def: Dictionary, road_pos: Vector2, dir: Vector2, perp: Vector2, width: float, way_id: int, idx: int, key: String) -> void:
+	var h := (way_id * 2654435761 + idx * 40503) & 0x7FFFFFFF
+	var offset: float = width / 2.0 + def["setback"]
+	var prefer_left: bool = (h & 1) == 0
+	var perps: Array = [perp, -perp] if prefer_left else [-perp, perp]
+	for op in perps:
+		var pos: Vector2 = road_pos + op * offset
+		var ck := _bb_chunk_key_at(pos)
+		if not _loaded_chunks.has(ck):
+			continue
+		if _prop_candidate_ok(type, def, pos, ck):
+			var yaw: float
+			if def["faces_road"]:
+				var toward: Vector2 = -op  # from prop toward the road
+				yaw = atan2(toward.x, toward.y) + deg_to_rad(def["front_yaw_deg"])
+			else:
+				yaw = atan2(dir.x, dir.y)  # long axis parallel to road
+			yaw += deg_to_rad(float(h % 13) - 6.0)  # tiny deterministic jitter
+			var model_idx := int(h / 7) % maxi(def["preps"].size(), 1)
+			if _spawn_prop(type, model_idx, pos, yaw, _loaded_chunks[ck]) != null:
+				_created_prop_keys[key] = true
+				if not _prop_keys_by_chunk.has(ck):
+					_prop_keys_by_chunk[ck] = []
+				_prop_keys_by_chunk[ck].append(key)
+				_prop_register_pos(pos, ck)
+			return
+
+func _prop_candidate_ok(type: String, def: Dictionary, pos: Vector2, ck: String) -> bool:
+	if _is_point_near_road(pos, 1.5, ck):
+		return false
+	if _is_point_in_intersection_shape(pos, false, ck) >= 0:
+		return false
+	if _is_point_on_bridge_deck(pos):
+		return false
+	if _is_point_in_water(pos, ck):
+		return false
+	if _is_point_in_any_parking(pos, ck):
+		return false
+	if _prop_too_close(pos):
+		return false
+	if _prop_near_furniture(pos):
+		return false
+	if roadside_props_debug_dense:
+		return true
+	if _building_clip_within(pos, def["build_margin"]):
+		return false
+	# Siting ("where it makes sense")
+	if type == "kiosk":
+		if not _near_bus_stop(pos, 28.0):  # kiosks cluster at transit stops
+			return false
+	elif type == "ebox":
+		if not _building_clip_within(pos, 25.0):  # only on verges near buildings it feeds
+			return false
+	return true
+
+func _prop_too_close(pos: Vector2) -> bool:
+	var cx := int(floor(pos.x / PROP_MIN_SPACING))
+	var cy := int(floor(pos.y / PROP_MIN_SPACING))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for q in _prop_pos_hash.get(Vector2i(cx + dx, cy + dy), []):
+				if pos.distance_to(q) < PROP_MIN_SPACING:
+					return true
+	return false
+
+# Keep clear of lamps / billboards / bus stops / signs already placed.
+func _prop_near_furniture(pos: Vector2) -> bool:
+	var r := PROP_FURNITURE_CLEAR
+	# billboards (own spatial hash)
+	var bcx := int(floor(pos.x / BILLBOARD_MIN_SPACING))
+	var bcy := int(floor(pos.y / BILLBOARD_MIN_SPACING))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for q in _billboard_pos_hash.get(Vector2i(bcx + dx, bcy + dy), []):
+				if pos.distance_to(q) < r:
+					return true
+	# lamps / bus stops / signs (int-keyed dicts) — scan a ±r integer neighbourhood
+	var ri := int(ceil(r))
+	for dx in range(-ri, ri + 1):
+		for dz in range(-ri, ri + 1):
+			var kx := int(pos.x) + dx
+			var kz := int(pos.y) + dz
+			if _created_lamp_positions.has("%d_%d" % [kx, kz]):
+				return true
+			if _created_bus_stop_positions.has("bs_%d_%d" % [kx, kz]):
+				return true
+			if _created_sign_positions.has("ts_%d_%d" % [kx, kz]):
+				return true
+	return false
+
+func _prop_register_pos(pos: Vector2, ck: String) -> void:
+	var cell := Vector2i(int(floor(pos.x / PROP_MIN_SPACING)), int(floor(pos.y / PROP_MIN_SPACING)))
+	if not _prop_pos_hash.has(cell):
+		_prop_pos_hash[cell] = []
+	_prop_pos_hash[cell].append(pos)
+	if not _prop_pos_by_chunk.has(ck):
+		_prop_pos_by_chunk[ck] = []
+	_prop_pos_by_chunk[ck].append(pos)
+
+func _near_bus_stop(pos: Vector2, r: float) -> bool:
+	for k in _created_bus_stop_positions:
+		var parts: PackedStringArray = k.split("_")  # bs, x, y
+		if parts.size() == 3 and Vector2(float(parts[1]), float(parts[2])).distance_to(pos) <= r:
+			return true
+	return false
+
+func _near_junction(pos: Vector2, r: float) -> bool:
+	for a in range(0, 360, 45):
+		var p: Vector2 = pos + Vector2(cos(deg_to_rad(a)), sin(deg_to_rad(a))) * r
+		if _is_point_in_intersection_shape(p, false, _bb_chunk_key_at(p)) >= 0:
+			return true
+	return false
+
+func _reset_prop_state() -> void:
+	_deferred_prop_road_queue.clear()
+	_created_prop_keys.clear()
+	_prop_keys_by_chunk.clear()
+	_prop_pos_hash.clear()
+	_prop_pos_by_chunk.clear()
+
+# Manual props placed by coordinate (decorations JSON `roadside_props`). Bypass the
+# procedural siting/spacing gates (you chose the spot) but still ground correctly and
+# register their position so procedural props keep clear. Parented to the chunk → freed
+# + re-placed on unload/reload (deterministic, no persistent dedup needed).
+func _place_manual_props_for_chunk(chunk_key: String, parent: Node3D) -> void:
+	if not enable_roadside_props or _decoration_layer == null:
+		return
+	var list: Array = _decoration_layer.get_roadside_props()
+	if list.is_empty():
+		return
+	_init_prop_defs()
+	for entry in list:
+		var lat: float = entry.get("lat", 0.0)
+		var lon: float = entry.get("lon", 0.0)
+		if lat == 0.0 or lon == 0.0:
+			continue
+		var pos := _latlon_to_local(lat, lon)
+		var ck := "%d,%d" % [int(floor(pos.x / chunk_size)), int(floor(pos.y / chunk_size))]
+		if ck != chunk_key:
+			continue
+		var type := str(entry.get("type", "kiosk"))
+		var def: Dictionary = _prop_defs.get(type, {})
+		if def.is_empty() or def.get("preps", []).is_empty():
+			push_warning("roadside_props: unknown type '%s'" % type)
+			continue
+		var yaw := deg_to_rad(float(entry.get("rotation_y", 0.0)))
+		var midx := int(entry.get("variant", -1))
+		if midx < 0:
+			midx = absi(int(pos.x) * 73856093 + int(pos.y) * 19349663) % maxi(def["preps"].size(), 1)
+		if _spawn_prop(type, midx, pos, yaw, parent) != null:
+			_prop_register_pos(pos, chunk_key)
+			print("OSM: placed manual %s at (%.1f, %.1f)" % [type, pos.x, pos.y])
 
 
 func _generate_manholes_along_road(nodes: Array, road_width: float, parent: Node3D) -> void:
@@ -20506,6 +22829,10 @@ func _on_night_mode_changed(enabled: bool) -> void:
 
 	# NEW: Update lamp night mode
 	_update_lamp_night_mode(enabled)
+
+	# Stop wire sparks immediately when day returns (night re-arms in _process).
+	if not enabled:
+		_stop_wire_sparks()
 
 	# Обновляем все фонари и неоновые вывески
 	for chunk_key in _loaded_chunks.keys():

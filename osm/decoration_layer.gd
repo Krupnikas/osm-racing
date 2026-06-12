@@ -18,6 +18,7 @@ var _billboards: Array = []  # Array[BillboardDecoration]
 var _building_overrides: Array = []  # Array[BuildingOverride]
 var _landuse_tree_overrides: Dictionary = {}  # way_id -> {dense: bool}
 var _custom_models: Array = []  # Array of {model, lat, lon, rotation_y, scale}
+var _roadside_props: Array = []  # Array of {type, lat, lon, rotation_y, variant} (manual kiosk/box)
 
 # Spatial index для быстрого поиска
 var _billboard_spatial_hash: Dictionary = {}  # cell_key -> Array[int] (индексы)
@@ -236,6 +237,17 @@ func _load_building_overrides_json(path: String) -> void:
 			"clear_trees_radius": md.get("clear_trees_radius", 0.0)
 		})
 
+	# Manual roadside props (kiosk/ebox) by coordinate — auto-grounded by the prop system
+	var props_data: Array = data.get("roadside_props", [])
+	for pd in props_data:
+		_roadside_props.append({
+			"type": pd.get("type", "kiosk"),
+			"lat": pd.get("lat", 0.0),
+			"lon": pd.get("lon", 0.0),
+			"rotation_y": pd.get("rotation_y", 0.0),
+			"variant": pd.get("variant", -1),  # -1 = auto by hash
+		})
+
 	# Landuse overrides (деревья на конкретных landuse зонах)
 	var landuse_data: Array = data.get("landuse_overrides", [])
 	for lo in landuse_data:
@@ -300,6 +312,9 @@ func get_landuse_tree_override(way_id: int):
 func get_custom_models() -> Array:
 	return _custom_models
 
+func get_roadside_props() -> Array:
+	return _roadside_props
+
 
 func get_billboards_in_chunk(chunk_min: Vector2, chunk_max: Vector2) -> Array:
 	"""Возвращает билборды в указанных границах чанка (локальные координаты)"""
@@ -321,7 +336,43 @@ func get_billboards_in_chunk(chunk_min: Vector2, chunk_max: Vector2) -> Array:
 	return result
 
 
-func create_billboard_mesh(billboard, elevation: float) -> Node3D:
+func create_road_billboard_mesh(world_x: float, world_z: float, elevation: float, yaw: float, tex_front: String, tex_back: String) -> Node3D:
+	"""Procedural roadside billboard: two-sided, externally top-lit (night-only),
+	no self-emission. Position/rotation are world-space (set after build)."""
+	var deco = BillboardDecorationScript.new()
+	deco.use_latlon = false
+	deco.local_position = Vector2.ZERO
+	deco.rotation_y = 0.0
+	deco.size = Vector2(6.0, 3.0)
+	deco.pole_height = 4.5
+	deco.has_backlight = false  # NO self-emission — lit by the top lamp instead
+	deco.texture_path = tex_front
+	deco.texture_path_back = tex_back
+	var root := create_billboard_mesh(deco, elevation, true)
+	root.position = Vector3(world_x, elevation, world_z)
+	root.rotation.y = yaw
+	# Collision: pole cylinder (so cars can't drive through it). StaticBody3D defaults
+	# to collision_layer 1 — same world layer lamp poles use.
+	var col := StaticBody3D.new()
+	col.name = "BillboardCol"
+	var cshape := CollisionShape3D.new()
+	var cyl := CylinderShape3D.new()
+	cyl.radius = 0.22
+	cyl.height = deco.pole_height
+	cshape.shape = cyl
+	cshape.position.y = deco.pole_height / 2.0
+	col.add_child(cshape)
+	root.add_child(col)
+	# Visibility: a big roadside board should be visible as soon as its chunk loads
+	# (the builder defaults to 300 m, which pops in "at the last moment"). Fade for smoothness.
+	for child in root.get_children():
+		if child is GeometryInstance3D:
+			child.visibility_range_end = 600.0
+			child.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	return root
+
+
+func create_billboard_mesh(billboard, elevation: float, with_top_lamp: bool = false) -> Node3D:
 	"""Создаёт 3D меш билборда"""
 	var root := Node3D.new()
 	root.name = "Billboard"
@@ -403,6 +454,53 @@ func create_billboard_mesh(billboard, elevation: float) -> Node3D:
 	right_bar.position = Vector3(billboard.size.x / 2.0 + frame_thickness / 2.0, frame_y, 0)
 	right_bar.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	root.add_child(right_bar)
+
+	# 1.6. Внешний верхний светильник (только для процедурных билбордов).
+	# Простой провинциальный плафон сверху по центру, светит вниз на щит.
+	# Свет включается только ночью через _recursive_update_lights (имя "LampLight").
+	if with_top_lamp:
+		var frame_top_y: float = frame_y + billboard.size.y / 2.0 + frame_thickness  # top surface of the frame
+		var fix_mat := StandardMaterial3D.new()
+		fix_mat.albedo_color = Color(0.2, 0.2, 0.22)
+		fix_mat.metallic = 0.6
+		fix_mat.roughness = 0.5
+		# Кронштейн: короткая стойка ОТ верха рамки — никакого зазора, светильник прикреплён
+		var bracket := MeshInstance3D.new()
+		var brbox := BoxMesh.new()
+		brbox.size = Vector3(0.09, 0.36, 0.09)
+		bracket.mesh = brbox
+		bracket.material_override = fix_mat
+		bracket.position = Vector3(0, frame_top_y + 0.18, 0.0)  # bottom touches the frame top
+		bracket.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(bracket)
+		# Корпус-плафон на верхушке кронштейна (перекрывает её — без зазора)
+		var lamp_top_y: float = frame_top_y + 0.36
+		var housing := MeshInstance3D.new()
+		var hbox := BoxMesh.new()
+		hbox.size = Vector3(minf(billboard.size.x * 0.5, 1.6), 0.14, 0.42)
+		housing.mesh = hbox
+		housing.material_override = fix_mat
+		housing.position = Vector3(0, lamp_top_y, 0.08)
+		housing.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(housing)
+		# Ночной прожектор: короткий радиус, без теней, distance-fade
+		var lamp := SpotLight3D.new()
+		lamp.name = "LampLight"  # toggled by OSMTerrain._recursive_update_lights
+		lamp.position = Vector3(0, lamp_top_y - 0.08, 0.08)
+		lamp.rotation_degrees = Vector3(-90, 0, 0)  # straight down onto the board
+		lamp.spot_range = billboard.size.y + 3.5
+		lamp.spot_angle = 62.0
+		lamp.spot_attenuation = 1.2
+		lamp.light_energy = 3.0
+		lamp.light_color = Color(1.0, 0.93, 0.78)
+		lamp.shadow_enabled = false
+		lamp.light_bake_mode = Light3D.BAKE_DISABLED
+		lamp.distance_fade_enabled = true
+		lamp.distance_fade_begin = 75.0
+		lamp.distance_fade_length = 25.0
+		lamp.set_meta("is_broken", false)
+		lamp.visible = false  # night-mode enables it (OSMTerrain sets initial state)
+		root.add_child(lamp)
 
 	# 2. Щит - две стороны с возможно разными текстурами
 	var board_y: float = billboard.pole_height + billboard.size.y / 2.0

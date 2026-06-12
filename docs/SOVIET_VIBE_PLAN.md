@@ -320,6 +320,46 @@ rain vs [example-rain](../tools/overpass-docker/example-rain.png) — each holdi
 
 ---
 
+## 14. Phase G — Graffiti on building walls
+
+**Status:** 📋 PLANNED (design agreed 2026-06-07). **Not implemented** — waiting on textures from the user, then build. Do not implement until the user says go.
+
+**Goal:** the lived-in post-Soviet yard look — sparse spray-paint tags / small murals on the blank ground-level walls of residential blocks (никаких windows/balconies painted over). Subtle, not a "rough neighbourhood" carpet.
+
+**Scope (agreed):**
+- **Surfaces:** only **blank wall** — slots whose `SLOT_CATALOG` role has an empty `overlay` (`wall` / `mid-wall` / `long-wall`), so windows and balconies are never covered. "Кое-где на бетонный фундамент" folds into the same ground-level band (the lowest part of the ground floor reads as the concrete base).
+- **Height:** **ground floor only** (human reach), sat low on the wall. No special full-height gable-end murals for v1.
+- **Density:** **sparse / realistic** — ~30–40 % of facade buildings get tagged, 1–2 tags each; only a fraction of eligible blank slots within a tagged building take a mark (so long plain gable ends aren't carpeted).
+- **Texture pool:** **one shared pool** for all archetypes (no per-archetype duplication); the same set is reused on walls and the base band.
+- **Which buildings qualify:** **TBD — deferred.** For v1 this is just a deterministic sparse pick keyed off `way_id`. The real selection criteria (by neighbourhood / building age / proximity to yards vs. main streets / etc.) is an open question to settle later. (See Open questions.)
+- **Buildings covered:** `FacadeAssembler` (Cherepovets procedural) buildings first. Extending to the plain flat-texture fallback buildings — and to the hand-built `facade_111_125.gd` (Северное Шоссе 39) — is a later, separate code path.
+
+**Mechanism (agreed approach, mirrors the existing overlay system):**
+- Graffiti = an **alpha-PNG overlay quad** floated a few mm proud of the wall (new `Z_GRAFFITI ≈ 0.018`, just past `Z_OVERLAY = 0.015`; safe because graffiti only lands on overlay-free slots). **No new shader, no `Decal` nodes** (decals would tank perf across hundreds of buildings) — reuse `facade_111_125.gdshader` exactly as windows/balconies do.
+- **No night emission:** graffiti has no `*-emission-*.png`, so `_make_material()` leaves it out of the night-mode pipeline (it stays dark at night). Correct by construction.
+- **Deterministic & stable across chunk reloads:** placement (which buildings, which slots, which tag, size, jitter) is hashed from `_seed = way_id` with a graffiti-specific salt — same LCG family as `_pick_atom` / `_glow_chance`, independent of the molecule/atom picks.
+
+**Code hooks (so implementation is quick when textures land):**
+- Tag-vs-blank-wall is **free**: it's the slot's `overlay` field in `SLOT_CATALOG` ([facade_assembler.gd:22](../osm/facade_assembler.gd#L22)).
+- Big blank canvases (gable ends of L-shaped / narrow buildings) come from `_plain_wall_pattern()` ([facade_assembler.gd:420](../osm/facade_assembler.gd#L420)) — all-`wall` slots.
+- Emit after the per-floor wall/overlay loop in `_build_edge` (floor 0 only); reuse `_emit_quad()` ([facade_assembler.gd:456](../osm/facade_assembler.gd#L456)).
+- Shared-pool discovery: scan a `graffiti-atoms/` dir once with the same `DirAccess` pattern as `_ensure_loaded()` ([facade_assembler.gd:633](../osm/facade_assembler.gd#L633)).
+
+**Texture spec (what the user prepares):**
+- **Transparent-background PNG**, alpha = the tag/mural itself (opaque paint; soft/spray edges fine), **sRGB**.
+- ~512–1024 px on the long side; any aspect (placement preserves native aspect, scales to fit the slot with margin).
+- **Naming:** `graffiti-1.png`, `graffiti-2.png`, … in `decorations/russia/cherepovets/graffiti-atoms/`.
+- After dropping them in: run Godot `--editor --quit` once to generate `.import` files (never hand-write `.import` — Godot generates them).
+
+**Open questions:**
+- **Selection criteria** for which buildings get graffiti (deferred — currently a random sparse pick).
+- Whether to extend to the plain fallback buildings + Северное Шоссе 39.
+- Whether a real concrete-plinth band exists to justify a distinct "foundation graffiti" look, or the ground band is enough.
+
+**Testing/debug when built:** temporarily force-dense (tag every building, raise per-slot chance) to verify placement / sizing / no z-fighting / no overlap with windows, screenshot a Cherepovets block, then revert to the sparse parameters. Hold FPS ≥ baseline (shader-only overlay, should be free).
+
+---
+
 ## 11. Execution log
 
 - **2026-06-04 — MCP bridge fix:** a stale node MCP server from a prior session held port 6505; the editor connected to it while this session's server never bound. Killed stale server, killed all Godot, let the harness respawn the node server (bound free 6505), reopened editor → connected.
