@@ -231,6 +231,31 @@ var _bag_size: Vector3 = Vector3.ONE
 var _paper_variants: Array = []  # [{mesh, xform, size}] — обрывки бумаги, на которые ЛОПАЕТСЯ мешок при наезде на 60+ км/ч
 var _clutter_sfx: Dictionary = {}  # key -> AudioStream (подхватывается, если ассет есть)
 var _clutter_manager: Node3D       # постоянный менеджер реквизита (не привязан к чанкам)
+
+# ── Paving-works set-piece (road roller + ОБЪЕЗД barrier + cone ring) ──────────
+# One named composite "paving_works": placed RARELY (≈3–5 citywide) on the outer lane of a road,
+# never at an intersection; addressable as a whole for both procedural and manual JSON placement.
+@export var enable_paving_works := true
+@export var paving_works_rarity := 80      # 1 in N eligible wide ways → ~3–5 sites citywide (tune in inspector)
+var paving_min_width := 6.0                # ≥ residential (6 m): room to close one lane and leave one open
+const PAVING_ROAD_CLASSES := ["secondary", "tertiary", "residential"]
+const PAVING_BARRIER_DIST := 9.0           # m upstream of the roller (toward oncoming traffic — seen first)
+const PAVING_INTERSECTION_CLEAR := 28.0    # keep the whole site away from junctions
+# Cone offsets in road-local metres: x = along lane_dir (+ = downstream/behind the paver), y = toward
+# the road CENTRE (the TRAFFIC side; always ≥ 0 → never on the kerb side). A short taper around the
+# paver's centre end (the side cars pass) + a couple downstream. The paver is perpendicular, so its
+# centre end is ~2 m off-centre; cones sit just past it.
+const PAVING_CONE_OFFSETS := [
+	Vector2(-1.8, 2.3), Vector2(-0.4, 2.4), Vector2(1.0, 2.3),   # taper along the paver's traffic-side end
+	Vector2(2.4, 1.3), Vector2(2.4, 0.3),                        # a couple downstream
+]
+var _roller_scene: PackedScene
+var _roller_visual_xform: Transform3D = Transform3D.IDENTITY
+var _roller_size: Vector3 = Vector3.ONE
+var _barrier_scene: PackedScene
+var _barrier_visual_xform: Transform3D = Transform3D.IDENTITY
+var _barrier_size: Vector3 = Vector3.ONE
+var _paving_dispatched: Dictionary = {}    # way_id → true (evaluate each eligible way once)
 # Тротуар поднят над проезжей частью на height_offset тротуара (0.115, см. таблицу
 # road height_offset). _sample_elevation даёт уровень ПЧ, поэтому реквизит на
 # тротуаре поднимаем на эту величину, иначе он стоит в кювете у бордюра.
@@ -3544,6 +3569,7 @@ func reset_terrain() -> void:
 	_infrastructure_queue.clear()
 	if _clutter_manager:
 		_clutter_manager.clear_all()
+	_paving_dispatched.clear()
 	_vegetation_queue.clear()
 	_pending_parking_signs.clear()
 	_curb_queue.clear()
@@ -5710,6 +5736,17 @@ func _apply_road_result(result: Dictionary) -> void:
 					"points": vr_full, "way_id": int(result.get("way_id", 0)),
 					"highway": highway_type, "width": width, "_idx": 1,
 				})
+
+	# Paving-works set-piece (paving_works): evaluate each eligible wide road ONCE; a rare hash gate
+	# picks ≈3–5 sites citywide, registered (outer lane, off intersections) with the ClutterManager.
+	if enable_paving_works and highway_type in PAVING_ROAD_CLASSES and not is_bridge and width >= paving_min_width:
+		var pw_way: int = int(result.get("way_id", 0))
+		if pw_way > 0 and not _paving_dispatched.has(pw_way):
+			_paving_dispatched[pw_way] = true
+			var pw_tunnel := str(result.get("tags", {}).get("tunnel", ""))
+			if (pw_tunnel == "" or pw_tunnel == "no") and absi(hash("pvwrk_%d" % pw_way)) % paving_works_rarity == 0:
+				var pw_full: PackedVector2Array = result.get("full_smoothed_points", smoothed_points)
+				_register_paving_works_on_way(pw_full, pw_way, width)
 
 	# Manholes - clip to chunk rect, deferred
 	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
@@ -10842,6 +10879,20 @@ func _init_clutter_assets() -> void:
 		_cone_mesh = c["mesh"]
 		_cone_visual_xform = c["xform"]
 		_cone_size = c["size"]
+	# Дорожный каток + барьер ОБЪЕЗД — центр композиции «дорожные работы» (paving_works).
+	if enable_paving_works:
+		var roller_path := "res://models/road_roller/road_roller_truck.glb"
+		if ResourceLoader.exists(roller_path):
+			var r := _measure_clutter_model(roller_path, 3.0)  # ~3 м высотой → ~4 м длиной, ~2 м шириной
+			_roller_scene = r["scene"]
+			_roller_visual_xform = r["xform"]
+			_roller_size = r["size"]
+		var barrier_path := "res://models/warning_sign_barrier/warning_sign_barrier.glb"
+		if ResourceLoader.exists(barrier_path):
+			var bar := _measure_clutter_model(barrier_path, 1.2)  # A-рамка ~1.2 м, ОБЪЕЗД на текстуре
+			_barrier_scene = bar["scene"]
+			_barrier_visual_xform = bar["xform"]
+			_barrier_size = bar["size"]
 	# Мешок мусора — мягкая «помойка» у урн (переполнение). Авто-скейл к ~0.6 м.
 	var bag_path := "res://models/low_poly_trash_bag/low_poly_trash_bag.glb"
 	if ResourceLoader.exists(bag_path):
@@ -11368,6 +11419,115 @@ func _on_cone_trigger(other_body: Node, cone: RigidBody3D) -> void:
 	for ch in cone.get_children():
 		if ch is Area3D:
 			ch.monitoring = false
+
+
+# ── Paving-works composite (road roller + ОБЪЕЗД barrier + cone ring) ──────────
+# Builds the WHOLE set-piece as one container at `pos` (the paver). `heading` = road tangent and
+# `curb_sign` = which kerb it hugs → together fix lane_dir (the lane's traffic direction). Layout is
+# defined ONLY from lane_dir: paver along the road hard against the kerb; barrier on the upstream side
+# facing the approaching cars; cones on the traffic (road-centre) side + a couple downstream, none on
+# the kerb side. Roller + barrier are solid static obstacles; cones are the usual knockable cones.
+# Returned to the ClutterManager, which frees the container when the player drives away.
+func _spawn_paving_works(pos: Vector2, elevation: float, heading: float, curb_sign: float, parent: Node) -> Node3D:
+	if not is_instance_valid(parent) or _roller_scene == null:
+		return null
+	var container := Node3D.new()
+	container.name = "PavingWorks"
+	parent.add_child(container)
+	# Road-local frame defined ONLY by the lane traffic direction (right-hand traffic). `curb_sign` picks
+	# the kerb the site hugs → fixes lane_dir (the direction cars drive in this lane), hence upstream/downstream.
+	var tangent := Vector2(sin(heading), cos(heading))
+	var perp := Vector2(-tangent.y, tangent.x)
+	var curb_dir := perp * curb_sign          # toward the kerb the paver hugs
+	var center_dir := -curb_dir               # toward the road centre = the TRAFFIC side (open lane)
+	var lane_dir := tangent * (-curb_sign)    # cars in this (kerb-side) lane drive +lane_dir
+	var base_y := elevation + 0.02
+	# road roller — PERPENDICULAR to the road (long axis across the lane), hard against the kerb; solid
+	var roller := StaticBody3D.new()
+	roller.name = "Roller"
+	roller.collision_layer = 1
+	roller.collision_mask = 0
+	roller.position = Vector3(pos.x, base_y, pos.y)
+	roller.rotation.y = atan2(curb_dir.x, curb_dir.y) + PI * 0.5  # long axis along the road
+	var rcol := CollisionShape3D.new()
+	var rbox := BoxShape3D.new()
+	rbox.size = _roller_size
+	rcol.shape = rbox
+	rcol.position.y = _roller_size.y * 0.5
+	roller.add_child(rcol)
+	var rvis: Node3D = _roller_scene.instantiate()
+	rvis.transform = _roller_visual_xform
+	roller.add_child(rvis)
+	container.add_child(roller)
+	# ОБЪЕЗД barrier — on the OTHER side of the paver from the cones (barrier_pos = paver_pos + lane_dir*dist),
+	# facing that way so approaching cars meet it first, then the paver.
+	if _barrier_scene != null:
+		var bpos := pos + lane_dir * PAVING_BARRIER_DIST + center_dir * 0.6
+		var barrier := StaticBody3D.new()
+		barrier.name = "Barrier"
+		barrier.collision_layer = 1
+		barrier.collision_mask = 0
+		barrier.position = Vector3(bpos.x, base_y, bpos.y)
+		barrier.rotation.y = atan2(lane_dir.x, lane_dir.y)  # sign faces the cars approaching from that side
+		var bcol := CollisionShape3D.new()
+		var bbox := BoxShape3D.new()
+		bbox.size = _barrier_size
+		bcol.shape = bbox
+		bcol.position.y = _barrier_size.y * 0.5
+		barrier.add_child(bcol)
+		var bvis: Node3D = _barrier_scene.instantiate()
+		bvis.transform = _barrier_visual_xform
+		barrier.add_child(bvis)
+		container.add_child(barrier)
+	# cones — knockable; ONLY on the traffic/centre side of the paver + a few downstream. NONE on the
+	# kerb side. x = along lane_dir (+ = downstream/behind), y = toward the road centre (traffic side).
+	for off_v in PAVING_CONE_OFFSETS:
+		var off: Vector2 = off_v
+		var cp := pos + lane_dir * off.x + center_dir * off.y
+		var crot := float(int(absf(cp.x * 11.0 + cp.y * 17.0)) % 360) * (PI / 180.0)
+		_create_cone_immediate(cp, elevation, crot, container)
+	return container
+
+
+# Procedural: pick ONE outer-lane anchor on a qualifying road (clear of intersections) and register
+# the composite with the persistent ClutterManager. Called once per eligible way that passes the rare gate.
+func _register_paving_works_on_way(points: PackedVector2Array, way_id: int, width: float) -> void:
+	if points.size() < 2 or _clutter_manager == null:
+		return
+	var n := points.size()
+	var cum := PackedFloat64Array()
+	cum.resize(n)
+	cum[0] = 0.0
+	for i in range(1, n):
+		cum[i] = cum[i - 1] + points[i - 1].distance_to(points[i])
+	var total: float = cum[n - 1]
+	if total < 35.0:
+		return  # too short for a worksite
+	for frac in [0.4, 0.6, 0.28, 0.72]:
+		var target: float = total * frac
+		var seg := 0
+		while seg < n - 1 and cum[seg + 1] < target:
+			seg += 1
+		if seg >= n - 1:
+			continue
+		var seg_len: float = cum[seg + 1] - cum[seg]
+		var t: float = (target - cum[seg]) / seg_len if seg_len > 0.01 else 0.0
+		var cl: Vector2 = points[seg].lerp(points[seg + 1], t)
+		var tangent: Vector2 = (points[seg + 1] - points[seg]).normalized()
+		if tangent.length_squared() < 0.01:
+			continue
+		var perp := Vector2(-tangent.y, tangent.x)
+		var curb_sign := 1.0 if absi(hash("pvside_%d" % way_id)) % 2 == 0 else -1.0
+		var curb_dir := perp * curb_sign
+		# roller ALONG the road, hard against the kerb: 2 m-wide side faces across, so centre 1 m in
+		var anchor := cl + curb_dir * (width * 0.5 - 1.0)
+		if _pfence_nearest_intersection(anchor, PAVING_INTERSECTION_CLEAR) >= 0:
+			continue  # too close to a junction
+		var heading := atan2(tangent.x, tangent.y)
+		_clutter_manager.register("paving_works", anchor, {"heading": heading, "curb": curb_sign})
+		if veg_debug:
+			print("PAVING: site way=%d at (%.0f, %.0f) curb=%.0f" % [way_id, anchor.x, anchor.y, curb_sign])
+		return
 
 
 ## Дорожные работы: на части артериальных дорог ставит сужающую полосу «ёлочку» конусов.
@@ -22836,6 +22996,15 @@ func _place_manual_props_for_chunk(chunk_key: String, parent: Node3D) -> void:
 		if ck != chunk_key:
 			continue
 		var type := str(entry.get("type", "kiosk"))
+		# Composite set-piece: register the whole paving_works with the ClutterManager (by name,
+		# not individual models). `heading_deg` (fallback rotation_y) = road direction.
+		if type == "paving_works":
+			if _clutter_manager:
+				var hdg := deg_to_rad(float(entry.get("heading_deg", entry.get("rotation_y", 0.0))))
+				var curb := float(entry.get("curb", 1.0))
+				_clutter_manager.register("paving_works", pos, {"heading": hdg, "curb": curb})
+				print("OSM: registered manual paving_works at (%.1f, %.1f)" % [pos.x, pos.y])
+			continue
 		var def: Dictionary = _prop_defs.get(type, {})
 		if def.is_empty() or def.get("preps", []).is_empty():
 			push_warning("roadside_props: unknown type '%s'" % type)

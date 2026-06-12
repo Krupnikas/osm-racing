@@ -24,12 +24,16 @@ func setup(terrain: Node3D) -> void:
 
 
 ## Регистрирует дремлющую запись реквизита (идемпотентно по округлённой позиции).
-func register(type: String, pos: Vector2) -> void:
+## `extra` — доп. поля записи (напр. {"heading": …} для составной площадки paving_works).
+func register(type: String, pos: Vector2, extra: Dictionary = {}) -> void:
 	var key := "%s:%d:%d" % [type, int(pos.x), int(pos.y)]
 	if _seen.has(key):
 		return
 	_seen[key] = true
-	_records.append({"type": type, "pos": pos, "instance": null})
+	var rec := {"type": type, "pos": pos, "instance": null}
+	for k in extra:
+		rec[k] = extra[k]
+	_records.append(rec)
 
 
 func _process(delta: float) -> void:
@@ -65,7 +69,7 @@ func _process(delta: float) -> void:
 			rec.instance = null
 
 
-func _build(rec: Dictionary) -> RigidBody3D:
+func _build(rec: Dictionary) -> Node3D:
 	var pos: Vector2 = rec.pos
 	var elev: float = _terrain._sample_elevation(pos.x, pos.y)
 	var rot: float = float(int(absf(pos.x * 11.0 + pos.y * 17.0)) % 360) * (PI / 180.0)
@@ -76,6 +80,8 @@ func _build(rec: Dictionary) -> RigidBody3D:
 			return _terrain._create_cone_immediate(pos, elev, rot, self)
 		"bag":
 			return _terrain._create_bag_immediate(pos, elev, rot, self)
+		"paving_works":
+			return _terrain._spawn_paving_works(pos, elev, rec.get("heading", 0.0), rec.get("curb", 1.0), self)
 	return null
 
 

@@ -169,3 +169,65 @@ chunk):
 
 Still parked (Phase 3+): trash bags + crumpled paper near schools; deform (dent/squash);
 warning-sign barrier; штендеры.
+
+---
+
+## Phase 5 — "Paving works" composite set-piece  ✅ DONE 2026-06-12
+
+A rare, elaborate roadworks **set-piece**: a road roller + an **ОБЪЕЗД** (detour) barrier + a ring of
+cones, placed as **one named composite** so both procedural and manual placement address *"paving_works"*
+as a whole, never the individual models. Very rare — **3–5 across the whole city**.
+
+### Assets (all present)
+- **Road roller** — `~/Desktop/OSM material/road_roller_truck.glb` (just downloaded; 9 meshes, ~16.7k tris,
+  textured PNG). → copy to `models/road_roller/`, scale from **real baked verts** (get_aabb gotcha) to a
+  realistic ~5–6 m length. The centrepiece.
+- **Cones** — the existing road-works pack cone already routed through the `ClutterManager` (Phase 2). Reuse.
+- **ОБЪЕЗД barrier** — `warning_sign_barrier.glb` (already in project; the textured A-frame — its embedded
+  texture **already carries the ОБЪЕЗД label**, per the user, so no label-making needed; verify the exact face at
+  build). `road_works_barrier_high.glb` is plain orange/gray (no label) — not used here.
+
+### The composite (one unit)
+A single descriptor + spawner `_spawn_paving_works(anchor: Vector3, heading: float)` that lays out, relative to
+the anchor and the road heading:
+- **Roller** at the anchor, aligned to the road, sitting in the **outer (curbside) lane**.
+- **ОБЪЕЗД barrier** ~3–4 m **in front** (upstream, facing oncoming traffic), closing the outer lane.
+- **Cones** ringing the rest: a short lead-in taper upstream of the barrier + a line down the open-lane side +
+  a couple behind the roller. Deterministic offsets.
+This layout IS the addressable thing → manual JSON references `{"type":"paving_works", ...}`; procedural placement
+calls the same spawner. (Mirrors how the storefront row / roadworks taper are single logical units.)
+
+### Procedural placement (rare · outer lane · not at intersections)
+- **Deterministic global pick of 3–5 sites.** Build a citywide candidate list from the road hash / road-walk:
+  gate on highway class (∈ **{secondary, tertiary, residential}** — residential included per user), **width ≥ ~7–8 m**
+  (room to close one lane and leave one open; will naturally exclude the narrowest residential streets), **not within
+  the intersection-clear radius** (`_pfence_nearest_intersection`), not
+  on a bridge/tunnel, and min-spacing from other sites. Hash `way_id`+arc → stable selection; **cap at 3–5** so the
+  same spots always appear (reload-deterministic).
+- **Anchor on the outer lane:** carriageway edge (`_find_road_edge_point`) offset **inward by ~one lane width** so
+  the roller sits in the curbside lane (not the centreline), leaving the inner lane open. Heading = road tangent.
+- **Persistence via `ClutterManager`** (mandatory for sparse/far clutter — the documented lesson): register a dormant
+  `paving_works` record at each anchor; the manager spawns the real composite within `ACTIVATE_R` and frees it past
+  `DEACTIVATE_R`. So the 3–5 sites reliably reappear and don't get trimmed by chunk streaming.
+
+### Manual placement
+JSON entry in the existing props/decoration placement file: `{ "type": "paving_works", "lat":…, "lon":…, "heading_deg":… }`
+→ routed to `_spawn_paving_works`. Addressable by composite name, exactly as requested.
+
+### Collision / gameplay
+- **Roller = solid `StaticBody`** (parked machine — the player must detour, can't drive through). Barrier solid.
+- **Cones knockable** via the existing cone physics (fly off, never launch the car — `add_collision_exception_with` player).
+- Net effect: the outer lane is blocked, ОБЪЕЗД points the player into the open lane. The point of the set-piece.
+
+### Perf
+3–5 instances citywide, each ~17k-tri roller + barrier + ~8–12 cones, activated only near the player via the manager.
+Negligible — plain instances (too few to need MultiMesh).
+
+### Resolved decisions (2026-06-12)
+1. **Road classes:** secondary + tertiary + **residential** (min width ≥ ~7–8 m gates out the narrowest streets).
+2. **Rarity:** **3–5** sites citywide.
+3. **ОБЪЕЗД label:** already on `warning_sign_barrier.glb`'s texture — no label to make.
+4. **Barrier model:** `warning_sign_barrier.glb`.
+5. **Roller:** solid `StaticBody` (blocks the closed lane) — assumed yes.
+
+**Status:** ✅ **IMPLEMENTED & in-engine verified 2026-06-12** (composition approved by user). Code in `osm/osm_terrain_generator.gd` (`_spawn_paving_works`, `_register_paving_works_on_way`, road-apply hook, manual hook in `_place_manual_props_for_chunk`) + `clutter/clutter_manager.gd` (record carries `heading`+`curb`; `_build` → `paving_works`). Roller `models/road_roller/road_roller_truck.glb` scaled to ~3 m tall. `@export enable_paving_works`, `@export paving_works_rarity` (set 80; tune in inspector). Procedural picker verified (rarity 8 → 3 sites near spawn, surviving the intersection gate). **Final layout (after several iterations):** paver ALONG the road hard against the kerb; **`barrier = paver + lane_dir*dist`** (`lane_dir = -curb_sign*tangent`) facing the cars, on the side the user approved; cones only on the traffic/road-centre side + a couple downstream, none on the kerb side. **Directional rule (learned the hard way):** define placement ONLY from lane_dir, never from the camera/"closer to me"; verify by viewing the affected lane, order must be barrier → paver → cones.
