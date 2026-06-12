@@ -676,6 +676,58 @@ var _prop_keys_by_chunk: Dictionary = {}         # chunk_key → Array[String]
 var _prop_pos_hash: Dictionary = {}              # PROP_MIN_SPACING cell → Array[Vector2]
 var _prop_pos_by_chunk: Dictionary = {}          # chunk_key → Array[Vector2]
 
+# ── Pedestrian guard-rail fences (russian_city_fence.glb) ───────────────────
+# v1 = STATIC placement only (Phase 2 shatter is out of scope). Full spec:
+# docs/PEDESTRIAN_FENCE_PLAN.md. Namespaced `pfence` to stay clear of the
+# unrelated iron-bar perimeter fences (`enable_fences`, _fence_*).
+@export var enable_pedestrian_fences := true
+const PFENCE_SCENE_PATH := "res://models/pedestrian_fence/russian_city_fence.glb"
+const PFENCE_INSTANCES_PER_CURB := 3     # NON-NEGOTIABLE: 3 instances × 4 bays = 12 bays per curb
+const PFENCE_BAYS_PER_INSTANCE := 4
+const PFENCE_MAJOR_ROADS := ["trunk", "primary", "secondary"]  # tertiary/residential/... excluded
+const PFENCE_ROAD_CLEAR := 0.15  # a fence footprint point must be at least this far OUTSIDE any road
+const PFENCE_DROP := 0    # site rejected permanently
+const PFENCE_RETRY := 1   # not anchorable yet (or mid-block until retries exhausted) — keep + retry
+const PFENCE_BUILT := 2   # placed this frame
+# Model bays are ~square (raw 0.88 long × 0.22 tall), so width-driven scaling to 2 m would make
+# it 2 m tall. We scale so one instance length = PFENCE_BAYS_PER_INSTANCE * bay_width; with 1.1 m
+# the fence ends up ~1.1 m tall — a realistic guard-rail. (Plan §10: tune bay width visually.)
+var pfence_bay_width := 1.1               # m per bay → instance length L = 4 * this
+var pfence_sidewalk_offset := 0.6         # outward from carriageway edge onto the sidewalk side
+var pfence_after_crossing_gap := 0.6      # gap past the far zebra edge before the run starts
+var pfence_zebra_half_depth := 2.5        # half the zebra marking depth along the road (clear it)
+var pfence_intersection_radius := 30.0    # anchoring search radius around a crossing
+var pfence_ambiguous_min := 3.0           # |dot(center-inter, axis)| below this → side ambiguous → skip
+var pfence_max_retries := 300             # drain retries before a still-unanchored site is dropped (mid-block)
+var pfence_debug := false                 # default-off: log site decisions + spawn debug markers
+# Pre-merged asset (built once): single ArrayMesh, structural surfaces only (Material_133 stripped),
+# along-axis baked to local +X, pivot at the run START (min X), depth centred on Z, base at Y=0.
+var _pfence_mesh: ArrayMesh = null
+var _pfence_loaded := false
+var _pfence_length := 0.0                 # scaled instance length L (along +X)
+var _pfence_depth := 0.0                  # scaled depth (Z)
+var _pfence_height := 0.0                 # scaled height (Y)
+var _deferred_pfence_queue: Dictionary = {}   # chunk_key → Array[{strip, cw_id, _retries}]
+var _pfence_batch_data: Dictionary = {}       # chunk_key → {parent, transforms: Array[Transform3D]}
+var _created_pfence_keys: Dictionary = {}     # global stable site key → true (dedup)
+var _pfence_keys_by_chunk: Dictionary = {}    # chunk_key → Array[String] (cleared on unload → reload rebuilds)
+var _pfence_dbg := {"enq": 0, "nonmajor": 0, "noroad": 0, "noanchor": 0, "ambiguous": 0, "built": 0}  # debug funnel
+# Phase 2 — разлёт (shatter on impact ≥ 40 km/h). See docs/PEDESTRIAN_FENCE_PLAN.md §8.
+@export var enable_pfence_shatter := true
+# m/s; ~38 km/h. Slightly under 40 so a genuine 40 km/h hit still shatters AFTER the car decelerates
+# on contact (we check the recent APPROACH speed, not the dropped instantaneous speed at body_entered).
+var pfence_shatter_speed := 10.5
+var _pfence_player: Node = null              # cached live player car (survives the Matiz swap)
+var _pfence_speed_hist: Array = []           # last ~10 frames of player linear_velocity (for approach speed)
+var pfence_shatter_impulse := 7.0            # impulse scale (× car-speed direction blend)
+var pfence_shatter_torque := 5.0             # random tumble torque
+var pfence_piece_ttl := 9.0                  # seconds a flown piece lives before despawn
+const PFENCE_MAX_SHATTERED := 6              # cap on concurrently-shattered instances (FIFO)
+var _pfence_segments: Array = []             # per-leaf {mesh(centered), offset, shape, mass} in instance-local space
+var _pfence_shattered: Dictionary = {}       # chunk_key → {instance_index → true} (cleared on unload = no persistence)
+var _pfence_shatter_order: Array = []        # FIFO [{ck, idx}] for the concurrent cap
+var _pfence_last_site := {}  # debug: last built site geometry (center/away/inter)
+
 var _finalize_phase: int = 0  # Round-robin: 0=roads, 1=curbs, 2=lamps, 3=buildings, 4=windows, 5=trees, 6=billboards
 var _chunk_activation_pending: Dictionary = {}  # chunk_key -> state (-1=waiting, >=0=RS activation index)
 var _chunk_culling_cooldown: Dictionary = {}  # chunk_key -> timestamp (ms) — don't cull recently activated chunks
@@ -1790,6 +1842,18 @@ func _process(delta: float) -> void:
 			_cached_velocity_dir = _cached_cam_fwd  # стоим — используем направление камеры
 	else:
 		_cached_velocity_dir = _cached_cam_fwd
+
+	# Track the player's recent velocity so a fence hit can use the APPROACH speed (the instantaneous
+	# speed at body_entered has already dropped from contact — a real 40 km/h hit would read too low).
+	if enable_pfence_shatter:
+		if _pfence_player == null or not is_instance_valid(_pfence_player):
+			_pfence_player = get_tree().get_first_node_in_group("player")
+			if _pfence_player == null:
+				_pfence_player = get_tree().get_first_node_in_group("car")
+		if _pfence_player is RigidBody3D:
+			_pfence_speed_hist.append((_pfence_player as RigidBody3D).linear_velocity)
+			if _pfence_speed_hist.size() > 10:
+				_pfence_speed_hist.pop_front()
 
 	# Night-only wire sparks — early-returns in daytime (zero cost).
 	_update_wire_sparks(delta)
@@ -3222,6 +3286,14 @@ func _unload_chunk(chunk_key: String) -> void:
 		_wire_geo_by_chunk.erase(chunk_key)
 		_wire_node_by_chunk.erase(chunk_key)
 		_sneaker_keys_by_chunk.erase(chunk_key)  # sneaker prop nodes free with chunk_node below
+		# Pedestrian fences: free dedup keys + batch data (the PedFences node frees with chunk_node).
+		_deferred_pfence_queue.erase(chunk_key)
+		_pfence_batch_data.erase(chunk_key)
+		_pfence_shattered.erase(chunk_key)  # no persistence — fence rebuilds intact on reload
+		if _pfence_keys_by_chunk.has(chunk_key):
+			for _pk in _pfence_keys_by_chunk[chunk_key]:
+				_created_pfence_keys.erase(_pk)
+			_pfence_keys_by_chunk.erase(chunk_key)
 		if _spark_joint_keys_by_chunk.has(chunk_key):
 			for _jk in _spark_joint_keys_by_chunk[chunk_key]:
 				_spark_joint_seen.erase(_jk)
@@ -3816,6 +3888,7 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 					"width": road_w,
 					"way_id": rseg_way_id,
 					"bridge": rseg_is_bridge,
+					"highway": str(tags.get("highway", "")),  # for the pedestrian-fence major-road gate
 				}
 				var p1: Vector2 = rseg.p1
 				var p2: Vector2 = rseg.p2
@@ -8323,6 +8396,10 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 							_pending_batch_chunks.append(ck)
 						if enable_crossing_signs:
 							_enqueue_crossing_signs(cross_pts, parent, ck)
+						# Pedestrian guard-rail fence: only at TAGGED zebras (#8). Anchoring to an
+						# intersection + major-road gate happen later in the deferred drain.
+						if enable_pedestrian_fences and is_tagged_crossing:
+							_pfence_enqueue_site(cross_pts, int(item.get("way_id", 0)), parent, ck)
 				else:
 					last_off_road_pt = smoothed_points[i - 1]
 					has_before_off = true
@@ -8367,6 +8444,8 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 					_pending_batch_chunks.append(ck)
 				if enable_crossing_signs:
 					_enqueue_crossing_signs(current_pts, parent, ck)
+				if enable_pedestrian_fences and is_tagged_crossing:
+					_pfence_enqueue_site(cross_pts_end, int(item.get("way_id", 0)), parent, ck)
 	return true
 
 
@@ -10734,6 +10813,8 @@ func _init_clutter_assets() -> void:
 		"bag_hit": "res://audio/sfx/clutter_bag_hit.mp3",
 		"bag_drop": "res://audio/sfx/clutter_bag_drop.mp3",
 		"paper_drop": "res://audio/sfx/clutter_paper_drop.mp3",
+		"pfence_hit": "res://audio/sfx/pfence_hit.mp3",     # fence shatter on impact
+		"pfence_drop": "res://audio/sfx/pfence_drop.mp3",   # pieces clattering to the ground
 	}
 	for key in sfx:
 		var p: String = sfx[key]
@@ -14082,6 +14163,11 @@ func _process_road_queue() -> void:
 		# Rebuild the single merged wire mesh for chunks that gained wires this frame.
 		for dck in wire_dirty:
 			_commit_wire_mesh(dck)
+
+	# Process deferred PEDESTRIAN-FENCE sites (anchor to intersections, place runs). Own slice.
+	if enable_pedestrian_fences and not _deferred_pfence_queue.is_empty():
+		var pf_deadline: int = Time.get_ticks_usec() + (500000 if _initial_loading else 3000)
+		_process_pfence_queue(pf_deadline)
 
 	# Process deferred ROADSIDE-PROP walking (budgeted), mirrors the billboard walk.
 	if enable_roadside_props and (Time.get_ticks_usec() - queue_start) <= TOTAL_BUDGET_USEC:
@@ -18987,6 +19073,8 @@ func _find_nearest_road_at_point(point: Vector2, ck: String = "") -> Dictionary:
 	var best_seg_p1 := Vector2.ZERO
 	var best_seg_p2 := Vector2.ZERO
 	var best_width := 0.0
+	var best_highway := ""
+	var best_way_id := 0
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			var key := Vector2i(cell_x + dx, cell_y + dy)
@@ -19001,6 +19089,8 @@ func _find_nearest_road_at_point(point: Vector2, ck: String = "") -> Dictionary:
 					best_seg_p1 = seg.p1
 					best_seg_p2 = seg.p2
 					best_width = seg.width
+					best_highway = str(seg.get("highway", ""))
+					best_way_id = int(seg.get("way_id", 0))
 	if best_dist > 20.0:
 		return {}
 	var road_dir: Vector2 = (best_seg_p2 - best_seg_p1).normalized()
@@ -19010,6 +19100,8 @@ func _find_nearest_road_at_point(point: Vector2, ck: String = "") -> Dictionary:
 		"road_width": best_width,
 		"road_p1": best_seg_p1,
 		"road_p2": best_seg_p2,
+		"road_highway": best_highway,
+		"road_way_id": best_way_id,
 	}
 
 
@@ -20709,6 +20801,612 @@ func _maybe_place_sneaker(p0: Vector3, p1: Vector3, sag: float, key: String, ck:
 		_sneaker_keys_by_chunk[ck] = []
 	_sneaker_keys_by_chunk[ck].append(key)
 
+# ══════════════════════════════════════════════════════════════════════════
+# Pedestrian guard-rail fences (v1 — static placement). See docs/PEDESTRIAN_FENCE_PLAN.md.
+# ══════════════════════════════════════════════════════════════════════════
+
+# Build the pre-merged fence mesh ONCE: bake node transforms, strip the junk Material_133
+# plate (#7), bake the along-axis to local +X (pivot at run START, depth centred on Z, base
+# Y=0), and scale so one instance = PFENCE_BAYS_PER_INSTANCE * bay_width long. Scale comes
+# from REAL transformed vertices, not stored AABB (#scale, plan §10).
+func _pfence_ensure_mesh() -> bool:
+	if _pfence_loaded:
+		return _pfence_mesh != null
+	_pfence_loaded = true
+	if not enable_pedestrian_fences:
+		return false
+	var scene: PackedScene = load(PFENCE_SCENE_PATH) as PackedScene
+	if scene == null:
+		push_warning("pedestrian fence: failed to load " + PFENCE_SCENE_PATH)
+		return false
+	var inst: Node = scene.instantiate()
+	var mis: Array[MeshInstance3D] = []
+	_collect_mesh_instances(inst, mis)
+	# Collect structural surfaces with baked transforms; drop the textured backdrop plate.
+	var surfaces: Array = []  # [{arrays, material}]
+	for mi in mis:
+		var mesh: Mesh = mi.mesh
+		if mesh == null:
+			continue
+		var xform := _get_node_transform_recursive(mi)
+		var nbasis := xform.basis.inverse().transposed()
+		for s in range(mesh.get_surface_count()):
+			var mat: Material = mesh.surface_get_material(s)
+			var mname := (mat.resource_name if mat != null else "")
+			if mname.begins_with("Material_133"):
+				continue  # junk Sketchfab plate (4-vert textured quad)
+			var arrays := mesh.surface_get_arrays(s)
+			var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+			var tv := PackedVector3Array()
+			tv.resize(verts.size())
+			for i in range(verts.size()):
+				tv[i] = xform * verts[i]
+			arrays[Mesh.ARRAY_VERTEX] = tv
+			var norms = arrays[Mesh.ARRAY_NORMAL]
+			if norms != null and norms is PackedVector3Array:
+				var tn := PackedVector3Array()
+				tn.resize(norms.size())
+				for i in range(norms.size()):
+					tn[i] = (nbasis * norms[i]).normalized()
+				arrays[Mesh.ARRAY_NORMAL] = tn
+			surfaces.append({"arrays": arrays, "material": mat})
+	inst.queue_free()
+	if surfaces.is_empty():
+		push_warning("pedestrian fence: no structural surfaces after merge")
+		return false
+	# Raw baked AABB to decide along-axis (longer horizontal extent).
+	var amin := Vector3(INF, INF, INF)
+	var amax := Vector3(-INF, -INF, -INF)
+	for sf in surfaces:
+		for v in (sf.arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array):
+			amin = Vector3(minf(amin.x, v.x), minf(amin.y, v.y), minf(amin.z, v.z))
+			amax = Vector3(maxf(amax.x, v.x), maxf(amax.y, v.y), maxf(amax.z, v.z))
+	var ext := amax - amin
+	# Pre-rotate so the long axis becomes +X (depth → Z). For this asset along is already X.
+	var pre := Basis.IDENTITY
+	if ext.z > ext.x:
+		pre = Basis(Vector3.UP, PI / 2.0)  # maps +Z → +X
+	# AABB after pre-rotation.
+	var bmin := Vector3(INF, INF, INF)
+	var bmax := Vector3(-INF, -INF, -INF)
+	for sf in surfaces:
+		for v in (sf.arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array):
+			var p: Vector3 = pre * v
+			bmin = Vector3(minf(bmin.x, p.x), minf(bmin.y, p.y), minf(bmin.z, p.z))
+			bmax = Vector3(maxf(bmax.x, p.x), maxf(bmax.y, p.y), maxf(bmax.z, p.z))
+	var raw_len := bmax.x - bmin.x
+	if raw_len < 0.001:
+		return false
+	var target_len := float(PFENCE_BAYS_PER_INSTANCE) * pfence_bay_width
+	var scale_f := target_len / raw_len
+	var center_z := (bmin.z + bmax.z) * 0.5
+	# Build the merged, normalized, scaled mesh.
+	# The GLB ships every material as flat black (baseColorFactor 0,0,0). Real Soviet pedestrian
+	# guard-rails are GALVANIZED STEEL — light cool grey, semi-matte metal. Use one shared material.
+	var alu := StandardMaterial3D.new()
+	alu.albedo_color = Color(0.66, 0.68, 0.70)
+	alu.metallic = 0.7
+	alu.roughness = 0.42
+	alu.metallic_specular = 0.5
+	alu.cull_mode = BaseMaterial3D.CULL_DISABLED  # source materials are double-sided
+	var result := ArrayMesh.new()
+	_pfence_segments.clear()
+	for sf in surfaces:
+		var arrays: Array = sf.arrays
+		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var out := PackedVector3Array()
+		out.resize(verts.size())
+		for i in range(verts.size()):
+			var p: Vector3 = pre * verts[i]
+			out[i] = Vector3((p.x - bmin.x) * scale_f, (p.y - bmin.y) * scale_f, (p.z - center_z) * scale_f)
+		arrays[Mesh.ARRAY_VERTEX] = out
+		var norms = arrays[Mesh.ARRAY_NORMAL]
+		if norms != null and norms is PackedVector3Array and pre != Basis.IDENTITY:
+			var tn := PackedVector3Array()
+			tn.resize(norms.size())
+			for i in range(norms.size()):
+				tn[i] = (pre * norms[i]).normalized()
+			arrays[Mesh.ARRAY_NORMAL] = tn
+		result.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		result.surface_set_material(result.get_surface_count() - 1, alu)
+		# Phase 2: keep each leaf as a separate, CENTRED piece (mesh + convex shape + mass) for shatter.
+		if enable_pfence_shatter and out.size() >= 3:
+			var cen := Vector3.ZERO
+			for v in out:
+				cen += v
+			cen /= float(out.size())
+			var centered := PackedVector3Array()
+			centered.resize(out.size())
+			for j in range(out.size()):
+				centered[j] = out[j] - cen
+			var seg_arrays: Array = arrays.duplicate(true)
+			seg_arrays[Mesh.ARRAY_VERTEX] = centered
+			var seg_mesh := ArrayMesh.new()
+			seg_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, seg_arrays)
+			seg_mesh.surface_set_material(0, alu)
+			var shape := ConvexPolygonShape3D.new()
+			shape.points = centered
+			_pfence_segments.append({"mesh": seg_mesh, "offset": cen, "shape": shape, "mass": clampf(float(out.size()) * 0.03, 0.4, 5.0)})
+	_pfence_mesh = result
+	_pfence_length = raw_len * scale_f
+	_pfence_depth = (bmax.z - bmin.z) * scale_f
+	_pfence_height = (bmax.y - bmin.y) * scale_f
+	if pfence_debug:
+		print("PFENCE mesh: raw_len=%.3f scale=%.3f → L=%.2f depth=%.2f height=%.2f surfaces=%d" % [
+			raw_len, scale_f, _pfence_length, _pfence_depth, _pfence_height, result.get_surface_count()])
+	return true
+
+
+# Collect a TAGGED zebra strip as a deferred fence-site candidate (dedup by crossing id + center).
+func _pfence_enqueue_site(strip: PackedVector2Array, cw_id: int, _parent: Node3D, ck: String) -> void:
+	if strip.size() < 2:
+		return
+	if not _deferred_pfence_queue.has(ck):
+		_deferred_pfence_queue[ck] = []
+	var center := (strip[0] + strip[strip.size() - 1]) * 0.5
+	var enq_key := "%d_%d_%d" % [cw_id, int(round(center.x)), int(round(center.y))]
+	for e in _deferred_pfence_queue[ck]:
+		if str(e.get("enq_key", "")) == enq_key:
+			return
+	# strip endpoints span ACROSS the road (perpendicular to it) — used to pick the crossed road.
+	_deferred_pfence_queue[ck].append({"center": center, "p0": strip[0], "p1": strip[strip.size() - 1], "cw_id": cw_id, "enq_key": enq_key, "_retries": 0})
+	_pfence_dbg.enq += 1
+
+
+# Drain deferred fence sites. Anchoring to an intersection may not be possible yet (intersections
+# build on a worker thread AFTER crossing detection) — so RETRY, never skip-on-first-miss (#1).
+func _process_pfence_queue(deadline_usec: int) -> void:
+	if not enable_pedestrian_fences or _deferred_pfence_queue.is_empty():
+		return
+	if not _pfence_ensure_mesh():
+		return
+	var dirty: Dictionary = {}
+	var done_keys: Array[String] = []
+	for ck in _get_prioritized_keys(_deferred_pfence_queue):
+		if Time.get_ticks_usec() > deadline_usec:
+			break
+		if not _loaded_chunks.has(ck):
+			continue  # worker race — keep the jobs; _unload_chunk erases truly-gone chunks
+		var arr: Array = _deferred_pfence_queue[ck]
+		var keep: Array = []
+		for site in arr:
+			if Time.get_ticks_usec() > deadline_usec:
+				keep.append(site)
+				continue
+			var st := _pfence_build_site(site, ck)
+			if st == PFENCE_BUILT:
+				dirty[ck] = true
+			elif st == PFENCE_RETRY:
+				site["_retries"] = int(site.get("_retries", 0)) + 1
+				if int(site["_retries"]) < pfence_max_retries:
+					keep.append(site)
+				elif pfence_debug:
+					print("PFENCE drop (no anchor / mid-block) cw=%d" % int(site.get("cw_id", 0)))
+			# PFENCE_DROP → drop silently
+		if keep.is_empty():
+			done_keys.append(ck)
+		else:
+			_deferred_pfence_queue[ck] = keep
+	for ck in done_keys:
+		_deferred_pfence_queue.erase(ck)
+	for ck in dirty:
+		_pfence_finalize_chunk(ck)
+
+
+# Evaluate one site: gate by road class, anchor to a junction, pick the body-of-road side,
+# place 3 instances on each curb. Returns PFENCE_DROP / PFENCE_RETRY / PFENCE_BUILT.
+func _pfence_build_site(site: Dictionary, ck: String) -> int:
+	var center: Vector2 = site.center
+	var cw_id: int = int(site.cw_id)
+	# The zebra strip spans ACROSS the road, so its axis is ~perpendicular to the crossed road.
+	var p0: Vector2 = site.get("p0", center)
+	var p1: Vector2 = site.get("p1", center)
+	var strip_dir := (p1 - p0)
+	strip_dir = strip_dir.normalized() if strip_dir.length() > 0.01 else Vector2.ZERO
+	# Pick the MAJOR road the zebra actually crosses (perpendicular + widest), across ALL loaded
+	# chunks (not ck-scoped — crossings sit on chunk borders). NOT merely the nearest road (#A).
+	var ri := _pfence_pick_crossed_road(center, strip_dir)
+	if ri.is_empty():
+		# A major road may not be hashed yet (worker race) — retry a while before giving up.
+		var any_road := _find_nearest_road_at_point(center, "")
+		if any_road.is_empty():
+			return PFENCE_RETRY
+		# A road IS here but none is major → genuinely not a major crossing.
+		_pfence_dbg.nonmajor += 1
+		return PFENCE_DROP
+	var hw: String = str(ri.get("road_highway", ""))
+	var road_dir: Vector2 = ri.road_dir
+	var road_w: float = ri.road_width
+	var road_way_id: int = int(ri.get("road_way_id", 0))
+	# Anchor to the nearest intersection (search all loaded — crossings sit on chunk borders).
+	# Not built yet → retry (deferred, not skip).
+	var ii := _pfence_nearest_intersection(center, pfence_intersection_radius)
+	if ii < 0:
+		var rt := int(site.get("_retries", 0))
+		if rt + 1 >= pfence_max_retries:
+			_pfence_dbg.noanchor += 1
+		return PFENCE_RETRY
+	var inter_c: Vector2 = _intersection_positions[ii]
+	# Body-of-road direction: along the road, from the junction THROUGH the crossing.
+	var sdot := (center - inter_c).dot(road_dir)
+	if absf(sdot) < pfence_ambiguous_min:
+		_pfence_dbg.ambiguous += 1
+		if pfence_debug:
+			print("PFENCE skip AMBIGUOUS side cw=%d |s|=%.2f (wrong-side worse than none)" % [cw_id, absf(sdot)])
+		return PFENCE_DROP   # can't tell which side is the road body → skip (§4)
+	var away := road_dir * signf(sdot)
+	var perp := Vector2(-road_dir.y, road_dir.x)
+	var d0 := pfence_zebra_half_depth + pfence_after_crossing_gap  # start past the far zebra edge (+gap)
+	var built_any := false
+	for side in [1.0, -1.0]:
+		var run_key := "pf_%d_%d_%d_%d" % [cw_id, road_way_id, (1 if sdot >= 0.0 else 0), int(side)]
+		if _created_pfence_keys.has(run_key):
+			built_any = true
+			continue
+		if _pfence_place_run(center, away, perp, side, d0, road_w, ck, ii):
+			_created_pfence_keys[run_key] = true
+			if not _pfence_keys_by_chunk.has(ck):
+				_pfence_keys_by_chunk[ck] = []
+			_pfence_keys_by_chunk[ck].append(run_key)
+			built_any = true
+	if built_any:
+		_pfence_dbg.built += 1
+		if pfence_debug:
+			_pfence_last_site = {"center": center, "away": away, "inter": inter_c, "inter_idx": ii, "hw": hw}
+	if pfence_debug and built_any:
+		print("PFENCE site cw=%d road=%s wid=%d away=(%.2f,%.2f) center=(%.1f,%.1f)" % [cw_id, hw, road_way_id, away.x, away.y, center.x, center.y])
+	return PFENCE_BUILT if built_any else PFENCE_DROP
+
+
+# Nearest intersection to `center` within `radius`. Tries the spatial hash first; falls back to a
+# linear scan because the per-chunk intersection hash can MISS an intersection registered by a
+# neighbouring (boundary) chunk → that dropped valid crossings as "no anchor".
+func _pfence_nearest_intersection(center: Vector2, radius: float) -> int:
+	var ii := _find_nearby_intersection(center, radius, "")
+	if ii >= 0:
+		return ii
+	var best := -1
+	var best_d := radius
+	for i in range(_intersection_positions.size()):
+		var d := center.distance_to(_intersection_positions[i])
+		if d < best_d:
+			best_d = d
+			best = i
+	return best
+
+
+# Pick the MAJOR road the zebra crosses: among road segs near `center`, prefer ones whose direction
+# is ~perpendicular to the strip (the zebra spans across the road) and widest. Searches ALL loaded
+# chunks. Returns {road_dir, road_width, road_p1, road_p2, road_highway, road_way_id} or {}.
+func _pfence_pick_crossed_road(center: Vector2, strip_dir: Vector2) -> Dictionary:
+	var cell_x := int(floor(center.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(center.y / ROAD_CELL_SIZE))
+	var best_score := -1.0
+	var best: Dictionary = {}
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for seg in _query_road_hash(Vector2i(cell_x + dx, cell_y + dy), ""):
+				var hw := str(seg.get("highway", ""))
+				if not (hw in PFENCE_MAJOR_ROADS):
+					continue
+				var closest := Geometry2D.get_closest_point_to_segment(center, seg.p1, seg.p2)
+				var dist: float = center.distance_to(closest)
+				if dist > 14.0:
+					continue
+				var sdir: Vector2 = (seg.p2 - seg.p1).normalized()
+				# Perpendicularity to the strip: 1.0 = perpendicular (zebra crosses it), 0.0 = parallel.
+				var perpness := 1.0
+				if strip_dir != Vector2.ZERO:
+					perpness = 1.0 - absf(sdir.dot(strip_dir))
+				# Favor wide + perpendicular + close.
+				var score := float(seg.width) * (0.4 + 0.6 * perpness) - dist * 0.15
+				if score > best_score:
+					best_score = score
+					best = {
+						"road_dir": sdir,
+						"road_width": float(seg.width),
+						"road_p1": seg.p1,
+						"road_p2": seg.p2,
+						"road_highway": hw,
+						"road_way_id": int(seg.get("way_id", 0)),
+					}
+	return best
+
+
+# Place 3 instances CONTIGUOUSLY (end-to-end, no gaps) along one curb. The run start is anchored to
+# the REAL road edge (curve-aware, #3) past the far zebra edge, then laid colinear along the curb
+# tangent. The ENTIRE run is validated first: if ANY footprint point is on a road of any type, or
+# inside the junction contour, the whole run is rejected — better no fence than a fence on the road /
+# on the wrong (junction) side. Each instance is grounded + pitched to the local grade (#5).
+func _pfence_place_run(center: Vector2, away: Vector2, perp: Vector2, side: float, d0: float, road_w: float, ck: String, _inter_idx: int) -> bool:
+	var L := _pfence_length
+	if L < 0.1:
+		return false
+	var outward := perp * side
+	var base := _pfence_edge_point(center + away * d0, outward, ck) + outward * pfence_sidewalk_offset
+	var heading := away
+	# Plan 3 contiguous instances, FOLLOWING the curb's local tangent so the run doesn't drift onto the
+	# carriageway on a curve (#bug1). Each step re-anchors to the local edge + reads the local road
+	# direction (clamped to <~45° turns so it can't snap onto a perpendicular side street).
+	var planned: Array = []  # [{b0, fwd2, y0}]
+	for k in range(PFENCE_INSTANCES_PER_CURB):
+		var probe := base - outward * (pfence_sidewalk_offset + maxf(road_w, 6.0) * 0.25)  # toward carriageway
+		var ri := _find_nearest_road_at_point(probe, "")
+		var fwd2 := heading
+		if not ri.is_empty():
+			var rd: Vector2 = ri.road_dir
+			if rd.dot(heading) < 0.0:
+				rd = -rd
+			if rd.dot(heading) > 0.7:  # same-ish direction → follow the curve
+				fwd2 = rd
+		if _is_point_on_vehicle_road(probe, 0.0, ck):  # re-anchor to the real local edge
+			base = _find_road_edge_point(probe, true, probe + outward * 30.0, ck) + outward * pfence_sidewalk_offset
+		var y0 := get_surface_y(base.x, base.y)
+		planned.append({"b0": base, "fwd2": fwd2, "y0": y0})
+		base = base + fwd2 * L  # next instance begins exactly where this one ends → no gaps
+		heading = fwd2
+	# VALIDATE: the road-facing face must NOT touch any VEHICLE carriageway anywhere (#bug1 / #bug2:
+	# junction-side placement lands on the wide junction roadway → rejected here).
+	var half_depth := _pfence_depth * 0.5 + 0.05
+	for p in planned:
+		var b: Vector2 = p.b0
+		var f: Vector2 = p.fwd2
+		for t in [0.0, 0.5, 1.0]:
+			var face: Vector2 = b + f * (float(t) * L) - outward * half_depth
+			if _pfence_vehicle_road_clearance(face) < PFENCE_ROAD_CLEAR:
+				if pfence_debug:
+					print("PFENCE run REJECTED (on vehicle road) side=%d at (%.1f,%.1f)" % [int(side), face.x, face.y])
+				return false
+	# Passed — commit (grounded + pitched to local grade).
+	if not _pfence_batch_data.has(ck):
+		_pfence_batch_data[ck] = {"transforms": []}
+	var transforms: Array = _pfence_batch_data[ck].transforms
+	for p in planned:
+		var b0: Vector2 = p.b0
+		var f2: Vector2 = p.fwd2
+		var y0: float = p.y0
+		var end2 := b0 + f2 * L
+		var y1 := get_surface_y(end2.x, end2.y)
+		var run3 := Vector3(f2.x * L, y1 - y0, f2.y * L)  # curb tangent + grade
+		var fwd := run3.normalized()
+		var up := Vector3.UP
+		var yax := up - fwd * up.dot(fwd)
+		if yax.length() < 0.01:
+			yax = Vector3.UP
+		yax = yax.normalized()
+		var zax := fwd.cross(yax).normalized()  # depth axis; guard-rail is symmetric so facing is cosmetic
+		var basis := Basis(fwd, yax, zax)  # +X=run, +Y=up, +Z=depth; right-handed, upright on both curbs
+		transforms.append(Transform3D(basis, Vector3(b0.x, y0, b0.y)))
+		if pfence_debug:
+			_pfence_debug_marker(ck, Vector3(b0.x, y0 + 0.1, b0.y), Color(0.1, 1.0, 0.2))
+	return true
+
+
+# Find the real road edge from an on-road centerline point, casting `outward` (unit). Falls back
+# to the centerline if the projection drifts off the corridor (curve/flare).
+func _pfence_edge_point(cl: Vector2, outward: Vector2, ck: String) -> Vector2:
+	if not _is_point_on_vehicle_road(cl, 0.0, ck):
+		return cl
+	return _find_road_edge_point(cl, true, cl + outward * 30.0, ck)
+
+
+# Signed distance to the nearest VEHICLE carriageway edge (width >= 4 only). <0 = inside a road.
+# Footways/sidewalks/paths/tram (width < 4) are EXCLUDED — a pedestrian fence belongs on the sidewalk.
+func _pfence_vehicle_road_clearance(p: Vector2) -> float:
+	var cx := int(floor(p.x / ROAD_CELL_SIZE))
+	var cy := int(floor(p.y / ROAD_CELL_SIZE))
+	var best := 999.0
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for seg in _query_road_hash(Vector2i(cx + dx, cy + dy), ""):
+				if seg.width < 4.0:
+					continue
+				var cl := Geometry2D.get_closest_point_to_segment(p, seg.p1, seg.p2)
+				best = minf(best, p.distance_to(cl) - seg.width * 0.5)
+	return best
+
+
+# (Re)build the chunk's fence MultiMesh + per-instance solid colliders from accumulated transforms.
+func _pfence_finalize_chunk(ck: String) -> void:
+	if not _loaded_chunks.has(ck) or not _pfence_batch_data.has(ck):
+		return
+	if _pfence_mesh == null:
+		return
+	var parent: Node3D = _loaded_chunks[ck]
+	if not is_instance_valid(parent):
+		return
+	var old := parent.get_node_or_null("PedFences")
+	if old != null:
+		old.free()
+	var transforms: Array = _pfence_batch_data[ck].transforms
+	if transforms.is_empty():
+		return
+	var container := Node3D.new()
+	container.name = "PedFences"
+	var shattered: Dictionary = _pfence_shattered.get(ck, {})
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = _pfence_mesh
+	mm.instance_count = transforms.size()
+	for i in range(transforms.size()):
+		if shattered.has(i):
+			mm.set_instance_transform(i, Transform3D(Basis().scaled(Vector3.ZERO), transforms[i].origin))  # broken → hidden
+		else:
+			mm.set_instance_transform(i, transforms[i])
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = "PedFenceMM"
+	mmi.multimesh = mm
+	container.add_child(mmi)
+	_pfence_batch_data[ck]["mm"] = mm  # kept so a shatter can hide its slot
+	# Per-instance solid collider — layer 1 (cars stop on it), like lamps/props (#2). With shatter
+	# enabled it's a FROZEN KINEMATIC RigidBody (still solid) that reports body_entered for the hit.
+	var box_size := Vector3(_pfence_length, maxf(_pfence_height, 0.6), maxf(_pfence_depth, 0.15))
+	var box_xform := Transform3D(Basis.IDENTITY, Vector3(_pfence_length * 0.5, _pfence_height * 0.5, 0.0))
+	for i in range(transforms.size()):
+		if shattered.has(i):
+			continue  # already broken — no collider
+		var body: PhysicsBody3D
+		if enable_pfence_shatter and not _pfence_segments.is_empty():
+			var rb := RigidBody3D.new()
+			rb.freeze = true
+			rb.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+			rb.contact_monitor = true
+			rb.max_contacts_reported = 4
+			rb.body_entered.connect(_pfence_on_body_entered.bind(rb, ck, i))
+			body = rb
+		else:
+			body = StaticBody3D.new()
+		body.collision_layer = 1
+		var cs := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		box.size = box_size
+		cs.shape = box
+		cs.transform = box_xform  # pivot at run start → box centre at +L/2, +h/2
+		body.transform = transforms[i]
+		body.add_child(cs)
+		container.add_child(body)
+	parent.add_child(container)
+
+
+# Phase 2: a fence instance's kinematic collider reports the car entering. Fast enough → shatter.
+func _pfence_on_body_entered(other: Node, fence_body: Node, ck: String, idx: int) -> void:
+	if not enable_pfence_shatter or other == null:
+		return
+	# Only the car (player GEVP RigidBody or NPC VehicleBody) — never flying fence pieces.
+	var is_car := other is VehicleBody3D or other.is_in_group("car") or other.is_in_group("player")
+	if not is_car:
+		return
+	var cvel := Vector3.ZERO
+	if other is RigidBody3D:
+		cvel = (other as RigidBody3D).linear_velocity
+	# Use the APPROACH speed (recent peak) for the player — the contact instant has already slowed it.
+	var approach := cvel
+	if other.is_in_group("player") or other == _pfence_player:
+		var pk := _pfence_player_approach_vel()
+		if pk.length() > approach.length():
+			approach = pk
+	if approach.length() < pfence_shatter_speed:  # too slow → just a solid bump, no shatter
+		return
+	var contact := (other as Node3D).global_position if other is Node3D else Vector3.ZERO
+	_pfence_shatter_instance(ck, idx, contact, approach, fence_body)
+
+
+# Largest recent player velocity (over the last ~10 physics frames) — the speed BEFORE contact slowed it.
+func _pfence_player_approach_vel() -> Vector3:
+	var best := Vector3.ZERO
+	for v in _pfence_speed_hist:
+		if (v as Vector3).length() > best.length():
+			best = v
+	return best
+
+
+# Break one fence instance into flying per-leaf rigid bodies; hide its MultiMesh slot + drop its collider.
+func _pfence_shatter_instance(ck: String, idx: int, contact: Vector3, cvel: Vector3, fence_body: Node) -> void:
+	if not _loaded_chunks.has(ck) or not _pfence_batch_data.has(ck):
+		return
+	var shattered: Dictionary = _pfence_shattered.get(ck, {})
+	if shattered.has(idx):
+		return  # already broken
+	shattered[idx] = true
+	_pfence_shattered[ck] = shattered
+	var bd: Dictionary = _pfence_batch_data[ck]
+	var transforms: Array = bd.transforms
+	if idx >= transforms.size():
+		return
+	var xf: Transform3D = transforms[idx]
+	# Hide the visual slot.
+	var mm = bd.get("mm", null)
+	if mm != null and idx < mm.instance_count:
+		mm.set_instance_transform(idx, Transform3D(Basis().scaled(Vector3.ZERO), xf.origin))
+	# Drop the solid collider so the car drives through the gap.
+	if fence_body != null and is_instance_valid(fence_body):
+		fence_body.queue_free()
+	# Spawn the flying pieces.
+	var holder := _pfence_spawn_pieces(ck, xf, contact, cvel)
+	# Sound: clang on impact, then the pieces clattering down a beat later.
+	_pfence_play_sfx(contact, "pfence_hit", 0.0)
+	_pfence_play_sfx(xf * Vector3(_pfence_length * 0.5, _pfence_height * 0.5, 0.0), "pfence_drop", 0.4)
+	_pfence_shatter_order.append({"holder": holder})
+	while _pfence_shatter_order.size() > PFENCE_MAX_SHATTERED:
+		var oldest: Dictionary = _pfence_shatter_order.pop_front()
+		var h = oldest.get("holder", null)
+		if h != null and is_instance_valid(h):
+			h.queue_free()
+
+
+# Instantiate every leaf segment of one instance as a RigidBody that flies off; despawn via TTL.
+func _pfence_spawn_pieces(ck: String, xf: Transform3D, contact: Vector3, cvel: Vector3) -> Node3D:
+	var parent: Node3D = _loaded_chunks.get(ck, null)
+	if parent == null or _pfence_segments.is_empty():
+		return null
+	var holder := Node3D.new()
+	holder.name = "PedFencePieces"
+	parent.add_child(holder)  # chunk-owned → freed on unload
+	for seg in _pfence_segments:
+		var piece := RigidBody3D.new()
+		piece.collision_layer = 4          # destructible debris
+		piece.collision_mask = 1 | 2       # collide with ground + statics, not the car/other pieces
+		piece.mass = float(seg.mass)
+		piece.add_to_group("pfence_piece")
+		var mi := MeshInstance3D.new()
+		mi.mesh = seg.mesh
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		piece.add_child(mi)
+		var cs := CollisionShape3D.new()
+		cs.shape = seg.shape
+		piece.add_child(cs)
+		holder.add_child(piece)
+		var world_pos: Vector3 = xf * (seg.offset as Vector3)  # leaf centroid → world
+		piece.global_transform = Transform3D(xf.basis, world_pos)
+		# Impulse: radial away from the contact point + a slice of car velocity + an upward kick.
+		var radial := world_pos - contact
+		radial.y = maxf(radial.y, 0.0)
+		radial = radial.normalized() if radial.length() > 0.1 else Vector3.UP
+		var imp := (radial * pfence_shatter_impulse + cvel * 0.25 + Vector3(0.0, 2.2, 0.0)) * piece.mass
+		piece.apply_central_impulse(imp)
+		piece.apply_torque_impulse(Vector3(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * pfence_shatter_torque)
+		var tmr := get_tree().create_timer(pfence_piece_ttl)
+		tmr.timeout.connect(piece.queue_free)
+	return holder
+
+
+# Play a one-shot positional SFX at a world point (optionally after a delay). Parented to the
+# generator so it survives the struck chunk and frees itself when finished.
+func _pfence_play_sfx(world_pos: Vector3, key: String, delay: float) -> void:
+	var stream: AudioStream = _clutter_sfx.get(key)
+	if stream == null:
+		return
+	var p := AudioStreamPlayer3D.new()
+	p.stream = stream
+	p.max_distance = 80.0
+	p.unit_size = 9.0
+	add_child(p)
+	p.global_position = world_pos
+	p.finished.connect(p.queue_free)
+	if delay > 0.0:
+		get_tree().create_timer(delay).timeout.connect(p.play)
+	else:
+		p.play()
+
+
+# Default-off debug marker (small sphere) parented to the chunk for visual site inspection.
+func _pfence_debug_marker(ck: String, world_pos: Vector3, color: Color) -> void:
+	if not _loaded_chunks.has(ck):
+		return
+	var mi := MeshInstance3D.new()
+	var sph := SphereMesh.new()
+	sph.radius = 0.25
+	sph.height = 0.5
+	mi.mesh = sph
+	var m := StandardMaterial3D.new()
+	m.albedo_color = color
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mi.material_override = m
+	mi.position = world_pos
+	mi.add_to_group("pfence_debug")
+	_loaded_chunks[ck].add_child(mi)
+
+
 # Rebuild the one merged wire MeshInstance for chunk `ck` (mesh-swap, no node churn).
 func _commit_wire_mesh(ck: String) -> void:
 	if not _loaded_chunks.has(ck) or not _wire_geo_by_chunk.has(ck):
@@ -20908,6 +21606,15 @@ func _reset_wire_state() -> void:
 	_wire_geo_by_chunk.clear()
 	_wire_node_by_chunk.clear()
 	_sneaker_keys_by_chunk.clear()
+	# Pedestrian fences share the regen/reset lifecycle.
+	_deferred_pfence_queue.clear()
+	_pfence_batch_data.clear()
+	_created_pfence_keys.clear()
+	_pfence_keys_by_chunk.clear()
+	_pfence_shattered.clear()
+	_pfence_shatter_order.clear()
+	_pfence_speed_hist.clear()
+	_pfence_player = null
 	_spark_joints_by_chunk.clear()
 	_spark_joint_seen.clear()
 	_spark_joint_keys_by_chunk.clear()
