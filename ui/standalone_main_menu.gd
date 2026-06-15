@@ -68,14 +68,10 @@ func _ready() -> void:
 	_populate_locations()
 	_populate_tracks()
 
-	# Добавляем кнопку "Выбрать на карте" в главное меню
-	# (Тестовые трассы — скрытая фича, по клавише 2)
-	_add_map_button()
-
 	# Подсветка активного ряда + автофокус
 	_wire_menu_focus()
 	await get_tree().process_frame
-	var first_btn := get_node_or_null("VBox/StartRow/StartButton") as Button
+	var first_btn := get_node_or_null("VBox/CareerRow/CareerButton") as Button
 	if first_btn:
 		first_btn.grab_focus()
 
@@ -295,41 +291,6 @@ func _build_menu_row(btn_name: String, label_text: String, kicker_text: String, 
 	return row
 
 
-func _add_map_button() -> void:
-	"""Добавить кнопку 'Выбрать на карте' в главное меню"""
-	var vbox: VBoxContainer = get_node_or_null("VBox")
-	if not vbox:
-		return
-	var start_row := vbox.get_node_or_null("StartRow")
-	if not start_row:
-		return
-
-	var row := _build_menu_row("MapButton", "ВЫБРАТЬ НА КАРТЕ", "07 / WORLD MAP", "Pick any spot on Earth")
-	var btn := row.get_node("MapButton") as Button
-	btn.pressed.connect(_on_map_pressed)
-	_connect_row_focus(btn, row.get_node("MapButtonKickerStack/MapButtonKicker") as Label)
-	vbox.add_child(row)
-	vbox.move_child(row, start_row.get_index() + 1)
-
-
-func _add_test_tracks_button() -> void:
-	"""Добавить кнопку Тестовые трассы в главное меню"""
-	var vbox: VBoxContainer = get_node_or_null("VBox")
-	if not vbox:
-		push_error("VBox not found!")
-		return
-	var start_row := vbox.get_node_or_null("StartRow")
-	if not start_row:
-		push_error("StartRow not found!")
-		return
-
-	var row := _build_menu_row("TestTracksButton", "ТЕСТОВЫЕ ТРАССЫ", "08 / TEST TRACKS", "Procedural tracks")
-	var btn := row.get_node("TestTracksButton") as Button
-	btn.pressed.connect(_on_test_tracks_pressed)
-	_connect_row_focus(btn, row.get_node("TestTracksButtonKickerStack/TestTracksButtonKicker") as Label)
-	vbox.add_child(row)
-	vbox.move_child(row, start_row.get_index() + 1)
-
 
 # === Главное меню ===
 
@@ -344,6 +305,8 @@ func _on_start_pressed() -> void:
 		$LocationSelect.location_chosen.connect(_on_location_chosen)
 	if not $LocationSelect.back_requested.is_connected(_on_location_select_back):
 		$LocationSelect.back_requested.connect(_on_location_select_back)
+	if not $LocationSelect.map_requested.is_connected(_on_location_select_map):
+		$LocationSelect.map_requested.connect(_on_location_select_map)
 	$LocationSelect.show_screen()
 
 
@@ -354,10 +317,12 @@ func _on_location_chosen(loc: Dictionary) -> void:
 
 func _on_location_select_back() -> void:
 	$LocationSelect.visible = false
-	$VBox.visible = true
-	$BrandBlock.visible = true
-	$MenuHeader.visible = true
-	$Footer.visible = true
+	_restore_main_menu()
+
+
+func _on_location_select_map() -> void:
+	$LocationSelect.visible = false
+	_on_map_pressed()
 
 
 func _start_free_roam_at(loc: Dictionary) -> void:
@@ -396,10 +361,7 @@ func _on_race_chosen(track) -> void:
 
 func _on_race_select_back() -> void:
 	$RaceSelect.visible = false
-	$VBox.visible = true
-	$BrandBlock.visible = true
-	$MenuHeader.visible = true
-	$Footer.visible = true
+	_restore_main_menu()
 
 
 func _on_career_pressed() -> void:
@@ -413,10 +375,7 @@ func _on_career_pressed() -> void:
 
 
 func _on_career_back() -> void:
-	$VBox.visible = true
-	$BrandBlock.visible = true
-	$MenuHeader.visible = true
-	$Footer.visible = true
+	_restore_main_menu()
 
 
 func _on_car_selection_pressed() -> void:
@@ -439,10 +398,17 @@ func _on_car_selection_chosen(car_id: String) -> void:
 
 
 func _on_car_selection_back() -> void:
+	_restore_main_menu()
+
+
+func _restore_main_menu() -> void:
 	$VBox.visible = true
 	$BrandBlock.visible = true
 	$MenuHeader.visible = true
 	$Footer.visible = true
+	var btn := get_node_or_null("VBox/CareerRow/CareerButton") as Button
+	if btn:
+		btn.grab_focus()
 
 
 func _on_controls_pressed() -> void:
@@ -598,14 +564,14 @@ func _on_track_selected(track) -> void:
 
 func _on_controls_back_pressed() -> void:
 	$ControlsPanel.visible = false
-	$VBox.visible = true
+	_restore_main_menu()
 
 
 # === Настройки ===
 
 func _on_settings_back_pressed() -> void:
 	$SettingsPanel.visible = false
-	$VBox.visible = true
+	_restore_main_menu()
 
 
 func _sync_audio_sliders() -> void:
@@ -737,7 +703,7 @@ func _on_test_tracks_back_pressed() -> void:
 	var test_panel = get_node_or_null("TestTracksPanel")
 	if test_panel:
 		test_panel.visible = false
-	$VBox.visible = true
+	_restore_main_menu()
 
 
 func _on_test_track_selected(track: Dictionary) -> void:
@@ -827,7 +793,7 @@ func _on_other_back_pressed() -> void:
 	var panel = get_node_or_null("OtherPanel")
 	if panel:
 		panel.visible = false
-	$VBox.visible = true
+	_restore_main_menu()
 
 
 # === Карта мира ===
@@ -897,7 +863,7 @@ func _on_map_back_pressed() -> void:
 	$MapPanel/WorldMap.hide_map()
 	$MapPanel.visible = false
 	$MapPanel/StartHereButton.visible = false
-	$VBox.visible = true
+	_restore_main_menu()
 
 
 func _on_map_location_selected(lat: float, lon: float) -> void:

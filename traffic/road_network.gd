@@ -90,10 +90,10 @@ func add_road_segment(points: PackedVector2Array, highway_type: String, _chunk_k
 	if points.size() < 2:
 		return
 
-	# Только крупные дороги - не дворы и сервисные проезды
-	const VEHICLE_ROADS := ["motorway", "trunk", "primary", "secondary", "tertiary"]
+	# Автомобильные дороги (включая residential и service для маршрутизации)
+	const VEHICLE_ROADS := ["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "unclassified", "service"]
 	if not highway_type in VEHICLE_ROADS:
-		return  # Пропускаем residential, service, footway и т.д.
+		return  # Пропускаем footway, path, cycleway и т.д.
 
 	var is_oneway_forward: bool = oneway == "yes" or oneway == "true" or oneway == "1"
 	var is_oneway_reverse: bool = oneway == "-1" or oneway == "reverse"

@@ -47,6 +47,9 @@ var steering_input := 0.0
 var throttle_input := 0.0
 var brake_input := 0.0
 
+# Внешняя блокировка (попап заказа и т.д.) — тормозит без freeze
+var force_stop := false
+
 
 # ===== LIFECYCLE =====
 
@@ -216,6 +219,18 @@ func _base_physics_process(delta: float) -> void:
 	steering_input = _get_steering_input()
 	throttle_input = _get_throttle_input()
 	brake_input = _get_brake_input()
+
+	# Внешняя блокировка — полный тормоз + гасим скорость напрямую
+	if force_stop:
+		throttle_input = 0.0
+		brake_input = 1.0
+		steering_input = 0.0
+		# Brake force может не хватить — гасим velocity напрямую
+		if linear_velocity.length() > 0.1:
+			linear_velocity = linear_velocity.lerp(Vector3.ZERO, 10.0 * delta)
+		else:
+			linear_velocity = Vector3.ZERO
+			angular_velocity = Vector3.ZERO
 
 	# Обновляем физику
 	_update_speed()

@@ -10,6 +10,7 @@ extends Control
 
 signal location_chosen(loc: Dictionary)
 signal back_requested
+signal map_requested
 
 const BrandMarkScene      = preload("res://ui/components/brand_mark.tscn")
 const CornerChromeScript  = preload("res://ui/components/corner_chrome.gd")
@@ -37,6 +38,7 @@ static func _get_fira_tight() -> FontVariation:
 
 var _focused_idx: int = 0
 var _rows: Array[Control] = []
+var _map_row_idx: int = -1  # index of "choose on map" row in _rows
 var _focused_sidebar: ColorRect = null
 var _focused_sidebar_tween: Tween = null
 
@@ -143,7 +145,7 @@ func _build_ui() -> void:
 	split.add_child(left)
 
 	var sub_kicker := Label.new()
-	sub_kicker.text = "// 7 ЛОКАЦИЙ · СЕГОДНЯ"
+	sub_kicker.text = "// %d ЛОКАЦИЙ · СЕГОДНЯ" % LOCATIONS.size()
 	sub_kicker.theme_type_variation = "MonoLabel"
 	sub_kicker.add_theme_font_size_override("font_size", 12)
 	sub_kicker.add_theme_color_override("font_color", UI.INK_500)
@@ -158,6 +160,12 @@ func _build_ui() -> void:
 		var row := _build_location_row(i)
 		_rows.append(row)
 		rows_box.add_child(row)
+
+	# "Choose on map" row
+	var map_row := _build_map_row(LOCATIONS.size())
+	_map_row_idx = _rows.size()
+	_rows.append(map_row)
+	rows_box.add_child(map_row)
 
 	left.add_child(_make_spacer(24))
 
@@ -285,6 +293,102 @@ func _build_location_row(idx: int) -> Control:
 	hbox.add_child(status_lbl)
 
 	# Stash refs in metadata so _apply_focus can repaint without rebuilding.
+	row.set_meta("name_lbl", name_lbl)
+	row.set_meta("sub_lbl", sub_lbl)
+	row.set_meta("num_lbl", num_lbl)
+	row.set_meta("dist_lbl", dist_lbl)
+	row.set_meta("status_lbl", status_lbl)
+	row.set_meta("bar", bar)
+
+	row.gui_input.connect(_on_row_gui_input.bind(idx))
+	row.focus_entered.connect(_on_row_focus_entered.bind(idx))
+	row.mouse_entered.connect(row.grab_focus)
+
+	return row
+
+
+func _build_map_row(idx: int) -> Control:
+	var row := Panel.new()
+	row.name = "Row_map"
+	row.custom_minimum_size = Vector2(0, 60)
+	row.mouse_filter = Control.MOUSE_FILTER_PASS
+	row.focus_mode = Control.FOCUS_ALL
+
+	var sb_normal: NeonStyleBox = NeonStyleBoxScript.new()
+	sb_normal.fill_color = Color(0, 0, 0, 0)
+	sb_normal.outline_color = Color(0, 0, 0, 0)
+	sb_normal.outline_width = 0.0
+	sb_normal.shear_deg = 0.0
+	sb_normal.glow_size = 0
+	sb_normal.right_slant = 14.0
+	row.add_theme_stylebox_override("panel", sb_normal)
+
+	var hbox := HBoxContainer.new()
+	hbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	hbox.offset_left = 22.0
+	hbox.offset_right = -22.0
+	hbox.add_theme_constant_override("separation", 18)
+	hbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(hbox)
+
+	var bar := ColorRect.new()
+	bar.color = UI.NEON_MAGENTA
+	bar.set_anchors_preset(Control.PRESET_LEFT_WIDE)
+	bar.offset_top = 6.0
+	bar.offset_bottom = -6.0
+	bar.offset_right = 4.0
+	bar.modulate.a = 0.0
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(bar)
+
+	var num_lbl := Label.new()
+	num_lbl.text = "%02d" % (idx + 1)
+	num_lbl.theme_type_variation = "MonoLabel"
+	num_lbl.add_theme_font_size_override("font_size", 22)
+	num_lbl.add_theme_color_override("font_color", UI.INK_500)
+	num_lbl.custom_minimum_size = Vector2(48, 0)
+	num_lbl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hbox.add_child(num_lbl)
+
+	var name_box := VBoxContainer.new()
+	name_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	name_box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	name_box.add_theme_constant_override("separation", 4)
+	hbox.add_child(name_box)
+
+	var name_lbl := Label.new()
+	name_lbl.text = "ВЫБРАТЬ НА КАРТЕ"
+	name_lbl.theme_type_variation = "DisplayLabel"
+	name_lbl.add_theme_font_override("font", _get_fira_tight())
+	name_lbl.add_theme_font_size_override("font_size", 28)
+	name_lbl.add_theme_color_override("font_color", UI.INK_900)
+	name_box.add_child(name_lbl)
+
+	var sub_lbl := Label.new()
+	sub_lbl.text = "WORLD MAP · ANY PLACE ON EARTH"
+	sub_lbl.theme_type_variation = "MonoLabel"
+	sub_lbl.add_theme_font_size_override("font_size", 10)
+	sub_lbl.add_theme_color_override("font_color", UI.INK_500)
+	name_box.add_child(sub_lbl)
+
+	var dist_lbl := Label.new()
+	dist_lbl.text = "🌍"
+	dist_lbl.theme_type_variation = "MonoLabel"
+	dist_lbl.add_theme_font_size_override("font_size", 14)
+	dist_lbl.add_theme_color_override("font_color", UI.INK_500)
+	dist_lbl.custom_minimum_size = Vector2(120, 0)
+	dist_lbl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	dist_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	hbox.add_child(dist_lbl)
+
+	var status_lbl := Label.new()
+	status_lbl.theme_type_variation = "MonoLabel"
+	status_lbl.add_theme_font_size_override("font_size", 11)
+	status_lbl.custom_minimum_size = Vector2(110, 0)
+	status_lbl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	status_lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	hbox.add_child(status_lbl)
+
 	row.set_meta("name_lbl", name_lbl)
 	row.set_meta("sub_lbl", sub_lbl)
 	row.set_meta("num_lbl", num_lbl)
@@ -475,6 +579,9 @@ func _on_row_focus_entered(idx: int) -> void:
 
 
 func _activate_focused() -> void:
+	if _focused_idx == _map_row_idx:
+		map_requested.emit()
+		return
 	var loc: Dictionary = LOCATIONS[_focused_idx]
 	if String(loc.get("status", "")) == "locked":
 		return
@@ -488,17 +595,19 @@ func _apply_focus() -> void:
 
 	for i in _rows.size():
 		var row: Panel = _rows[i] as Panel
-		var loc: Dictionary = LOCATIONS[i]
-		var locked: bool = loc.get("status", "") == "locked"
+		var is_map := i == _map_row_idx
+		var loc: Dictionary = LOCATIONS[i] if not is_map else {}
+		var locked: bool = loc.get("status", "") == "locked" if not is_map else false
 		var focused := i == _focused_idx
+		var accent: Color = UI.NEON_MAGENTA if is_map else UI.NEON_CYAN
 
 		row.modulate.a = 0.55 if locked else 1.0
 
 		var sb := row.get_theme_stylebox("panel") as NeonStyleBox
 		if sb:
 			if focused:
-				sb.fill_color = Color(UI.NEON_CYAN.r, UI.NEON_CYAN.g, UI.NEON_CYAN.b, 0.10)
-				sb.outline_color = UI.NEON_CYAN
+				sb.fill_color = Color(accent.r, accent.g, accent.b, 0.10)
+				sb.outline_color = accent
 				sb.outline_width = 1.0
 			else:
 				sb.fill_color = Color(0.043, 0.055, 0.078, 0.6)
@@ -507,11 +616,11 @@ func _apply_focus() -> void:
 
 		var num: Label = row.get_meta("num_lbl") as Label
 		num.add_theme_color_override("font_color",
-			UI.NEON_CYAN if focused else UI.INK_500)
+			accent if focused else UI.INK_500)
 
 		var name_lbl: Label = row.get_meta("name_lbl") as Label
 		name_lbl.add_theme_color_override("font_color",
-			UI.NEON_CYAN if focused else UI.INK_900)
+			accent if focused else UI.INK_900)
 
 		var dist: Label = row.get_meta("dist_lbl") as Label
 		dist.add_theme_color_override("font_color",
@@ -520,7 +629,10 @@ func _apply_focus() -> void:
 		var status: Label = row.get_meta("status_lbl") as Label
 		var status_text: String
 		var status_color: Color
-		if locked:
+		if is_map:
+			status_text = "↵ MAP" if focused else "MAP"
+			status_color = accent if focused else UI.INK_500
+		elif locked:
 			status_text = "◢ LOCKED"
 			status_color = UI.NEON_RED
 		elif focused:
@@ -537,7 +649,8 @@ func _apply_focus() -> void:
 		if focused:
 			_focused_sidebar = bar
 
-	_apply_locator()
+	if _focused_idx != _map_row_idx:
+		_apply_locator()
 	_start_sidebar_pulse()
 
 

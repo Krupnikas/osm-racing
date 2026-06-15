@@ -60,7 +60,7 @@ var _route_points_local: Array = []  # Array[Vector2] - точки маршру�
 var _route_segments: Dictionary = {}  # {segment_key: true} - сегменты на маршруте
 const ROUTE_COLOR := Color(0.3, 0.7, 1.0, 0.95)  # Голубой
 const ROUTE_LINE_WIDTH := 4.0  # Ширина линии маршрута
-const ROUTE_MATCH_DISTANCE := 10.0  # Метры - максимальное расстояние от отрезка маршрута
+const ROUTE_MATCH_DISTANCE := 6.0  # Метры - максимальное расстояние от отрезка маршрута
 
 # Маркеры режима работы (такси)
 var _work_pickup_positions: Array = []  # Array[Vector3] — несколько пикапов одновременно
@@ -178,7 +178,14 @@ func _update_road_cache(player_pos: Vector3) -> void:
 	if not _terrain_generator.has_method("get_road_segments_in_radius"):
 		return
 
-	_cached_road_segments = _terrain_generator.get_road_segments_in_radius(player_pos, _cache_radius)
+	var raw_segments: Array = _terrain_generator.get_road_segments_in_radius(player_pos, _cache_radius)
+	# Фильтруем пешеходные дороги — не показываем на миникарте
+	const PEDESTRIAN_ROADS := ["footway", "path", "cycleway", "steps", "pedestrian"]
+	for seg in raw_segments:
+		var hw: String = seg.get("highway", "")
+		if hw in PEDESTRIAN_ROADS:
+			continue
+		_cached_road_segments.append(seg)
 
 	if not _cached_road_segments.is_empty():
 		print("MiniMap: Cached %d road segments" % _cached_road_segments.size())
@@ -446,30 +453,39 @@ func _try_find_terrain_generator() -> void:
 
 func _is_segment_on_route(p1: Vector2, p2: Vector2) -> bool:
 	"""Проверяет, принадлежит ли сегмент дороги маршруту.
-	Условия: близко к ОТРЕЗКУ маршрута (не точке) И направление совпадает."""
+	Условия: ОБА конца близки к маршруту И направление совпадает."""
 	if _route_points_local.size() < 2:
 		return false
 
-	var mid: Vector2 = (p1 + p2) / 2.0
 	var seg_dir: Vector2 = (p2 - p1).normalized()
 
-	# Ищем ближайший ОТРЕЗОК маршрута (не точку!)
+	# Оба конца сегмента должны быть близко к маршруту
+	var best_dist_p1 := INF
+	var best_dist_p2 := INF
+	var best_dot := 0.0
+
 	for i in range(_route_points_local.size() - 1):
 		var route_a: Vector2 = _route_points_local[i]
 		var route_b: Vector2 = _route_points_local[i + 1]
 
-		# Расстояние от середины сегмента до отрезка маршрута
-		var dist: float = _point_to_segment_distance(mid, route_a, route_b)
-		if dist > ROUTE_MATCH_DISTANCE:
-			continue
+		var d1: float = _point_to_segment_distance(p1, route_a, route_b)
+		var d2: float = _point_to_segment_distance(p2, route_a, route_b)
 
-		# Направление отрезка маршрута
-		var route_dir: Vector2 = (route_b - route_a).normalized()
+		if d1 < best_dist_p1:
+			best_dist_p1 = d1
+		if d2 < best_dist_p2:
+			best_dist_p2 = d2
 
-		# Проверяем совпадение направлений (abs т.к. дорога двусторонняя)
-		var dot: float = abs(seg_dir.dot(route_dir))
-		if dot > 0.7:  # ~45 градусов допуск
-			return true
+		# Направление проверяем только для сегментов, к которым оба конца близки
+		if d1 < ROUTE_MATCH_DISTANCE and d2 < ROUTE_MATCH_DISTANCE:
+			var route_dir: Vector2 = (route_b - route_a).normalized()
+			var dot: float = abs(seg_dir.dot(route_dir))
+			if dot > best_dot:
+				best_dot = dot
+
+	# Оба конца должны быть близко И направление совпадает
+	if best_dist_p1 < ROUTE_MATCH_DISTANCE and best_dist_p2 < ROUTE_MATCH_DISTANCE and best_dot > 0.85:
+		return true
 
 	return false
 

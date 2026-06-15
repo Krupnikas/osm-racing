@@ -300,10 +300,14 @@ func _snap_to_road_edge(pos: Vector2) -> Vector2:
 	if segments.is_empty():
 		return Vector2.ZERO
 
-	# Находим ближайший сегмент
+	# Находим ближайший сегмент (только автомобильные дороги)
+	const PEDESTRIAN_ROADS := ["footway", "path", "cycleway", "steps", "pedestrian"]
 	var best_dist := INF
 	var best_point := Vector2.ZERO
 	for seg in segments:
+		var hw: String = seg.get("highway", "")
+		if hw in PEDESTRIAN_ROADS:
+			continue
 		var p1: Vector2 = seg.p1
 		var p2: Vector2 = seg.p2
 		var width: float = seg.width
@@ -520,20 +524,132 @@ func _update_route_to(target: Vector3) -> void:
 # === PATHFINDING ПО ДОРОГАМ (A*) ===
 
 func _find_road_path(from_pos: Vector3, to_pos: Vector3) -> Array:
-	"""A* по дорожному графу. Возвращает Array[Vector2] точек маршрута."""
-	if not _terrain_generator or not _terrain_generator.has_method("get_road_segments_in_radius"):
-		return _straight_line_fallback(from_pos, to_pos)
+	"""Pathfinding по дорожной сети. Возвращает Array[Vector2] точек маршрута."""
+	# 1. Пробуем RoadNetwork (waypoint граф — покрывает все загруженные чанки)
+	var traffic_manager = get_tree().current_scene.find_child("TrafficManager", true, false)
+	if traffic_manager and traffic_manager.has_method("get_road_network"):
+		var road_network = traffic_manager.get_road_network()
+		if road_network and not road_network.all_waypoints.is_empty():
+			var path := _find_path_on_road_network(road_network, from_pos, to_pos)
+			if path.size() >= 2:
+				return path
 
+	# 2. Fallback: A* по сегментам дорог (работает только в пределах загруженных LOD0 чанков)
+	if _terrain_generator and _terrain_generator.has_method("get_road_segments_in_radius"):
+		var seg_path := _find_path_on_segments(from_pos, to_pos)
+		if seg_path.size() >= 2:
+			return seg_path
+
+	return _straight_line_fallback(from_pos, to_pos)
+
+
+func _find_path_on_road_network(road_network, from_pos: Vector3, to_pos: Vector3) -> Array:
+	"""A* по графу waypoints RoadNetwork. Работает на всех загруженных чанках."""
+	var start_wp = road_network.get_nearest_waypoint(from_pos)
+	var end_wp = road_network.get_nearest_waypoint(to_pos)
+	if not start_wp:
+		return []
+
+	var start_2d := Vector2(from_pos.x, from_pos.z)
+	var end_2d := Vector2(to_pos.x, to_pos.z)
+
+	# Если start далеко от ближайшего waypoint — сеть не покрывает эту область
+	if start_wp.position.distance_to(from_pos) > 100.0:
+		return []
+
+	# A* по waypoint графу (обходим и next и prev — ищем кратчайший путь, не NPC-маршрут)
+	var target_pos := to_pos
+	# open: [f_score, g_score, waypoint]
+	var open: Array = [[start_wp.position.distance_to(target_pos), 0.0, start_wp]]
+	var g_score := {start_wp: 0.0}
+	var came_from := {}
+	var closed := {}
+
+	var best_wp = start_wp  # Ближайший к цели найденный waypoint
+	var best_dist: float = start_wp.position.distance_to(target_pos)
+
+	for _iter in range(PATHFIND_MAX_ITER):
+		if open.is_empty():
+			break
+
+		# Находим минимум f
+		var best_idx := 0
+		for i in range(1, open.size()):
+			if open[i][0] < open[best_idx][0]:
+				best_idx = i
+		var entry: Array = open[best_idx]
+		open.remove_at(best_idx)
+		var current = entry[2]  # Waypoint
+		var g: float = entry[1]
+
+		if closed.has(current):
+			continue
+		closed[current] = true
+
+		# Обновляем лучший waypoint (ближайший к цели)
+		var dist_to_target: float = current.position.distance_to(target_pos)
+		if dist_to_target < best_dist:
+			best_dist = dist_to_target
+			best_wp = current
+
+		# Достигли цели?
+		if current == end_wp or dist_to_target < 30.0:
+			best_wp = current
+			break
+
+		# Раскрываем соседей (оба направления)
+		for next_wp in current.next_waypoints:
+			if closed.has(next_wp):
+				continue
+			var edge_cost: float = current.position.distance_to(next_wp.position)
+			var new_g: float = g + edge_cost
+			if new_g < g_score.get(next_wp, INF):
+				g_score[next_wp] = new_g
+				came_from[next_wp] = current
+				var h: float = next_wp.position.distance_to(target_pos)
+				open.append([new_g + h, new_g, next_wp])
+
+		for prev_wp in current.prev_waypoints:
+			if closed.has(prev_wp):
+				continue
+			var edge_cost: float = current.position.distance_to(prev_wp.position)
+			var new_g: float = g + edge_cost
+			if new_g < g_score.get(prev_wp, INF):
+				g_score[prev_wp] = new_g
+				came_from[prev_wp] = current
+				var h: float = prev_wp.position.distance_to(target_pos)
+				open.append([new_g + h, new_g, prev_wp])
+
+	# Реконструируем путь до best_wp
+	if best_wp == start_wp and best_dist > 50.0:
+		return []  # Не продвинулись — граф отсечён
+
+	var wp_path: Array = []
+	var n = best_wp
+	while came_from.has(n):
+		wp_path.insert(0, Vector2(n.position.x, n.position.z))
+		n = came_from[n]
+	wp_path.insert(0, Vector2(n.position.x, n.position.z))
+
+	# Собираем результат: start + waypoints + end
+	var result: Array = [start_2d]
+	for pt in wp_path:
+		if result[-1].distance_to(pt) > 3.0:
+			result.append(pt)
+	result.append(end_2d)
+	return result
+
+
+func _find_path_on_segments(from_pos: Vector3, to_pos: Vector3) -> Array:
+	"""A* по сегментам дорог (fallback — только в пределах LOD0)."""
 	var start := Vector2(from_pos.x, from_pos.z)
 	var end := Vector2(to_pos.x, to_pos.z)
 
-	# 1. Собираем сегменты вдоль коридора
 	var segments := _collect_corridor_segments(start, end)
 	if segments.is_empty():
-		return _straight_line_fallback(from_pos, to_pos)
+		return []
 
-	# 2. Строим граф
-	# graph: Dictionary[Vector2i] → Array of {to: Vector2i, cost: float}
+	# Строим граф
 	var graph := {}
 	for seg in segments:
 		var k1 := Vector2i(roundi(seg.p1.x), roundi(seg.p1.y))
@@ -549,20 +665,17 @@ func _find_road_path(from_pos: Vector3, to_pos: Vector3) -> Array:
 		graph[k2].append({"to": k1, "cost": cost})
 
 	if graph.is_empty():
-		return _straight_line_fallback(from_pos, to_pos)
+		return []
 
-	# 3. Ближайшие ноды к старту и финишу
 	var start_node := _nearest_graph_node(graph, start)
 	var end_node := _nearest_graph_node(graph, end)
 	if start_node == end_node:
 		return [start, end]
 
-	# 4. A*
-	var path := _astar(graph, start_node, end_node)
+	var path := _astar_segments(graph, start_node, end_node)
 	if path.is_empty():
-		return _straight_line_fallback(from_pos, to_pos)
+		return []
 
-	# 5. Конвертируем Vector2i → Vector2, добавляем start/end
 	var result: Array = [start]
 	for node in path:
 		result.append(Vector2(node.x, node.y))
@@ -571,6 +684,7 @@ func _find_road_path(from_pos: Vector3, to_pos: Vector3) -> Array:
 
 
 func _collect_corridor_segments(start: Vector2, end: Vector2) -> Array:
+	const PEDESTRIAN_ROADS := ["footway", "path", "cycleway", "steps", "pedestrian"]
 	var segments: Array = []
 	var seen := {}
 	var dist := start.distance_to(end)
@@ -581,6 +695,9 @@ func _collect_corridor_segments(start: Vector2, end: Vector2) -> Array:
 		var center_3d := Vector3(center.x, 0, center.y)
 		var segs: Array = _terrain_generator.get_road_segments_in_radius(center_3d, PATHFIND_QUERY_RADIUS)
 		for seg in segs:
+			var hw: String = seg.get("highway", "")
+			if hw in PEDESTRIAN_ROADS:
+				continue
 			var key := "%d_%d_%d_%d" % [roundi(seg.p1.x), roundi(seg.p1.y), roundi(seg.p2.x), roundi(seg.p2.y)]
 			if not seen.has(key):
 				seen[key] = true
@@ -599,11 +716,10 @@ func _nearest_graph_node(graph: Dictionary, pos: Vector2) -> Vector2i:
 	return best
 
 
-func _astar(graph: Dictionary, start: Vector2i, end: Vector2i) -> Array:
+func _astar_segments(graph: Dictionary, start: Vector2i, end: Vector2i) -> Array:
 	if not graph.has(start) or not graph.has(end):
 		return []
 	var end_f := Vector2(end.x, end.y)
-	# open: Array of [f_score, g_score, node]
 	var open: Array = [[start.distance_to(end), 0.0, start]]
 	var g_score := {start: 0.0}
 	var came_from := {}
@@ -612,7 +728,6 @@ func _astar(graph: Dictionary, start: Vector2i, end: Vector2i) -> Array:
 
 	while not open.is_empty() and iterations < PATHFIND_MAX_ITER:
 		iterations += 1
-		# Находим минимум f
 		var best_idx := 0
 		for i in range(1, open.size()):
 			if open[i][0] < open[best_idx][0]:
@@ -623,7 +738,6 @@ func _astar(graph: Dictionary, start: Vector2i, end: Vector2i) -> Array:
 		var g: float = current[1]
 
 		if node == end:
-			# Реконструируем путь
 			var path: Array = [end]
 			var n := end
 			while came_from.has(n):
@@ -767,12 +881,10 @@ func _remove_dropoff_marker() -> void:
 
 
 func _freeze_car() -> void:
-	if _car and _car is RigidBody3D:
-		(_car as RigidBody3D).linear_velocity = Vector3.ZERO
-		(_car as RigidBody3D).angular_velocity = Vector3.ZERO
-		_car.freeze = true
+	if _car and _car is VehicleBody3D:
+		_car.force_stop = true
 
 
 func _unfreeze_car() -> void:
-	if _car and _car is RigidBody3D:
-		_car.freeze = false
+	if _car and _car is VehicleBody3D:
+		_car.force_stop = false
