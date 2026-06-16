@@ -4816,8 +4816,10 @@ func _process_phase3_queue() -> bool:
 					"residential", "unclassified": ho = 0.006
 					"service": ho = 0.004
 				max_height_offset = maxf(max_height_offset, ho)
-			# Search ALL chunks — intersection may be registered under a different chunk due to overlap
-			var intersection_idx := _find_nearest_intersection(pos, 2.0)
+			# Search ALL chunks — intersection may be registered under a different chunk due to overlap.
+			# Радиус 12м (не 2м): узлы, слитые дедупликацией в соседний перекрёсток, должны найти
+			# родительский перекрёсток и взять его bezier-контур, а не падать в эллипс-fallback.
+			var intersection_idx := _find_nearest_intersection(pos, 12.0)
 			# Signs only in the chunk that contains the center (avoid duplicates)
 			if inside_chunk:
 				var sign_offset := Vector2(5, 5)
