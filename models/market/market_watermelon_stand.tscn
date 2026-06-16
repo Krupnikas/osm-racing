@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://bwmelonstand01"]
+
+[ext_resource type="Script" path="res://models/market/market_watermelon_stand.gd" id="1_wmstand"]
+
+[node name="MarketWatermelonStand" type="Node3D"]
+script = ExtResource("1_wmstand")

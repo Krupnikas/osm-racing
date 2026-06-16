@@ -4965,6 +4965,7 @@ func _process_phase3_queue() -> bool:
 		if chunk_key != "":
 			_place_custom_models_for_chunk(chunk_key, target)
 			_place_manual_props_for_chunk(chunk_key, target)
+			_place_market_stands_for_chunk(chunk_key, target)
 			_generate_trees_for_chunk(chunk_key, target)
 		var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
 		if not _pending_batch_chunks.has(batch_chunk_key):
@@ -18901,6 +18902,60 @@ func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
 			parent.add_child(inst)
 		print("OSM: Placed custom model '%s' at (%.1f, %.1f) in chunk %s, scale=%.1f" % [
 			model_path.get_file(), pos.x, pos.y, chunk_key, scale_val])
+
+
+var _market_stand_scene: PackedScene = null
+var _debug_market_stands: bool = false  # default OFF (placement + per-stand logs/markers)
+
+# Watermelon market stands — EXACT manual placement only. The configured anchor is authoritative:
+# no auto-search, no relocation, no default coordinate (empty config → nothing spawns). See
+# docs/WATERMELON_STAND_PLAN.md §6. Chunk-owned (parented to the chunk → freed on unload, rebuilt
+# intact on reload). Overlaps are NOT fixed here — the stand logs and keeps its configured position.
+func _place_market_stands_for_chunk(chunk_key: String, parent: Node3D) -> void:
+	if not _decoration_layer:
+		return
+	var entries: Array = _decoration_layer.get_market_stands()
+	if entries.is_empty():
+		return
+	if _market_stand_scene == null:
+		if not ResourceLoader.exists("res://models/market/market_watermelon_stand.tscn"):
+			return
+		_market_stand_scene = load("res://models/market/market_watermelon_stand.tscn")
+	for ei in range(entries.size()):
+		var e: Dictionary = entries[ei]
+		var lat: float = e.lat
+		var lon: float = e.lon
+		if lat == 0.0 or lon == 0.0:
+			continue
+		var anchor := _latlon_to_local(lat, lon)
+		var yaw_rad := deg_to_rad(float(e.yaw))
+		# frontage axis = the stand's local +X after yaw (Godot Y-rot basis x = (cos, 0, -sin))
+		var frontage := Vector2(cos(yaw_rad), -sin(yaw_rad))
+		var count: int = int(e.stand_count)
+		var spacing: float = float(e.spacing)
+		for i in range(count):
+			var off := (float(i) - float(count - 1) * 0.5) * spacing
+			var pos := anchor + frontage * off  # EXACT: anchor + configured offset only
+			var cx := int(floor(pos.x / chunk_size))
+			var cz := int(floor(pos.y / chunk_size))
+			if "%d,%d" % [cx, cz] != chunk_key:
+				continue
+			var sname := "MarketWatermelonStand_%d_%d" % [ei, i]
+			if parent.has_node(NodePath(sname)):
+				continue  # already built for this loaded chunk (no double-spawn)
+			var ground := _sample_elevation(pos.x, pos.y)  # Y-only grounding — never X/Z drift
+			var stand: Node3D = _market_stand_scene.instantiate()
+			stand.name = sname
+			stand.set("stand_index", ei * 10 + i)
+			stand.set("wmelon_debug", _debug_market_stands)
+			# Small lift so the pallet rests ON the terrain rather than sinking into the grass texture.
+			stand.position = Vector3(pos.x, ground + 0.06, pos.y)
+			stand.rotation.y = yaw_rad
+			stand.scale = Vector3.ONE * float(e.scale)
+			parent.add_child(stand)
+			if _debug_market_stands:
+				print("[WMELON] placed %s anchor(%.6f,%.6f) local=(%.2f,%.2f) yaw=%.0f chunk=%s" % [
+					sname, lat, lon, pos.x, pos.y, float(e.yaw), chunk_key])
 
 
 func _set_visibility_range_recursive(node: Node, range_end: float) -> void:

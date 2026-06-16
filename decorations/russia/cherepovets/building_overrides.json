@@ -809,6 +809,17 @@
   ],
   "roadside_props": [
   ],
+  "market_stands": [
+    {
+      "comment": "Watermelon pallet stands by the bazar gate — exact manual anchor (authoritative)",
+      "lat": 59.145588,
+      "lon": 37.946021,
+      "yaw": 256.0,
+      "stand_count": 2,
+      "spacing": 1.6,
+      "scale": 1.3
+    }
+  ],
   "landuse_overrides": [
     {
       "osm_way_id": 694466407,
