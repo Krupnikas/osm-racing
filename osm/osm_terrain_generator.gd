@@ -55,10 +55,21 @@ var _ground_shader_material: ShaderMaterial = null  # Shared material for all gr
 var _ground_shader_material_lod2: ShaderMaterial = null  # Brighter variant for LOD2 (compensates mip darkening)
 var _textures_initialized := false
 
-# Текстуры люков
-var _manhole_albedo: Texture2D
-var _manhole_normal: Texture2D
-var _manhole_opacity: Texture2D
+# Люки — реальная 3D-модель крышки (раньше был Decal, который проецировался
+# и на проезжающие машины «как сверху проектором»). Теперь машина переезжает
+# крышку: меш лежит на дороге + цилиндрическая коллизия в слое дороги.
+const MANHOLE_DIAMETER := 0.9  # целевой диаметр крышки, м
+var _manhole_mesh: Mesh  # общий меш крышки (73 верта), переиспользуется
+var _manhole_shape: CylinderShape3D  # общая коллизия (плоский цилиндр)
+var _manhole_model_scale := 1.0  # uniform-скейл модели до MANHOLE_DIAMETER
+var _manhole_mesh_y_off := 0.0  # сдвиг меша вверх, чтобы низ лёг на дорогу
+var _manhole_thickness := 0.05  # высота крышки над дорогой, м
+# Ночной пар из части люков (как из канализации). Общие ресурсы частиц + общий меш-пасс,
+# переиспользуются всеми эмиттерами. Эмиттеры в группе "manhole_steam" — переключаются
+# вместе с ночью в _on_night_mode_changed (днём emitting/visible=false → ~0 стоимости).
+const MANHOLE_STEAM_FRACTION := 0.30  # доля люков, из которых идёт пар
+var _manhole_steam_mesh: QuadMesh  # общий draw-pass (мягкий billboard-квад)
+var _manhole_steam_process: ParticleProcessMaterial  # общий процесс-материал
 
 @export var start_lat := 59.1509  # = ChunkMath.ORIGIN_LAT (fixed global origin)
 @export var start_lon := 37.9483  # = ChunkMath.ORIGIN_LON
@@ -1096,10 +1107,9 @@ func _init_textures() -> void:
 	_road_textures["service"] = _cached_road_albedo
 	_road_textures["marking_service"] = null
 
-	# Текстуры люков
-	_manhole_albedo = load("res://textures/road/manhole/color_alpha.png")
-	_manhole_normal = load("res://textures/road/manhole/normal.png")
-	print("OSM Manholes: textures loaded - albedo=%s, normal=%s" % [_manhole_albedo != null, _manhole_normal != null])
+	# Люки — загружаем 3D-модель крышки один раз, считаем скейл/грунтовку из РЕАЛЬНЫХ
+	# вершин (не get_aabb — он у импортов бывает раздут, см. cone-levitation gotcha).
+	_load_manhole_model()
 
 	# Текстуры зданий — PBR текстуры из ambientCG (CC0)
 	# Bricks053 — светлые здания (panel), Bricks026 — кирпичные (brick)
@@ -18541,6 +18551,18 @@ func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
 		inst.position = Vector3(pos.x, ground_y + y_offset, pos.y)
 		inst.scale = Vector3.ONE * scale_val
 		inst.rotation_degrees.y = entry.rotation_y
+		# Optional extras (bazar gate & co): real-vertex grounding, box collision, per-half signs.
+		var coll_kind: String = entry.get("collision", "")
+		var signs_arr: Array = entry.get("signs", [])
+		if coll_kind != "" or not signs_arr.is_empty() or entry.get("auto_ground", false):
+			var mab := _scene_real_vertex_aabb(inst)  # model-space (unscaled) AABB
+			if mab.size != Vector3.ZERO:
+				# Ground so the model base sits on the road (real verts, not get_aabb).
+				inst.position.y = ground_y + (-mab.position.y * scale_val) + y_offset
+				if coll_kind == "box":
+					_add_box_collision_to_model(inst, mab)
+				for s in signs_arr:
+					_add_gate_sign(inst, mab, s)
 		var vis_range: float = entry.get("visibility_range", 150.0)
 		if vis_range > 300.0:
 			# Large-range model (e.g. bridge pylon) — parent to self so it
@@ -18567,6 +18589,84 @@ func _set_visibility_range_recursive(node: Node, range_end: float) -> void:
 		node.visibility_range_end = range_end
 	for child in node.get_children():
 		_set_visibility_range_recursive(child, range_end)
+
+
+func _scene_real_vertex_aabb(root: Node3D) -> AABB:
+	"""Model-LOCAL (unscaled) AABB of a custom model from REAL vertices (not get_aabb — the
+	cone-levitation gotcha). root's own transform is excluded; child mesh transforms included."""
+	var ab := AABB()
+	var first := true
+	var stack: Array = [root]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		for c in n.get_children():
+			stack.push_back(c)
+		if n is MeshInstance3D and (n as MeshInstance3D).mesh:
+			var mi := n as MeshInstance3D
+			var t := Transform3D.IDENTITY
+			var p: Node = mi
+			while p != null and p != root:
+				if p is Node3D:
+					t = (p as Node3D).transform * t
+				p = p.get_parent()
+			for si in range(mi.mesh.get_surface_count()):
+				var verts: PackedVector3Array = mi.mesh.surface_get_arrays(si)[Mesh.ARRAY_VERTEX]
+				for v in verts:
+					var wv: Vector3 = t * v
+					if first:
+						ab = AABB(wv, Vector3.ZERO); first = false
+					else:
+						ab = ab.expand(wv)
+	return ab
+
+
+func _add_box_collision_to_model(inst: Node3D, mab: AABB) -> void:
+	"""Wraps a custom model in a StaticBody3D + BoxShape3D (model-space size, scaled by parent).
+	Layer 1 (static world); the car (mask 7) is physically blocked."""
+	var body := StaticBody3D.new()
+	body.name = "ModelCollision"
+	body.collision_layer = 1
+	body.collision_mask = 0
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = mab.size
+	cs.shape = box
+	cs.position = mab.get_center()
+	body.add_child(cs)
+	inst.add_child(body)
+
+
+func _add_gate_sign(inst: Node3D, mab: AABB, s: Dictionary) -> void:
+	"""Hangs a sign image as a textured quad on a door panel (parented to the model → inherits
+	scale/rotation). Placement is data-driven via fractions of the model bbox so it can be tuned
+	from JSON without code edits:
+	  u    : horizontal centre, fraction of half-width from model centre (-1..1)
+	  v    : vertical centre, fraction of half-height from model centre (-1..1)
+	  front: depth, fraction of half-depth from centre (~0.7 sits on the door's front face;
+	         the default frame plane is further out and makes signs look like they float)
+	  size : overall size multiplier (base = 0.21 x 0.31 of the model)."""
+	var tex_path: String = s.get("texture", "")
+	if tex_path.is_empty() or not ResourceLoader.exists(tex_path):
+		push_warning("Gate sign texture missing: " + tex_path)
+		return
+	var tex: Texture2D = load(tex_path)
+	var side: String = s.get("side", "left")
+	var size_mul: float = float(s.get("size", 1.0))
+	var u: float = float(s.get("u", -0.5 if side == "left" else 0.5))
+	var v: float = float(s.get("v", 0.0))
+	var front: float = float(s.get("front", 1.1))
+	var quad := QuadMesh.new()
+	quad.size = Vector2(mab.size.x * 0.21 * size_mul, mab.size.y * 0.31 * size_mul)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = tex
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var mi := MeshInstance3D.new()
+	mi.mesh = quad
+	mi.material_override = mat
+	var c := mab.get_center()
+	mi.position = Vector3(c.x + u * mab.size.x * 0.5, c.y + v * mab.size.y * 0.5, c.z + front * mab.size.z * 0.5)
+	inst.add_child(mi)
 
 
 func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, parent: Node3D) -> void:
@@ -21241,6 +21341,10 @@ func _veg_ensure_assets() -> bool:
 				dm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
 				dm.alpha_scissor_threshold = 0.5
 				dm.cull_mode = BaseMaterial3D.CULL_DISABLED
+				# The birch GLB ships its material as UNSHADED → it ignored lighting and stayed
+				# full-bright at night ("glowing birches"), unlike the other (lit) trees. Make it
+				# lit so it darkens at night like everything else.
+				dm.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
 				mat = dm
 			out_mesh.surface_set_material(out_mesh.get_surface_count() - 1, mat)
 		_veg_birch_meshes.append(out_mesh)
@@ -23104,7 +23208,7 @@ func _generate_manholes_along_road(nodes: Array, road_width: float, parent: Node
 	if not enable_manholes or nodes.size() < 2:
 		return
 
-	if not _manhole_albedo or not _manhole_normal:
+	if not _manhole_mesh:
 		return
 
 	var accumulated := 0.0
@@ -23126,7 +23230,7 @@ func _generate_manholes_along_road(nodes: Array, road_width: float, parent: Node
 				var manhole_pos := road_pos - perp * offset  # Вправо от центра
 
 				var elev := _sample_elevation(manhole_pos.x, manhole_pos.y)
-				_create_manhole_decal(manhole_pos, elev, randf() * TAU, parent)
+				_create_manhole_cover(manhole_pos, elev, randf() * TAU, parent)
 				last_manhole = accumulated + pos_along
 
 			pos_along += 50.0  # Шаг проверки
@@ -23138,7 +23242,7 @@ func _generate_manholes_along_road(nodes: Array, road_width: float, parent: Node
 func _generate_manholes_fast(local_points: PackedVector2Array, road_width: float, parent: Node3D) -> void:
 	if not enable_manholes or local_points.size() < 2:
 		return
-	if not _manhole_albedo or not _manhole_normal:
+	if not _manhole_mesh:
 		return
 
 	var accumulated := 0.0
@@ -23159,7 +23263,7 @@ func _generate_manholes_fast(local_points: PackedVector2Array, road_width: float
 				var road_pos := p1.lerp(p2, t)
 				var manhole_pos := road_pos - perp * offset
 
-				_create_manhole_decal(manhole_pos, _sample_elevation(manhole_pos.x, manhole_pos.y), randf() * TAU, parent)
+				_create_manhole_cover(manhole_pos, _sample_elevation(manhole_pos.x, manhole_pos.y), randf() * TAU, parent)
 				last_manhole = accumulated + pos_along
 
 			pos_along += 50.0
@@ -23170,26 +23274,167 @@ func _generate_manholes_fast(local_points: PackedVector2Array, road_width: float
 var _manhole_count := 0  # Debug counter
 var _manhole_positions := {}  # Трекинг позиций для дедупликации
 
-func _create_manhole_decal(pos: Vector2, elevation: float, rotation: float, parent: Node3D) -> void:
-	"""Создаёт Decal люка в указанной позиции"""
+func _load_manhole_model() -> void:
+	"""Грузит модель крышки люка один раз: общий меш + общая коллизия, скейл/грунтовка
+	из РЕАЛЬНЫХ вершин (get_aabb у импортов бывает раздут — см. cone-levitation gotcha)."""
+	var scene: PackedScene = load("res://models/manhole/manhole.glb")
+	if not scene:
+		push_warning("OSM Manholes: model res://models/manhole/manhole.glb not found")
+		return
+	var inst := scene.instantiate()
+	var mi: MeshInstance3D = null
+	var stack: Array = [inst]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		for c in n.get_children():
+			stack.push_back(c)
+		if n is MeshInstance3D:
+			mi = n
+	if mi == null or mi.mesh == null:
+		inst.free()
+		push_warning("OSM Manholes: no MeshInstance3D in model")
+		return
+	_manhole_mesh = mi.mesh
+	# real-vertex AABB (mesh node transform is identity for this model)
+	var ab := AABB()
+	var first := true
+	for si in range(_manhole_mesh.get_surface_count()):
+		var verts: PackedVector3Array = _manhole_mesh.surface_get_arrays(si)[Mesh.ARRAY_VERTEX]
+		for v in verts:
+			if first:
+				ab = AABB(v, Vector3.ZERO); first = false
+			else:
+				ab = ab.expand(v)
+	inst.free()
+	var width: float = maxf(ab.size.x, ab.size.z)
+	_manhole_model_scale = (MANHOLE_DIAMETER / width) if width > 0.0 else 1.0
+	_manhole_thickness = ab.size.y * _manhole_model_scale
+	_manhole_mesh_y_off = -ab.position.y * _manhole_model_scale  # низ меша → на дорогу
+	_manhole_shape = CylinderShape3D.new()
+	_manhole_shape.radius = MANHOLE_DIAMETER * 0.5
+	_manhole_shape.height = _manhole_thickness
+	_build_manhole_steam_resources()
+	print("OSM Manholes: model loaded scale=%.5f thickness=%.3fm" % [_manhole_model_scale, _manhole_thickness])
+
+
+func _build_manhole_steam_resources() -> void:
+	"""Строит общие ресурсы ночного пара (один раз): мягкая радиальная текстура-пуф,
+	unshaded billboard-материал и процесс-материал восходящего пара."""
+	# Мягкий круглый «пуф»: радиальный градиент белый-центр → прозрачные края.
+	var grad := Gradient.new()
+	grad.offsets = PackedFloat32Array([0.0, 0.5, 1.0])
+	grad.colors = PackedColorArray([Color(1, 1, 1, 1), Color(1, 1, 1, 0.5), Color(1, 1, 1, 0.0)])
+	var puff := GradientTexture2D.new()
+	puff.gradient = grad
+	puff.fill = GradientTexture2D.FILL_RADIAL
+	puff.fill_from = Vector2(0.5, 0.5)
+	puff.fill_to = Vector2(1.0, 0.5)  # радиус 0.5 → прозрачность к краю
+	puff.width = 64
+	puff.height = 64
+
+	var dm := StandardMaterial3D.new()
+	dm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED  # надёжно видно в темноте
+	dm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	dm.albedo_texture = puff
+	dm.albedo_color = Color(0.72, 0.78, 0.85, 0.22)  # холодновато-белый, низкая альфа
+	dm.vertex_color_use_as_albedo = true  # чтобы кривая альфы частиц применялась
+	dm.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+	dm.billboard_keep_scale = true
+	dm.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	dm.cull_mode = BaseMaterial3D.CULL_DISABLED
+	dm.disable_receive_shadows = true
+
+	_manhole_steam_mesh = QuadMesh.new()
+	_manhole_steam_mesh.size = Vector2(0.7, 0.7)
+	_manhole_steam_mesh.material = dm
+
+	# Процесс: медленный восходящий пар с лёгкой турбулентностью, рост + плавная альфа.
+	var pm := ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE_SURFACE
+	pm.emission_sphere_radius = 0.16
+	pm.direction = Vector3(0, 1, 0)
+	pm.spread = 10.0
+	pm.initial_velocity_min = 0.25
+	pm.initial_velocity_max = 0.55
+	pm.gravity = Vector3(0, 0.12, 0)  # лёгкая плавучесть вверх
+	pm.damping_min = 0.0
+	pm.damping_max = 0.25
+	pm.scale_min = 0.5
+	pm.scale_max = 1.0
+	# рост размера по жизни
+	var scurve := Curve.new()
+	scurve.add_point(Vector2(0.0, 0.4))
+	scurve.add_point(Vector2(1.0, 1.6))
+	var sctex := CurveTexture.new()
+	sctex.curve = scurve
+	pm.scale_curve = sctex
+	# альфа: быстро проявляется, медленно тает
+	var aramp := Gradient.new()
+	aramp.offsets = PackedFloat32Array([0.0, 0.18, 1.0])
+	aramp.colors = PackedColorArray([Color(1, 1, 1, 0.0), Color(1, 1, 1, 1.0), Color(1, 1, 1, 0.0)])
+	var artex := GradientTexture1D.new()
+	artex.gradient = aramp
+	pm.color_ramp = artex
+	pm.turbulence_enabled = true
+	pm.turbulence_noise_strength = 0.25
+	pm.turbulence_noise_scale = 1.2
+	_manhole_steam_process = pm
+
+
+func _create_manhole_cover(pos: Vector2, elevation: float, rotation: float, parent: Node3D) -> void:
+	"""Кладёт 3D-крышку люка на дорогу + коллизию в слое дороги (машина переезжает)."""
 	# Дедупликация: округляем позицию до 1м и проверяем
 	var key := "%d_%d" % [int(pos.x), int(pos.y)]
 	if _manhole_positions.has(key):
 		return
 	_manhole_positions[key] = true
-	var decal := Decal.new()
-	decal.position = Vector3(pos.x, elevation + 0.5, pos.y)
-	decal.rotation.y = rotation
-	decal.size = Vector3(0.93, 1.0, 0.93)
 
-	decal.texture_albedo = _manhole_albedo
-	decal.texture_normal = _manhole_normal
+	# StaticBody3D в слое дороги (1) + группа "Road" — колёса GEVP проезжают, не врезаются.
+	var body := StaticBody3D.new()
+	body.position = Vector3(pos.x, elevation, pos.y)
+	body.collision_layer = 1
+	body.collision_mask = 0
+	body.add_to_group("Road")
 
-	decal.distance_fade_enabled = true
-	decal.distance_fade_begin = 80.0
-	decal.distance_fade_length = 20.0
+	var mesh_node := MeshInstance3D.new()
+	mesh_node.mesh = _manhole_mesh
+	mesh_node.scale = Vector3.ONE * _manhole_model_scale
+	mesh_node.position.y = _manhole_mesh_y_off
+	mesh_node.rotation.y = rotation
+	mesh_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mesh_node.visibility_range_end = 120.0
+	mesh_node.visibility_range_end_margin = 20.0
+	mesh_node.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	body.add_child(mesh_node)
 
-	parent.add_child(decal)
+	var coll := CollisionShape3D.new()
+	coll.shape = _manhole_shape
+	coll.position.y = _manhole_thickness * 0.5
+	body.add_child(coll)
+
+	# Ночной пар из части люков (детерминированно по позиции, чтобы не мерцал при
+	# перезагрузке чанка). Днём emitting/visible=false → почти бесплатно.
+	if _manhole_steam_process and absi(hash(key)) % 100 < int(MANHOLE_STEAM_FRACTION * 100.0):
+		var steam := GPUParticles3D.new()
+		steam.amount = 10
+		steam.lifetime = 3.5
+		steam.preprocess = 2.0  # пар уже есть, когда наступает ночь
+		steam.randomness = 0.5
+		steam.fixed_fps = 15  # пар медленный — низкий fps достаточно, дешевле
+		steam.local_coords = false  # мировые координаты → естественный снос
+		steam.process_material = _manhole_steam_process
+		steam.draw_pass_1 = _manhole_steam_mesh
+		steam.visibility_aabb = AABB(Vector3(-1.0, -0.2, -1.0), Vector3(2.0, 4.5, 2.0))
+		steam.position.y = _manhole_thickness
+		steam.visibility_range_end = 70.0
+		steam.visibility_range_end_margin = 15.0
+		steam.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		steam.visible = _is_night_mode
+		steam.emitting = _is_night_mode
+		steam.add_to_group("manhole_steam")
+		body.add_child(steam)
+
+	parent.add_child(body)
 	_manhole_count += 1
 	if _manhole_count <= 5 or _manhole_count % 50 == 0:
 		print("OSM Manholes: created #%d at (%.1f, %.1f)" % [_manhole_count, pos.x, pos.y])
@@ -24017,6 +24262,12 @@ func _on_night_mode_changed(enabled: bool) -> void:
 	# Stop wire sparks immediately when day returns (night re-arms in _process).
 	if not enabled:
 		_stop_wire_sparks()
+
+	# Ночной пар из люков — включаем/выключаем все эмиттеры разом.
+	for steam in get_tree().get_nodes_in_group("manhole_steam"):
+		if is_instance_valid(steam):
+			steam.visible = enabled
+			steam.emitting = enabled
 
 	# Обновляем все фонари и неоновые вывески
 	for chunk_key in _loaded_chunks.keys():

@@ -234,7 +234,11 @@ func _load_building_overrides_json(path: String) -> void:
 			"scale": md.get("scale", 1.0),
 			"y_offset": md.get("y_offset", 0.0),
 			"visibility_range": md.get("visibility_range", 150.0),
-			"clear_trees_radius": md.get("clear_trees_radius", 0.0)
+			"clear_trees_radius": md.get("clear_trees_radius", 0.0),
+			# Optional extras (bazar gate & co): box collision, per-half signs, real-vertex grounding
+			"collision": md.get("collision", ""),  # "" | "box"
+			"signs": md.get("signs", []),  # [{texture, side:"left"|"right"}]
+			"auto_ground": md.get("auto_ground", false)
 		})
 
 	# Manual roadside props (kiosk/ebox) by coordinate — auto-grounded by the prop system
