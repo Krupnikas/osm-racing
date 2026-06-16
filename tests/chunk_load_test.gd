@@ -53,6 +53,10 @@ func _ready() -> void:
 			test_location.x = float(arg.substr(11))
 		elif arg.begins_with("--test-lon="):
 			test_location.y = float(arg.substr(11))
+		elif arg.begins_with("--fly-height="):
+			fly_height = float(arg.substr(13))
+		elif arg.begins_with("--fly-speed="):
+			fly_speed = float(arg.substr(12))
 	print("\n========== CHUNK LOAD PERFORMANCE TEST ==========")
 	print("Location: (%.4f, %.4f)" % [test_location.x, test_location.y])
 	print("Phase 1: Initial load (camera stationary, profiled separately)")
@@ -134,12 +138,21 @@ func _apply_render_flags() -> void:
 	# Scene feature flags (OSM terrain generator)
 	if osm_terrain:
 		for arg in args:
-			if arg == "--no-buildings":
+			if arg == "--perf-verbose":
+				osm_terrain._perf_verbose = true
+				disabled.append("(perf-verbose: log every slow frame)")
+			elif arg == "--no-bush-shadows":
+				osm_terrain.enable_bush_shadows = false
+				disabled.append("BushShadows")
+			elif arg == "--no-buildings":
 				osm_terrain.enable_buildings = false
 				disabled.append("Buildings")
 			elif arg == "--no-vegetation":
 				osm_terrain.enable_vegetation = false
 				disabled.append("Vegetation")
+			elif arg == "--no-bushes":
+				osm_terrain.enable_bushes = false
+				disabled.append("Bushes")
 			elif arg == "--no-lamps":
 				osm_terrain.enable_street_lamps = false
 				disabled.append("Lamps")

@@ -1,0 +1,11 @@
+Model Information:
+* title:	Low poly Bush (Buxus)
+* source:	https://sketchfab.com/3d-models/low-poly-bush-buxus-d3383bb111bc49d6a9d6cfe810e3058b
+* author:	arekusandoru.kurobe (https://sketchfab.com/arekusandoru.kurobe)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Low poly Bush (Buxus)" (https://sketchfab.com/3d-models/low-poly-bush-buxus-d3383bb111bc49d6a9d6cfe810e3058b) by arekusandoru.kurobe (https://sketchfab.com/arekusandoru.kurobe) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

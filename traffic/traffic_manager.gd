@@ -127,6 +127,10 @@ func _ready() -> void:
 
 	print("TrafficManager: Initialized (max %d NPCs)" % max_npcs)
 
+	# Прогреваем пул NPC заранее (на загрузочном экране), чтобы в игре спавн не
+	# инстансил машину каждую секунду (главная причина фриза ~1/сек).
+	_prewarm_pool()
+
 
 func _warmup_mesh_cache() -> void:
 	var t0 := Time.get_ticks_msec()
@@ -235,12 +239,30 @@ func _update_spawning() -> void:
 	var spawns_this_frame := 0
 	const MAX_SPAWNS_PER_FRAME := 3
 
+	# Радиус актуальности спавна: только чанки рядом с игроком. Раньше цикл шёл
+	# по ВСЕМ загруженным чанкам (до 90, включая LOD2 за 1км) каждую секунду —
+	# это давало фриз ~75-80мс/сек (главная причина периодического фриза).
+	var t_chunk_size: float = terrain_generator.chunk_size if "chunk_size" in terrain_generator else 210.0
+	var spawn_chunk_radius: float = spawn_distance + t_chunk_size
+
 	# Проходим по всем полностью загруженным чанкам
 	for chunk_key in loaded_chunks.keys():
 		if active_npcs.size() >= max_npcs:
 			break
 		if spawns_this_frame >= MAX_SPAWNS_PER_FRAME:
 			break
+
+		# Пропускаем далёкие чанки ДО дорогой работы (waypoints/спавн имеют смысл
+		# только рядом с игроком) — бьёт фриз обхода всех чанков.
+		var ck_parts := String(chunk_key).split(",")
+		if ck_parts.size() == 2:
+			var ccx := (ck_parts[0].to_float() + 0.5) * t_chunk_size
+			var ccz := (ck_parts[1].to_float() + 0.5) * t_chunk_size
+			var dx := ccx - player_pos.x
+			var dz := ccz - player_pos.z
+			if dx * dx + dz * dz > spawn_chunk_radius * spawn_chunk_radius:
+				continue
+
 		# Спавним только в полностью финализированных чанках
 		if not terrain_generator.is_chunk_fully_ready(chunk_key):
 			continue
@@ -309,10 +331,6 @@ func _attempt_spawn_in_chunk(chunk_key: String, player_pos: Vector3) -> bool:
 
 	# Добавляем в списки
 	active_npcs.append(npc)
-
-	print("[NPC Spawn] chunk=%s bridge=%s pos=(%.1f, %.1f, %.1f) wp_y=%.1f" % [
-		chunk_key, spawn_waypoint.is_bridge, spawn_pos.x, spawn_pos.y, spawn_pos.z,
-		spawn_waypoint.position.y])
 
 	return true
 
@@ -442,9 +460,10 @@ func _choose_next_waypoint(current: Variant) -> Variant:
 	return straight_wp
 
 
-func _get_npc_from_pool():
-	"""Получает NPC из pool или создаёт новый"""
-	if inactive_npcs.size() > 0:
+func _get_npc_from_pool(force_new := false):
+	"""Получает NPC из pool или создаёт новый.
+	force_new=true — всегда instantiate, минуя пул (для прогрева пула)."""
+	if not force_new and inactive_npcs.size() > 0:
 		var npc = inactive_npcs.pop_back()
 		npc.visible = true
 		npc.process_mode = Node.PROCESS_MODE_INHERIT
@@ -555,6 +574,25 @@ func _get_npc_from_pool():
 		return npc
 
 	return null
+
+
+## Прогрев пула: заранее инстансируем max_npcs машин (на загрузочном экране),
+## размазывая по кадрам. В игре спавн берёт готовую из пула без instantiate()
+## (~30-40мс) → убирает периодический фриз ~1/сек при спавне NPC.
+func _prewarm_pool() -> void:
+	var made := 0
+	for i in range(max_npcs):
+		var npc = _get_npc_from_pool(true)  # force_new — всегда новый, минуя пул
+		if npc == null:
+			continue
+		npc.visible = false
+		npc.process_mode = Node.PROCESS_MODE_DISABLED
+		inactive_npcs.append(npc)
+		made += 1
+		# Размазываем по кадрам, чтобы не застопорить загрузку одним кадром
+		if i % 2 == 1:
+			await get_tree().process_frame
+	print("TrafficManager: NPC pool pre-warmed (%d ready)" % made)
 
 
 func _on_npc_request_despawn(npc) -> void:
