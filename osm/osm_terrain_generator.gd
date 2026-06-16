@@ -769,6 +769,7 @@ const RS_CAT_CURB := 3
 const RS_CAT_FENCE := 4
 const RS_CAT_OTHER := 5
 const RS_CAT_MAX := 5
+const RS_REVEAL_PER_FRAME := 2  # сколько RS-инстансов чанка показывать за кадр (размазка GPU-аплоада)
 var _chunk_rs_meshes: Dictionary = {}  # chunk_key -> Array[Mesh] (prevent GC)
 var _chunk_road_materials: Dictionary = {}  # chunk_key -> Array[ShaderMaterial] (wet mode)
 var _chunk_building_rs: Dictionary = {}  # chunk_key -> Array[RID] (shadow LOD)
@@ -26834,6 +26835,25 @@ func is_chunk_fully_ready(chunk_key: String) -> bool:
 	return _loaded_chunks.has(chunk_key) and not _chunk_activation_pending.has(chunk_key)
 
 
+## Сортирует RS-инстансы чанка по категории (террейн→здания→дороги→…) для
+## поэтапного появления. Меши (_chunk_rs_meshes) не сортируем — они нужны только
+## против GC, порядок не важен и они не выровнены 1:1 (хранят ещё и материалы).
+func _sort_chunk_rs_by_category(chunk_key: String) -> void:
+	var inst: Array = _chunk_rs_instances.get(chunk_key, [])
+	var cats: Array = _chunk_rs_categories.get(chunk_key, [])
+	if inst.size() != cats.size() or inst.size() < 2:
+		return
+	var order: Array = range(inst.size())
+	order.sort_custom(func(a, b): return int(cats[a]) < int(cats[b]))
+	var new_inst: Array = []
+	var new_cats: Array = []
+	for idx in order:
+		new_inst.append(inst[idx])
+		new_cats.append(cats[idx])
+	_chunk_rs_instances[chunk_key] = new_inst
+	_chunk_rs_categories[chunk_key] = new_cats
+
+
 ## Lazy chunk activation — даёт Vulkan время подготовить GPU ресурсы перед показом
 func _process_chunk_activation() -> void:
 	if _chunk_activation_pending.is_empty():
@@ -26875,6 +26895,7 @@ func _process_chunk_activation() -> void:
 					dump_chunk_pipeline(chunk_key)
 			if not _chunk_has_pending_work(chunk_key):
 				_chunk_activation_pending[chunk_key] = 0  # начинаем пакетную активацию
+				_sort_chunk_rs_by_category(chunk_key)  # порядок появления: террейн→здания→дороги→…
 				_set_chunk_stage(chunk_key, "activating")
 		else:
 			# Пакетная активация RS instances по N за кадр
@@ -26918,23 +26939,20 @@ func _process_chunk_activation() -> void:
 					_chunk_activation_pending[chunk_key] = r_end
 				continue
 
-			# Поэтапное появление: раскрываем по ОДНОЙ непустой категории за кадр
-			# (террейн → здания → дороги → бордюры → заборы → прочее), затем scene
-			# tree (деревья/фонари/знаки). Изолирует тяжёлый аплоад зданий в свой
-			# кадр → нет спайка «весь чанк разом». state = уровень категории.
+			# Поэтапное появление: инстансы отсортированы по категории (террейн →
+			# здания → дороги → бордюры → заборы → прочее), раскрываем по
+			# RS_REVEAL_PER_FRAME за кадр. Так даже множество surface-мешей зданий
+			# размазывается на несколько кадров → нет спайка GPU-аплоада «всё разом».
 			var instances: Array = _chunk_rs_instances[chunk_key]
-			var cats: Array = _chunk_rs_categories.get(chunk_key, [])
-			var revealed_any := false
-			while state <= RS_CAT_MAX and not revealed_any:
-				for i in range(instances.size()):
-					var c: int = int(cats[i]) if i < cats.size() else RS_CAT_OTHER
-					if c == state:
-						RenderingServer.instance_set_visible(instances[i], true)
-						revealed_any = true
-				state += 1
-			rs_activated += 1  # одна категория-стадия за кадр на чанк
-			if state > RS_CAT_MAX:
-				# Все категории RS показаны — включаем scene tree node (деревья/фонари)
+			var r_end: int = mini(state + RS_REVEAL_PER_FRAME, instances.size())
+			var i := state
+			while i < r_end:
+				RenderingServer.instance_set_visible(instances[i], true)
+				i += 1
+			rs_activated += 1  # одна стадия (батч) за кадр на чанк
+			state = r_end
+			if state >= instances.size():
+				# Все RS показаны — включаем scene tree node (деревья/фонари/знаки)
 				var cn: Node3D = _get_chunk_node(chunk_key)
 				if is_instance_valid(cn):
 					cn.visible = true

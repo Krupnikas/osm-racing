@@ -53,6 +53,10 @@ func _ready() -> void:
 			test_location.x = float(arg.substr(11))
 		elif arg.begins_with("--test-lon="):
 			test_location.y = float(arg.substr(11))
+		elif arg.begins_with("--fly-height="):
+			fly_height = float(arg.substr(13))
+		elif arg.begins_with("--fly-speed="):
+			fly_speed = float(arg.substr(12))
 	print("\n========== CHUNK LOAD PERFORMANCE TEST ==========")
 	print("Location: (%.4f, %.4f)" % [test_location.x, test_location.y])
 	print("Phase 1: Initial load (camera stationary, profiled separately)")
