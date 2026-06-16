@@ -21,7 +21,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)
 shape = SubResource("BoxShape3D_taxi")
 
 [node name="Model" parent="." instance=ExtResource("2_taxi_model")]
-transform = Transform3D(-0.1, 0, 0, 0, 0.1, 0, 0, 0, -0.1, 0, 0.8, 0)
+transform = Transform3D(-0.1, 0, 0, 0, 0.1, 0, 0, 0, -0.1, 0, 0.56, 0)
 script = ExtResource("3_taxi_setup")
 
 [node name="WheelFrontLeft" type="VehicleWheel3D" parent="."]

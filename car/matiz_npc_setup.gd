@@ -29,6 +29,8 @@ func _ready() -> void:
 	# are matched first so "rear turn signals" stays red.
 	init_real_lens(["lights_chassis", "lights_body_7", "front turn"], ["rear brake", "rear lamp", "rear light", "rear turn"], true)
 
+	_hide_misplaced_tuning_lights()
+
 	await get_tree().process_frame
 
 	_change_body_color()
@@ -41,6 +43,17 @@ func _find_all_meshes(node: Node) -> Array:
 	for child in node.get_children():
 		meshes.append_array(_find_all_meshes(child))
 	return meshes
+
+
+## The Matiz GLB ships an emissive "tune light" underbody-neon strip baked below the body — at
+## night it glows UNDER THE GROUND ("headlights under the ground"). Same stray mesh the player
+## Matiz hides (matiz_setup.gd). Match by the model's surface name "tune light".
+func _hide_misplaced_tuning_lights() -> void:
+	for mesh in _find_all_meshes(self):
+		if not (mesh is MeshInstance3D):
+			continue
+		if "tune light" in String(mesh.name).to_lower():
+			(mesh as MeshInstance3D).visible = false
 
 
 func _change_body_color() -> void:

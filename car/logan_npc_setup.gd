@@ -7,6 +7,10 @@ extends "res://car/npc_real_lens.gd"
 ## colour is a per-instance override on the merged "Kuzov1" surface.
 
 const PAINT_MAT := "kuzov1"
+const CarWheelRig := preload("res://tools/car_wheel_rig.gd")
+# Logan wheels are merged-by-material: one "Disk_low" (rims) + one "Rezina_low" (tires) across all 4
+# wheels → split into spinning containers. "disk"/"rezina" added to the wheel name keys.
+const WHEEL_KEYS := ["tire", "tyre", "rim", "wheel", "brakedisc", "brake_disc", "caliper", "disk", "rezina"]
 
 const NPC_COLORS := [
 	Color(0.93, 0.93, 0.91),  # White
@@ -24,6 +28,8 @@ var body_color := NPC_COLORS[0]
 
 
 func _ready() -> void:
+	# Split the merged disk/tire meshes into 4 spinning wheel containers BEFORE the merge (sync).
+	CarWheelRig.build(self, WHEEL_KEYS)
 	# real lamp lenses (front fara = white, rear fonar = red) BEFORE the merge
 	init_real_lens(["fara"], ["fonar"], true)
 	body_color = NPC_COLORS[randi() % NPC_COLORS.size()]

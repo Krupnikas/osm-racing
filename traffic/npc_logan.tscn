@@ -21,7 +21,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.45, 0)
 shape = SubResource("BoxShape3D_logan")
 
 [node name="LoganModel" parent="." instance=ExtResource("2_logan_model")]
-transform = Transform3D(0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0, 0.10, 0)
+transform = Transform3D(0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0, 0.0, 0)
 script = ExtResource("3_logan_setup")
 
 [node name="WheelFL" type="VehicleWheel3D" parent="."]
