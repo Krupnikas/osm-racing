@@ -231,6 +231,31 @@ var _bag_size: Vector3 = Vector3.ONE
 var _paper_variants: Array = []  # [{mesh, xform, size}] — обрывки бумаги, на которые ЛОПАЕТСЯ мешок при наезде на 60+ км/ч
 var _clutter_sfx: Dictionary = {}  # key -> AudioStream (подхватывается, если ассет есть)
 var _clutter_manager: Node3D       # постоянный менеджер реквизита (не привязан к чанкам)
+
+# ── Paving-works set-piece (road roller + ОБЪЕЗД barrier + cone ring) ──────────
+# One named composite "paving_works": placed RARELY (≈3–5 citywide) on the outer lane of a road,
+# never at an intersection; addressable as a whole for both procedural and manual JSON placement.
+@export var enable_paving_works := true
+@export var paving_works_rarity := 80      # 1 in N eligible wide ways → ~3–5 sites citywide (tune in inspector)
+var paving_min_width := 6.0                # ≥ residential (6 m): room to close one lane and leave one open
+const PAVING_ROAD_CLASSES := ["secondary", "tertiary", "residential"]
+const PAVING_BARRIER_DIST := 9.0           # m upstream of the roller (toward oncoming traffic — seen first)
+const PAVING_INTERSECTION_CLEAR := 28.0    # keep the whole site away from junctions
+# Cone offsets in road-local metres: x = along lane_dir (+ = downstream/behind the paver), y = toward
+# the road CENTRE (the TRAFFIC side; always ≥ 0 → never on the kerb side). A short taper around the
+# paver's centre end (the side cars pass) + a couple downstream. The paver is perpendicular, so its
+# centre end is ~2 m off-centre; cones sit just past it.
+const PAVING_CONE_OFFSETS := [
+	Vector2(-1.8, 2.3), Vector2(-0.4, 2.4), Vector2(1.0, 2.3),   # taper along the paver's traffic-side end
+	Vector2(2.4, 1.3), Vector2(2.4, 0.3),                        # a couple downstream
+]
+var _roller_scene: PackedScene
+var _roller_visual_xform: Transform3D = Transform3D.IDENTITY
+var _roller_size: Vector3 = Vector3.ONE
+var _barrier_scene: PackedScene
+var _barrier_visual_xform: Transform3D = Transform3D.IDENTITY
+var _barrier_size: Vector3 = Vector3.ONE
+var _paving_dispatched: Dictionary = {}    # way_id → true (evaluate each eligible way once)
 # Тротуар поднят над проезжей частью на height_offset тротуара (0.115, см. таблицу
 # road height_offset). _sample_elevation даёт уровень ПЧ, поэтому реквизит на
 # тротуаре поднимаем на эту величину, иначе он стоит в кювете у бордюра.
@@ -726,6 +751,53 @@ const PFENCE_MAX_SHATTERED := 6              # cap on concurrently-shattered ins
 var _pfence_segments: Array = []             # per-leaf {mesh(centered), offset, shape, mass} in instance-local space
 var _pfence_shattered: Dictionary = {}       # chunk_key → {instance_index → true} (cleared on unload = no persistence)
 var _pfence_shatter_order: Array = []        # FIFO [{ck, idx}] for the concurrent cap
+
+# ── Vegetation: layered roadside greenery (docs/VEGETATION_PLACEMENT_PLAN.md) ──
+# Land layer-by-layer behind separate flags. L1 birch rows first; L2/L3/L4 stay OFF until built+verified.
+@export var enable_veg_rows := true        # L1 street-line birch rows (road-walk)
+@export var enable_veg_shrubs := true      # L2 verge shrub clusters (piggyback the L1 road-walk)
+@export var enable_veg_weeds := true       # L3 nettle patches (nettle_2.glb — solid 3D plant) in neglected industrial/brownfield land
+@export var enable_veg_flowers := true     # L4 flower/ground-cover patches on kept-green land (dandelion)
+var veg_shrub_target_height := 1.9         # m (raw ~2.37 → scale ~0.8); ×per-instance 0.8–1.3 → 1.5–2.5 m
+var veg_shrub_cluster_every := 2           # place a shrub cluster every Nth row slot
+const VEG_SHRUB_CAP := 40                  # max shrubs per chunk
+var _veg_shrub_mesh: ArrayMesh = null
+var _veg_shrub_batch: Dictionary = {}      # ck → Array[Transform3D]
+# L3 weeds/nettles — patch-based scatter in NEGLECTED landuse zones (industrial/brownfield/scrub).
+var veg_nettle_target_height := 1.3        # m; ×per-instance 0.8–1.3
+const VEG_NETTLE_PATCH_CAP := 8            # max nettle PATCHES per chunk (3–6 cards each)
+var _veg_nettle_mesh: ArrayMesh = null
+var _veg_nettle_batch: Dictionary = {}     # ck → Array[Transform3D]
+# L4 flowers/ground-cover — sparse decorative patches on KEPT-GREEN land only (parks/lawns/courtyards).
+var veg_flower_target_height := 0.45       # m ground-cover clump (native ~157m → heavy downscale)
+const VEG_FLOWER_PATCH_CAP := 5            # max flower PATCHES per chunk (3–6 cards each), short range
+var _veg_flower_mesh: ArrayMesh = null
+var _veg_flower_batch: Dictionary = {}     # ck → Array[Transform3D]
+# L5 run-over flattening — flowers + nettles get pressed flat (but stay VISIBLE — imprinted) under a wheel.
+@export var enable_veg_flatten := true
+const VEG_FLATTEN_RADIUS := 0.55           # m around each wheel contact
+const VEG_FLATTEN_TIP_DEG := 80.0          # lie-down angle when run over (90 = flat on the ground)
+const VEG_FLATTEN_SPREAD := 1.3            # widen the footprint as it splays out
+const VEG_FLATTEN_RESIDUAL := 0.6          # residual height factor of the (now horizontal) plant
+const VEG_FLATTEN_GRID := 0.3              # m — persistence grid cell
+var _veg_flattened: Dictionary = {}        # Vector2i(grid) → true; persists across chunk reloads (cleared on reset)
+var veg_row_classes := ["primary", "secondary", "tertiary"]  # trunk OFF by default; tunable
+var veg_birch_target_height := 13.0        # m (raw ~16 → scale down a touch)
+var veg_row_offset := 2.0                  # m onto the verge beyond the carriageway edge
+const VEG_ROW_CLEAR := 1.0                 # min carriageway clearance for a row tree
+var veg_row_intersection_clear := 18.0     # keep trees off junctions (sightlines)
+var veg_furniture_clear := 3.0             # billboards/signs/bus-stops (lamps/fences = soft, ignored)
+const VEG_ROW_COLLISION_CAP := 24          # max near-road birch colliders per chunk
+const VEG_DONE := 1000000000               # incremental walk sentinel = road fully walked
+var veg_debug := false                     # default-off: counters + candidate markers
+var _veg_loaded := false
+var _veg_birch_meshes: Array = []          # 3 normalized ArrayMesh variants (alpha-scissor)
+var _veg_birch_half_w := 4.0               # scaled canopy half-width (for spacing/gates)
+var _deferred_veg_row_queue: Dictionary = {}  # ck → Array[{points, way_id, highway, width, _idx}]
+var _veg_row_batch: Dictionary = {}        # ck → { variant_index:int → Array[Transform3D] }
+var _created_veg_keys: Dictionary = {}     # global stable key → true (dedup)
+var _veg_keys_by_chunk: Dictionary = {}    # ck → Array[String] (cleared on unload → reload rebuilds)
+var _veg_dbg := {"placed": 0, "rej_road": 0, "rej_bldg": 0, "rej_inter": 0, "rej_water": 0, "rej_park": 0, "rej_furn": 0, "rej_unloaded": 0}
 var _pfence_last_site := {}  # debug: last built site geometry (center/away/inter)
 
 var _finalize_phase: int = 0  # Round-robin: 0=roads, 1=curbs, 2=lamps, 3=buildings, 4=windows, 5=trees, 6=billboards
@@ -1861,6 +1933,9 @@ func _process(delta: float) -> void:
 
 	# Night-only wire sparks — early-returns in daytime (zero cost).
 	_update_wire_sparks(delta)
+
+	# L5: crush flowers/nettles under the wheels (early-returns if disabled / no car).
+	_veg_update_flatten()
 
 	# Reset add_child budget and drain deferred queue (with time budget)
 	_add_child_budget = 9999 if _initial_loading else ADD_CHILD_BUDGET_NORMAL
@@ -3298,6 +3373,16 @@ func _unload_chunk(chunk_key: String) -> void:
 			for _pk in _pfence_keys_by_chunk[chunk_key]:
 				_created_pfence_keys.erase(_pk)
 			_pfence_keys_by_chunk.erase(chunk_key)
+		# Vegetation rows: free dedup keys + batch (VegRows node frees with chunk_node).
+		_deferred_veg_row_queue.erase(chunk_key)
+		_veg_row_batch.erase(chunk_key)
+		_veg_shrub_batch.erase(chunk_key)
+		_veg_nettle_batch.erase(chunk_key)
+		_veg_flower_batch.erase(chunk_key)
+		if _veg_keys_by_chunk.has(chunk_key):
+			for _vk in _veg_keys_by_chunk[chunk_key]:
+				_created_veg_keys.erase(_vk)
+			_veg_keys_by_chunk.erase(chunk_key)
 		if _spark_joint_keys_by_chunk.has(chunk_key):
 			for _jk in _spark_joint_keys_by_chunk[chunk_key]:
 				_spark_joint_seen.erase(_jk)
@@ -3488,6 +3573,7 @@ func reset_terrain() -> void:
 	_infrastructure_queue.clear()
 	if _clutter_manager:
 		_clutter_manager.clear_all()
+	_paving_dispatched.clear()
 	_vegetation_queue.clear()
 	_pending_parking_signs.clear()
 	_curb_queue.clear()
@@ -5642,6 +5728,29 @@ func _apply_road_result(result: Dictionary) -> void:
 							"points": pr_full, "way_id": int(result.get("way_id", 0)),
 							"highway": highway_type, "width": width, "type": pr_type, "_idx": 1,
 						})
+
+	# Street-line birch rows (L1) — FULL unclipped points (global arc-length spacing); both sides;
+	# each candidate assigned to its OWN chunk during the walk. Excludes bridges/tunnels/motorway.
+	if enable_veg_rows and highway_type in veg_row_classes and not is_bridge:
+		var vr_tunnel := str(result.get("tags", {}).get("tunnel", ""))
+		if vr_tunnel == "" or vr_tunnel == "no":
+			var vr_full: PackedVector2Array = result.get("full_smoothed_points", smoothed_points)
+			if vr_full.size() >= 2:
+				_deferred_append(_deferred_veg_row_queue, _get_chunk_key_from_node(parent), {
+					"points": vr_full, "way_id": int(result.get("way_id", 0)),
+					"highway": highway_type, "width": width, "_idx": 1,
+				})
+
+	# Paving-works set-piece (paving_works): evaluate each eligible wide road ONCE; a rare hash gate
+	# picks ≈3–5 sites citywide, registered (outer lane, off intersections) with the ClutterManager.
+	if enable_paving_works and highway_type in PAVING_ROAD_CLASSES and not is_bridge and width >= paving_min_width:
+		var pw_way: int = int(result.get("way_id", 0))
+		if pw_way > 0 and not _paving_dispatched.has(pw_way):
+			_paving_dispatched[pw_way] = true
+			var pw_tunnel := str(result.get("tags", {}).get("tunnel", ""))
+			if (pw_tunnel == "" or pw_tunnel == "no") and absi(hash("pvwrk_%d" % pw_way)) % paving_works_rarity == 0:
+				var pw_full: PackedVector2Array = result.get("full_smoothed_points", smoothed_points)
+				_register_paving_works_on_way(pw_full, pw_way, width)
 
 	# Manholes - clip to chunk rect, deferred
 	if highway_type in ["primary", "secondary", "tertiary", "residential", "unclassified"]:
@@ -10774,6 +10883,20 @@ func _init_clutter_assets() -> void:
 		_cone_mesh = c["mesh"]
 		_cone_visual_xform = c["xform"]
 		_cone_size = c["size"]
+	# Дорожный каток + барьер ОБЪЕЗД — центр композиции «дорожные работы» (paving_works).
+	if enable_paving_works:
+		var roller_path := "res://models/road_roller/road_roller_truck.glb"
+		if ResourceLoader.exists(roller_path):
+			var r := _measure_clutter_model(roller_path, 3.0)  # ~3 м высотой → ~4 м длиной, ~2 м шириной
+			_roller_scene = r["scene"]
+			_roller_visual_xform = r["xform"]
+			_roller_size = r["size"]
+		var barrier_path := "res://models/warning_sign_barrier/warning_sign_barrier.glb"
+		if ResourceLoader.exists(barrier_path):
+			var bar := _measure_clutter_model(barrier_path, 1.2)  # A-рамка ~1.2 м, ОБЪЕЗД на текстуре
+			_barrier_scene = bar["scene"]
+			_barrier_visual_xform = bar["xform"]
+			_barrier_size = bar["size"]
 	# Мешок мусора — мягкая «помойка» у урн (переполнение). Авто-скейл к ~0.6 м.
 	var bag_path := "res://models/low_poly_trash_bag/low_poly_trash_bag.glb"
 	if ResourceLoader.exists(bag_path):
@@ -11300,6 +11423,115 @@ func _on_cone_trigger(other_body: Node, cone: RigidBody3D) -> void:
 	for ch in cone.get_children():
 		if ch is Area3D:
 			ch.monitoring = false
+
+
+# ── Paving-works composite (road roller + ОБЪЕЗД barrier + cone ring) ──────────
+# Builds the WHOLE set-piece as one container at `pos` (the paver). `heading` = road tangent and
+# `curb_sign` = which kerb it hugs → together fix lane_dir (the lane's traffic direction). Layout is
+# defined ONLY from lane_dir: paver along the road hard against the kerb; barrier on the upstream side
+# facing the approaching cars; cones on the traffic (road-centre) side + a couple downstream, none on
+# the kerb side. Roller + barrier are solid static obstacles; cones are the usual knockable cones.
+# Returned to the ClutterManager, which frees the container when the player drives away.
+func _spawn_paving_works(pos: Vector2, elevation: float, heading: float, curb_sign: float, parent: Node) -> Node3D:
+	if not is_instance_valid(parent) or _roller_scene == null:
+		return null
+	var container := Node3D.new()
+	container.name = "PavingWorks"
+	parent.add_child(container)
+	# Road-local frame defined ONLY by the lane traffic direction (right-hand traffic). `curb_sign` picks
+	# the kerb the site hugs → fixes lane_dir (the direction cars drive in this lane), hence upstream/downstream.
+	var tangent := Vector2(sin(heading), cos(heading))
+	var perp := Vector2(-tangent.y, tangent.x)
+	var curb_dir := perp * curb_sign          # toward the kerb the paver hugs
+	var center_dir := -curb_dir               # toward the road centre = the TRAFFIC side (open lane)
+	var lane_dir := tangent * (-curb_sign)    # cars in this (kerb-side) lane drive +lane_dir
+	var base_y := elevation + 0.02
+	# road roller — PERPENDICULAR to the road (long axis across the lane), hard against the kerb; solid
+	var roller := StaticBody3D.new()
+	roller.name = "Roller"
+	roller.collision_layer = 1
+	roller.collision_mask = 0
+	roller.position = Vector3(pos.x, base_y, pos.y)
+	roller.rotation.y = atan2(curb_dir.x, curb_dir.y) + PI * 0.5  # long axis along the road
+	var rcol := CollisionShape3D.new()
+	var rbox := BoxShape3D.new()
+	rbox.size = _roller_size
+	rcol.shape = rbox
+	rcol.position.y = _roller_size.y * 0.5
+	roller.add_child(rcol)
+	var rvis: Node3D = _roller_scene.instantiate()
+	rvis.transform = _roller_visual_xform
+	roller.add_child(rvis)
+	container.add_child(roller)
+	# ОБЪЕЗД barrier — on the OTHER side of the paver from the cones (barrier_pos = paver_pos + lane_dir*dist),
+	# facing that way so approaching cars meet it first, then the paver.
+	if _barrier_scene != null:
+		var bpos := pos + lane_dir * PAVING_BARRIER_DIST + center_dir * 0.6
+		var barrier := StaticBody3D.new()
+		barrier.name = "Barrier"
+		barrier.collision_layer = 1
+		barrier.collision_mask = 0
+		barrier.position = Vector3(bpos.x, base_y, bpos.y)
+		barrier.rotation.y = atan2(lane_dir.x, lane_dir.y)  # sign faces the cars approaching from that side
+		var bcol := CollisionShape3D.new()
+		var bbox := BoxShape3D.new()
+		bbox.size = _barrier_size
+		bcol.shape = bbox
+		bcol.position.y = _barrier_size.y * 0.5
+		barrier.add_child(bcol)
+		var bvis: Node3D = _barrier_scene.instantiate()
+		bvis.transform = _barrier_visual_xform
+		barrier.add_child(bvis)
+		container.add_child(barrier)
+	# cones — knockable; ONLY on the traffic/centre side of the paver + a few downstream. NONE on the
+	# kerb side. x = along lane_dir (+ = downstream/behind), y = toward the road centre (traffic side).
+	for off_v in PAVING_CONE_OFFSETS:
+		var off: Vector2 = off_v
+		var cp := pos + lane_dir * off.x + center_dir * off.y
+		var crot := float(int(absf(cp.x * 11.0 + cp.y * 17.0)) % 360) * (PI / 180.0)
+		_create_cone_immediate(cp, elevation, crot, container)
+	return container
+
+
+# Procedural: pick ONE outer-lane anchor on a qualifying road (clear of intersections) and register
+# the composite with the persistent ClutterManager. Called once per eligible way that passes the rare gate.
+func _register_paving_works_on_way(points: PackedVector2Array, way_id: int, width: float) -> void:
+	if points.size() < 2 or _clutter_manager == null:
+		return
+	var n := points.size()
+	var cum := PackedFloat64Array()
+	cum.resize(n)
+	cum[0] = 0.0
+	for i in range(1, n):
+		cum[i] = cum[i - 1] + points[i - 1].distance_to(points[i])
+	var total: float = cum[n - 1]
+	if total < 35.0:
+		return  # too short for a worksite
+	for frac in [0.4, 0.6, 0.28, 0.72]:
+		var target: float = total * frac
+		var seg := 0
+		while seg < n - 1 and cum[seg + 1] < target:
+			seg += 1
+		if seg >= n - 1:
+			continue
+		var seg_len: float = cum[seg + 1] - cum[seg]
+		var t: float = (target - cum[seg]) / seg_len if seg_len > 0.01 else 0.0
+		var cl: Vector2 = points[seg].lerp(points[seg + 1], t)
+		var tangent: Vector2 = (points[seg + 1] - points[seg]).normalized()
+		if tangent.length_squared() < 0.01:
+			continue
+		var perp := Vector2(-tangent.y, tangent.x)
+		var curb_sign := 1.0 if absi(hash("pvside_%d" % way_id)) % 2 == 0 else -1.0
+		var curb_dir := perp * curb_sign
+		# roller ALONG the road, hard against the kerb: 2 m-wide side faces across, so centre 1 m in
+		var anchor := cl + curb_dir * (width * 0.5 - 1.0)
+		if _pfence_nearest_intersection(anchor, PAVING_INTERSECTION_CLEAR) >= 0:
+			continue  # too close to a junction
+		var heading := atan2(tangent.x, tangent.y)
+		_clutter_manager.register("paving_works", anchor, {"heading": heading, "curb": curb_sign})
+		if veg_debug:
+			print("PAVING: site way=%d at (%.0f, %.0f) curb=%.0f" % [way_id, anchor.x, anchor.y, curb_sign])
+		return
 
 
 ## Дорожные работы: на части артериальных дорог ставит сужающую полосу «ёлочку» конусов.
@@ -11881,7 +12113,18 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 		for clipped in clipped_ind:
 			_add_fence_to_batch(clipped, parent)
 			_generate_industrial_buildings(clipped, parent)
+			if enable_veg_weeds:
+				_veg_scatter_nettles(clipped, parent, way_id)  # L3 weeds in neglected industrial land
+			if enable_veg_shrubs:
+				_veg_scatter_shrubs_poly(clipped, parent, way_id)  # L2b scrubby shrubs in vacant industrial land
 		return
+	# Neglected zones (these otherwise fall through to a plain grass texture) get scrubby shrubs (+ L3 weeds).
+	if landuse_type in ["brownfield", "construction", "landfill", "greenfield", "railway"]:
+		for clipped_w in _clip_polygon_to_chunk(points, chunk_key):
+			if enable_veg_weeds:
+				_veg_scatter_nettles(clipped_w, parent, way_id)
+			if enable_veg_shrubs:
+				_veg_scatter_shrubs_poly(clipped_w, parent, way_id)
 
 	var texture_key := "grass"
 	var is_water := false
@@ -11908,6 +12151,15 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 		if tree_override:
 			has_tree_override = true
 			dense_override = tree_override.get("dense", false)
+
+	# L2b shrub clusters + L4 flower patches inside residential courtyards / grass / meadow / recreation
+	# land (green interiors that otherwise read as flat). Gated + capped; before the grass early-return.
+	if (enable_veg_shrubs or enable_veg_flowers) and landuse_type in ["residential", "grass", "meadow", "recreation_ground"]:
+		for clipped_s in _clip_polygon_to_chunk(points, chunk_key):
+			if enable_veg_shrubs:
+				_veg_scatter_shrubs_poly(clipped_s, parent, way_id)
+			if enable_veg_flowers:
+				_veg_scatter_flowers(clipped_s, parent, way_id)
 
 	# Трава уже покрыта per-chunk terrain, пропускаем чтобы не было z-fighting
 	if texture_key == "grass" and not has_tree_override and landuse_type != "forest":
@@ -11970,6 +12222,10 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 		# Генерируем деревья в парках и садах
 		if leisure_type in ["park", "garden"]:
 			_generate_trees_in_polygon(clipped, parent, false)
+			if enable_veg_shrubs:
+				_veg_scatter_shrubs_poly(clipped, parent, way_id)  # L2b shrub clusters in parks/gardens
+			if enable_veg_flowers:
+				_veg_scatter_flowers(clipped, parent, way_id)  # L4 flower patches in parks/gardens
 		# Забор для указанных парков
 		if way_id in fenced_parks:
 			_add_fence_to_batch(clipped, parent)
@@ -14194,6 +14450,34 @@ func _process_road_queue() -> void:
 				pr_done_keys.append(pr_ck)
 		for pr_ck in pr_done_keys:
 			_deferred_prop_road_queue.erase(pr_ck)
+
+	# Process deferred VEGETATION ROW walking (L1 birch). Deferred until AFTER the initial load burst
+	# (the per-candidate all-chunk gate queries are too heavy for the 500 ms initial budget), then a
+	# small dedicated slice per frame — no spikes.
+	if enable_veg_rows and not _initial_loading and not _deferred_veg_row_queue.is_empty() and _veg_ensure_assets():
+		var veg_deadline: int = Time.get_ticks_usec() + 3000
+		var vr_dirty: Dictionary = {}
+		var vr_done_keys: Array[String] = []
+		for vr_ck in _get_prioritized_keys(_deferred_veg_row_queue):
+			if Time.get_ticks_usec() > veg_deadline:
+				break
+			var vr_arr: Array = _deferred_veg_row_queue[vr_ck]
+			while not vr_arr.is_empty():
+				if Time.get_ticks_usec() > veg_deadline:
+					break
+				var vr_item: Dictionary = vr_arr[0]
+				var vr_next: int = _generate_veg_rows_incremental(vr_item.points, int(vr_item.way_id), str(vr_item.highway), float(vr_item.get("width", 7.0)), int(vr_item.get("_idx", 1)), veg_deadline, vr_dirty)
+				if vr_next >= VEG_DONE:
+					vr_arr.pop_front()
+				else:
+					vr_item["_idx"] = vr_next
+					break
+			if vr_arr.is_empty():
+				vr_done_keys.append(vr_ck)
+		for vr_ck in vr_done_keys:
+			_deferred_veg_row_queue.erase(vr_ck)
+		for dck in vr_dirty:
+			_veg_finalize_chunk(dck)
 
 	# Dispatch roads to worker threads — no time budget needed on main thread!
 	# Limit concurrent tasks to avoid overwhelming thread pool
@@ -19027,6 +19311,27 @@ func _is_point_on_vehicle_road(point: Vector2, margin: float = 1.0, ck: String =
 	return false
 
 
+# True if `point` lies on a NARROW way surface — footway / path / cycleway / track / tram (width < 4m).
+# The complement of the vehicle-carriageway test (`_pfence_vehicle_road_clearance`, width >= 4): used to
+# keep roadside vegetation OFF pedestrian sidewalks, which the carriageway test ignores by design.
+func _is_point_on_footway(point: Vector2, margin: float, ck: String = "") -> bool:
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			var segs := _query_road_hash(key, ck)
+			for seg in segs:
+				if seg.width >= 4.0:
+					continue
+				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+				# Footways RENDER at 2× their logical width (see _process_footway_incremental: width*2),
+				# so the visual pavement half-width is seg.width (= the logical full width), not /2.
+				if point.distance_to(closest) < seg.width + margin:
+					return true
+	return false
+
+
 # Finds the closest vehicle road (width >= 4m) near midpoint of before_pt/after_pt.
 # Returns Dictionary with road info if full crossing, or empty dict if not.
 func _detect_road_crossing(before_pt: Vector2, after_pt: Vector2, ck: String = "") -> Dictionary:
@@ -20809,6 +21114,772 @@ func _maybe_place_sneaker(p0: Vector3, p1: Vector3, sag: float, key: String, ck:
 	_sneaker_keys_by_chunk[ck].append(key)
 
 # ══════════════════════════════════════════════════════════════════════════
+# Vegetation — L1 street-line birch rows (road-walk). See docs/VEGETATION_PLACEMENT_PLAN.md.
+# ══════════════════════════════════════════════════════════════════════════
+
+func _veg_chunk_key(p: Vector2) -> String:
+	return "%d,%d" % [int(floor(p.x / chunk_size)), int(floor(p.y / chunk_size))]
+
+
+# Build the 3 birch variant meshes ONCE: bake node transforms, normalize (XZ-centred, base Y=0),
+# scale each to veg_birch_target_height, force alpha-scissor (imported as ALPHA_DEPTH_PRE). Scale from
+# REAL transformed verts (get_aabb gotcha).
+func _veg_ensure_assets() -> bool:
+	if _veg_loaded:
+		return not _veg_birch_meshes.is_empty() or _veg_shrub_mesh != null or _veg_nettle_mesh != null or _veg_flower_mesh != null
+	_veg_loaded = true
+	if not enable_veg_rows and not enable_veg_shrubs and not enable_veg_weeds and not enable_veg_flowers:
+		return false
+	var scene: PackedScene = load("res://models/vegetation/birch_trees_pack.glb") as PackedScene
+	if scene == null:
+		push_warning("veg: failed to load birch pack")
+		return false
+	var inst: Node = scene.instantiate()
+	var mis: Array[MeshInstance3D] = []
+	_collect_mesh_instances(inst, mis)
+	for mi in mis:
+		var mesh: Mesh = mi.mesh
+		if mesh == null:
+			continue
+		var xform := _get_node_transform_recursive(mi)
+		var nbasis := xform.basis.inverse().transposed()
+		var surfs: Array = []
+		var amin := Vector3(INF, INF, INF)
+		var amax := Vector3(-INF, -INF, -INF)
+		for s in range(mesh.get_surface_count()):
+			var arr := mesh.surface_get_arrays(s)
+			var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+			var bv := PackedVector3Array()
+			bv.resize(verts.size())
+			for i in range(verts.size()):
+				bv[i] = xform * verts[i]
+				amin = Vector3(minf(amin.x, bv[i].x), minf(amin.y, bv[i].y), minf(amin.z, bv[i].z))
+				amax = Vector3(maxf(amax.x, bv[i].x), maxf(amax.y, bv[i].y), maxf(amax.z, bv[i].z))
+			arr[Mesh.ARRAY_VERTEX] = bv
+			var norms = arr[Mesh.ARRAY_NORMAL]
+			if norms != null and norms is PackedVector3Array:
+				var tn := PackedVector3Array()
+				tn.resize(norms.size())
+				for i in range(norms.size()):
+					tn[i] = (nbasis * norms[i]).normalized()
+				arr[Mesh.ARRAY_NORMAL] = tn
+			surfs.append({"arr": arr, "mat": mesh.surface_get_material(s)})
+		var h := amax.y - amin.y
+		if h < 0.5:
+			continue
+		var scl := veg_birch_target_height / h
+		var cx := (amin.x + amax.x) * 0.5
+		var cz := (amin.z + amax.z) * 0.5
+		var out_mesh := ArrayMesh.new()
+		for sf in surfs:
+			var a: Array = sf.arr
+			var vv: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+			var o := PackedVector3Array()
+			o.resize(vv.size())
+			for i in range(vv.size()):
+				o[i] = Vector3((vv[i].x - cx) * scl, (vv[i].y - amin.y) * scl, (vv[i].z - cz) * scl)
+			a[Mesh.ARRAY_VERTEX] = o
+			out_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a)
+			var mat: Material = sf.mat
+			if mat is StandardMaterial3D:
+				var dm: StandardMaterial3D = (mat as StandardMaterial3D).duplicate()
+				dm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+				dm.alpha_scissor_threshold = 0.5
+				dm.cull_mode = BaseMaterial3D.CULL_DISABLED
+				mat = dm
+			out_mesh.surface_set_material(out_mesh.get_surface_count() - 1, mat)
+		_veg_birch_meshes.append(out_mesh)
+		_veg_birch_half_w = maxf(_veg_birch_half_w, maxf(amax.x - cx, amax.z - cz) * scl)
+	inst.queue_free()
+	# Shrub (single variant) — normalize + scale to target height; material is already alpha-scissor.
+	if enable_veg_shrubs:
+		_veg_shrub_mesh = _veg_build_normalized_mesh("res://models/vegetation/low_poly_shrub_2.glb", veg_shrub_target_height)
+	if enable_veg_weeds:
+		# nettle_2.glb is a SOLID 3D nettle (real geometry, opaque) → normal build (no luminance cutout).
+		_veg_nettle_mesh = _veg_build_normalized_mesh("res://models/vegetation/nettle_2.glb", veg_nettle_target_height)
+	if enable_veg_flowers:
+		# dandelion clump: real alpha channel + already alpha-scissor → normal build, heavy downscale.
+		_veg_flower_mesh = _veg_build_normalized_mesh("res://models/vegetation/dandelion_clover_strawberry.glb", veg_flower_target_height)
+	if veg_debug:
+		print("VEG: birch=%d shrub=%s nettle=%s flower=%s" % [_veg_birch_meshes.size(), str(_veg_shrub_mesh != null), str(_veg_nettle_mesh != null), str(_veg_flower_mesh != null)])
+	return not _veg_birch_meshes.is_empty() or _veg_shrub_mesh != null or _veg_nettle_mesh != null or _veg_flower_mesh != null
+
+
+# Load a GLB, bake node transforms, normalize (XZ-centred, base Y=0), scale to `target_height`, force
+# alpha-scissor + double-sided. Returns one merged ArrayMesh (real-vertex scale; get_aabb gotcha).
+func _veg_build_normalized_mesh(path: String, target_height: float, luminance_cutout: bool = false) -> ArrayMesh:
+	var scene: PackedScene = load(path) as PackedScene
+	if scene == null:
+		push_warning("veg: failed to load " + path)
+		return null
+	var inst: Node = scene.instantiate()
+	var mis: Array[MeshInstance3D] = []
+	_collect_mesh_instances(inst, mis)
+	var surfs: Array = []
+	var amin := Vector3(INF, INF, INF)
+	var amax := Vector3(-INF, -INF, -INF)
+	for mi in mis:
+		var mesh: Mesh = mi.mesh
+		if mesh == null:
+			continue
+		var xform := _get_node_transform_recursive(mi)
+		var nbasis := xform.basis.inverse().transposed()
+		for s in range(mesh.get_surface_count()):
+			var arr := mesh.surface_get_arrays(s)
+			var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+			var bv := PackedVector3Array()
+			bv.resize(verts.size())
+			for i in range(verts.size()):
+				bv[i] = xform * verts[i]
+				amin = Vector3(minf(amin.x, bv[i].x), minf(amin.y, bv[i].y), minf(amin.z, bv[i].z))
+				amax = Vector3(maxf(amax.x, bv[i].x), maxf(amax.y, bv[i].y), maxf(amax.z, bv[i].z))
+			arr[Mesh.ARRAY_VERTEX] = bv
+			var norms = arr[Mesh.ARRAY_NORMAL]
+			if norms != null and norms is PackedVector3Array:
+				var tn := PackedVector3Array()
+				tn.resize(norms.size())
+				for i in range(norms.size()):
+					tn[i] = (nbasis * norms[i]).normalized()
+				arr[Mesh.ARRAY_NORMAL] = tn
+			surfs.append({"arr": arr, "mat": mesh.surface_get_material(s)})
+	inst.queue_free()
+	var h := amax.y - amin.y
+	if surfs.is_empty() or h < 0.1:
+		return null
+	var scl := target_height / h
+	var cx := (amin.x + amax.x) * 0.5
+	var cz := (amin.z + amax.z) * 0.5
+	var out_mesh := ArrayMesh.new()
+	for sf in surfs:
+		var a: Array = sf.arr
+		var vv: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+		var o := PackedVector3Array()
+		o.resize(vv.size())
+		for i in range(vv.size()):
+			o[i] = Vector3((vv[i].x - cx) * scl, (vv[i].y - amin.y) * scl, (vv[i].z - cz) * scl)
+		# Rebuild a CLEAN arrays set — only VERTEX/NORMAL/UV/INDEX. Some imported GLBs (e.g. nettle)
+		# carry a TANGENT (or other) channel that add_surface_from_arrays silently rejects → 0 surfaces.
+		var clean: Array = []
+		clean.resize(Mesh.ARRAY_MAX)
+		clean[Mesh.ARRAY_VERTEX] = o
+		if a[Mesh.ARRAY_NORMAL] != null:
+			clean[Mesh.ARRAY_NORMAL] = a[Mesh.ARRAY_NORMAL]
+		if a[Mesh.ARRAY_TEX_UV] != null:
+			clean[Mesh.ARRAY_TEX_UV] = a[Mesh.ARRAY_TEX_UV]
+		if a[Mesh.ARRAY_INDEX] != null:
+			clean[Mesh.ARRAY_INDEX] = a[Mesh.ARRAY_INDEX]
+		out_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, clean)
+		var mat: Material = sf.mat
+		if luminance_cutout:
+			# Texture (nettle_0.png) encodes the silhouette as a dark background with NO alpha
+			# channel. A luminance key is fragile: mipmaps average the 90%-black background into the
+			# leaf at distance and any cutoff then erases it. Instead BAKE a real alpha channel from
+			# luminance and use the proven alpha-scissor path — the cutout lives in alpha, so mip
+			# blur of the colour no longer darkens-and-discards the leaf.
+			var src_tex: Texture2D = null
+			if mat is StandardMaterial3D:
+				src_tex = (mat as StandardMaterial3D).albedo_texture
+			var keyed := _veg_keyed_alpha_texture(src_tex, 0.08)
+			var sm := StandardMaterial3D.new()
+			sm.albedo_texture = keyed
+			sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+			sm.alpha_scissor_threshold = 0.5
+			sm.cull_mode = BaseMaterial3D.CULL_DISABLED
+			mat = sm
+		elif mat is StandardMaterial3D:
+			var dm: StandardMaterial3D = (mat as StandardMaterial3D).duplicate()
+			dm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+			dm.alpha_scissor_threshold = 0.45
+			dm.cull_mode = BaseMaterial3D.CULL_DISABLED
+			mat = dm
+		out_mesh.surface_set_material(out_mesh.get_surface_count() - 1, mat)
+	return out_mesh
+
+
+# Build an RGBA copy of `src` whose alpha is keyed from luminance: opaque where the texture has
+# colour (the leaf), transparent on the dark background. For cutout textures that ship with NO
+# alpha channel (silhouette baked as black). Downscaled to keep the one-time bake cheap; no mipmaps
+# so the hard alpha edge survives at distance instead of bleeding into black.
+func _veg_keyed_alpha_texture(src: Texture2D, lum_thresh: float) -> ImageTexture:
+	if src == null:
+		return null
+	var img: Image = src.get_image()
+	if img == null:
+		return null
+	if img.is_compressed():
+		img.decompress()
+	img.convert(Image.FORMAT_RGBA8)
+	var maxdim := 512
+	if img.get_width() > maxdim or img.get_height() > maxdim:
+		img.resize(mini(img.get_width(), maxdim), mini(img.get_height(), maxdim), Image.INTERPOLATE_LANCZOS)
+	var w := img.get_width()
+	var h := img.get_height()
+	for y in range(h):
+		for x in range(w):
+			var c := img.get_pixel(x, y)
+			c.a = 1.0 if maxf(c.r, maxf(c.g, c.b)) >= lum_thresh else 0.0
+			img.set_pixel(x, y, c)
+	return ImageTexture.create_from_image(img)
+
+
+# Furniture clearance — reuse EXISTING hashes only (billboards + props). Lamps/fences SOFT (ignored —
+# trees beside them are realistic). Returns true if `p` is clear of billboards/props within `radius`.
+func _veg_furniture_clear(p: Vector2, radius: float) -> bool:
+	var bc := Vector2i(int(floor(p.x / 100.0)), int(floor(p.y / 100.0)))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for q in _billboard_pos_hash.get(Vector2i(bc.x + dx, bc.y + dy), []):
+				if p.distance_to(q) < radius:
+					return false
+	var pc := Vector2i(int(floor(p.x / PROP_MIN_SPACING)), int(floor(p.y / PROP_MIN_SPACING)))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for q in _prop_pos_hash.get(Vector2i(pc.x + dx, pc.y + dy), []):
+				if p.distance_to(q) < radius:
+					return false
+	return true
+
+
+# March outward from the carriageway edge to the first spot clear of any footway/sidewalk — birches
+# (and other verge plantings) belong on the grass verge BEYOND the pavement, never on it. On a street
+# with no sidewalk the very first step (at start_d) is already grass, so behaviour is unchanged.
+# Returns Vector2(INF, INF) if the whole start_d..max_d band is pavement (e.g. a wide plaza).
+func _veg_verge_point(edge: Vector2, outward: Vector2, start_d: float, max_d: float) -> Vector2:
+	var d := start_d
+	while d <= max_d:
+		var p := edge + outward * d
+		if not _is_point_on_footway(p, 0.4, ""):
+			return p
+		d += 0.6
+	return Vector2(INF, INF)
+
+
+# Walk a road polyline by arc length; place birches on BOTH verges with deterministic variant/yaw/
+# scale/jitter; gate hard against carriageway/buildings/water/parking/intersections/furniture; each
+# candidate is written into the chunk that OWNS it (dedup by global key). Budgeted/resumable.
+func _generate_veg_rows_incremental(points: PackedVector2Array, way_id: int, highway: String, width: float, start_idx: int, deadline: int, dirty: Dictionary) -> int:
+	if not enable_veg_rows or _veg_birch_meshes.is_empty() or points.size() < 2:
+		return VEG_DONE
+	var spacing := clampf(8.0 + width, 12.0, 22.0)
+	var n := points.size()
+	var cumulative := PackedFloat64Array()
+	cumulative.resize(n)
+	cumulative[0] = 0.0
+	for i in range(1, n):
+		cumulative[i] = cumulative[i - 1] + points[i - 1].distance_to(points[i])
+	var total: float = cumulative[n - 1]
+	var num_slots := int(total / spacing)
+	var is_resid := highway == "residential"
+	var slot := maxi(start_idx, 1)
+	var processed := 0
+	while slot <= num_slots:
+		# Time-slice + a hard per-call cap so one heavy road can never stall a frame.
+		if Time.get_ticks_usec() > deadline or processed >= 40:
+			return slot
+		processed += 1
+		var dist := float(slot) * spacing
+		var seg_i := 0
+		while seg_i < n - 1 and cumulative[seg_i + 1] < dist:
+			seg_i += 1
+		if seg_i >= n - 1:
+			break
+		var seg_len: float = cumulative[seg_i + 1] - cumulative[seg_i]
+		var t := (dist - cumulative[seg_i]) / seg_len if seg_len > 0.01 else 0.0
+		var cl: Vector2 = points[seg_i].lerp(points[seg_i + 1], t)
+		var tangent: Vector2 = (points[seg_i + 1] - points[seg_i]).normalized()
+		var perp := Vector2(-tangent.y, tangent.x)
+		var cl_on_road := _is_point_on_vehicle_road(cl, 0.0, "")
+		for side_v in [1.0, -1.0]:
+			var side := float(side_v)
+			var key := "vt_%d_%d_%d" % [way_id, (1 if side > 0.0 else 0), slot]
+			if _created_veg_keys.has(key):
+				continue
+			var outward := perp * side
+			var edge := cl
+			if cl_on_road:
+				edge = _find_road_edge_point(cl, true, cl + outward * 30.0, "")
+			var hk := absi(hash(key))
+			var jitter := (float(hk % 1000) / 1000.0 - 0.5) * 0.6
+			# Land on the grass verge BEYOND any sidewalk — march outward past the pavement.
+			var verge := _veg_verge_point(edge, outward, veg_row_offset, 8.0)
+			if verge.x == INF:
+				_veg_dbg.rej_road += 1
+				continue
+			var base := verge + tangent * jitter  # jitter ALONG the road, never back toward the pavement
+			# hard gates
+			if _pfence_vehicle_road_clearance(base) < VEG_ROW_CLEAR:
+				_veg_dbg.rej_road += 1
+				continue
+			if _is_point_on_footway(base, 0.4, ""):  # belt-and-braces: never on a sidewalk
+				_veg_dbg.rej_road += 1
+				continue
+			var cand_ck := _veg_chunk_key(base)
+			if not _loaded_chunks.has(cand_ck):
+				_veg_dbg.rej_unloaded += 1
+				continue
+			if _building_clip_within(base, 3.0 if is_resid else 1.5):
+				_veg_dbg.rej_bldg += 1
+				continue
+			if _is_point_in_any_parking(base, cand_ck):
+				_veg_dbg.rej_park += 1
+				continue
+			if _is_point_in_water(base, cand_ck):
+				_veg_dbg.rej_water += 1
+				continue
+			if _pfence_nearest_intersection(base, veg_row_intersection_clear) >= 0:
+				_veg_dbg.rej_inter += 1
+				continue
+			if not _veg_furniture_clear(base, veg_furniture_clear):
+				_veg_dbg.rej_furn += 1
+				continue
+			# residential: only when we could confidently anchor to the real road edge
+			if is_resid and not cl_on_road:
+				continue
+			var variant: int = hk % _veg_birch_meshes.size()
+			var yaw := float((hk >> 3) % 6283) / 1000.0
+			var scl := 0.85 + float((hk >> 7) % 300) / 1000.0
+			var y := get_surface_y(base.x, base.y)
+			var xf := Transform3D(Basis(Vector3.UP, yaw).scaled(Vector3(scl, scl, scl)), Vector3(base.x, y, base.y))
+			if not _veg_row_batch.has(cand_ck):
+				_veg_row_batch[cand_ck] = {}
+			if not _veg_row_batch[cand_ck].has(variant):
+				_veg_row_batch[cand_ck][variant] = []
+			_veg_row_batch[cand_ck][variant].append(xf)
+			_created_veg_keys[key] = true
+			if not _veg_keys_by_chunk.has(cand_ck):
+				_veg_keys_by_chunk[cand_ck] = []
+			_veg_keys_by_chunk[cand_ck].append(key)
+			dirty[cand_ck] = true
+			_veg_dbg.placed += 1
+			if veg_debug:
+				_pfence_debug_marker(cand_ck, Vector3(base.x, y + 0.2, base.y), Color(0.2, 0.85, 1.0))
+		# L2: verge shrub clusters — denser than birches, LOOSER gates (allowed near junctions), no collision.
+		if enable_veg_shrubs and _veg_shrub_mesh != null and (slot % veg_shrub_cluster_every == 0):
+			for sside_v in [1.0, -1.0]:
+				var sside := float(sside_v)
+				var skey := "vs_%d_%d_%d" % [way_id, (1 if sside > 0.0 else 0), slot]
+				if _created_veg_keys.has(skey):
+					continue
+				var soutward := perp * sside
+				var sedge := cl
+				if cl_on_road:
+					sedge = _find_road_edge_point(cl, true, cl + soutward * 30.0, "")
+				var shk := absi(hash(skey))
+				var scen := sedge + soutward * (veg_row_offset + 0.6 + float(shk % 900) / 1000.0)
+				if _pfence_vehicle_road_clearance(scen) < VEG_ROW_CLEAR:
+					continue
+				var sck := _veg_chunk_key(scen)
+				if not _loaded_chunks.has(sck):
+					continue
+				if _building_clip_within(scen, 1.0) or _is_point_in_any_parking(scen, sck) or _is_point_in_water(scen, sck):
+					continue
+				# Keep shrubs off pedestrian sidewalks/footways (carriageway clearance ignores them).
+				if _is_point_on_footway(scen, 0.6, sck):
+					continue
+				if (_veg_shrub_batch.get(sck, []) as Array).size() >= VEG_SHRUB_CAP:
+					continue
+				var cnt := 2 + (shk % 3)  # 2–4 shrubs per cluster
+				for j in range(cnt):
+					var jh := absi(hash(skey + "_" + str(j)))
+					var pos := scen + Vector2((float(jh % 1000) / 1000.0 - 0.5) * 2.4, (float((jh >> 5) % 1000) / 1000.0 - 0.5) * 2.4)
+					if _pfence_vehicle_road_clearance(pos) < 0.3:
+						continue
+					if _is_point_on_footway(pos, 0.3, sck):
+						continue
+					var sscl := 0.8 + float((jh >> 3) % 500) / 1000.0
+					var syaw := float((jh >> 7) % 6283) / 1000.0
+					var sy := get_surface_y(pos.x, pos.y)
+					if not _veg_shrub_batch.has(sck):
+						_veg_shrub_batch[sck] = []
+					_veg_shrub_batch[sck].append(Transform3D(Basis(Vector3.UP, syaw).scaled(Vector3(sscl, sscl, sscl)), Vector3(pos.x, sy, pos.y)))
+				_created_veg_keys[skey] = true
+				if not _veg_keys_by_chunk.has(sck):
+					_veg_keys_by_chunk[sck] = []
+				_veg_keys_by_chunk[sck].append(skey)
+				dirty[sck] = true
+		slot += 1
+	return VEG_DONE
+
+
+# (Re)build the chunk's L2 shrub MultiMesh — verge clusters (road-walk) AND L2b polygon scatter both
+# feed `_veg_shrub_batch[ck]`, so this single node holds every shrub in the chunk. Own direct child of
+# the chunk (not inside VegRows) so a landuse-only chunk with no birch road-walk still renders shrubs.
+func _veg_finalize_shrubs(ck: String) -> void:
+	if not _loaded_chunks.has(ck) or _veg_shrub_mesh == null:
+		return
+	var parent: Node3D = _loaded_chunks[ck]
+	if not is_instance_valid(parent):
+		return
+	var old := parent.get_node_or_null("VegShrubMM")
+	if old != null:
+		old.free()
+	var shrubs: Array = _veg_shrub_batch.get(ck, [])
+	if shrubs.is_empty():
+		return
+	var smm := MultiMesh.new()
+	smm.transform_format = MultiMesh.TRANSFORM_3D
+	smm.mesh = _veg_shrub_mesh
+	smm.instance_count = shrubs.size()
+	for i in range(shrubs.size()):
+		smm.set_instance_transform(i, shrubs[i])
+	var smmi := MultiMeshInstance3D.new()
+	smmi.name = "VegShrubMM"
+	smmi.multimesh = smm
+	smmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	smmi.visibility_range_end = 150.0
+	smmi.visibility_range_end_margin = 20.0
+	smmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	parent.add_child(smmi)
+
+
+# (Re)build the chunk's birch-row MultiMeshes (one per variant) + capped near-road trunk colliders.
+func _veg_finalize_chunk(ck: String) -> void:
+	if not _loaded_chunks.has(ck):
+		return
+	_veg_finalize_shrubs(ck)  # L2 shrubs share the batch with L2b polygon scatter
+	if not _veg_row_batch.has(ck):
+		return
+	var parent: Node3D = _loaded_chunks[ck]
+	if not is_instance_valid(parent):
+		return
+	var old := parent.get_node_or_null("VegRows")
+	if old != null:
+		old.free()
+	var byv: Dictionary = _veg_row_batch.get(ck, {})
+	var container := Node3D.new()
+	container.name = "VegRows"
+	var coll_added := 0
+	for variant in byv:
+		var transforms: Array = byv[variant]
+		if transforms.is_empty() or int(variant) >= _veg_birch_meshes.size():
+			continue
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = _veg_birch_meshes[int(variant)]
+		mm.instance_count = transforms.size()
+		for i in range(transforms.size()):
+			mm.set_instance_transform(i, transforms[i])
+		var mmi := MultiMeshInstance3D.new()
+		mmi.name = "VegRowMM_%d" % int(variant)
+		mmi.multimesh = mm
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF  # thousands of alpha trees → no shadows
+		mmi.visibility_range_end = 200.0
+		mmi.visibility_range_end_margin = 25.0
+		mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+		container.add_child(mmi)
+		for xf in transforms:
+			if coll_added >= VEG_ROW_COLLISION_CAP:
+				break
+			var body := StaticBody3D.new()
+			body.collision_layer = 1
+			var cs := CollisionShape3D.new()
+			var cyl := CylinderShape3D.new()
+			cyl.radius = 0.3
+			cyl.height = 3.0
+			cs.shape = cyl
+			cs.position.y = 1.5
+			body.transform = Transform3D(Basis.IDENTITY, xf.origin)
+			body.add_child(cs)
+			container.add_child(body)
+			coll_added += 1
+	parent.add_child(container)
+
+
+# L2b: scatter shrub CLUSTERS inside a green polygon (park/garden, residential courtyard, vacant
+# industrial/brownfield). Deterministic, gated off roads/sidewalks/buildings/water/parking, capped per
+# chunk, no collision. Feeds the SAME `_veg_shrub_batch[ck]` as the verge road-walk → one merged
+# VegShrubMM. Main-thread (called from the landuse/leisure dispatch) but tiny + capped so it can't spike.
+func _veg_scatter_shrubs_poly(points: PackedVector2Array, parent: Node3D, way_id: int) -> void:
+	if not enable_veg_shrubs or points.size() < 3:
+		return
+	if not _veg_ensure_assets() or _veg_shrub_mesh == null:
+		return
+	var ck := _get_chunk_key_from_node(parent)
+	if ck == "" or not _loaded_chunks.has(ck):
+		return
+	if (_veg_shrub_batch.get(ck, []) as Array).size() >= VEG_SHRUB_CAP:
+		return
+	var mn := points[0]
+	var mx := points[0]
+	for p in points:
+		mn = Vector2(minf(mn.x, p.x), minf(mn.y, p.y))
+		mx = Vector2(maxf(mx.x, p.x), maxf(mx.y, p.y))
+	var want := clampi(int((mx.x - mn.x) * (mx.y - mn.y) / 2500.0), 1, 4)  # ~1 cluster / 50×50 m, ≤4/poly
+	var placed := 0
+	var changed := false
+	for pi in range(want * 4):
+		if placed >= want or (_veg_shrub_batch.get(ck, []) as Array).size() >= VEG_SHRUB_CAP:
+			break
+		var key := "vsp_%d_%s_%d" % [way_id, ck, pi]  # ck in key → chunk-spanning polys place in every chunk
+		if _created_veg_keys.has(key):
+			continue
+		var hk := absi(hash(key))
+		var c := Vector2(mn.x + float(hk % 1000) / 1000.0 * (mx.x - mn.x), mn.y + float((hk >> 10) % 1000) / 1000.0 * (mx.y - mn.y))
+		if not Geometry2D.is_point_in_polygon(c, points):
+			continue
+		if _is_point_near_road_fast(c, 2.0, ck) or _is_point_on_footway(c, 0.6, ck) or _building_clip_within(c, 1.5) or _is_point_in_any_parking(c, ck) or _is_point_in_water(c, ck):
+			continue
+		var cnt := 2 + (hk % 3)  # 2–4 shrubs per cluster
+		for j in range(cnt):
+			var jh := absi(hash(key + "_" + str(j)))
+			var pos := c + Vector2((float(jh % 1000) / 1000.0 - 0.5) * 3.0, (float((jh >> 5) % 1000) / 1000.0 - 0.5) * 3.0)
+			if not Geometry2D.is_point_in_polygon(pos, points) or _is_point_near_road_fast(pos, 1.0, ck) or _is_point_on_footway(pos, 0.3, ck):
+				continue
+			var sscl := 0.8 + float((jh >> 3) % 500) / 1000.0
+			var syaw := float((jh >> 7) % 6283) / 1000.0
+			var sy := get_surface_y(pos.x, pos.y)
+			if not _veg_shrub_batch.has(ck):
+				_veg_shrub_batch[ck] = []
+			_veg_shrub_batch[ck].append(Transform3D(Basis(Vector3.UP, syaw).scaled(Vector3(sscl, sscl, sscl)), Vector3(pos.x, sy, pos.y)))
+			changed = true
+		_created_veg_keys[key] = true
+		if not _veg_keys_by_chunk.has(ck):
+			_veg_keys_by_chunk[ck] = []
+		_veg_keys_by_chunk[ck].append(key)
+		placed += 1
+	if changed:
+		_veg_finalize_shrubs(ck)
+
+
+# L3: scatter nettle PATCHES inside a neglected-zone polygon (industrial/commercial/brownfield/...).
+# Deterministic, gated off roads/buildings/water/parking, capped per chunk, no collision. Main-thread
+# (called from the landuse dispatch) but tiny + capped so it can't spike.
+func _veg_scatter_nettles(points: PackedVector2Array, parent: Node3D, way_id: int) -> void:
+	if not enable_veg_weeds or points.size() < 3:
+		return
+	if not _veg_ensure_assets() or _veg_nettle_mesh == null:
+		return
+	var ck := _get_chunk_key_from_node(parent)
+	if ck == "" or not _loaded_chunks.has(ck):
+		return
+	var existing: int = (_veg_nettle_batch.get(ck, []) as Array).size()
+	if existing >= VEG_NETTLE_PATCH_CAP * 6:
+		return
+	var mn := points[0]
+	var mx := points[0]
+	for p in points:
+		mn = Vector2(minf(mn.x, p.x), minf(mn.y, p.y))
+		mx = Vector2(maxf(mx.x, p.x), maxf(mx.y, p.y))
+	var want := clampi(int((mx.x - mn.x) * (mx.y - mn.y) / 900.0), 1, 4)  # ~1 patch / 30×30 m, ≤4/poly
+	var placed := 0
+	for pi in range(want * 4):
+		if placed >= want or (_veg_nettle_batch.get(ck, []) as Array).size() >= VEG_NETTLE_PATCH_CAP * 6:
+			break
+		var key := "vw_%d_%d" % [way_id, pi]
+		if _created_veg_keys.has(key):
+			continue
+		var hk := absi(hash(key))
+		var c := Vector2(mn.x + float(hk % 1000) / 1000.0 * (mx.x - mn.x), mn.y + float((hk >> 10) % 1000) / 1000.0 * (mx.y - mn.y))
+		if not Geometry2D.is_point_in_polygon(c, points):
+			continue
+		if _is_point_near_road_fast(c, 1.5, ck) or _building_clip_within(c, 1.0) or _is_point_in_any_parking(c, ck) or _is_point_in_water(c, ck):
+			continue
+		var cnt := 3 + (hk % 4)  # 3–6 nettles per patch
+		for j in range(cnt):
+			var jh := absi(hash(key + "_" + str(j)))
+			var pos := c + Vector2((float(jh % 1000) / 1000.0 - 0.5) * 2.0, (float((jh >> 5) % 1000) / 1000.0 - 0.5) * 2.0)
+			if not Geometry2D.is_point_in_polygon(pos, points) or _is_point_near_road_fast(pos, 0.5, ck):
+				continue
+			var nscl := 0.8 + float((jh >> 3) % 500) / 1000.0
+			var nyaw := float((jh >> 7) % 6283) / 1000.0
+			var ny := get_surface_y(pos.x, pos.y)
+			if not _veg_nettle_batch.has(ck):
+				_veg_nettle_batch[ck] = []
+			_veg_nettle_batch[ck].append(Transform3D(Basis(Vector3.UP, nyaw).scaled(Vector3(nscl, nscl, nscl)), Vector3(pos.x, ny, pos.y)))
+		_created_veg_keys[key] = true
+		if not _veg_keys_by_chunk.has(ck):
+			_veg_keys_by_chunk[ck] = []
+		_veg_keys_by_chunk[ck].append(key)
+		placed += 1
+	if placed > 0:
+		_veg_finalize_nettles(ck)
+
+
+func _veg_finalize_nettles(ck: String) -> void:
+	if not _loaded_chunks.has(ck) or _veg_nettle_mesh == null:
+		return
+	var arr: Array = _veg_nettle_batch.get(ck, [])
+	if arr.is_empty():
+		return
+	var parent: Node3D = _loaded_chunks[ck]
+	if not is_instance_valid(parent):
+		return
+	var old := parent.get_node_or_null("VegNettles")
+	if old != null:
+		old.free()
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = _veg_nettle_mesh
+	mm.instance_count = arr.size()
+	for i in range(arr.size()):
+		var nxf: Transform3D = arr[i]
+		if enable_veg_flatten and _veg_flattened.has(_veg_flat_key(nxf.origin.x, nxf.origin.z)):
+			nxf = _veg_squash_xf(nxf)  # L5: stays crushed after reload
+		mm.set_instance_transform(i, nxf)
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = "VegNettles"
+	mmi.multimesh = mm
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mmi.visibility_range_end = 60.0
+	mmi.visibility_range_end_margin = 10.0
+	mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	parent.add_child(mmi)
+
+
+# L4: scatter sparse flower/ground-cover PATCHES inside KEPT-GREEN polygons only (park/garden/grass/
+# meadow/recreation/residential courtyards). Deterministic, gated off roads/sidewalks/buildings/water/
+# parking, capped (≤5 patches/chunk), no collision, very short visibility range. Subtle lawn detail.
+func _veg_scatter_flowers(points: PackedVector2Array, parent: Node3D, way_id: int) -> void:
+	if not enable_veg_flowers or points.size() < 3:
+		return
+	if not _veg_ensure_assets() or _veg_flower_mesh == null:
+		return
+	var ck := _get_chunk_key_from_node(parent)
+	if ck == "" or not _loaded_chunks.has(ck):
+		return
+	var existing_patches := 0
+	for k in _veg_keys_by_chunk.get(ck, []):
+		if (k as String).begins_with("vf_"):
+			existing_patches += 1
+	if existing_patches >= VEG_FLOWER_PATCH_CAP:
+		return
+	var mn := points[0]
+	var mx := points[0]
+	for p in points:
+		mn = Vector2(minf(mn.x, p.x), minf(mn.y, p.y))
+		mx = Vector2(maxf(mx.x, p.x), maxf(mx.y, p.y))
+	var want := clampi(int((mx.x - mn.x) * (mx.y - mn.y) / 1600.0), 1, VEG_FLOWER_PATCH_CAP)  # ~1 patch / 40×40 m
+	var placed := 0
+	var changed := false
+	for pi in range(want * 4):
+		if placed >= want or existing_patches + placed >= VEG_FLOWER_PATCH_CAP:
+			break
+		var key := "vf_%d_%s_%d" % [way_id, ck, pi]
+		if _created_veg_keys.has(key):
+			continue
+		var hk := absi(hash(key))
+		var c := Vector2(mn.x + float(hk % 1000) / 1000.0 * (mx.x - mn.x), mn.y + float((hk >> 10) % 1000) / 1000.0 * (mx.y - mn.y))
+		if not Geometry2D.is_point_in_polygon(c, points):
+			continue
+		if _is_point_near_road_fast(c, 1.5, ck) or _is_point_on_footway(c, 0.4, ck) or _building_clip_within(c, 1.0) or _is_point_in_any_parking(c, ck) or _is_point_in_water(c, ck):
+			continue
+		var cnt := 3 + (hk % 4)  # 3–6 flower cards per patch
+		for j in range(cnt):
+			var jh := absi(hash(key + "_" + str(j)))
+			var pos := c + Vector2((float(jh % 1000) / 1000.0 - 0.5) * 2.4, (float((jh >> 5) % 1000) / 1000.0 - 0.5) * 2.4)
+			if not Geometry2D.is_point_in_polygon(pos, points) or _is_point_near_road_fast(pos, 0.8, ck):
+				continue
+			var fscl := 0.8 + float((jh >> 3) % 500) / 1000.0
+			var fyaw := float((jh >> 7) % 6283) / 1000.0
+			var fy := get_surface_y(pos.x, pos.y)
+			if not _veg_flower_batch.has(ck):
+				_veg_flower_batch[ck] = []
+			_veg_flower_batch[ck].append(Transform3D(Basis(Vector3.UP, fyaw).scaled(Vector3(fscl, fscl, fscl)), Vector3(pos.x, fy, pos.y)))
+			changed = true
+		_created_veg_keys[key] = true
+		if not _veg_keys_by_chunk.has(ck):
+			_veg_keys_by_chunk[ck] = []
+		_veg_keys_by_chunk[ck].append(key)
+		placed += 1
+	if changed:
+		_veg_finalize_flowers(ck)
+
+
+func _veg_finalize_flowers(ck: String) -> void:
+	if not _loaded_chunks.has(ck) or _veg_flower_mesh == null:
+		return
+	var arr: Array = _veg_flower_batch.get(ck, [])
+	if arr.is_empty():
+		return
+	var parent: Node3D = _loaded_chunks[ck]
+	if not is_instance_valid(parent):
+		return
+	var old := parent.get_node_or_null("VegFlowers")
+	if old != null:
+		old.free()
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = _veg_flower_mesh
+	mm.instance_count = arr.size()
+	for i in range(arr.size()):
+		var fxf: Transform3D = arr[i]
+		if enable_veg_flatten and _veg_flattened.has(_veg_flat_key(fxf.origin.x, fxf.origin.z)):
+			fxf = _veg_squash_xf(fxf)  # L5: stays crushed after reload
+		mm.set_instance_transform(i, fxf)
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = "VegFlowers"
+	mmi.multimesh = mm
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mmi.visibility_range_end = 50.0
+	mmi.visibility_range_end_margin = 8.0
+	mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	parent.add_child(mmi)
+
+
+# ── L5: run-over flattening (flowers + nettles) ───────────────────────────
+# Persistence grid cell for a world XZ position.
+func _veg_flat_key(x: float, z: float) -> Vector2i:
+	return Vector2i(int(round(x / VEG_FLATTEN_GRID)), int(round(z / VEG_FLATTEN_GRID)))
+
+
+# Press a stored (upright) transform flat onto the ground as a "run-over" imprint: TIP the plant nearly
+# horizontal (in its own facing direction) so its full silhouette stays VISIBLE splayed on the grass,
+# widen the footprint, drop the residual height, sink the base a few cm. Built from the ORIGINAL
+# transform so re-applying is idempotent.
+func _veg_squash_xf(xf: Transform3D) -> Transform3D:
+	var s := xf.basis.get_scale()
+	var yaw := xf.basis.get_euler().y
+	var b := Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, deg_to_rad(VEG_FLATTEN_TIP_DEG))
+	b = b.scaled(Vector3(s.x * VEG_FLATTEN_SPREAD, s.y * VEG_FLATTEN_RESIDUAL, s.z * VEG_FLATTEN_SPREAD))
+	var o := xf.origin
+	o.y -= 0.05
+	return Transform3D(b, o)
+
+
+# Each frame: for every wheel touching the ground, crush nearby flower/nettle instances. Cheap —
+# per-chunk veg counts are small and capped; the squash is one MultiMesh transform write per hit.
+func _veg_update_flatten() -> void:
+	if not enable_veg_flatten or _car == null or not is_instance_valid(_car):
+		return
+	if not ("wheel_array" in _car):
+		return
+	for w in _car.wheel_array:
+		if w == null or not is_instance_valid(w) or not w.is_colliding():
+			continue
+		var wp: Vector3 = w.global_position
+		_veg_flatten_at(wp.x, wp.z)
+
+
+func _veg_flatten_at(wx: float, wz: float) -> void:
+	var ck := _veg_chunk_key(Vector2(wx, wz))
+	var chunk = _loaded_chunks.get(ck)
+	if chunk == null or not is_instance_valid(chunk):
+		return
+	var r2 := VEG_FLATTEN_RADIUS * VEG_FLATTEN_RADIUS
+	_veg_flatten_layer(chunk.get_node_or_null("VegFlowers"), _veg_flower_batch.get(ck, []), wx, wz, r2)
+	_veg_flatten_layer(chunk.get_node_or_null("VegNettles"), _veg_nettle_batch.get(ck, []), wx, wz, r2)
+
+
+func _veg_flatten_layer(node: Node, batch: Array, wx: float, wz: float, r2: float) -> void:
+	if node == null or not (node is MultiMeshInstance3D):
+		return
+	var mm: MultiMesh = (node as MultiMeshInstance3D).multimesh
+	if mm == null or mm.instance_count != batch.size():
+		return
+	for i in range(batch.size()):
+		var o: Vector3 = batch[i].origin
+		var dx := o.x - wx
+		var dz := o.z - wz
+		if dx * dx + dz * dz > r2:
+			continue
+		# already crushed? (squash sinks the origin — use it as the marker so we write once)
+		if mm.get_instance_transform(i).origin.y < o.y - 0.03:
+			continue
+		mm.set_instance_transform(i, _veg_squash_xf(batch[i]))
+		_veg_flattened[_veg_flat_key(o.x, o.z)] = true
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Pedestrian guard-rail fences (v1 — static placement). See docs/PEDESTRIAN_FENCE_PLAN.md.
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -21622,6 +22693,14 @@ func _reset_wire_state() -> void:
 	_pfence_shatter_order.clear()
 	_pfence_speed_hist.clear()
 	_pfence_player = null
+	_deferred_veg_row_queue.clear()
+	_veg_row_batch.clear()
+	_veg_shrub_batch.clear()
+	_veg_nettle_batch.clear()
+	_veg_flower_batch.clear()
+	_veg_flattened.clear()
+	_created_veg_keys.clear()
+	_veg_keys_by_chunk.clear()
 	_spark_joints_by_chunk.clear()
 	_spark_joint_seen.clear()
 	_spark_joint_keys_by_chunk.clear()
@@ -21924,6 +23003,15 @@ func _place_manual_props_for_chunk(chunk_key: String, parent: Node3D) -> void:
 		if ck != chunk_key:
 			continue
 		var type := str(entry.get("type", "kiosk"))
+		# Composite set-piece: register the whole paving_works with the ClutterManager (by name,
+		# not individual models). `heading_deg` (fallback rotation_y) = road direction.
+		if type == "paving_works":
+			if _clutter_manager:
+				var hdg := deg_to_rad(float(entry.get("heading_deg", entry.get("rotation_y", 0.0))))
+				var curb := float(entry.get("curb", 1.0))
+				_clutter_manager.register("paving_works", pos, {"heading": hdg, "curb": curb})
+				print("OSM: registered manual paving_works at (%.1f, %.1f)" % [pos.x, pos.y])
+			continue
 		var def: Dictionary = _prop_defs.get(type, {})
 		if def.is_empty() or def.get("preps", []).is_empty():
 			push_warning("roadside_props: unknown type '%s'" % type)
