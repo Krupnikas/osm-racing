@@ -875,6 +875,20 @@ static func create_oneway_markings(size: int = 512, lanes: int = 4) -> ImageText
 	return ImageTexture.create_from_image(image)
 
 
+## Stop-line marking: a solid white field with per-pixel wear (transparent worn spots), matching the
+## worn look of the zebra / lane markings. Applied to the traffic-light stop-line quad via alpha.
+static func create_stopline_markings(size: int = 128) -> ImageTexture:
+	var image := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0, 0, 0, 0))
+	var rng := RandomNumberGenerator.new()
+	for y in range(size):
+		for x in range(size):
+			rng.seed = 91193 + x * 13 + y * 29
+			if rng.randf() > 0.15:  # ~15% worn away → transparent (same wear ratio as the zebra)
+				image.set_pixel(x, y, Color(0.92, 0.92, 0.90, 1.0))
+	return ImageTexture.create_from_image(image)
+
+
 ## Crossing markings: zebra stripes
 static func create_crossing_markings(size: int = 256) -> ImageTexture:
 	var image := Image.create(size, size, false, Image.FORMAT_RGBA8)
