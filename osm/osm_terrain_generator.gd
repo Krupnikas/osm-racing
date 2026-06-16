@@ -1930,6 +1930,9 @@ func _process(delta: float) -> void:
 	# Night-only wire sparks — early-returns in daytime (zero cost).
 	_update_wire_sparks(delta)
 
+	# Blinking-yellow traffic lights — early-returns if none placed (zero cost).
+	_tl_update_blink(delta)
+
 	# L5: crush flowers/nettles under the wheels (early-returns if disabled / no car).
 	_veg_update_flatten()
 
@@ -3369,6 +3372,17 @@ func _unload_chunk(chunk_key: String) -> void:
 			for _pk in _pfence_keys_by_chunk[chunk_key]:
 				_created_pfence_keys.erase(_pk)
 			_pfence_keys_by_chunk.erase(chunk_key)
+		# OSM traffic lights: free dedup keys (node + approach) + records. Light nodes free with
+		# chunk_node; stop-line meshes free with the road batch. Reload re-places them.
+		_deferred_tl_queue.erase(chunk_key)
+		_tl_sl_queue.erase(chunk_key)
+		_tl_records_by_chunk.erase(chunk_key)
+		if _tl_keys_by_chunk.has(chunk_key):
+			for _tk in _tl_keys_by_chunk[chunk_key]:
+				_created_tl_keys.erase(_tk)
+				_created_tl_app_keys.erase(_tk)
+				_created_sl_keys.erase(_tk)
+			_tl_keys_by_chunk.erase(chunk_key)
 		# Vegetation rows: free dedup keys + batch (VegRows node frees with chunk_node).
 		_deferred_veg_row_queue.erase(chunk_key)
 		_veg_row_batch.erase(chunk_key)
@@ -3967,6 +3981,8 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 			# from 7102d8c can't function.
 			var rseg_way_id: int = int(way.get("id", 0))
 			var rseg_is_bridge: bool = tags.get("bridge", "") == "yes"
+			var rseg_ow_s: String = str(tags.get("oneway", ""))
+			var rseg_oneway: bool = rseg_ow_s == "yes" or rseg_ow_s == "true" or rseg_ow_s == "1" or rseg_ow_s == "-1"
 			for j in range(smoothed_pts.size() - 1):
 				var rseg := {
 					"p1": smoothed_pts[j],
@@ -3975,6 +3991,7 @@ func _compute_terrain_phases_thread(task_data: Dictionary) -> void:
 					"way_id": rseg_way_id,
 					"bridge": rseg_is_bridge,
 					"highway": str(tags.get("highway", "")),  # for the pedestrian-fence major-road gate
+					"oneway": rseg_oneway,                      # stop-line span: full carriageway vs half
 				}
 				var p1: Vector2 = rseg.p1
 				var p2: Vector2 = rseg.p2
@@ -4666,7 +4683,11 @@ func _process_phase3_queue() -> bool:
 				var sign_elev := _sample_elevation(pos.x, pos.y)
 				var has_primary := "primary" in road_types or "secondary" in road_types
 				if has_primary and node_road_count[node_key] >= 3:
-					_create_traffic_light(pos + sign_offset, sign_elev, target)
+					# OSM-driven traffic lights (enable_osm_traffic_signals) REPLACE this old center
+					# placeholder — the two must NOT coexist. Only fall back to the placeholder when
+					# the OSM-driven system is disabled.
+					if not enable_osm_traffic_signals:
+						_create_traffic_light(pos + sign_offset, sign_elev, target)
 				else:
 					_create_yield_sign(pos + sign_offset, sign_elev, target)
 			# Patches in all nearby chunks (clipped to chunk bounds inside)
@@ -4777,7 +4798,22 @@ func _process_phase3_queue() -> bool:
 					continue
 			_create_pedestrian_area(ped_points, target, chunk_key)
 			print("OSM: Created pedestrian area with %d points in chunk %s" % [ped_points.size(), chunk_key])
-		# Done — finalize
+		# Done — traffic signals next
+		entry.phase = "traffic_signals"
+		return true
+
+	if phase == "traffic_signals":
+		# OSM-driven traffic lights: enqueue every signal node owned by this chunk into the
+		# deferred-retry queue. Placement waits on road + intersection data (built on a worker
+		# thread) — never skip on first miss. Mirrors the pedestrian-fence enqueue pattern.
+		if enable_osm_traffic_signals:
+			var signals: Array = osm_data.get("traffic_signals", [])
+			for sig in signals:
+				var slocal: Vector2 = _latlon_to_local(sig.get("lat", 0.0), sig.get("lon", 0.0))
+				if filter_by_chunk:
+					if slocal.x < chunk_min_x or slocal.x >= chunk_max_x or slocal.y < chunk_min_z or slocal.y >= chunk_max_z:
+						continue
+				_tl_enqueue_signal(int(sig.get("id", 0)), slocal, sig.get("tags", {}), chunk_key)
 		entry.phase = "finalize"
 		return true
 
@@ -4856,6 +4892,8 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 			var smoothed_pts := _smooth_road_corners(raw_pts)
 			var sync_way_id: int = int(way.get("id", 0))
 			var sync_is_bridge: bool = tags.get("bridge", "") == "yes"
+			var sync_ow_s: String = str(tags.get("oneway", ""))
+			var sync_oneway: bool = sync_ow_s == "yes" or sync_ow_s == "true" or sync_ow_s == "1" or sync_ow_s == "-1"
 			for j in range(smoothed_pts.size() - 1):
 				_add_road_segment_to_spatial_hash({
 					"p1": smoothed_pts[j],
@@ -4863,6 +4901,7 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 					"width": road_w,
 					"way_id": sync_way_id,
 					"bridge": sync_is_bridge,
+					"oneway": sync_oneway,
 				}, chunk_key)
 		if (tags.has("building") or (tags.has("amenity") and not tags.has("highway"))) and nodes.size() >= 3:
 			var bpoints := PackedVector2Array()
@@ -5060,6 +5099,8 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 		raw_pts[i] = _latlon_to_local(nodes[i].lat, nodes[i].lon)
 	var smoothed_pts := _smooth_road_corners(raw_pts)
 	var seg_is_bridge: bool = tags.get("bridge", "") == "yes"
+	var seg_ow_s: String = str(tags.get("oneway", ""))
+	var seg_oneway: bool = seg_ow_s == "yes" or seg_ow_s == "true" or seg_ow_s == "1" or seg_ow_s == "-1"
 	for i in range(smoothed_pts.size() - 1):
 		var seg := {
 			"p1": smoothed_pts[i],
@@ -5067,6 +5108,7 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 			"width": width,
 			"way_id": way_id,
 			"bridge": seg_is_bridge,
+			"oneway": seg_oneway,
 		}
 		_add_road_segment_to_spatial_hash(seg, rq_ck)
 
@@ -8500,6 +8542,7 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 						var cross_w := width
 						_add_road_to_batch_fast(cross_pts, cross_w, "intersection", 0.016, parent)
 						_add_road_to_batch_fast(cross_pts, cross_w, "crossing", 0.017, parent)
+						_tl_record_crossing(cross_pts, cross_w)  # so stop lines stay upstream of this zebra
 						# Re-enqueue chunk for finalization (crossing added after initial batch build)
 						if not _pending_batch_chunks.has(ck):
 							_pending_batch_chunks.append(ck)
@@ -8549,6 +8592,7 @@ func _process_footway_incremental(item: Dictionary, budget_end: int, ck: String 
 				var cross_w_end := width
 				_add_road_to_batch_fast(cross_pts_end, cross_w_end, "intersection", 0.016, parent)
 				_add_road_to_batch_fast(cross_pts_end, cross_w_end, "crossing", 0.017, parent)
+				_tl_record_crossing(cross_pts_end, cross_w_end)  # so stop lines stay upstream of this zebra
 				if not _pending_batch_chunks.has(ck):
 					_pending_batch_chunks.append(ck)
 				if enable_crossing_signs:
@@ -14425,6 +14469,14 @@ func _process_road_queue() -> void:
 		var pf_deadline: int = Time.get_ticks_usec() + (500000 if _initial_loading else 3000)
 		_process_pfence_queue(pf_deadline)
 
+	# Process deferred OSM TRAFFIC-SIGNAL sites (place roadside lights). Own slice.
+	if enable_osm_traffic_signals and not _deferred_tl_queue.is_empty():
+		var tl_deadline: int = Time.get_ticks_usec() + (500000 if _initial_loading else 3000)
+		_process_tl_queue(tl_deadline)
+	# Stop lines build in a later pass so the approach's zebra crossings are recorded first.
+	if enable_osm_traffic_signals and not _tl_sl_queue.is_empty():
+		_process_tl_sl_queue(Time.get_ticks_usec() + (500000 if _initial_loading else 3000))
+
 	# Process deferred ROADSIDE-PROP walking (budgeted), mirrors the billboard walk.
 	if enable_roadside_props and (Time.get_ticks_usec() - queue_start) <= TOTAL_BUDGET_USEC:
 		var pr_done_keys: Array[String] = []
@@ -19380,6 +19432,7 @@ func _find_nearest_road_at_point(point: Vector2, ck: String = "") -> Dictionary:
 	var best_width := 0.0
 	var best_highway := ""
 	var best_way_id := 0
+	var best_oneway := false
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			var key := Vector2i(cell_x + dx, cell_y + dy)
@@ -19396,6 +19449,7 @@ func _find_nearest_road_at_point(point: Vector2, ck: String = "") -> Dictionary:
 					best_width = seg.width
 					best_highway = str(seg.get("highway", ""))
 					best_way_id = int(seg.get("way_id", 0))
+					best_oneway = bool(seg.get("oneway", false))
 	if best_dist > 20.0:
 		return {}
 	var road_dir: Vector2 = (best_seg_p2 - best_seg_p1).normalized()
@@ -19407,6 +19461,7 @@ func _find_nearest_road_at_point(point: Vector2, ck: String = "") -> Dictionary:
 		"road_p2": best_seg_p2,
 		"road_highway": best_highway,
 		"road_way_id": best_way_id,
+		"oneway": best_oneway,
 	}
 
 
@@ -21330,6 +21385,12 @@ func _veg_furniture_clear(p: Vector2, radius: float) -> bool:
 			for q in _prop_pos_hash.get(Vector2i(pc.x + dx, pc.y + dy), []):
 				if p.distance_to(q) < radius:
 					return false
+	# OSM traffic lights — vegetation yields to them (int-grid dict)
+	var ri := int(ceil(radius))
+	for dx2 in range(-ri, ri + 1):
+		for dz2 in range(-ri, ri + 1):
+			if _created_tl_positions.has("tl_%d_%d" % [int(p.x) + dx2, int(p.y) + dz2]):
+				return false
 	return true
 
 
@@ -22686,6 +22747,17 @@ func _reset_wire_state() -> void:
 	_pfence_shatter_order.clear()
 	_pfence_speed_hist.clear()
 	_pfence_player = null
+	# OSM traffic lights share the regen/reset lifecycle.
+	_deferred_tl_queue.clear()
+	_created_tl_keys.clear()
+	_created_tl_app_keys.clear()
+	_tl_keys_by_chunk.clear()
+	_tl_records_by_chunk.clear()
+	_created_tl_positions.clear()
+	_created_sl_keys.clear()
+	_tl_crossings.clear()
+	_tl_sl_queue.clear()
+	_tl_blink_accum = 0.0
 	_deferred_veg_row_queue.clear()
 	_veg_row_batch.clear()
 	_veg_shrub_batch.clear()
@@ -22942,6 +23014,8 @@ func _prop_near_furniture(pos: Vector2) -> bool:
 			if _created_bus_stop_positions.has("bs_%d_%d" % [kx, kz]):
 				return true
 			if _created_sign_positions.has("ts_%d_%d" % [kx, kz]):
+				return true
+			if _created_tl_positions.has("tl_%d_%d" % [kx, kz]):  # OSM traffic lights — props yield to them
 				return true
 	return false
 
@@ -27912,3 +27986,571 @@ func _get_random_soviet_texture(way_id: int, tags: Dictionary) -> String:
 	# Используем way_id как seed для консистентных результатов между запусками игры
 	var index := way_id % PANEL_TEXTURES.size()
 	return PANEL_TEXTURES[index]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OSM-DRIVEN TRAFFIC LIGHTS & STOP-LINES (v1).  Full spec: docs/TRAFFIC_LIGHTS_PLAN.md
+# Lights are placed at OSM highway=traffic_signals nodes on the NEAR-SIDE RIGHT CURB
+# of the approach, facing oncoming traffic (right-hand traffic). Placement mirrors the
+# pedestrian-fence system: a deferred-retry queue (road + intersection data build on a
+# worker thread → never skip on first miss), per-chunk ownership, stable node-id dedup
+# PLUS a secondary one-light-per-approach dedup. v1 lighting = blinking yellow, emissive
+# ONLY (no Light3D — respects the 48-light cap). Replaces the old center placeholder.
+# ═════════════════════════════════════════════════════════════════════════════
+@export var enable_osm_traffic_signals := true
+const TL_DROP := 0     # signal rejected permanently (dup / ambiguous)
+const TL_RETRY := 1    # road/intersection not ready yet (or mid-block until retries exhausted)
+const TL_BUILT := 2    # light placed this frame
+var tl_intersection_radius := 32.0     # anchoring search radius around a signal node
+var tl_curb_offset := 0.6              # outward from the carriageway edge onto the kerb
+var tl_min_along := 2.0                # |signal-along-road from inter centre| below this → ambiguous
+var tl_max_retries := 300             # drain retries before a still-unanchored signal → midblock_v2
+var tl_blink_hz := 1.1                 # blinking-yellow frequency
+var tl_blink_energy_day := 3.5
+var tl_blink_energy_night := 7.0
+var tl_visibility_range := 320.0
+var tl_debug := false                  # default-off: spawn debug markers + funnel logs
+var _deferred_tl_queue: Dictionary = {}     # ck → Array[{id, pos, tags, _retries}]
+var _created_tl_keys: Dictionary = {}       # "tl_<node_id>" → true (chunk-overlap dedup)
+var _created_tl_app_keys: Dictionary = {}   # "tl_app_<ii>_<wid>_<end>" → node_id (one light per approach)
+var _tl_keys_by_chunk: Dictionary = {}      # ck → Array[String] (node + app keys, erased on unload)
+var _tl_records_by_chunk: Dictionary = {}   # ck → Array[record] (blink + cleanup)
+var _created_tl_positions: Dictionary = {}  # "tl_<x>_<z>" int grid → true (furniture clearance; props yield)
+var _tl_blink_accum := 0.0
+var tl_stopline_setback := 1.0          # m upstream nudge so the bar clears the junction edge (no zebra)
+var tl_stopline_depth := 0.4            # along-road thickness of the bar (transverse stop line)
+var tl_stopline_zebra_gap := 1.2        # clearance kept UPSTREAM of a zebra crossing
+var _created_sl_keys: Dictionary = {}   # "sl_<id>" → true (stop-line dedup)
+var _tl_crossings: Dictionary = {}      # "x_z" → {c:Vector2, depth:float} zebra positions (stop-line avoidance)
+var _tl_sl_queue: Dictionary = {}       # ck → Array[stop-line jobs] (built after crossings recorded)
+var tl_sl_max_retries := 600            # safety-net frames before default placement (map-edge junctions)
+var _tl_stopline_mat: StandardMaterial3D = null
+var _tl_dbg := {"enq": 0, "placed": 0, "noroad": 0, "midblock_v2": 0, "dup_node": 0, "dup_approach": 0, "ambiguous": 0, "sl_drawn": 0, "sl_nofit": 0, "sl_late": 0}
+
+
+# Queue one signal node (owned by chunk `ck`) for deferred placement. Node-id dedup at both enqueue
+# (skip if already placed) and build time (skip if a neighbouring fetch placed it first).
+func _tl_enqueue_signal(node_id: int, pos: Vector2, tags: Dictionary, ck: String) -> void:
+	if node_id == 0 or not enable_osm_traffic_signals:
+		return
+	if _created_tl_keys.has("tl_%d" % node_id):
+		return  # already placed (e.g. overlapping neighbour fetch)
+	if not _deferred_tl_queue.has(ck):
+		_deferred_tl_queue[ck] = []
+	for e in _deferred_tl_queue[ck]:
+		if int(e.get("id", 0)) == node_id:
+			return  # already queued for this chunk
+	_deferred_tl_queue[ck].append({"id": node_id, "pos": pos, "tags": tags, "_retries": 0})
+	_tl_dbg.enq += 1
+
+
+# Drain deferred signal sites within a time budget. Anchoring to road/intersection data may not be
+# possible yet (built on a worker thread AFTER signal enqueue) — so RETRY, never skip on first miss.
+func _process_tl_queue(deadline_usec: int) -> void:
+	if not enable_osm_traffic_signals or _deferred_tl_queue.is_empty():
+		return
+	var done_keys: Array[String] = []
+	for ck in _get_prioritized_keys(_deferred_tl_queue):
+		if Time.get_ticks_usec() > deadline_usec:
+			break
+		if not _loaded_chunks.has(ck):
+			continue  # worker race — keep the jobs; _unload_chunk erases truly-gone chunks
+		var arr: Array = _deferred_tl_queue[ck]
+		var keep: Array = []
+		for site in arr:
+			if Time.get_ticks_usec() > deadline_usec:
+				keep.append(site)
+				continue
+			var st := _tl_build_signal(site, ck)
+			if st == TL_RETRY:
+				site["_retries"] = int(site.get("_retries", 0)) + 1
+				if int(site["_retries"]) < tl_max_retries:
+					keep.append(site)
+				else:
+					# Could not associate with any junction after a long drain → mid-block signal.
+					# Deliberate v1-scope skip (NOT a generic failure); see plan §13/§14.
+					_tl_dbg.midblock_v2 += 1
+					if tl_debug:
+						print("TL midblock_signal_v2 (no junction after %d retries) id=%d" % [tl_max_retries, int(site.get("id", 0))])
+			# TL_BUILT / TL_DROP → drop from queue
+		if keep.is_empty():
+			done_keys.append(ck)
+		else:
+			_deferred_tl_queue[ck] = keep
+	for ck in done_keys:
+		_deferred_tl_queue.erase(ck)
+
+
+# Evaluate one signal: match the carriageway, anchor to a junction, infer the approach direction,
+# project to the near-side RIGHT curb, orient to face oncoming traffic, dedup (node + approach),
+# build the light and its stop line. Returns TL_DROP / TL_RETRY / TL_BUILT.
+func _tl_build_signal(site: Dictionary, ck: String) -> int:
+	var node_id: int = int(site.get("id", 0))
+	var pos: Vector2 = site.get("pos", Vector2.ZERO)
+	var node_key := "tl_%d" % node_id
+	if _created_tl_keys.has(node_key):
+		_tl_dbg.dup_node += 1
+		return TL_DROP  # placed already by another (overlapping) chunk fetch
+	# 1) Match the nearest VEHICLE carriageway (width >= 4). Not hashed yet → retry.
+	var ri := _find_nearest_road_at_point(pos, "")
+	if ri.is_empty():
+		return TL_RETRY
+	var road_dir: Vector2 = ri.road_dir
+	var road_w: float = ri.road_width
+	var road_way_id: int = int(ri.get("road_way_id", 0))
+	# 2) Anchor to the nearest intersection (search all loaded — signals sit on chunk borders).
+	var ii := _pfence_nearest_intersection(pos, tl_intersection_radius)
+	if ii < 0:
+		return TL_RETRY  # not built yet, or genuinely mid-block (→ midblock_v2 after retries)
+	var inter_c: Vector2 = _intersection_positions[ii]
+	# 3) approach_dir = along the road TOWARD the junction = the car's travel direction.
+	#    NOTE: road_dir orientation is arbitrary (segment node order). We DO NOT trust a
+	#    direction=forward/backward tag here because the matched segment is not guaranteed to
+	#    follow OSM way order (anti-flip safeguard, plan §4.1) — geometry decides.
+	var s := road_dir.dot(inter_c - pos)
+	if absf(s) < tl_min_along:
+		# Signal sits ON the junction node (common OSM pattern, esp. T-junctions): geometry can't pick a
+		# single approach → the WHOLE junction is signalized. Expand to one light per intersection arm.
+		return _tl_build_junction_arms(node_id, ii, ck)
+	var approach_dir := road_dir * signf(s)
+	var end_sign := 1 if s >= 0.0 else 0  # which end of the way relative to the junction
+	# 4) Secondary approach dedup: one light per (intersection, way, approach end).
+	var app_key := "tl_app_%d_%d_%d" % [ii, road_way_id, end_sign]
+	if _created_tl_app_keys.has(app_key):
+		_tl_dbg.dup_approach += 1
+		if tl_debug:
+			print("TL dup_approach id=%d app=%s (kept id=%d)" % [node_id, app_key, int(_created_tl_app_keys[app_key])])
+		_created_tl_keys[node_key] = true  # mark so it isn't retried forever
+		_tl_track_chunk_key(ck, node_key)
+		return TL_DROP
+	# 5) Right curb (right-hand traffic). Local 2D is (x=east, y=world z=south) — a y-DOWN frame, so
+	# the driver's RIGHT of travel dir d is Vector2(-d.y, d.x) (verified in-engine: the other sign put
+	# lights on the left curb).
+	var right_perp := Vector2(-approach_dir.y, approach_dir.x)
+	var cl := Geometry2D.get_closest_point_to_segment(pos, ri.road_p1, ri.road_p2)
+	var curb := _tl_curb_point(cl, right_perp, ck)
+	# 6) Near-side clamp: never inside the junction curb contour — push upstream if it lands inside.
+	var guard := 0
+	while _is_point_in_intersection_shape(curb, true, "") == ii and guard < 8:
+		cl -= approach_dir * 1.5
+		curb = _tl_curb_point(cl, right_perp, ck)
+		guard += 1
+	# 7) yaw: the head faces oncoming traffic = faces UPSTREAM (-approach_dir). Local +Z = face.
+	var face := -approach_dir
+	var yaw := atan2(face.x, face.y)
+	var elev := _sample_elevation(curb.x, curb.y)
+	var parent: Node3D = _loaded_chunks.get(ck, null)
+	if parent == null or not is_instance_valid(parent):
+		return TL_RETRY
+	# 8) Build the light + commit both dedup layers.
+	var rec = _tl_create_light(curb, elev, yaw, node_id, parent)
+	if rec == null:
+		return TL_RETRY
+	rec["node_key"] = node_key
+	rec["app_key"] = app_key
+	rec["approach"] = approach_dir   # debug: car travel dir toward the junction
+	rec["inter"] = inter_c           # debug: matched intersection centre
+	rec["dr"] = right_perp           # debug: driver_right used for placement
+	rec["curb"] = curb               # debug: final light position
+	rec["face"] = face               # debug: head facing dir
+	_created_tl_keys[node_key] = true
+	_created_tl_app_keys[app_key] = node_id
+	_tl_track_chunk_key(ck, node_key)
+	_tl_track_chunk_key(ck, app_key)
+	if not _tl_records_by_chunk.has(ck):
+		_tl_records_by_chunk[ck] = []
+	_tl_records_by_chunk[ck].append(rec)
+	_tl_register_furniture(curb)  # props/veg/etc. yield to the light (priority)
+	_tl_dbg.placed += 1
+	# 9) Stop line for this approach — deferred so the approach's zebra crossings are recorded first.
+	_tl_enqueue_stop_line(cl, approach_dir, right_perp, road_w, ck, node_id)
+	if tl_debug:
+		_tl_debug_signal(ck, node_id, pos, inter_c, approach_dir, right_perp, curb, face)
+	return TL_BUILT
+
+
+# A signal node placed ON the junction node → the whole junction is signalized. Place one light per
+# intersection ARM: each arm's approach faces inward, the light goes on that approach's right curb,
+# upstream of the junction contour, facing oncoming traffic.
+func _tl_build_junction_arms(node_id: int, ii: int, ck: String) -> int:
+	if ii >= _intersection_roads.size():
+		return TL_RETRY
+	var arms: Array = _intersection_roads[ii]
+	if arms.is_empty():
+		return TL_RETRY
+	var inter_c: Vector2 = _intersection_positions[ii]
+	var parent: Node3D = _loaded_chunks.get(ck, null)
+	if parent == null or not is_instance_valid(parent):
+		return TL_RETRY
+	var node_key := "tl_%d" % node_id
+	var any := false
+	for ai in range(arms.size()):
+		var arm: Dictionary = arms[ai]
+		var arm_dir: Vector2 = arm.get("direction", Vector2.ZERO)  # outward from the centre
+		if arm_dir.length() < 0.5:
+			continue
+		arm_dir = arm_dir.normalized()
+		var road_w: float = float(arm.get("width", 7.0))
+		var app_key := "tl_app_%d_arm_%d" % [ii, ai]
+		if _created_tl_app_keys.has(app_key):
+			any = true
+			continue
+		var approach_dir := -arm_dir                                  # cars drive INTO the junction
+		var right_perp := Vector2(-approach_dir.y, approach_dir.x)    # driver's right (verified handedness)
+		var cl := inter_c + arm_dir * (road_w * 0.5 + 3.0)           # centerline point just outside centre
+		var guard := 0
+		while _is_point_in_intersection_shape(cl, true, "") == ii and guard < 8:
+			cl += arm_dir * 1.5
+			guard += 1
+		var curb := _tl_curb_point(cl, right_perp, ck)
+		var face := -approach_dir                                     # head faces oncoming driver
+		var yaw := atan2(face.x, face.y)
+		var elev := _sample_elevation(curb.x, curb.y)
+		var synth_id := node_id * 100 + ai                           # unique per arm (name + blink phase)
+		var rec = _tl_create_light(curb, elev, yaw, synth_id, parent)
+		if rec == null:
+			continue
+		rec["node_key"] = node_key
+		rec["app_key"] = app_key
+		rec["approach"] = approach_dir
+		rec["inter"] = inter_c
+		rec["dr"] = right_perp
+		rec["curb"] = curb
+		rec["face"] = face
+		_created_tl_app_keys[app_key] = node_id
+		_tl_track_chunk_key(ck, app_key)
+		if not _tl_records_by_chunk.has(ck):
+			_tl_records_by_chunk[ck] = []
+		_tl_records_by_chunk[ck].append(rec)
+		_tl_register_furniture(curb)
+		_tl_dbg.placed += 1
+		_tl_enqueue_stop_line(cl, approach_dir, right_perp, road_w, ck, synth_id)
+		if tl_debug:
+			_tl_debug_signal(ck, synth_id, inter_c, inter_c, approach_dir, right_perp, curb, face)
+		any = true
+	if any:
+		_created_tl_keys[node_key] = true
+		_tl_track_chunk_key(ck, node_key)
+		return TL_BUILT
+	return TL_RETRY
+
+
+func _tl_track_chunk_key(ck: String, key: String) -> void:
+	if not _tl_keys_by_chunk.has(ck):
+		_tl_keys_by_chunk[ck] = []
+	_tl_keys_by_chunk[ck].append(key)
+
+
+# From a road centerline point, cast `outward` to the real carriageway edge then add the kerb offset.
+func _tl_curb_point(cl: Vector2, outward: Vector2, ck: String) -> Vector2:
+	if _is_point_on_vehicle_road(cl, 0.0, ck):
+		return _find_road_edge_point(cl, true, cl + outward * 30.0, ck) + outward * tl_curb_offset
+	return cl + outward * tl_curb_offset
+
+
+func _tl_register_furniture(p: Vector2) -> void:
+	_created_tl_positions["tl_%d_%d" % [int(p.x), int(p.y)]] = true
+
+
+# Build one oriented traffic light (pole + head + 3 separable emissive bulbs + solid collider).
+# Returns a record {root, mat_red, mat_yellow, mat_green, phase, node_key, app_key} or null.
+func _tl_create_light(pos: Vector2, elevation: float, yaw: float, node_id: int, parent: Node3D):
+	if not enable_traffic_lights:
+		return null
+	var root := Node3D.new()
+	root.name = "TrafficLightOSM_%d" % node_id
+	root.position = Vector3(pos.x, elevation, pos.y)
+	root.rotation.y = yaw
+	# NOTE: visibility_range_end is a GeometryInstance3D property — set it on the mesh children,
+	# NOT on the Node3D root (which has no such property).
+	# Pole — dark metallic.
+	var pole := MeshInstance3D.new()
+	var pole_mesh := CylinderMesh.new()
+	pole_mesh.top_radius = 0.08
+	pole_mesh.bottom_radius = 0.1
+	pole_mesh.height = 4.5
+	pole.mesh = pole_mesh
+	var pole_mat := StandardMaterial3D.new()
+	pole_mat.albedo_color = Color(0.2, 0.2, 0.2)
+	pole_mat.metallic = 0.8
+	pole.material_override = pole_mat
+	pole.position.y = 2.25
+	pole.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	pole.visibility_range_end = tl_visibility_range
+	root.add_child(pole)
+	# Head — near-black box.
+	var box := MeshInstance3D.new()
+	var box_mesh := BoxMesh.new()
+	box_mesh.size = Vector3(0.35, 1.0, 0.25)
+	box.mesh = box_mesh
+	var box_mat := StandardMaterial3D.new()
+	box_mat.albedo_color = Color(0.08, 0.08, 0.08)
+	box.material_override = box_mat
+	box.position = Vector3(0, 4.2, 0.0)
+	box.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	box.visibility_range_end = tl_visibility_range
+	root.add_child(box)
+	# Bulbs (separate materials) — front face = local +Z (yaw points it at oncoming cars). Red top,
+	# yellow mid, green bottom. v1: red+green emission OFF; yellow driven by the blink loop.
+	var bulb_mesh := SphereMesh.new()
+	bulb_mesh.radius = 0.1
+	bulb_mesh.height = 0.2
+	var mat_red := _tl_bulb_mat(Color(0.55, 0.06, 0.06), Color(1.0, 0.05, 0.05))
+	var mat_yellow := _tl_bulb_mat(Color(0.6, 0.45, 0.08), Color(1.0, 0.72, 0.05))
+	var mat_green := _tl_bulb_mat(Color(0.06, 0.45, 0.1), Color(0.1, 1.0, 0.2))
+	for spec in [[mat_red, 4.5], [mat_yellow, 4.2], [mat_green, 3.9]]:
+		var b := MeshInstance3D.new()
+		b.mesh = bulb_mesh
+		b.material_override = spec[0]
+		b.position = Vector3(0, spec[1], 0.14)
+		b.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		b.visibility_range_end = tl_visibility_range
+		root.add_child(b)
+	# Solid pole collider (layer 1 — the car bumps it), like lamps/fences.
+	var body := StaticBody3D.new()
+	body.collision_layer = 1
+	body.collision_mask = 0
+	var cs := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.12
+	shape.height = 4.5
+	cs.shape = shape
+	cs.position.y = 2.25
+	body.add_child(cs)
+	root.add_child(body)
+	parent.add_child(root)
+	# Deterministic per-id blink phase (lights don't blink in lockstep; reproducible across reloads).
+	var phase := fmod(float(node_id) * 0.61803398875, 1.0) * TAU
+	return {"root": root, "mat_red": mat_red, "mat_yellow": mat_yellow, "mat_green": mat_green, "phase": phase, "node_key": "", "app_key": ""}
+
+
+func _tl_bulb_mat(albedo: Color, emission: Color) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = albedo
+	m.emission_enabled = true
+	m.emission = emission
+	m.emission_energy_multiplier = 0.0  # off until the blink driver / a future cycle sets it
+	return m
+
+
+# v1 lighting mode: blink the YELLOW bulb of every placed light (emissive only). Shared driver, no
+# per-light scripts. Visible day & night (caution mode); brighter at night. Red/green stay off in v1.
+func _tl_update_blink(delta: float) -> void:
+	if _tl_records_by_chunk.is_empty():
+		return
+	_tl_blink_accum += delta
+	var e_on := tl_blink_energy_night if _is_night_mode else tl_blink_energy_day
+	var t := _tl_blink_accum * TAU * tl_blink_hz
+	for ck in _tl_records_by_chunk:
+		for rec in _tl_records_by_chunk[ck]:
+			var my: StandardMaterial3D = rec.get("mat_yellow", null)
+			if my == null:
+				continue
+			my.emission_energy_multiplier = e_on if sin(t + float(rec.get("phase", 0.0))) > 0.0 else 0.0
+
+
+# Stop lines build in a DEFERRED pass: a signal can resolve before its chunk's zebra crossings are
+# recorded (those happen in the road "ways" phase), so building immediately would draw the bar onto the
+# zebra. Enqueue the job; build only once a zebra on the approach is found (bar placed UPSTREAM of it)
+# or retries are exhausted (no zebra → default upstream nudge).
+func _tl_enqueue_stop_line(cl: Vector2, approach_dir: Vector2, right_perp: Vector2, road_w: float, ck: String, node_id: int) -> void:
+	if _created_sl_keys.has("sl_%d" % node_id):
+		return
+	if not _tl_sl_queue.has(ck):
+		_tl_sl_queue[ck] = []
+	_tl_sl_queue[ck].append({"cl": cl, "approach": approach_dir, "right": right_perp, "road_w": road_w, "node_id": node_id, "_retries": 0})
+
+
+# True once every chunk in the 3×3 block around `cl` is loaded → their crossings are all recorded
+# (a chunk enters _loaded_chunks only at finalize, after its "ways" phase records crossings).
+func _tl_neighbors_loaded(cl: Vector2) -> bool:
+	var cx := int(floor(cl.x / chunk_size))
+	var cz := int(floor(cl.y / chunk_size))
+	for dx in [-1, 0, 1]:
+		for dz in [-1, 0, 1]:
+			if not _loaded_chunks.has("%d,%d" % [cx + dx, cz + dz]):
+				return false
+	return true
+
+
+func _process_tl_sl_queue(deadline_usec: int) -> void:
+	if not enable_osm_traffic_signals or _tl_sl_queue.is_empty():
+		return
+	var done: Array[String] = []
+	for ck in _get_prioritized_keys(_tl_sl_queue):
+		if Time.get_ticks_usec() > deadline_usec:
+			break
+		if not _loaded_chunks.has(ck):
+			continue
+		var keep: Array = []
+		for job in _tl_sl_queue[ck]:
+			# Build only once the junction's 3×3 neighbour chunks are all loaded → ALL crossings near it
+			# are recorded (a zebra on a neighbouring chunk that finalizes later was the overlap bug).
+			# Retries are the safety net for map-edge junctions whose neighbours never load.
+			if _tl_neighbors_loaded(job.cl) or int(job._retries) >= tl_sl_max_retries:
+				var off := _tl_compute_stopline_offset(job.cl, job.approach, float(job.road_w))
+				_tl_do_build_stop_line(job.cl, job.approach, job.right, float(job.road_w), ck, int(job.node_id), float(off.along_off))
+			else:
+				job._retries = int(job._retries) + 1
+				keep.append(job)
+		if keep.is_empty():
+			done.append(ck)
+		else:
+			_tl_sl_queue[ck] = keep
+	for ck in done:
+		_tl_sl_queue.erase(ck)
+
+
+# How far UPSTREAM of cl (along -approach_dir) the bar must sit to clear any zebra on this approach.
+# Returns {along_off, matched}. A zebra may sit upstream OR downstream of cl (junction-arm cl is near
+# the centre → crosswalk is often UPSTREAM, negative along), so the along window is two-sided; lateral
+# tolerance = half road + margin so both split halves of a crossing are caught.
+func _tl_compute_stopline_offset(cl: Vector2, approach_dir: Vector2, road_w: float) -> Dictionary:
+	var half_d := tl_stopline_depth * 0.5
+	var along_off := -tl_stopline_setback
+	var matched := false
+	for k in _tl_crossings:
+		var cr: Dictionary = _tl_crossings[k]
+		var v: Vector2 = cr.c - cl
+		var along: float = v.dot(approach_dir)               # + = toward junction
+		var lateral: float = (v - approach_dir * along).length()
+		if lateral <= road_w * 0.5 + 4.0 and along > -25.0 and along < 25.0:
+			along_off = minf(along_off, along - float(cr.depth) * 0.5 - tl_stopline_zebra_gap - half_d)
+			matched = true
+	return {"along_off": along_off, "matched": matched}
+
+
+# Build the TRANSVERSE stop-line quad at cl + approach_dir*along_off — long axis = right_perp
+# (centerline → right curb), depth ~0.4 m ALONG approach_dir (NOT a road-parallel stripe). Dedicated
+# chunk-child quad (frees on unload; late-resolve safe). White, Y-offset 0.018 (above the 0.017 zebra).
+func _tl_do_build_stop_line(cl: Vector2, approach_dir: Vector2, right_perp: Vector2, road_w: float, ck: String, node_id: int, along_off: float) -> void:
+	var parent: Node3D = _loaded_chunks.get(ck, null)
+	if parent == null or not is_instance_valid(parent):
+		return
+	var sl_key := "sl_%d" % node_id
+	if _created_sl_keys.has(sl_key):
+		return
+	var half_d := tl_stopline_depth * 0.5
+	# Span the APPROACHING carriageway. Two-way road (single centreline way) → cl IS the median: span the
+	# right half only (cl → right curb). One-way carriageway (divided road, separate ways) → cl is the
+	# carriageway CENTRE: span the FULL carriageway (median → curb) so the bar reaches the inner boundary,
+	# not just half of it.
+	var oneway: bool = bool(_find_nearest_road_at_point(cl, "").get("oneway", false))
+	var halfw := maxf(road_w * 0.5, 2.5)
+	var inner_off := halfw if oneway else 0.0
+	var across := (halfw * 2.0) if oneway else halfw
+	var stop_pos := cl + approach_dir * along_off
+	var base := stop_pos - right_perp * inner_off            # inner edge (median for one-way; centreline two-way)
+	var a0 := base - approach_dir * half_d
+	var a1 := base + approach_dir * half_d
+	var c2 := a1 + right_perp * across
+	var c3 := a0 + right_perp * across
+	var yo := 0.018
+	var corners := [a0, a1, c2, c3]
+	var verts := PackedVector3Array()
+	for c in corners:
+		verts.append(Vector3(c.x, _sample_elevation(c.x, c.y) + yo, c.y))
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_NORMAL] = PackedVector3Array([Vector3.UP, Vector3.UP, Vector3.UP, Vector3.UP])
+	# UVs scaled by real metres (×2 tiles/m, texture repeats) so the worn speckle stays square, not stretched.
+	var us := 2.0
+	arr[Mesh.ARRAY_TEX_UV] = PackedVector2Array([
+		Vector2(0.0, 0.0), Vector2(tl_stopline_depth * us, 0.0),
+		Vector2(tl_stopline_depth * us, across * us), Vector2(0.0, across * us)])
+	arr[Mesh.ARRAY_INDEX] = PackedInt32Array([0, 1, 2, 0, 2, 3])
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	var mi := MeshInstance3D.new()
+	mi.name = "TLStopLine_%d" % node_id
+	mi.mesh = mesh
+	mi.material_override = _tl_stopline_material()
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.visibility_range_end = tl_visibility_range
+	parent.add_child(mi)
+	_created_sl_keys[sl_key] = true
+	_tl_track_chunk_key(ck, sl_key)
+	_tl_dbg.sl_drawn += 1
+
+
+func _tl_stopline_material() -> StandardMaterial3D:
+	if _tl_stopline_mat == null:
+		var m := StandardMaterial3D.new()
+		m.albedo_color = Color(0.92, 0.92, 0.90)
+		# Worn paint: transparent speckle (same wear ratio as the zebra) cut out via alpha scissor so the
+		# asphalt shows through the worn spots — matches the look of the other road markings.
+		m.albedo_texture = TextureGeneratorScript.create_stopline_markings(128)
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+		m.alpha_scissor_threshold = 0.4
+		m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+		m.roughness = 0.55
+		m.cull_mode = BaseMaterial3D.CULL_DISABLED   # 1 flat quad — visible regardless of winding
+		_tl_stopline_mat = m
+	return _tl_stopline_mat
+
+
+# Record a zebra crossing (center on the road centerline + along-road depth) so stop lines on that
+# approach stay UPSTREAM of it. Deduped by quantized position; cleared on reset.
+func _tl_record_crossing(strip: PackedVector2Array, depth: float) -> void:
+	if not enable_osm_traffic_signals or strip.size() < 2:
+		return
+	var c := (strip[0] + strip[strip.size() - 1]) * 0.5
+	_tl_crossings["%d_%d" % [int(c.x), int(c.y)]] = {"c": c, "depth": depth}
+
+
+# ── Debug (default-off) ──────────────────────────────────────────────────────
+func _tl_debug_marker(ck: String, world_pos: Vector3, color: Color, radius: float = 0.3) -> void:
+	if not _loaded_chunks.has(ck):
+		return
+	var mi := MeshInstance3D.new()
+	var sph := SphereMesh.new()
+	sph.radius = radius
+	sph.height = radius * 2.0
+	mi.mesh = sph
+	var m := StandardMaterial3D.new()
+	m.albedo_color = color
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mi.material_override = m
+	mi.position = world_pos
+	mi.add_to_group("tl_debug")
+	_loaded_chunks[ck].add_child(mi)
+
+
+# Driver's-perspective debug: RED marker at the matched intersection centre, plus 3 arrows from the
+# light's curb point — GREEN = approach_dir (toward the junction), BLUE = driver_right, YELLOW = face.
+func _tl_debug_signal(ck: String, node_id: int, raw: Vector2, inter_c: Vector2, approach_dir: Vector2, driver_right: Vector2, curb: Vector2, face: Vector2) -> void:
+	var ey := _sample_elevation(curb.x, curb.y) + 1.0
+	_tl_debug_marker(ck, Vector3(raw.x, _sample_elevation(raw.x, raw.y) + 0.5, raw.y), Color(1.0, 0.1, 1.0))  # magenta = raw OSM node
+	_tl_debug_marker(ck, Vector3(inter_c.x, _sample_elevation(inter_c.x, inter_c.y) + 1.0, inter_c.y), Color(1.0, 0.05, 0.05), 0.7)  # RED = intersection centre
+	_tl_debug_arrow(ck, curb, approach_dir, 5.0, Color(0.1, 1.0, 0.1), ey)   # GREEN = approach_dir
+	_tl_debug_arrow(ck, curb, driver_right, 3.5, Color(0.2, 0.4, 1.0), ey)   # BLUE = driver_right
+	_tl_debug_arrow(ck, curb, face, 3.5, Color(1.0, 1.0, 0.1), ey)           # YELLOW = face direction
+	print("TL placed id=%d inter=(%.1f,%.1f) approach=(%.2f,%.2f) driver_right=(%.2f,%.2f) curb=(%.1f,%.1f) face=(%.2f,%.2f)" % [
+		node_id, inter_c.x, inter_c.y, approach_dir.x, approach_dir.y, driver_right.x, driver_right.y, curb.x, curb.y, face.x, face.y])
+
+
+# A flat colored bar from `from` along `dir` (length m) at height y, with a tip sphere showing direction.
+func _tl_debug_arrow(ck: String, from: Vector2, dir: Vector2, length: float, color: Color, y: float) -> void:
+	if not _loaded_chunks.has(ck):
+		return
+	var d := dir.normalized()
+	if d.length() < 0.5:
+		return
+	var a := Vector3(from.x, y, from.y)
+	var tip := Vector3(from.x + d.x * length, y, from.y + d.y * length)
+	var mi := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.18, 0.18, length)
+	mi.mesh = bm
+	var m := StandardMaterial3D.new()
+	m.albedo_color = color
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mi.material_override = m
+	var mid := (a + tip) * 0.5
+	mi.position = mid
+	mi.look_at_from_position(mid, tip, Vector3.UP)  # box +Z axis lies along dir
+	mi.add_to_group("tl_debug")
+	_loaded_chunks[ck].add_child(mi)
+	# tip sphere (bigger) marks the arrow head
+	_tl_debug_marker(ck, tip, color, 0.35)

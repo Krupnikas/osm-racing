@@ -34,7 +34,7 @@ START_LAT = 59.149886  # from main.tscn
 START_LON = 37.949370
 CHUNK_SIZE = 210.0     # from main.tscn
 QUERY_RADIUS = 315     # maxf(210, 150) + 210/2 = 315
-CACHE_VERSION = 6
+CACHE_VERSION = 8  # align with osm_loader.gd CACHE_VERSION; v8 adds node[highway=traffic_signals]
 
 REMOTE_SERVERS = [
     "http://mc.skrup.ru:12346/api/interpreter",
@@ -120,6 +120,7 @@ def build_overpass_query(center_lat: float, center_lon: float, radius_m: int) ->
   node["natural"="tree"]({b});
   node["traffic_sign"]({b});
   node["highway"="street_lamp"]({b});
+  node["highway"="traffic_signals"]({b});
   node["entrance"]({b});
   node["shop"]({b});
   node["amenity"]({b});
@@ -194,6 +195,7 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
     tram_stops = []
     pedestrian_areas = []
     bridge_decks = []
+    traffic_signals = []  # node highway=traffic_signals — keep node id for dedup
 
     for el in data.get("elements", []):
         if el.get("type") == "node":
@@ -226,9 +228,15 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
                         "lat": el["lat"], "lon": el["lon"], "tags": tags
                     })
 
-                point_objects.append({
-                    "lat": el["lat"], "lon": el["lon"], "tags": tags
-                })
+                # Traffic signals: dedicated array w/ node id; excluded from generic point_objects
+                if tags.get("highway") == "traffic_signals":
+                    traffic_signals.append({
+                        "id": el["id"], "lat": el["lat"], "lon": el["lon"], "tags": tags
+                    })
+                else:
+                    point_objects.append({
+                        "lat": el["lat"], "lon": el["lon"], "tags": tags
+                    })
 
     for el in data.get("elements", []):
         if el.get("type") == "way":
@@ -321,6 +329,7 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
         "tram_stops": tram_stops,
         "pedestrian_areas": pedestrian_areas,
         "bridge_decks": bridge_decks,
+        "traffic_signals": traffic_signals,
     }
 
 

@@ -25,7 +25,7 @@ static var _queue_processor: OSMLoader = null  # Один инстанс обр�
 
 # Кеширование
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 7  # v7: добавлен way[man_made=bridge] (single-way deck outlines)
+const CACHE_VERSION := 8  # v8: добавлен node[highway=traffic_signals] (светофоры с сохранением node id)
 var use_cache := true
 
 var http_request: HTTPRequest
@@ -267,6 +267,7 @@ func _start_network_request() -> void:
   node["natural"="tree"](%s);
   node["traffic_sign"](%s);
   node["highway"="street_lamp"](%s);
+  node["highway"="traffic_signals"](%s);
   node["entrance"](%s);
   node["shop"](%s);
   node["amenity"](%s);
@@ -279,7 +280,7 @@ func _start_network_request() -> void:
 out body geom;
 >;
 out skel qt;
-""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
+""" % [bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox, bbox]
 
 	pending_query = query
 	retry_count = 0
@@ -387,6 +388,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	var tram_stops := []  # Трамвайные остановки
 	var pedestrian_areas := []  # Пешеходные площади (relation highway=pedestrian area=yes)
 	var bridge_decks := []  # Bridge deck outlines (relation man_made=bridge type=multipolygon)
+	var traffic_signals := []  # Светофоры (node highway=traffic_signals) — с сохранением node id для дедупликации
 
 	# Собираем все узлы
 	for element in data.get("elements", []):
@@ -435,11 +437,21 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 						"tags": tags
 					})
 
-				point_objects.append({
-					"lat": element.lat,
-					"lon": element.lon,
-					"tags": tags
-				})
+				# Светофоры: отдельный массив с node id (единственный источник для расстановки светофоров).
+				# НЕ добавляем в generic point_objects, чтобы их не создал какой-либо точечный пайплайн.
+				if tags.get("highway", "") == "traffic_signals":
+					traffic_signals.append({
+						"id": element.id,
+						"lat": element.lat,
+						"lon": element.lon,
+						"tags": tags
+					})
+				else:
+					point_objects.append({
+						"lat": element.lat,
+						"lon": element.lon,
+						"tags": tags
+					})
 
 	# Собираем все пути (и сохраняем по id для relation)
 	for element in data.get("elements", []):
@@ -554,7 +566,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	if relations_found > 0:
 		print("OSM: Found %d relations, %d with valid geometry" % [relations_found, relations_with_nodes])
 
-	print("OSM: Parsed %d nodes, %d ways, %d point objects, %d entrances, %d POI nodes, %d bus stops, %d tram stops, %d pedestrian areas, %d bridge decks" % [nodes.size(), ways.size(), point_objects.size(), entrance_nodes.size(), poi_nodes.size(), bus_stops.size(), tram_stops.size(), pedestrian_areas.size(), bridge_decks.size()])
+	print("OSM: Parsed %d nodes, %d ways, %d point objects, %d entrances, %d POI nodes, %d bus stops, %d tram stops, %d pedestrian areas, %d bridge decks, %d traffic signals" % [nodes.size(), ways.size(), point_objects.size(), entrance_nodes.size(), poi_nodes.size(), bus_stops.size(), tram_stops.size(), pedestrian_areas.size(), bridge_decks.size(), traffic_signals.size()])
 
 	return {
 		"center_lat": center_lat,
@@ -568,6 +580,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 		"tram_stops": tram_stops,
 		"pedestrian_areas": pedestrian_areas,
 		"bridge_decks": bridge_decks,
+		"traffic_signals": traffic_signals,
 	}
 
 ## Joins relation outer member ways head-to-tail into closed rings.
