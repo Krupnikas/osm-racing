@@ -771,9 +771,17 @@ func _update_wheel_rotation(delta: float) -> void:
 		return
 	var speed_ms: float = current_speed_kmh / 3.6
 	var angular_vel: float = speed_ms / _wheel_radius
+	# Spin about the car's ACTUAL lateral axis (world space), so the wheels roll the
+	# right way regardless of model orientation. The old local rotate_x(-…) was correct
+	# only for models rotated 180° (native -Z); for native +Z models (e.g. Audi TT) it
+	# spun the wheels BACKWARDS — invisible on a smooth tire, but the disk spokes gave
+	# it away. global_rotate keeps each mesh's origin (= wheel centre) and rotates about
+	# the car's +X, so the wheel top rolls toward car-forward (+Z).
+	var axis: Vector3 = global_transform.basis.x.normalized()
+	var ang: float = angular_vel * delta
 	for mesh in _wheel_mesh_nodes:
 		if is_instance_valid(mesh):
-			mesh.rotate_x(-angular_vel * delta)
+			mesh.global_rotate(axis, ang)
 
 
 func _disable_wheel_physics() -> void:
