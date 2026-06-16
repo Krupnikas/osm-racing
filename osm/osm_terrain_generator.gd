@@ -758,6 +758,7 @@ var _deferred_fence_edges: Dictionary = {}  # chunk_key → Array[{chunk_key, p1
 
 # RenderingServer direct instances — bypass scene tree for zero-spike mesh display
 var _chunk_rs_instances: Dictionary = {}  # chunk_key -> Array[RID]
+var _chunk_reveal_nodes: Dictionary = {}  # chunk_key -> Array[VisualInstance3D] для порционного включения LOD0-чанка (антифриз)
 var _chunk_rs_meshes: Dictionary = {}  # chunk_key -> Array[Mesh] (prevent GC)
 var _chunk_road_materials: Dictionary = {}  # chunk_key -> Array[ShaderMaterial] (wet mode)
 var _chunk_building_rs: Dictionary = {}  # chunk_key -> Array[RID] (shadow LOD)
@@ -1869,6 +1870,16 @@ static func _collect_mesh_instances(node: Node, result: Array[MeshInstance3D]) -
 		_collect_mesh_instances(child, result)
 
 
+## Рекурсивно собирает все VisualInstance3D (меши, мультимеши) для порционного
+## включения видимости — чтобы RenderingServer не создавал все инстансы LOD0-чанка
+## в один кадр (источник фриза ~130мс при появлении чанка впереди машины).
+static func _collect_visual_instances(node: Node, result: Array) -> void:
+	if node is VisualInstance3D:
+		result.append(node)
+	for child in node.get_children():
+		_collect_visual_instances(child, result)
+
+
 ## Вычисляет полный трансформ узла от корня (для узлов не в SceneTree)
 static func _get_node_transform_recursive(node: Node3D) -> Transform3D:
 	var xform := node.transform
@@ -2107,6 +2118,8 @@ func _process(delta: float) -> void:
 		_slow_frame_cooldown = 0.0 if _perf_verbose else 1.0
 		if not _viewport_rid.is_valid() and get_viewport():
 			_viewport_rid = get_viewport().get_viewport_rid()
+			# Включаем измерение render-времени (иначе CPU/GPU всегда 0)
+			RenderingServer.viewport_set_measure_render_time(_viewport_rid, true)
 		var sf_render_cpu := 0.0
 		var sf_render_gpu := 0.0
 		if _viewport_rid.is_valid():
@@ -2154,8 +2167,10 @@ func _process(delta: float) -> void:
 		# Scene stats
 		print("  Scene: draws=%d verts=%.1fM objects=%d nodes=%d resources=%d" % [
 			sf_draw_calls, sf_vertices / 1_000_000.0, sf_objects, sf_nodes, sf_resources])
-		print("  Physics: bodies=%d pairs=%d | VRAM=%.0fMB" % [
-			sf_phys_bodies, sf_phys_pairs, sf_vram])
+		var sf_physics_ms := Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+		var sf_process_ms := Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0
+		print("  Physics: bodies=%d pairs=%d physics=%.1fms | engine process=%.1fms | VRAM=%.0fMB" % [
+			sf_phys_bodies, sf_phys_pairs, sf_physics_ms, sf_process_ms, sf_vram])
 		# Queues
 		print("  Queues: roads=%d terrain=%d infra=%d buildings=%d curbs=%d" % [
 			_road_queue_total_size(), _terrain_objects_queue.size(), _infrastructure_queue.size(),
@@ -2303,6 +2318,7 @@ func start_loading() -> void:
 	_deferred_terrain_collisions.clear()
 	_deferred_fence_edges.clear()
 	_chunk_activation_pending.clear()
+	_chunk_reveal_nodes.clear()
 	_chunk_culling_cooldown.clear()
 	_intersection_positions.clear()  # Очищаем перекрёстки
 	_intersection_radii.clear()
@@ -3442,6 +3458,7 @@ func _unload_chunk(chunk_key: String) -> void:
 			for rid in _chunk_rs_instances[chunk_key]:
 				RenderingServer.free_rid(rid)
 			_chunk_rs_instances.erase(chunk_key)
+		_chunk_reveal_nodes.erase(chunk_key)
 		_chunk_rs_meshes.erase(chunk_key)
 		_chunk_road_materials.erase(chunk_key)
 		_road_depressions.erase(chunk_key)  # перекарвится при перезагрузке чанка
@@ -3626,6 +3643,7 @@ func reset_terrain() -> void:
 	_reset_wire_state()
 	_reset_prop_state()
 	_chunk_activation_pending.clear()
+	_chunk_reveal_nodes.clear()
 	_chunk_culling_cooldown.clear()
 
 	# Clear ALL batching data on reset
@@ -26810,7 +26828,7 @@ func _process_chunk_activation() -> void:
 	# >= 0 = индекс следующего RS instance для активации
 	# During initial loading: activate ALL instances immediately (loading screen hides stutter)
 	# During gameplay: budget per frame. LOD2 чанки дешёвые (1-4 RS) — активируем больше.
-	var rs_budget := 999999 if _initial_loading else 20
+	var rs_budget := 999999 if _initial_loading else 10
 	var rs_activated := 0
 
 	# Сортируем по приоритету: ближайшие по вектору скорости первыми
@@ -26845,16 +26863,43 @@ func _process_chunk_activation() -> void:
 		else:
 			# Пакетная активация RS instances по N за кадр
 			if not _chunk_rs_instances.has(chunk_key):
-				# Нет RS instances — сразу включаем scene tree node
+				# LOD0-чанк (scene tree, без RS instances). Раньше включался разом
+				# (cn.visible=true) → RenderingServer создавал все инстансы чанка за
+				# 1 кадр = фриз ~130мс при появлении чанка впереди машины. Теперь
+				# включаем дочерние VisualInstance3D порциями за несколько кадров.
 				var cn: Node3D = _get_chunk_node(chunk_key)
-				if is_instance_valid(cn):
+				if not is_instance_valid(cn):
+					_chunk_reveal_nodes.erase(chunk_key)
+					_chunk_activation_pending.erase(chunk_key)
+					continue
+				# Первый визит: собираем визуалы, прячем их, включаем сам узел чанка
+				if not _chunk_reveal_nodes.has(chunk_key):
+					var vis_nodes: Array = []
+					_collect_visual_instances(cn, vis_nodes)
+					for vn in vis_nodes:
+						(vn as Node3D).visible = false
 					cn.visible = true
-				print("ACTIVATE: %s READY (no RS instances)" % chunk_key)
-				_chunk_activation_pending.erase(chunk_key)
-				_remove_loading_placeholder(chunk_key)
-				_chunk_culling_cooldown[chunk_key] = Time.get_ticks_msec() + 3000
-				_set_chunk_stage(chunk_key, "ready", {"node": cn})
-				_schedule_lod_transition_free(chunk_key)
+					_chunk_reveal_nodes[chunk_key] = vis_nodes
+					_chunk_activation_pending[chunk_key] = 0  # курсор раскрытия
+				var rnodes: Array = _chunk_reveal_nodes[chunk_key]
+				var r_end: int = mini(state + (rs_budget - rs_activated), rnodes.size())
+				var ri := state
+				while ri < r_end:
+					var vn: Node = rnodes[ri]
+					if is_instance_valid(vn):
+						(vn as Node3D).visible = true
+					ri += 1
+				rs_activated += r_end - state
+				if r_end >= rnodes.size():
+					print("ACTIVATE: %s READY (scene, %d visuals)" % [chunk_key, rnodes.size()])
+					_chunk_reveal_nodes.erase(chunk_key)
+					_chunk_activation_pending.erase(chunk_key)
+					_remove_loading_placeholder(chunk_key)
+					_chunk_culling_cooldown[chunk_key] = Time.get_ticks_msec() + 3000
+					_set_chunk_stage(chunk_key, "ready", {"node": cn})
+					_schedule_lod_transition_free(chunk_key)
+				else:
+					_chunk_activation_pending[chunk_key] = r_end
 				continue
 
 			var instances: Array = _chunk_rs_instances[chunk_key]
