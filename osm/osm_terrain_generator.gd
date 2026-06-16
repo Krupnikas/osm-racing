@@ -98,6 +98,7 @@ var _world_offset_chunks := Vector2i.ZERO
 var _chunk_lod: Dictionary = {}           # chunk_key -> int (0, 1, 2)
 var _lod2_building_materials: Dictionary = {}  # color_key -> StandardMaterial3D
 var _lod_chunk_queue: Array = []  # Deferred LOD chunk generation queue [{osm_data, chunk_key, gen, lod_level}]
+var _road_extract_queue: Array = []  # Отложенное добавление дорог в RoadNetwork (A*) [{points, tags}] — чтобы не фризить на финализации LOD-чанка
 var _lod_transition_rs: Dictionary = {}  # chunk_key -> {rids: Array[RID], meshes: Array} — old LOD instances kept visible during upgrade
 var _lod_transition_free_at: Dictionary = {}  # chunk_key -> int (tick_ms) — delayed free to let GPU finish rendering new instances
 @export var fog_enabled := true  # Включить туман для скрытия края мира
@@ -127,6 +128,7 @@ const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slop
 @export var enable_sidewalk_curbs := true  # Phase 4: поребрик по внешнему контуру тротуаров
 @export var enable_vegetation := true  # Включить деревья/растительность
 @export var enable_bushes := true  # Включить кусты (отдельно от деревьев)
+@export var enable_bush_shadows := true  # Тень-эллипс под кустами (можно выключить для fps)
 @export var enable_street_lamps := true  # Включить уличные фонари
 @export var enable_traffic_signs := true  # Включить дорожные знаки
 @export var enable_traffic_lights := true  # Включить светофоры
@@ -535,6 +537,8 @@ var _current_frame_perf: Dictionary = {}  # name → float (мс), заполн�
 
 # Slow frame tracking
 var _slow_frame_cooldown := 0.0  # Ограничиваем частоту логирования (не чаще 1 раз в сек)
+var _perf_verbose := false  # Диагностика: логировать КАЖДЫЙ медленный кадр (cooldown=0) + частый дамп метрик
+@export var cull_debug := false  # Печатать CULL SHOW/HIDE (шумно, только для отладки)
 
 # Per-chunk profiling: chunk_key → {start_ms, phase12_thread_ms, phase12_apply_ms, phase3_ms, finalize_ms, activate_ms, total_ms, ways, buildings, roads}
 var _chunk_profile: Dictionary = {}
@@ -2071,6 +2075,12 @@ func _process(delta: float) -> void:
 		_process_lod_chunk_queue()
 		_record_perf("lod_chunk_gen", Time.get_ticks_usec() - t0)
 
+	# Дороги в RoadNetwork (A*) — бюджетно, чтобы не фризить на LOD-чанках
+	if not _road_extract_queue.is_empty():
+		t0 = Time.get_ticks_usec()
+		_process_road_extract_queue()
+		_record_perf("road_extract", Time.get_ticks_usec() - t0)
+
 	# Lazy chunk activation — включаем видимость через N кадров после финализации
 	t0 = Time.get_ticks_usec()
 	_process_chunk_activation()
@@ -2094,7 +2104,7 @@ func _process(delta: float) -> void:
 	# Детальное логирование при реальном delta > 16ms (< 60fps), не чаще раза в секунду
 	var _real_frame_ms := delta * 1000.0
 	if _real_frame_ms > 16.0 and _slow_frame_cooldown <= 0.0:
-		_slow_frame_cooldown = 1.0
+		_slow_frame_cooldown = 0.0 if _perf_verbose else 1.0
 		if not _viewport_rid.is_valid() and get_viewport():
 			_viewport_rid = get_viewport().get_viewport_rid()
 		var sf_render_cpu := 0.0
@@ -2163,7 +2173,8 @@ func _process(delta: float) -> void:
 		print("===========================================")
 
 	_perf_frame_count += 1
-	if _perf_enabled and _perf_frame_count % 600 == 0:  # Каждые 10 сек при 60fps
+	var _metrics_interval := 120 if _perf_verbose else 600  # verbose: каждые ~2с
+	if _perf_enabled and _perf_frame_count % _metrics_interval == 0:
 		_print_perf_metrics()
 		_print_draw_call_stats()
 
@@ -2217,7 +2228,9 @@ func _process(delta: float) -> void:
 	_record_perf("update_chunks", Time.get_ticks_usec() - _uc_t0)
 
 	# Обновляем тени зданий и деревьев по расстоянию до игрока
+	var _bsh_t0 := Time.get_ticks_usec()
 	_update_building_shadows(player_pos)
+	_record_perf("building_shadows", Time.get_ticks_usec() - _bsh_t0)
 	_update_tree_shadows(player_pos)
 
 # Начать загрузку карты
@@ -2239,6 +2252,7 @@ func start_loading() -> void:
 	_chunk_state.clear()
 	_chunk_lod.clear()
 	_lod_chunk_queue.clear()
+	_road_extract_queue.clear()
 	for ck in _lod_transition_rs:
 		for rid in _lod_transition_rs[ck].get("rids", []):
 			RenderingServer.free_rid(rid)
@@ -18150,6 +18164,30 @@ func _add_bush_to_batch(chunk_key: String, pos: Vector2, elevation: float, paren
 		_tree_batches_to_finalize.append(chunk_key)
 
 
+## Строит MultiMesh-буфер (12 float/инстанс, TRANSFORM_3D без цвета) одним
+## проходом — на порядок быстрее, чем per-instance set_instance_transform.
+static func _build_mm_buffer_12(transforms: Array) -> PackedFloat32Array:
+	var n := transforms.size()
+	var buf := PackedFloat32Array()
+	buf.resize(n * 12)
+	for i in range(n):
+		var t: Transform3D = transforms[i]
+		var idx := i * 12
+		buf[idx + 0] = t.basis.x.x
+		buf[idx + 1] = t.basis.y.x
+		buf[idx + 2] = t.basis.z.x
+		buf[idx + 3] = t.origin.x
+		buf[idx + 4] = t.basis.x.y
+		buf[idx + 5] = t.basis.y.y
+		buf[idx + 6] = t.basis.z.y
+		buf[idx + 7] = t.origin.y
+		buf[idx + 8] = t.basis.x.z
+		buf[idx + 9] = t.basis.y.z
+		buf[idx + 10] = t.basis.z.z
+		buf[idx + 11] = t.origin.z
+	return buf
+
+
 ## Finalize tree batches for chunk - create MultiMesh instances
 func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 	if not _tree_batch_data.has(chunk_key):
@@ -18213,10 +18251,13 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		})
 
 	for config in tree_configs:
+		var t_cfg := Time.get_ticks_usec()
 		var transforms: Array = config["transforms"]
 		var name_prefix: String = config["name"]
+		var cnt := transforms.size()
 
-		# Один MultiMesh на тип дерева, без visibility_range (LOD через MultiMesh не работает per-instance)
+		# Один MultiMesh на тип дерева. Заполняем буфер одним проходом
+		# (16 float/инстанс: 12 transform + 4 color) — быстрее per-instance API.
 		var mm_inst := MultiMeshInstance3D.new()
 		mm_inst.name = "Trees%s" % name_prefix
 		mm_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -18224,17 +18265,32 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		mm.transform_format = MultiMesh.TRANSFORM_3D
 		mm.use_colors = true
 		mm.mesh = config["mesh_lod0"]
-		mm.instance_count = transforms.size()
-		for i in range(transforms.size()):
-			mm.set_instance_transform(i, transforms[i])
+		mm.instance_count = cnt
+		var buf := PackedFloat32Array()
+		buf.resize(cnt * 16)
+		for i in range(cnt):
+			var t: Transform3D = transforms[i]
+			var idx := i * 16
+			buf[idx + 0] = t.basis.x.x
+			buf[idx + 1] = t.basis.y.x
+			buf[idx + 2] = t.basis.z.x
+			buf[idx + 3] = t.origin.x
+			buf[idx + 4] = t.basis.x.y
+			buf[idx + 5] = t.basis.y.y
+			buf[idx + 6] = t.basis.z.y
+			buf[idx + 7] = t.origin.y
+			buf[idx + 8] = t.basis.x.z
+			buf[idx + 9] = t.basis.y.z
+			buf[idx + 10] = t.basis.z.z
+			buf[idx + 11] = t.origin.z
 			# Вариативность цвета кроны: от тёмно-зелёного до жёлто-зелёного
-			var pos: Vector3 = (transforms[i] as Transform3D).origin
-			var h1 := fmod(absf(pos.x * 73.1 + pos.z * 137.9), 1.0)
-			var h2 := fmod(absf(pos.x * 41.3 + pos.z * 97.7), 1.0)
-			var r := 0.12 + h1 * 0.3
-			var g := 0.3 + h2 * 0.4
-			var b := 0.03 + h1 * 0.12
-			mm.set_instance_color(i, Color(r, g, b))
+			var h1 := fmod(absf(t.origin.x * 73.1 + t.origin.z * 137.9), 1.0)
+			var h2 := fmod(absf(t.origin.x * 41.3 + t.origin.z * 97.7), 1.0)
+			buf[idx + 12] = 0.12 + h1 * 0.3
+			buf[idx + 13] = 0.3 + h2 * 0.4
+			buf[idx + 14] = 0.03 + h1 * 0.12
+			buf[idx + 15] = 1.0
+		mm.buffer = buf
 		mm_inst.multimesh = mm
 		_budgeted_add_child(parent, mm_inst)
 
@@ -18247,9 +18303,8 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 			var shadow_mm := MultiMesh.new()
 			shadow_mm.transform_format = MultiMesh.TRANSFORM_3D
 			shadow_mm.mesh = shadow_mesh
-			shadow_mm.instance_count = transforms.size()
-			for i in range(transforms.size()):
-				shadow_mm.set_instance_transform(i, transforms[i])
+			shadow_mm.instance_count = cnt
+			shadow_mm.buffer = _build_mm_buffer_12(transforms)
 			shadow_inst.multimesh = shadow_mm
 			_budgeted_add_child(parent, shadow_inst)
 			# Track node for distance-based shadow LOD
@@ -18258,9 +18313,11 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 			_chunk_tree_shadow_nodes[chunk_key].append(shadow_inst)
 
 		draw_calls += config["mesh_lod0"].get_surface_count()
+		_record_perf("fin_tree_%s" % name_prefix.to_lower(), Time.get_ticks_usec() - t_cfg)
 
 	# Кусты: один MultiMesh на чанк, без LOD/билбордов/теней (близкий рендер).
 	if _bush_available and enable_bushes and _bush_mesh and bush_transforms.size() > 0:
+		var t_bush := Time.get_ticks_usec()
 		var bush_inst := MultiMeshInstance3D.new()
 		bush_inst.name = "Bushes"
 		bush_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -18268,31 +18325,37 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		bush_mm.transform_format = MultiMesh.TRANSFORM_3D
 		bush_mm.mesh = _bush_mesh
 		bush_mm.instance_count = bush_transforms.size()
-		for i in range(bush_transforms.size()):
-			bush_mm.set_instance_transform(i, bush_transforms[i])
+		bush_mm.buffer = _build_mm_buffer_12(bush_transforms)
 		bush_inst.multimesh = bush_mm
 		_budgeted_add_child(parent, bush_inst)
 		draw_calls += _bush_mesh.get_surface_count()
+		_record_perf("fin_bush", Time.get_ticks_usec() - t_bush)
 
 		# Тень-эллипс: плоский диск на земле под каждым кустом, масштаб по следу
 		# куста с разными X/Z (→ эллипс), повёрнут вместе с кустом.
-		if _bush_shadow_mesh:
+		if enable_bush_shadows and _bush_shadow_mesh:
+			var t_bsh := Time.get_ticks_usec()
+			var n := bush_transforms.size()
+			var ell_transforms: Array[Transform3D] = []
+			ell_transforms.resize(n)
+			for i in range(n):
+				var bt: Transform3D = bush_transforms[i]
+				var footprint: float = bt.basis.x.length()  # = scale_xz куста
+				var rot := bt.basis.orthonormalized()        # только поворот по Y
+				var ell := rot * Basis().scaled(Vector3(footprint * 1.15, 1.0, footprint * 0.8))
+				var o := bt.origin
+				ell_transforms[i] = Transform3D(ell, Vector3(o.x, o.y + 0.03, o.z))
 			var sh_inst := MultiMeshInstance3D.new()
 			sh_inst.name = "BushShadows"
 			sh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			var sh_mm := MultiMesh.new()
 			sh_mm.transform_format = MultiMesh.TRANSFORM_3D
 			sh_mm.mesh = _bush_shadow_mesh
-			sh_mm.instance_count = bush_transforms.size()
-			for i in range(bush_transforms.size()):
-				var bt: Transform3D = bush_transforms[i]
-				var footprint: float = bt.basis.x.length()  # = scale_xz куста
-				var rot := bt.basis.orthonormalized()        # только поворот по Y
-				var ell := rot * Basis().scaled(Vector3(footprint * 1.15, 1.0, footprint * 0.8))
-				var o := bt.origin
-				sh_mm.set_instance_transform(i, Transform3D(ell, Vector3(o.x, o.y + 0.03, o.z)))
+			sh_mm.instance_count = n
+			sh_mm.buffer = _build_mm_buffer_12(ell_transforms)
 			sh_inst.multimesh = sh_mm
 			_budgeted_add_child(parent, sh_inst)
+			_record_perf("fin_bush_shadow", Time.get_ticks_usec() - t_bsh)
 
 	if _draw_call_logging_enabled:
 		_draw_call_stats["vegetation"] += draw_calls
@@ -20016,13 +20079,20 @@ func _generate_lod_chunk(osm_data: Dictionary, chunk_key: String, gen: int, lod_
 
 ## Обрабатывает LOD чанки из очереди — приоритет по близости и направлению
 func _process_lod_chunk_queue() -> void:
-	var budget := 4 if not _initial_loading else 8
+	# Временной бюджет вместо счётного: один LOD2-чанк ~10мс, по 4/кадр давало
+	# фризы 40-70мс. Теперь обрабатываем минимум 1 чанк, дальше пока укладываемся
+	# в бюджет → спайк ~10мс вместо 40+. В initial-load грузим агрессивно.
+	var budget_us: int = 200000 if _initial_loading else 6000
+	var t0 := Time.get_ticks_usec()
 	var processed := 0
 	var deferred: Array = []  # Чанки ожидающие elevation — вернём в очередь
 	# Сортируем по приоритету: ближайшие впереди первыми
 	if _lod_chunk_queue.size() > 1:
 		_lod_chunk_queue.sort_custom(func(a, b): return _chunk_priority_score(a["chunk_key"]) < _chunk_priority_score(b["chunk_key"]))
-	while processed < budget and not _lod_chunk_queue.is_empty():
+	while not _lod_chunk_queue.is_empty():
+		# Бюджет проверяем ПОСЛЕ первого чанка (минимум 1 за вызов)
+		if processed > 0 and (Time.get_ticks_usec() - t0) > budget_us:
+			break
 		var task: Dictionary = _lod_chunk_queue.pop_front()
 		var chunk_key: String = task["chunk_key"]
 		var gen: int = task["gen"]
@@ -20054,17 +20124,25 @@ func _process_lod_chunk_queue() -> void:
 		var min_z := float(chunk_z) * chunk_size
 
 		# 1. Плоский террейн (трава с elevation)
+		var _ls0 := Time.get_ticks_usec()
 		_create_flat_terrain(chunk_key, min_x, min_z)
+		_record_perf("lod_flat_terrain", Time.get_ticks_usec() - _ls0)
 
 		# 2. Здания
+		_ls0 = Time.get_ticks_usec()
 		_generate_lod2_buildings(chunk_key, osm_data, min_x, min_z)
+		_record_perf("lod_buildings", Time.get_ticks_usec() - _ls0)
 
 		# 3. Дороги → RoadNetwork (для A* маршрутизации в race/work mode)
+		_ls0 = Time.get_ticks_usec()
 		_extract_lod2_roads_for_traffic(osm_data)
+		_record_perf("lod_roads_extract", Time.get_ticks_usec() - _ls0)
 
 		# 4. Деревья (только LOD1)
 		if lod_level == 1:
+			_ls0 = Time.get_ticks_usec()
 			_create_lod1_trees(chunk_key, osm_data, min_x, min_z)
+			_record_perf("lod_trees", Time.get_ticks_usec() - _ls0)
 
 		# Пометить чанк как загруженный
 		_loading_chunks.erase(chunk_key)
@@ -22953,6 +23031,9 @@ func _extract_road_for_traffic(nodes: Array, tags: Dictionary, bridge_info: Dict
 
 
 func _extract_lod2_roads_for_traffic(osm_data: Dictionary) -> void:
+	# Раньше add_road_segment вызывался синхронно здесь и давал ~36мс фриз на
+	# финализации LOD-чанка. Теперь только дёшево считаем local_points и кладём
+	# в очередь — построение A*-графа идёт бюджетно в _process_road_extract_queue.
 	var ways: Array = osm_data.get("ways", [])
 	for way in ways:
 		var tags: Dictionary = way.get("tags", {})
@@ -22964,7 +23045,21 @@ func _extract_lod2_roads_for_traffic(osm_data: Dictionary) -> void:
 		var local_points := PackedVector2Array()
 		for node in nodes:
 			local_points.append(_latlon_to_local(node.lat, node.lon))
-		_extract_road_for_traffic_fast(local_points, tags)
+		_road_extract_queue.append({"points": local_points, "tags": tags})
+
+
+## Бюджетно добавляет дороги в RoadNetwork (A*) — несколько сегментов за кадр,
+## чтобы тяжёлый add_road_segment не фризил кадр при загрузке LOD-чанков.
+func _process_road_extract_queue() -> void:
+	if _road_extract_queue.is_empty():
+		return
+	var t0 := Time.get_ticks_usec()
+	var budget_us: int = 200000 if _initial_loading else 2500
+	while not _road_extract_queue.is_empty():
+		var item: Dictionary = _road_extract_queue.pop_front()
+		_extract_road_for_traffic_fast(item.points, item.tags)
+		if not _initial_loading and (Time.get_ticks_usec() - t0) > budget_us:
+			break
 
 
 # Fast variant: accepts pre-computed local_points
@@ -27049,11 +27144,12 @@ func _update_chunk_culling() -> void:
 
 		var want_visible := not should_hide
 		if chunk_node.visible != want_visible:
-			var rs_count: int = _chunk_rs_instances.get(chunk_key, []).size()
-			if want_visible:
-				print("CULL: %s SHOW lod=%d rs=%d dist=%.0f dot=%.2f" % [chunk_key, chunk_lod_level, rs_count, dist, dot])
-			else:
-				print("CULL: %s HIDE lod=%d rs=%d dist=%.0f dot=%.2f" % [chunk_key, chunk_lod_level, rs_count, dist, dot])
+			if cull_debug:
+				var rs_count: int = _chunk_rs_instances.get(chunk_key, []).size()
+				if want_visible:
+					print("CULL: %s SHOW lod=%d rs=%d dist=%.0f dot=%.2f" % [chunk_key, chunk_lod_level, rs_count, dist, dot])
+				else:
+					print("CULL: %s HIDE lod=%d rs=%d dist=%.0f dot=%.2f" % [chunk_key, chunk_lod_level, rs_count, dist, dot])
 			chunk_node.visible = want_visible
 			if _chunk_rs_instances.has(chunk_key):
 				for rid in _chunk_rs_instances[chunk_key]:

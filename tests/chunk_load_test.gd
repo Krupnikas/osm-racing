@@ -134,7 +134,13 @@ func _apply_render_flags() -> void:
 	# Scene feature flags (OSM terrain generator)
 	if osm_terrain:
 		for arg in args:
-			if arg == "--no-buildings":
+			if arg == "--perf-verbose":
+				osm_terrain._perf_verbose = true
+				disabled.append("(perf-verbose: log every slow frame)")
+			elif arg == "--no-bush-shadows":
+				osm_terrain.enable_bush_shadows = false
+				disabled.append("BushShadows")
+			elif arg == "--no-buildings":
 				osm_terrain.enable_buildings = false
 				disabled.append("Buildings")
 			elif arg == "--no-vegetation":
