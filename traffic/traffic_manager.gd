@@ -239,12 +239,30 @@ func _update_spawning() -> void:
 	var spawns_this_frame := 0
 	const MAX_SPAWNS_PER_FRAME := 3
 
+	# Радиус актуальности спавна: только чанки рядом с игроком. Раньше цикл шёл
+	# по ВСЕМ загруженным чанкам (до 90, включая LOD2 за 1км) каждую секунду —
+	# это давало фриз ~75-80мс/сек (главная причина периодического фриза).
+	var t_chunk_size: float = terrain_generator.chunk_size if "chunk_size" in terrain_generator else 210.0
+	var spawn_chunk_radius: float = spawn_distance + t_chunk_size
+
 	# Проходим по всем полностью загруженным чанкам
 	for chunk_key in loaded_chunks.keys():
 		if active_npcs.size() >= max_npcs:
 			break
 		if spawns_this_frame >= MAX_SPAWNS_PER_FRAME:
 			break
+
+		# Пропускаем далёкие чанки ДО дорогой работы (waypoints/спавн имеют смысл
+		# только рядом с игроком) — бьёт фриз обхода всех чанков.
+		var ck_parts := String(chunk_key).split(",")
+		if ck_parts.size() == 2:
+			var ccx := (ck_parts[0].to_float() + 0.5) * t_chunk_size
+			var ccz := (ck_parts[1].to_float() + 0.5) * t_chunk_size
+			var dx := ccx - player_pos.x
+			var dz := ccz - player_pos.z
+			if dx * dx + dz * dz > spawn_chunk_radius * spawn_chunk_radius:
+				continue
+
 		# Спавним только в полностью финализированных чанках
 		if not terrain_generator.is_chunk_fully_ready(chunk_key):
 			continue
