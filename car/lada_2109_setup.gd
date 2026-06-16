@@ -3,11 +3,17 @@ extends Node3D
 ## Скрипт для настройки модели Lada 2109 DPS
 ## Настраивает цвета и параметры полицейского автомобиля
 
+const CarWheelRig := preload("res://tools/car_wheel_rig.gd")
+
 # Цвет кузова (белый с синим для ДПС)
 var body_color := Color(0.9, 0.9, 0.9, 1.0)  # Белый
 var stripe_color := Color(0.1, 0.3, 0.8, 1.0)  # Синий для полосы
 
 func _ready() -> void:
+	# Split the 4 corner wheels (material "Whells*_lambert") into spinning containers BEFORE the
+	# parent npc_car merges body meshes — npc_car then collects + spins them. Run SYNC (no await first).
+	CarWheelRig.build(self, CarWheelRig.DEFAULT_NAME_KEYS, CarWheelRig.DEFAULT_MAT_KEYS, ["whell"])
+
 	await get_tree().process_frame
 
 	# Применяем цветовую схему ДПС

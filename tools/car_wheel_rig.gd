@@ -183,6 +183,7 @@ static func build(model_root: Node3D, name_keys: Array = DEFAULT_NAME_KEYS, mat_
 		cont.name = "wheel_" + q
 		cont.transform.origin = centers[q]
 		model_root.add_child(cont)
+		var ci := 0
 		for matkey in quads[q].keys():
 			var st: SurfaceTool = quads[q][matkey]
 			if quad_tan[q].get(matkey, false):
@@ -190,7 +191,10 @@ static func build(model_root: Node3D, name_keys: Array = DEFAULT_NAME_KEYS, mat_
 			var amesh: ArrayMesh = st.commit()
 			var mi2 := MeshInstance3D.new()
 			mi2.mesh = amesh
-			mi2.name = "wheelmesh_" + q
+			# UNIQUE name per piece (disk + tire) so npc_car collects + spins ALL of them, not just the
+			# first — duplicate names get auto-renamed to "@MeshInstance3D@N" and skipped → static disks.
+			mi2.name = "wheelmesh_%s_%d" % [q, ci]
+			ci += 1
 			var mat: Material = qmat.get(matkey, null)
 			if mat:
 				mi2.set_surface_override_material(0, mat)
