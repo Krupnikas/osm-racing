@@ -18185,8 +18185,8 @@ func _add_bush_to_batch(chunk_key: String, pos: Vector2, elevation: float, paren
 	var h_xz := fmod(absf(pos.x * 12.9898 + pos.y * 78.233) * 43758.5453, 1.0)
 	var h_y := fmod(absf(pos.x * 39.346 + pos.y * 11.135) * 24634.633, 1.0)
 	var h_rot := fmod(absf(pos.x * 4.7 + pos.y * 9.13) * 1517.31, 1.0)
-	var scale_xz := 0.5 + h_xz * 1.5   # 0.5..2.0 — широкий разброс
-	var scale_y := 0.5 + h_y * 1.5     # 0.5..2.0 → высота до 2 м
+	var scale_xz := 1.0 + h_xz * 3.0   # 1.0..4.0 — широкий разброс (x2)
+	var scale_y := 1.0 + h_y * 3.0     # 1.0..4.0 → высота до 4 м
 	var rotation_y := h_rot * TAU
 
 	var bush_pos := Vector3(pos.x, elevation, pos.y)
@@ -19114,8 +19114,8 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 			var bs_xz := fmod(float(b_seed + i * 3571) * 0.7236, 1.0)
 			var bs_y := fmod(float(b_seed + i * 4919) * 0.8317, 1.0)
 			var br := fmod(float(b_seed + i * 6271) * 0.5413, 1.0)
-			var scale_xz := 0.5 + bs_xz * 1.5   # 0.5..2.0 — широкий разброс
-			var scale_y := 0.5 + bs_y * 1.5     # 0.5..2.0 → высота до 2 м
+			var scale_xz := 1.0 + bs_xz * 3.0   # 1.0..4.0 — широкий разброс (x2)
+			var scale_y := 1.0 + bs_y * 3.0     # 1.0..4.0 → высота до 4 м
 			var rotation_y := br * TAU
 
 			var bush_pos := Vector3(bx, b_elev, by)
@@ -19244,8 +19244,8 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 			var bs_xz := fmod(float(b_seed + i * 3571) * 0.7236, 1.0)
 			var bs_y := fmod(float(b_seed + i * 4919) * 0.8317, 1.0)
 			var br := fmod(float(b_seed + i * 6271) * 0.5413, 1.0)
-			var b_scale_xz := 0.5 + bs_xz * 1.5   # 0.5..2.0
-			var b_scale_y := 0.5 + bs_y * 1.5     # 0.5..2.0 → до 2 м
+			var b_scale_xz := 1.0 + bs_xz * 3.0   # 1.0..4.0 (x2)
+			var b_scale_y := 1.0 + bs_y * 3.0     # 1.0..4.0 → до 4 м
 			var b_basis := Basis(Vector3.UP, br * TAU).scaled(Vector3(b_scale_xz, b_scale_y, b_scale_xz))
 			bush_transforms.append(Transform3D(b_basis, Vector3(bx, b_elev, by)))
 			b_count += 1
