@@ -790,6 +790,21 @@
       "y_offset": 1.5,
       "clear_trees_radius": 5.0,
       "visibility_range": 400.0
+    },
+    {
+      "comment": "Базарные ворота поперёк service road 219861574 — коллизия + знаки на дверях",
+      "model": "res://models/bazar_gate/bazar-gate.glb",
+      "lat": 59.145677,
+      "lon": 37.946260,
+      "rotation_y": 256.0,
+      "scale": 5.9,
+      "auto_ground": true,
+      "visibility_range": 200.0,
+      "collision": "box",
+      "signs": [
+        { "texture": "res://models/bazar_gate/bazar-sign.png", "side": "left", "u": -0.31, "v": -0.383, "front": 0.7, "size": 1.0 },
+        { "texture": "res://models/bazar_gate/bazar-no-entry.png", "side": "right", "u": 0.31, "v": -0.28, "front": 0.7, "size": 0.667 }
+      ]
     }
   ],
   "roadside_props": [

@@ -18547,6 +18547,18 @@ func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
 		inst.position = Vector3(pos.x, ground_y + y_offset, pos.y)
 		inst.scale = Vector3.ONE * scale_val
 		inst.rotation_degrees.y = entry.rotation_y
+		# Optional extras (bazar gate & co): real-vertex grounding, box collision, per-half signs.
+		var coll_kind: String = entry.get("collision", "")
+		var signs_arr: Array = entry.get("signs", [])
+		if coll_kind != "" or not signs_arr.is_empty() or entry.get("auto_ground", false):
+			var mab := _scene_real_vertex_aabb(inst)  # model-space (unscaled) AABB
+			if mab.size != Vector3.ZERO:
+				# Ground so the model base sits on the road (real verts, not get_aabb).
+				inst.position.y = ground_y + (-mab.position.y * scale_val) + y_offset
+				if coll_kind == "box":
+					_add_box_collision_to_model(inst, mab)
+				for s in signs_arr:
+					_add_gate_sign(inst, mab, s)
 		var vis_range: float = entry.get("visibility_range", 150.0)
 		if vis_range > 300.0:
 			# Large-range model (e.g. bridge pylon) — parent to self so it
@@ -18573,6 +18585,84 @@ func _set_visibility_range_recursive(node: Node, range_end: float) -> void:
 		node.visibility_range_end = range_end
 	for child in node.get_children():
 		_set_visibility_range_recursive(child, range_end)
+
+
+func _scene_real_vertex_aabb(root: Node3D) -> AABB:
+	"""Model-LOCAL (unscaled) AABB of a custom model from REAL vertices (not get_aabb — the
+	cone-levitation gotcha). root's own transform is excluded; child mesh transforms included."""
+	var ab := AABB()
+	var first := true
+	var stack: Array = [root]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		for c in n.get_children():
+			stack.push_back(c)
+		if n is MeshInstance3D and (n as MeshInstance3D).mesh:
+			var mi := n as MeshInstance3D
+			var t := Transform3D.IDENTITY
+			var p: Node = mi
+			while p != null and p != root:
+				if p is Node3D:
+					t = (p as Node3D).transform * t
+				p = p.get_parent()
+			for si in range(mi.mesh.get_surface_count()):
+				var verts: PackedVector3Array = mi.mesh.surface_get_arrays(si)[Mesh.ARRAY_VERTEX]
+				for v in verts:
+					var wv: Vector3 = t * v
+					if first:
+						ab = AABB(wv, Vector3.ZERO); first = false
+					else:
+						ab = ab.expand(wv)
+	return ab
+
+
+func _add_box_collision_to_model(inst: Node3D, mab: AABB) -> void:
+	"""Wraps a custom model in a StaticBody3D + BoxShape3D (model-space size, scaled by parent).
+	Layer 1 (static world); the car (mask 7) is physically blocked."""
+	var body := StaticBody3D.new()
+	body.name = "ModelCollision"
+	body.collision_layer = 1
+	body.collision_mask = 0
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = mab.size
+	cs.shape = box
+	cs.position = mab.get_center()
+	body.add_child(cs)
+	inst.add_child(body)
+
+
+func _add_gate_sign(inst: Node3D, mab: AABB, s: Dictionary) -> void:
+	"""Hangs a sign image as a textured quad on a door panel (parented to the model → inherits
+	scale/rotation). Placement is data-driven via fractions of the model bbox so it can be tuned
+	from JSON without code edits:
+	  u    : horizontal centre, fraction of half-width from model centre (-1..1)
+	  v    : vertical centre, fraction of half-height from model centre (-1..1)
+	  front: depth, fraction of half-depth from centre (~0.7 sits on the door's front face;
+	         the default frame plane is further out and makes signs look like they float)
+	  size : overall size multiplier (base = 0.21 x 0.31 of the model)."""
+	var tex_path: String = s.get("texture", "")
+	if tex_path.is_empty() or not ResourceLoader.exists(tex_path):
+		push_warning("Gate sign texture missing: " + tex_path)
+		return
+	var tex: Texture2D = load(tex_path)
+	var side: String = s.get("side", "left")
+	var size_mul: float = float(s.get("size", 1.0))
+	var u: float = float(s.get("u", -0.5 if side == "left" else 0.5))
+	var v: float = float(s.get("v", 0.0))
+	var front: float = float(s.get("front", 1.1))
+	var quad := QuadMesh.new()
+	quad.size = Vector2(mab.size.x * 0.21 * size_mul, mab.size.y * 0.31 * size_mul)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = tex
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var mi := MeshInstance3D.new()
+	mi.mesh = quad
+	mi.material_override = mat
+	var c := mab.get_center()
+	mi.position = Vector3(c.x + u * mab.size.x * 0.5, c.y + v * mab.size.y * 0.5, c.z + front * mab.size.z * 0.5)
+	inst.add_child(mi)
 
 
 func _create_traffic_sign(pos: Vector2, elevation: float, tags: Dictionary, parent: Node3D) -> void:
