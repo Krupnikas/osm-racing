@@ -15,6 +15,15 @@ const ClutterManagerScript = preload("res://clutter/clutter_manager.gd")
 const MarsEntranceGeneratorScript = preload("res://osm/mars_entrance_generator.gd")
 const LEAF_TREE_SCENE = preload("res://models/trees/leaf/scene.gltf")
 const PINE_TREE_SCENE = preload("res://models/trees/pine/scene.gltf")
+# Кусты: загружаются через load() (не preload), чтобы отсутствие файла не ломало
+# проект до того, как модель будет скачана и положена в models/bushes/.
+const BUSH_BUXUS_PATH := "res://models/bushes/buxus/scene.gltf"
+const BUSH_HEIGHT := 1.0  # целевая высота нормализованного куста, м
+# Плотности кустов (кустов на м²): spacing ≈ sqrt(1/density)
+const BUSH_DENSITY_SCRUB := 0.06    # natural=scrub — густые заросли (~4 м шаг)
+const BUSH_DENSITY_FOREST := 0.012  # подлесок в лесу (~9 м шаг)
+const BUSH_DENSITY_PARK := 0.008    # парки/газоны (~11 м шаг)
+const HEDGE_BUSH_SPACING := 1.2     # шаг кустов вдоль живой изгороди, м
 const TreeBillboardShader = preload("res://shaders/tree_billboard.gdshader")
 const BUS_STOP_SCENE = preload("res://models/bus_stop/scene.gltf")
 const GARBAGE_CONTAINER_SCENE = preload("res://models/garbage_container/scene.gltf")
@@ -117,6 +126,7 @@ const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slop
 @export var enable_curbs := true  # Включить бордюры
 @export var enable_sidewalk_curbs := true  # Phase 4: поребрик по внешнему контуру тротуаров
 @export var enable_vegetation := true  # Включить деревья/растительность
+@export var enable_bushes := true  # Включить кусты (отдельно от деревьев)
 @export var enable_street_lamps := true  # Включить уличные фонари
 @export var enable_traffic_signs := true  # Включить дорожные знаки
 @export var enable_traffic_lights := true  # Включить светофоры
@@ -338,6 +348,9 @@ var _tree_batches_to_finalize: Array[String] = []  # Chunk keys ready for finali
 var _veg_mutex: Mutex
 var _veg_thread_results: Array = []  # Готовые результаты из воркер-тредов
 var _pending_veg_tasks: int = 0  # Счётчик активных задач
+var _bush_mesh: ArrayMesh  # Меш куста (Buxus), нормализован до BUSH_HEIGHT
+var _bush_shadow_mesh: ArrayMesh  # Плоский эллипс-диск (blob-тень под кустом)
+var _bush_available := false  # true если модель куста загрузилась
 var _tree_mesh_leaf: ArrayMesh  # Меш лиственного дерева LOD0
 var _tree_mesh_leaf_lod1: ArrayMesh  # Меш лиственного дерева LOD1 (декимация 50%)
 var _tree_mesh_pine: ArrayMesh  # Меш сосны LOD0
@@ -899,6 +912,7 @@ func _ready() -> void:
 
 	# Инициализируем tree meshes для LOD
 	_init_tree_meshes()
+	_init_bush_meshes()
 	_init_tree_billboards()
 	_init_garbage_container_mesh()
 
@@ -1368,6 +1382,73 @@ func _init_tree_meshes_model() -> void:
 		_tree_mesh_pine.surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size(),
 		_tree_mesh_pine.surface_get_arrays(0)[Mesh.ARRAY_INDEX].size() / 3
 	])
+
+
+## Загружает модель куста (Buxus) и нормализует её по высоте.
+## Если файла нет (ещё не скачан) — кусты просто отключаются, проект не падает.
+func _init_bush_meshes() -> void:
+	if not ResourceLoader.exists(BUSH_BUXUS_PATH):
+		push_warning("OSM: bush model not found at %s — bushes disabled (download it from Sketchfab)" % BUSH_BUXUS_PATH)
+		return
+	var scene: PackedScene = load(BUSH_BUXUS_PATH)
+	if scene == null:
+		push_warning("OSM: failed to load bush model — bushes disabled")
+		return
+	_bush_mesh = _load_tree_mesh_normalized(scene, BUSH_HEIGHT)
+	# Матовый материал: убираем металличность и блики из gltf (листва не блестит)
+	for si in range(_bush_mesh.get_surface_count()):
+		var m: Material = _bush_mesh.surface_get_material(si)
+		if m is StandardMaterial3D:
+			var sm: StandardMaterial3D = m.duplicate()
+			sm.metallic = 0.0
+			sm.metallic_texture = null
+			sm.metallic_specular = 0.0          # убирает зеркальный блик
+			sm.roughness = 1.0                  # полностью матовая поверхность
+			sm.roughness_texture = null
+			_bush_mesh.surface_set_material(si, sm)
+	_bush_shadow_mesh = _create_bush_shadow_disc()
+	_bush_available = true
+	print("OSM: Bush mesh loaded: %d verts, %d surfaces (matte)" % [
+		_bush_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size(),
+		_bush_mesh.get_surface_count()
+	])
+
+
+## Плоский диск с радиальным затуханием альфы — дешёвая «тень-эллипс» под кустом.
+## Центр полупрозрачно-чёрный, край прозрачный. Кладётся на землю и масштабируется
+## под след куста (с разными X/Z → эллипс).
+func _create_bush_shadow_disc() -> ArrayMesh:
+	var verts := PackedVector3Array()
+	var colors := PackedColorArray()
+	var indices := PackedInt32Array()
+	var segments := 14
+	verts.append(Vector3.ZERO)
+	colors.append(Color(0.0, 0.0, 0.0, 0.42))  # тёмный центр
+	for i in range(segments + 1):
+		var a := TAU * float(i) / float(segments)
+		verts.append(Vector3(cos(a) * 0.5, 0.0, sin(a) * 0.5))
+		colors.append(Color(0.0, 0.0, 0.0, 0.0))  # прозрачный край
+	for i in range(segments):
+		indices.append(0)
+		indices.append(1 + i)
+		indices.append(1 + i + 1)
+
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_COLOR] = colors
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.vertex_color_use_as_albedo = true
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED  # не пишет в depth → нет z-fight
+	mesh.surface_set_material(0, mat)
+	return mesh
 
 
 func _init_garbage_container_mesh() -> void:
@@ -4518,6 +4599,8 @@ func _process_phase3_queue() -> bool:
 				_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 			elif tags.has("leisure"):
 				_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
+			elif tags.get("barrier", "") == "hedge":
+				_terrain_objects_queue.append({"type": "hedge", "nodes": nodes, "tags": tags, "parent": target})
 			elif tags.has("waterway") and enable_water:
 				_create_waterway(nodes, tags, target, null)
 		# Done with ways — move to intersections
@@ -4832,6 +4915,8 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 			_terrain_objects_queue.append({"type": "landuse", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
 		elif tags.has("leisure"):
 			_terrain_objects_queue.append({"type": "leisure", "nodes": nodes, "tags": tags, "parent": target, "way_id": way_id_raw})
+		elif tags.get("barrier", "") == "hedge":
+			_terrain_objects_queue.append({"type": "hedge", "nodes": nodes, "tags": tags, "parent": target})
 		elif tags.has("waterway") and enable_water:
 			_create_waterway(nodes, tags, target, null)
 	# Pedestrian areas (from relations, separate from highway ways)
@@ -11831,12 +11916,20 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -
 		var local: Vector2 = _latlon_to_local(node.lat, node.lon)
 		points.append(local)
 
+	var chunk_key := _get_chunk_key_from_node(parent)
+
+	# Заросли кустарника: травяной меш не рисуем (его покрывает terrain),
+	# но засаживаем полигон кустами.
+	if natural_type in ["scrub", "shrubbery", "heath"]:
+		for clipped_scrub in _clip_polygon_to_chunk(points, chunk_key):
+			_generate_bushes_in_polygon(clipped_scrub, parent, BUSH_DENSITY_SCRUB)
+		return
+
 	# Трава уже покрыта per-chunk terrain, пропускаем чтобы не было z-fighting
 	if texture_key == "grass" and natural_type not in ["wood", "tree_row"]:
 		return
 
 	# Клипаем полигон по границам чанка
-	var chunk_key := _get_chunk_key_from_node(parent)
 	var clipped_polys := _clip_polygon_to_chunk(points, chunk_key)
 	for clipped in clipped_polys:
 		if is_water and enable_water:
@@ -11853,9 +11946,58 @@ func _create_natural_immediate(nodes: Array, tags: Dictionary, parent: Node3D) -
 			var clipped_center := _get_polygon_center(clipped)
 			if not _is_point_in_water(clipped_center, chunk_key):
 				_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
-		# Генерируем густые деревья внутри лесных полигонов
+		# Генерируем густые деревья + подлесок из кустов внутри лесных полигонов
 		if natural_type in ["wood", "tree_row"]:
-			_generate_trees_in_polygon(clipped, parent, true)
+			_generate_trees_in_polygon(clipped, parent, true, BUSH_DENSITY_FOREST)
+
+
+## Живая изгородь (barrier=hedge): кусты в ряд вдоль линии way с фиксированным
+## шагом. Главный поток — используем per-chunk проверки дорог/зданий. Точки
+## клипуются по границам чанка, чтобы соседние чанки не дублировали кусты.
+func _create_hedge_immediate(nodes: Array, parent: Node3D) -> void:
+	if not is_instance_valid(parent) or not enable_vegetation or not _bush_available:
+		return
+	if nodes.size() < 2:
+		return
+
+	var chunk_key := _get_chunk_key_from_node(parent)
+	var pts: PackedVector2Array = []
+	for node in nodes:
+		pts.append(_latlon_to_local(node.lat, node.lon))
+
+	# Границы чанка (для клипа кустов в собственный чанк)
+	var has_bounds := false
+	var min_x := 0.0
+	var min_z := 0.0
+	var max_x := 0.0
+	var max_z := 0.0
+	var parts := chunk_key.split(",")
+	if parts.size() == 2:
+		min_x = float(parts[0]) * chunk_size
+		min_z = float(parts[1]) * chunk_size
+		max_x = min_x + chunk_size
+		max_z = min_z + chunk_size
+		has_bounds = true
+
+	for i in range(pts.size() - 1):
+		var a := pts[i]
+		var b := pts[i + 1]
+		var seg_len := a.distance_to(b)
+		if seg_len < 0.01:
+			continue
+		var dir := (b - a) / seg_len
+		var d := 0.0
+		while d <= seg_len:
+			var p := a + dir * d
+			d += HEDGE_BUSH_SPACING
+			if has_bounds and (p.x < min_x or p.x >= max_x or p.y < min_z or p.y >= max_z):
+				continue
+			if _is_point_near_road(p, 0.8, chunk_key):
+				continue
+			if _is_point_near_building(p, 0.5, chunk_key):
+				continue
+			var elevation := _sample_elevation(p.x, p.y)
+			_add_bush_to_batch(chunk_key, p, elevation, parent)
 
 
 ## Немедленное создание землепользования (вызывается из очереди)
@@ -11916,7 +12058,7 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 	var clipped_polys := _clip_polygon_to_chunk(points, chunk_key)
 	for clipped in clipped_polys:
 		if has_tree_override:
-			_generate_trees_in_polygon(clipped, parent, dense_override)
+			_generate_trees_in_polygon(clipped, parent, dense_override, BUSH_DENSITY_FOREST if dense_override else BUSH_DENSITY_PARK)
 		if is_water and enable_water:
 			# See _create_natural_immediate: water mesh + shore is rendered
 			# globally in _create_deferred_terrain, not per-immediate-poly.
@@ -11926,7 +12068,7 @@ func _create_landuse_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 			if not _is_point_in_water(clipped_center, chunk_key):
 				_create_polygon_mesh_with_texture(clipped, texture_key, -0.02, parent, false)
 		if landuse_type == "forest":
-			_generate_trees_in_polygon(clipped, parent, true)
+			_generate_trees_in_polygon(clipped, parent, true, BUSH_DENSITY_FOREST)
 
 
 ## Немедленное создание объекта отдыха (вызывается из очереди)
@@ -11967,9 +12109,9 @@ func _create_leisure_immediate(nodes: Array, tags: Dictionary, parent: Node3D, w
 		# Добавляем коллизию с группой Park для высокого сопротивления качению
 		if leisure_type in ["park", "garden", "pitch"]:
 			_create_park_collision(clipped, parent)
-		# Генерируем деревья в парках и садах
+		# Генерируем деревья + кусты в парках и садах
 		if leisure_type in ["park", "garden"]:
-			_generate_trees_in_polygon(clipped, parent, false)
+			_generate_trees_in_polygon(clipped, parent, false, BUSH_DENSITY_PARK)
 		# Забор для указанных парков
 		if way_id in fenced_parks:
 			_add_fence_to_batch(clipped, parent)
@@ -14976,6 +15118,9 @@ func _process_terrain_objects_queue() -> void:
 			"leisure":
 				_create_leisure_immediate(item.nodes, item.tags, item.parent, item.get("way_id", 0))
 				_record_perf("terrain_leisure", Time.get_ticks_usec() - t0)
+			"hedge":
+				_create_hedge_immediate(item.nodes, item.parent)
+				_record_perf("terrain_hedge", Time.get_ticks_usec() - t0)
 			"bridge_deck":
 				var poly: PackedVector2Array = item.get("polygon", PackedVector2Array())
 				var poly_idx: int = _bridge_deck_polygons.find(poly)
@@ -15163,6 +15308,8 @@ func _process_vegetation_queue() -> void:
 				var task_data := {
 					"points": item.points,
 					"dense": item.dense,
+					"bush_density": item.get("bush_density", 0.0),
+					"skip_trees": item.get("skip_trees", false),
 					"chunk_key": chunk_key,
 					"chunk_size": chunk_size,
 					"road_spatial_hash": ck_road_hash,
@@ -15229,13 +15376,17 @@ func _apply_veg_thread_results() -> void:
 			_tree_batch_data[chunk_key] = {
 				"leaf_transforms": [],
 				"pine_transforms": [],
+				"bush_transforms": [],
 				"collisions": [],
 				"parent": parent
 			}
+		elif not _tree_batch_data[chunk_key].has("bush_transforms"):
+			_tree_batch_data[chunk_key]["bush_transforms"] = []
 
 		var batch: Dictionary = _tree_batch_data[chunk_key]
 		batch["leaf_transforms"].append_array(result.leaf_transforms)
 		batch["pine_transforms"].append_array(result.pine_transforms)
+		batch["bush_transforms"].append_array(result.get("bush_transforms", []))
 		batch["collisions"].append_array(result.collisions)
 
 		if not _tree_batches_to_finalize.has(chunk_key):
@@ -17941,6 +18092,7 @@ func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, paren
 		_tree_batch_data[chunk_key] = {
 			"leaf_transforms": [],
 			"pine_transforms": [],
+			"bush_transforms": [],
 			"collisions": [],
 			"parent": parent
 		}
@@ -17965,6 +18117,39 @@ func _add_tree_to_batch(chunk_key: String, pos: Vector2, elevation: float, paren
 	if not _tree_batches_to_finalize.has(chunk_key):
 		_tree_batches_to_finalize.append(chunk_key)
 
+## Добавляет один куст в общий tree-batch чанка (главный поток — для hedge).
+## Размер/поворот детерминированы из координат, поэтому при перезагрузке
+## чанка куст встаёт так же (фиксированный seed, как у деревьев).
+func _add_bush_to_batch(chunk_key: String, pos: Vector2, elevation: float, parent: Node3D) -> void:
+	if not enable_vegetation or not enable_bushes or not _bush_available:
+		return
+	if not _tree_batch_data.has(chunk_key):
+		_tree_batch_data[chunk_key] = {
+			"leaf_transforms": [],
+			"pine_transforms": [],
+			"bush_transforms": [],
+			"collisions": [],
+			"parent": parent
+		}
+	elif not _tree_batch_data[chunk_key].has("bush_transforms"):
+		_tree_batch_data[chunk_key]["bush_transforms"] = []
+
+	# Детерминированные хеши из мировых координат
+	var h_xz := fmod(absf(pos.x * 12.9898 + pos.y * 78.233) * 43758.5453, 1.0)
+	var h_y := fmod(absf(pos.x * 39.346 + pos.y * 11.135) * 24634.633, 1.0)
+	var h_rot := fmod(absf(pos.x * 4.7 + pos.y * 9.13) * 1517.31, 1.0)
+	var scale_xz := 0.5 + h_xz * 1.5   # 0.5..2.0 — широкий разброс
+	var scale_y := 0.5 + h_y * 1.5     # 0.5..2.0 → высота до 2 м
+	var rotation_y := h_rot * TAU
+
+	var bush_pos := Vector3(pos.x, elevation, pos.y)
+	var basis := Basis(Vector3.UP, rotation_y).scaled(Vector3(scale_xz, scale_y, scale_xz))
+	_tree_batch_data[chunk_key]["bush_transforms"].append(Transform3D(basis, bush_pos))
+
+	if not _tree_batches_to_finalize.has(chunk_key):
+		_tree_batches_to_finalize.append(chunk_key)
+
+
 ## Finalize tree batches for chunk - create MultiMesh instances
 func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 	if not _tree_batch_data.has(chunk_key):
@@ -17979,12 +18164,13 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 
 	var leaf_transforms: Array = batch["leaf_transforms"]
 	var pine_transforms: Array = batch["pine_transforms"]
-	var total_trees := leaf_transforms.size() + pine_transforms.size()
-	if total_trees == 0:
+	var bush_transforms: Array = batch.get("bush_transforms", [])
+	var total_veg := leaf_transforms.size() + pine_transforms.size() + bush_transforms.size()
+	if total_veg == 0:
 		_tree_batch_data.erase(chunk_key)
 		return
 
-	# Удаляем деревья, попавшие в зоны очистки вокруг кастомных моделей
+	# Удаляем деревья/кусты, попавшие в зоны очистки вокруг кастомных моделей
 	# (напр. травяная фигура «Ладья»). Делаем это на главном потоке —
 	# per-tree проверка в _add_tree_to_batch идёт в рабочем потоке и не
 	# успевает увидеть загруженный decoration_layer.
@@ -17993,12 +18179,14 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 		var keep_t := func(t): return not _point_in_tree_clear_zone(Vector2(t.origin.x, t.origin.z))
 		leaf_transforms = leaf_transforms.filter(keep_t)
 		pine_transforms = pine_transforms.filter(keep_t)
+		bush_transforms = bush_transforms.filter(keep_t)
 		batch["leaf_transforms"] = leaf_transforms
 		batch["pine_transforms"] = pine_transforms
+		batch["bush_transforms"] = bush_transforms
 		batch["collisions"] = (batch["collisions"] as Array).filter(
 			func(c): return not _point_in_tree_clear_zone(Vector2(c.position.x, c.position.z)))
-		total_trees = leaf_transforms.size() + pine_transforms.size()
-		if total_trees == 0:
+		total_veg = leaf_transforms.size() + pine_transforms.size() + bush_transforms.size()
+		if total_veg == 0:
 			_tree_batch_data.erase(chunk_key)
 			return
 
@@ -18071,6 +18259,41 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 
 		draw_calls += config["mesh_lod0"].get_surface_count()
 
+	# Кусты: один MultiMesh на чанк, без LOD/билбордов/теней (близкий рендер).
+	if _bush_available and enable_bushes and _bush_mesh and bush_transforms.size() > 0:
+		var bush_inst := MultiMeshInstance3D.new()
+		bush_inst.name = "Bushes"
+		bush_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var bush_mm := MultiMesh.new()
+		bush_mm.transform_format = MultiMesh.TRANSFORM_3D
+		bush_mm.mesh = _bush_mesh
+		bush_mm.instance_count = bush_transforms.size()
+		for i in range(bush_transforms.size()):
+			bush_mm.set_instance_transform(i, bush_transforms[i])
+		bush_inst.multimesh = bush_mm
+		_budgeted_add_child(parent, bush_inst)
+		draw_calls += _bush_mesh.get_surface_count()
+
+		# Тень-эллипс: плоский диск на земле под каждым кустом, масштаб по следу
+		# куста с разными X/Z (→ эллипс), повёрнут вместе с кустом.
+		if _bush_shadow_mesh:
+			var sh_inst := MultiMeshInstance3D.new()
+			sh_inst.name = "BushShadows"
+			sh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			var sh_mm := MultiMesh.new()
+			sh_mm.transform_format = MultiMesh.TRANSFORM_3D
+			sh_mm.mesh = _bush_shadow_mesh
+			sh_mm.instance_count = bush_transforms.size()
+			for i in range(bush_transforms.size()):
+				var bt: Transform3D = bush_transforms[i]
+				var footprint: float = bt.basis.x.length()  # = scale_xz куста
+				var rot := bt.basis.orthonormalized()        # только поворот по Y
+				var ell := rot * Basis().scaled(Vector3(footprint * 1.15, 1.0, footprint * 0.8))
+				var o := bt.origin
+				sh_mm.set_instance_transform(i, Transform3D(ell, Vector3(o.x, o.y + 0.03, o.z)))
+			sh_inst.multimesh = sh_mm
+			_budgeted_add_child(parent, sh_inst)
+
 	if _draw_call_logging_enabled:
 		_draw_call_stats["vegetation"] += draw_calls
 
@@ -18082,8 +18305,8 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 			"idx": 0
 		})
 
-	print("OSM: Trees for chunk %s: %d leaf + %d pine (LOD0+LOD1+LOD2)" % [
-		chunk_key, leaf_transforms.size(), pine_transforms.size()
+	print("OSM: Trees for chunk %s: %d leaf + %d pine + %d bush" % [
+		chunk_key, leaf_transforms.size(), pine_transforms.size(), bush_transforms.size()
 	])
 
 	_tree_batch_data.erase(chunk_key)
@@ -18570,7 +18793,7 @@ func _get_direction_to_nearest_road(pos: Vector2) -> Vector2:
 
 
 # Процедурная генерация деревьев в полигоне (парк, лес) - добавляет в очередь
-func _generate_trees_in_polygon(points: PackedVector2Array, parent: Node3D, dense: bool = false) -> void:
+func _generate_trees_in_polygon(points: PackedVector2Array, parent: Node3D, dense: bool = false, bush_density: float = 0.0, skip_trees: bool = false) -> void:
 	if not enable_vegetation:
 		return
 	if points.size() < 3:
@@ -18581,8 +18804,19 @@ func _generate_trees_in_polygon(points: PackedVector2Array, parent: Node3D, dens
 		"type": "trees",
 		"points": points,
 		"parent": parent,
-		"dense": dense
+		"dense": dense,
+		"bush_density": bush_density,
+		"skip_trees": skip_trees
 	})
+
+
+## Заросли кустарника (natural=scrub): только кусты, без деревьев.
+func _generate_bushes_in_polygon(points: PackedVector2Array, parent: Node3D, bush_density: float) -> void:
+	if not enable_vegetation or not enable_bushes or not _bush_available:
+		return
+	if points.size() < 3:
+		return
+	_generate_trees_in_polygon(points, parent, false, bush_density, true)
 
 
 # === Потокобезопасные функции поиска (для воркер-тредов) ===
@@ -18691,8 +18925,16 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 	estimated_trees = mini(estimated_trees, max_trees)
 	var max_attempts := estimated_trees * 3
 
+	# Кусты: либо подлесок вместе с деревьями, либо (skip_trees) только кусты
+	# для зарослей scrub. Плотность независимая.
+	var bush_density: float = task_data.get("bush_density", 0.0)
+	var skip_trees: bool = task_data.get("skip_trees", false)
+	if skip_trees:
+		max_attempts = 0
+
 	var leaf_transforms: Array[Transform3D] = []
 	var pine_transforms: Array[Transform3D] = []
+	var bush_transforms: Array[Transform3D] = []
 	var collisions: Array[Dictionary] = []
 
 	for i in range(max_attempts):
@@ -18740,11 +18982,60 @@ func _compute_trees_thread(task_data: Dictionary) -> void:
 		if tree_count >= max_trees:
 			break
 
+	# --- Кусты (подлесок / заросли scrub) ---
+	# Отдельный seed-offset, чтобы кусты не садились ровно в позиции деревьев.
+	if bush_density > 0.0 and _bush_available and enable_bushes:
+		var max_bushes := mini(int(area * bush_density), 800)
+		if max_bushes < 1:
+			max_bushes = 1
+		var b_spacing := sqrt(1.0 / bush_density)
+		var b_estimated := mini(int(area / (b_spacing * b_spacing)), max_bushes)
+		var b_attempts := b_estimated * 3
+		var b_seed := seed_value + 50021
+		var b_count := 0
+		for i in range(b_attempts):
+			var bh1 := fmod(float(b_seed + i * 7919) * 0.61803398875, 1.0)
+			var bh2 := fmod(float(b_seed + i * 104729) * 0.41421356237, 1.0)
+			var bh3 := fmod(bh1 * 17.0 + bh2 * 31.0, 1.0)
+			var bh4 := fmod(bh2 * 23.0 + bh1 * 13.0, 1.0)
+
+			var bx := min_x + (bh1 * 0.7 + bh3 * 0.3) * width
+			var by := min_y + (bh2 * 0.7 + bh4 * 0.3) * height
+			var bp := Vector2(bx, by)
+
+			if not Geometry2D.is_point_in_polygon(bp, points):
+				continue
+			if _is_point_near_road_threadsafe(bp, 3.0, road_hash):
+				continue
+			if _is_point_near_building_threadsafe(bp, 1.5, building_hash, poly_hash):
+				continue
+			if _is_point_in_water_threadsafe(bp, water_hash, water_polys):
+				continue
+
+			var b_elev := _sample_elevation_static(bx, by, t_elev_grid, t_base_elev)
+
+			# Детерминированная вариативность размеров (потокобезопасно, без randf)
+			var bs_xz := fmod(float(b_seed + i * 3571) * 0.7236, 1.0)
+			var bs_y := fmod(float(b_seed + i * 4919) * 0.8317, 1.0)
+			var br := fmod(float(b_seed + i * 6271) * 0.5413, 1.0)
+			var scale_xz := 0.5 + bs_xz * 1.5   # 0.5..2.0 — широкий разброс
+			var scale_y := 0.5 + bs_y * 1.5     # 0.5..2.0 → высота до 2 м
+			var rotation_y := br * TAU
+
+			var bush_pos := Vector3(bx, b_elev, by)
+			var b_basis := Basis(Vector3.UP, rotation_y).scaled(Vector3(scale_xz, scale_y, scale_xz))
+			bush_transforms.append(Transform3D(b_basis, bush_pos))
+
+			b_count += 1
+			if b_count >= max_bushes:
+				break
+
 	var result := {
 		"chunk_key": chunk_key,
 		"parent": task_data.parent,
 		"leaf_transforms": leaf_transforms,
 		"pine_transforms": pine_transforms,
+		"bush_transforms": bush_transforms,
 		"collisions": collisions
 	}
 
@@ -18826,11 +19117,49 @@ func _compute_chunk_trees_thread(task_data: Dictionary) -> void:
 		if tree_count >= max_trees:
 			break
 
+	# --- Кусты по всему чанку (на траве, как деревья, только гуще) ---
+	var bush_transforms: Array[Transform3D] = []
+	if _bush_available and enable_bushes:
+		var b_spacing := 8.0   # гуще деревьев (у деревьев 10 м)
+		var b_max := 320
+		var b_estimated := mini(int((t_chunk_size * t_chunk_size) / (b_spacing * b_spacing)), b_max)
+		var b_seed := seed_value + 50021
+		var b_count := 0
+		for i in range(b_estimated):
+			var bh1 := fmod(float(b_seed + i * 7919) * 0.61803398875, 1.0)
+			var bh2 := fmod(float(b_seed + i * 104729) * 0.41421356237, 1.0)
+			var bh3 := fmod(bh1 * 17.0 + bh2 * 31.0, 1.0)
+			var bh4 := fmod(bh2 * 23.0 + bh1 * 13.0, 1.0)
+
+			var bx := min_x + (bh1 * 0.7 + bh3 * 0.3) * t_chunk_size
+			var by := min_z + (bh2 * 0.7 + bh4 * 0.3) * t_chunk_size
+			var bp := Vector2(bx, by)
+
+			if _is_point_near_road_threadsafe(bp, 2.5, road_hash):
+				continue
+			if _is_point_near_building_threadsafe(bp, 1.5, building_hash, poly_hash):
+				continue
+			if _is_point_in_any_parking_threadsafe(bp, parking_hash, parking_polys):
+				continue
+			if _is_point_in_water_threadsafe(bp, water_hash, water_polys):
+				continue
+
+			var b_elev := _sample_elevation_static(bx, by, t_elev_grid, t_base_elev)
+			var bs_xz := fmod(float(b_seed + i * 3571) * 0.7236, 1.0)
+			var bs_y := fmod(float(b_seed + i * 4919) * 0.8317, 1.0)
+			var br := fmod(float(b_seed + i * 6271) * 0.5413, 1.0)
+			var b_scale_xz := 0.5 + bs_xz * 1.5   # 0.5..2.0
+			var b_scale_y := 0.5 + bs_y * 1.5     # 0.5..2.0 → до 2 м
+			var b_basis := Basis(Vector3.UP, br * TAU).scaled(Vector3(b_scale_xz, b_scale_y, b_scale_xz))
+			bush_transforms.append(Transform3D(b_basis, Vector3(bx, b_elev, by)))
+			b_count += 1
+
 	var result := {
 		"chunk_key": chunk_key,
 		"parent": task_data.parent,
 		"leaf_transforms": leaf_transforms,
 		"pine_transforms": pine_transforms,
+		"bush_transforms": bush_transforms,
 		"collisions": collisions
 	}
 

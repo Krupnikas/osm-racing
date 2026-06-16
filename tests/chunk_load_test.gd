@@ -140,6 +140,9 @@ func _apply_render_flags() -> void:
 			elif arg == "--no-vegetation":
 				osm_terrain.enable_vegetation = false
 				disabled.append("Vegetation")
+			elif arg == "--no-bushes":
+				osm_terrain.enable_bushes = false
+				disabled.append("Bushes")
 			elif arg == "--no-lamps":
 				osm_terrain.enable_street_lamps = false
 				disabled.append("Lamps")
