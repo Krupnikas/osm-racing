@@ -758,7 +758,17 @@ var _deferred_fence_edges: Dictionary = {}  # chunk_key → Array[{chunk_key, p1
 
 # RenderingServer direct instances — bypass scene tree for zero-spike mesh display
 var _chunk_rs_instances: Dictionary = {}  # chunk_key -> Array[RID]
+var _chunk_rs_categories: Dictionary = {}  # chunk_key -> Array[int] (категория каждого RS-инстанса, параллельно _chunk_rs_instances)
 var _chunk_reveal_nodes: Dictionary = {}  # chunk_key -> Array[VisualInstance3D] для порционного включения LOD0-чанка (антифриз)
+
+# Категории геометрии чанка — порядок = порядок поэтапного появления (по кадрам)
+const RS_CAT_TERRAIN := 0
+const RS_CAT_BUILDING := 1
+const RS_CAT_ROAD := 2
+const RS_CAT_CURB := 3
+const RS_CAT_FENCE := 4
+const RS_CAT_OTHER := 5
+const RS_CAT_MAX := 5
 var _chunk_rs_meshes: Dictionary = {}  # chunk_key -> Array[Mesh] (prevent GC)
 var _chunk_road_materials: Dictionary = {}  # chunk_key -> Array[ShaderMaterial] (wet mode)
 var _chunk_building_rs: Dictionary = {}  # chunk_key -> Array[RID] (shadow LOD)
@@ -2319,6 +2329,7 @@ func start_loading() -> void:
 	_deferred_fence_edges.clear()
 	_chunk_activation_pending.clear()
 	_chunk_reveal_nodes.clear()
+	_chunk_rs_categories.clear()
 	_chunk_culling_cooldown.clear()
 	_intersection_positions.clear()  # Очищаем перекрёстки
 	_intersection_radii.clear()
@@ -2749,6 +2760,7 @@ func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) ->
 				}
 				# Remove from main dicts so _unload_chunk doesn't free them
 				_chunk_rs_instances.erase(chunk_key)
+				_chunk_rs_categories.erase(chunk_key)
 				_chunk_rs_meshes.erase(chunk_key)
 			_chunks_to_unload.append(chunk_key)
 
@@ -3458,6 +3470,7 @@ func _unload_chunk(chunk_key: String) -> void:
 			for rid in _chunk_rs_instances[chunk_key]:
 				RenderingServer.free_rid(rid)
 			_chunk_rs_instances.erase(chunk_key)
+		_chunk_rs_categories.erase(chunk_key)
 		_chunk_reveal_nodes.erase(chunk_key)
 		_chunk_rs_meshes.erase(chunk_key)
 		_chunk_road_materials.erase(chunk_key)
@@ -3644,6 +3657,7 @@ func reset_terrain() -> void:
 	_reset_prop_state()
 	_chunk_activation_pending.clear()
 	_chunk_reveal_nodes.clear()
+	_chunk_rs_categories.clear()
 	_chunk_culling_cooldown.clear()
 
 	# Clear ALL batching data on reset
@@ -8974,7 +8988,7 @@ func _build_sidewalk_kerbs(merged: Array[PackedVector2Array], chunk_key: String,
 	arr[Mesh.ARRAY_INDEX] = bucket["i"]
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-	_rs_add_mesh(chunk_key, mesh, _curb_material)
+	_rs_add_mesh(chunk_key, mesh, _curb_material, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_CURB)
 
 
 ## Добавляет одну секцию поребрика (top + наружная + внутренняя грань) в bucket,
@@ -9187,7 +9201,7 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		return
 
 	# Road visual — RenderingServer (no scene tree overhead)
-	_rs_add_mesh(chunk_key, arr_mesh, material)
+	_rs_add_mesh(chunk_key, arr_mesh, material, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_ROAD)
 
 	# Track material for wet mode toggle
 	if material is ShaderMaterial:
@@ -12440,7 +12454,7 @@ func _finalize_fence_batches_for_chunk(chunk_key: String) -> void:
 		var mesh := ArrayMesh.new()
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 		_rs_add_mesh(chunk_key, mesh, _fence_material,
-			RenderingServer.SHADOW_CASTING_SETTING_OFF, 50.0)
+			RenderingServer.SHADOW_CASTING_SETTING_OFF, 50.0, 0.0, RS_CAT_FENCE)
 
 	if lod1_count > 0:
 		var arrays := []
@@ -12456,7 +12470,7 @@ func _finalize_fence_batches_for_chunk(chunk_key: String) -> void:
 		# fence, causing vis_max=150 to cull the mesh even when standing next to it.
 		# Chunk unload at 700m provides natural distance culling instead.
 		_rs_add_mesh(chunk_key, mesh, _fence_material,
-			RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 50.0)
+			RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 50.0, RS_CAT_FENCE)
 
 	# Collision: build StaticBody3D with shapes off-tree, then add once
 	var edges: Array = batch.edges
@@ -13840,7 +13854,7 @@ func _finalize_building_geo_batch(chunk_key: String) -> void:
 				material = _building_recess_materials.get(tex_type, _building_wall_materials[tex_type])
 
 			var rid := _rs_add_mesh(chunk_key, arr_mesh, material,
-				shadow_setting)
+				shadow_setting, 0.0, 0.0, RS_CAT_BUILDING)
 			if not _chunk_building_rs.has(chunk_key):
 				_chunk_building_rs[chunk_key] = []
 			_chunk_building_rs[chunk_key].append(rid)
@@ -15039,7 +15053,7 @@ func _finalize_curb_geo_batch(chunk_key: String) -> void:
 	if _draw_call_logging_enabled:
 		_draw_call_stats["curbs"] += 1
 
-	_rs_add_mesh(chunk_key, arr_mesh, _curb_material)
+	_rs_add_mesh(chunk_key, arr_mesh, _curb_material, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_CURB)
 	_curb_geo_batch.erase(chunk_key)
 
 
@@ -19883,7 +19897,7 @@ func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void
 		mat = fb
 		mesh.surface_set_material(0, mat)
 		print("WARNING: LOD2 terrain %s using fallback material (no ground shader)" % chunk_key)
-	_rs_add_mesh(chunk_key, mesh, mat)
+	_rs_add_mesh(chunk_key, mesh, mat, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_TERRAIN)
 
 
 ## Генерация LOD2 зданий-коробок для одного чанка (все здания в один ArrayMesh)
@@ -20000,7 +20014,7 @@ func _generate_lod2_buildings(chunk_key: String, osm_data: Dictionary, min_x: fl
 		var mesh := ArrayMesh.new()
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 		var mat := _get_lod2_building_material(batch["color"])
-		_rs_add_mesh(chunk_key, mesh, mat)
+		_rs_add_mesh(chunk_key, mesh, mat, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_BUILDING)
 
 
 ## Генерация LOD1 деревьев-билбордов для чанка (без spatial hash — упрощённая)
@@ -20307,7 +20321,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 		curb_arrays[Mesh.ARRAY_INDEX] = curb_idxs
 		var curb_mesh := ArrayMesh.new()
 		curb_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, curb_arrays)
-		_rs_add_mesh(chunk_key, curb_mesh, _curb_material)
+		_rs_add_mesh(chunk_key, curb_mesh, _curb_material, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_CURB)
 
 	# Split terrain polygons into 5m grid cells — same as sidewalk grid.
 	# Terrain and sidewalk both sample _sample_elevation at 5m multiples, so
@@ -20364,7 +20378,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 			fallback.albedo_color = Color(0.3, 0.5, 0.2)
 		material = fallback
 
-	_rs_add_mesh(chunk_key, arr_mesh, material)
+	_rs_add_mesh(chunk_key, arr_mesh, material, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_TERRAIN)
 
 	# Ground plane: same polygons, 0.5m below raw elevation (fills holes)
 	if enable_ground_plane and enable_elevation:
@@ -20384,7 +20398,7 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 		var gp_mat := StandardMaterial3D.new()
 		gp_mat.albedo_color = Color(0.35, 0.35, 0.32)
 		gp_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-		_rs_add_mesh(chunk_key, gp_mesh, gp_mat)
+		_rs_add_mesh(chunk_key, gp_mesh, gp_mat, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_TERRAIN)
 
 	# Коллизия — отложенная (ConcavePolygonShape3D из реальной геометрии)
 	_deferred_append(_deferred_terrain_collisions, chunk_key, {
@@ -26789,7 +26803,7 @@ func _create_intersection_patch(pos: Vector2, parent: Node3D, intersection_idx: 
 ## Returns the instance RID. Mesh ref stored to prevent GC.
 func _rs_add_mesh(chunk_key: String, mesh: Mesh, material: Material = null,
 		shadow: int = RenderingServer.SHADOW_CASTING_SETTING_OFF,
-		vis_max: float = 0.0, vis_min: float = 0.0) -> RID:
+		vis_max: float = 0.0, vis_min: float = 0.0, category: int = RS_CAT_OTHER) -> RID:
 	var inst := RenderingServer.instance_create2(mesh.get_rid(), get_world_3d().scenario)
 	RenderingServer.instance_set_transform(inst, Transform3D.IDENTITY)
 	RenderingServer.instance_geometry_set_cast_shadows_setting(inst, shadow)
@@ -26804,7 +26818,9 @@ func _rs_add_mesh(chunk_key: String, mesh: Mesh, material: Material = null,
 	if not _chunk_rs_instances.has(chunk_key):
 		_chunk_rs_instances[chunk_key] = []
 		_chunk_rs_meshes[chunk_key] = []
+		_chunk_rs_categories[chunk_key] = []
 	_chunk_rs_instances[chunk_key].append(inst)
+	_chunk_rs_categories[chunk_key].append(category)
 	_chunk_rs_meshes[chunk_key].append(mesh)
 	if material:
 		_chunk_rs_meshes[chunk_key].append(material)  # prevent GC for dynamic materials
@@ -26902,28 +26918,35 @@ func _process_chunk_activation() -> void:
 					_chunk_activation_pending[chunk_key] = r_end
 				continue
 
+			# Поэтапное появление: раскрываем по ОДНОЙ непустой категории за кадр
+			# (террейн → здания → дороги → бордюры → заборы → прочее), затем scene
+			# tree (деревья/фонари/знаки). Изолирует тяжёлый аплоад зданий в свой
+			# кадр → нет спайка «весь чанк разом». state = уровень категории.
 			var instances: Array = _chunk_rs_instances[chunk_key]
-			var remaining_budget: int = rs_budget - rs_activated
-			var end_idx: int = mini(state + remaining_budget, instances.size())
-			var i := state
-			while i < end_idx:
-				RenderingServer.instance_set_visible(instances[i], true)
-				i += 1
-			rs_activated += end_idx - state
-			if end_idx >= instances.size():
-				# Все RS instances активированы — включаем scene tree node
+			var cats: Array = _chunk_rs_categories.get(chunk_key, [])
+			var revealed_any := false
+			while state <= RS_CAT_MAX and not revealed_any:
+				for i in range(instances.size()):
+					var c: int = int(cats[i]) if i < cats.size() else RS_CAT_OTHER
+					if c == state:
+						RenderingServer.instance_set_visible(instances[i], true)
+						revealed_any = true
+				state += 1
+			rs_activated += 1  # одна категория-стадия за кадр на чанк
+			if state > RS_CAT_MAX:
+				# Все категории RS показаны — включаем scene tree node (деревья/фонари)
 				var cn: Node3D = _get_chunk_node(chunk_key)
 				if is_instance_valid(cn):
 					cn.visible = true
 				var lod_lvl: int = _chunk_state.get(chunk_key, {}).get("lod_level", 0)
-				print("ACTIVATE: %s READY lod=%d rs=%d" % [chunk_key, lod_lvl, instances.size()])
+				print("ACTIVATE: %s READY lod=%d rs=%d (staged)" % [chunk_key, lod_lvl, instances.size()])
 				_chunk_activation_pending.erase(chunk_key)
 				_remove_loading_placeholder(chunk_key)
 				_chunk_culling_cooldown[chunk_key] = Time.get_ticks_msec() + 3000
 				_set_chunk_stage(chunk_key, "ready", {"node": cn})
 				_schedule_lod_transition_free(chunk_key)
 			else:
-				_chunk_activation_pending[chunk_key] = end_idx
+				_chunk_activation_pending[chunk_key] = state
 
 
 ## Free old LOD RS instances immediately when new LOD chunk is ready
