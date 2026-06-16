@@ -21334,6 +21334,10 @@ func _veg_ensure_assets() -> bool:
 				dm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
 				dm.alpha_scissor_threshold = 0.5
 				dm.cull_mode = BaseMaterial3D.CULL_DISABLED
+				# The birch GLB ships its material as UNSHADED → it ignored lighting and stayed
+				# full-bright at night ("glowing birches"), unlike the other (lit) trees. Make it
+				# lit so it darkens at night like everything else.
+				dm.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
 				mat = dm
 			out_mesh.surface_set_material(out_mesh.get_surface_count() - 1, mat)
 		_veg_birch_meshes.append(out_mesh)
