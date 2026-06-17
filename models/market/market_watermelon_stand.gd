@@ -376,10 +376,9 @@ func _on_impact(body: Node) -> void:
 		v = (body as RigidBody3D).linear_velocity
 	elif body is VehicleBody3D:
 		v = (body as VehicleBody3D).linear_velocity
-	# approach speed = car velocity projected toward the stand (fallback: magnitude)
-	var impact := maxf(0.0, v.dot(dir))
-	if impact < 0.1:
-		impact = v.length()
+	# Speed = velocity magnitude (same as the proven bag/cone clutter; a projection could read low
+	# when the car decelerates on the frozen-fruit wall and misclassify a fast hit as low → no burst).
+	var impact := v.length()
 	if wmelon_debug:
 		print("[WMELON] stand %d hit at %.1f km/h → %s" % [stand_index, impact * 3.6, "HIGH" if impact >= smash_speed_mps else "LOW"])
 	if impact >= smash_speed_mps:
@@ -436,17 +435,17 @@ func _do_high_speed(car: Node3D, dir: Vector3, impact: float) -> void:
 	var dv := clampf(impact, 8.0, 20.0)
 	var spawned := 0
 	# red flesh chunks
-	for i in range(28):
+	for i in range(16):
 		if spawned >= DEBRIS_CAP:
 			break
 		var mat := _mat_pink if (i % 3 != 0) else _mat_pink_lt
-		_spawn_chunk(origin, dir, dv, _pulp_mesh, mat, randf_range(0.9, 1.7))
+		_spawn_chunk(origin, dir, dv, _pulp_mesh, mat, randf_range(0.8, 1.4))
 		spawned += 1
 	# green rind shards
-	for i in range(8):
+	for i in range(5):
 		if spawned >= DEBRIS_CAP:
 			break
-		_spawn_chunk(origin, dir, dv * 0.9, _pulp_mesh, _mat_rind, randf_range(1.2, 2.2))
+		_spawn_chunk(origin, dir, dv * 0.9, _pulp_mesh, _mat_rind, randf_range(1.0, 1.6))
 		spawned += 1
 	# red juice particle burst (one-shot)
 	_spawn_burst(origin)
@@ -466,7 +465,7 @@ func _spawn_chunk(origin: Vector3, dir: Vector3, dv: float, mesh: Mesh, mat: Mat
 	body.add_child(mi)
 	var cs := CollisionShape3D.new()
 	var box := BoxShape3D.new()
-	box.size = Vector3(0.13, 0.13, 0.13) * sscale
+	box.size = Vector3(0.08, 0.08, 0.08) * sscale
 	cs.shape = box
 	body.add_child(cs)
 	add_child(body)
@@ -481,18 +480,28 @@ func _spawn_chunk(origin: Vector3, dir: Vector3, dv: float, mesh: Mesh, mat: Mat
 
 
 func _spawn_burst(origin: Vector3) -> void:
+	# one_shot GPUParticles often fail to fire when emitting is set on the spawn frame; use a brief
+	# CONTINUOUS emit then stop (this is the pattern that renders reliably here).
 	var p := GPUParticles3D.new()
-	p.amount = 70
-	p.lifetime = 1.6
-	p.one_shot = true
-	p.explosiveness = 0.85
+	p.amount = 55
+	p.lifetime = 0.9
+	p.one_shot = false
+	p.explosiveness = 0.0
 	p.process_material = _burst_proc
 	p.draw_pass_1 = _burst_draw
+	# Mirror the proven test: add to an UNSCALED host (the chunk, not the 1.3-scaled stand) and let
+	# visibility_aabb auto-compute (a wrong custom AABB frustum-culls the whole emitter → invisible).
+	var host: Node = get_parent()
+	if host == null:
+		host = get_tree().current_scene
+	host.add_child(p)
 	p.global_position = origin
-	p.visibility_aabb = AABB(Vector3(-2.5, -1.0, -2.5), Vector3(5, 5, 5))
-	add_child(p)
 	p.emitting = true
-	get_tree().create_timer(2.6).timeout.connect(func() -> void:
+	# dense puff for ~0.35s, then stop new emission and free once particles fade
+	get_tree().create_timer(0.35).timeout.connect(func() -> void:
+		if is_instance_valid(p):
+			p.emitting = false)
+	get_tree().create_timer(2.2).timeout.connect(func() -> void:
 		if is_instance_valid(p):
 			p.queue_free())
 
@@ -501,14 +510,15 @@ func _ensure_debris_resources() -> void:
 	if _pulp_mesh != null:
 		return
 	_pulp_mesh = BoxMesh.new()
-	_pulp_mesh.size = Vector3(0.13, 0.13, 0.13)
+	_pulp_mesh.size = Vector3(0.08, 0.08, 0.08)
 	_mat_pink = _flat_mat(PULP_PINK)
 	_mat_pink_lt = _flat_mat(PULP_PINK_LT)
 	_mat_rind = _flat_mat(RIND_GREEN)
-	# red juice puff
+	# Soft round pinkish-red juice puff (small). The render pipeline now works (unscaled host +
+	# auto visibility_aabb in _spawn_burst), so the textured/soft-alpha material is safe.
 	var grad := Gradient.new()
-	grad.offsets = PackedFloat32Array([0.0, 0.5, 1.0])
-	grad.colors = PackedColorArray([Color(1.0, 0.22, 0.30, 1.0), Color(0.90, 0.16, 0.26, 0.9), Color(0.86, 0.16, 0.26, 0.0)])
+	grad.offsets = PackedFloat32Array([0.0, 0.55, 1.0])
+	grad.colors = PackedColorArray([Color(1, 1, 1, 1), Color(1, 1, 1, 0.45), Color(1, 1, 1, 0.0)])
 	var puff := GradientTexture2D.new()
 	puff.gradient = grad
 	puff.fill = GradientTexture2D.FILL_RADIAL
@@ -517,27 +527,27 @@ func _ensure_debris_resources() -> void:
 	puff.width = 64
 	puff.height = 64
 	var dm := StandardMaterial3D.new()
+	dm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	dm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	dm.albedo_texture = puff
+	dm.albedo_color = Color(0.88, 0.20, 0.28)
 	dm.vertex_color_use_as_albedo = true
 	dm.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
 	dm.billboard_keep_scale = true
-	# UNSHADED so the smash burst is clearly visible day or night (transient VFX, not the static pile).
-	dm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	dm.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_burst_draw = QuadMesh.new()
-	_burst_draw.size = Vector2(0.85, 0.85)
+	_burst_draw.size = Vector2(0.22, 0.22)
 	_burst_draw.material = dm
 	var pm := ParticleProcessMaterial.new()
 	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
 	pm.emission_sphere_radius = 0.35
 	pm.direction = Vector3(0, 1, 0)
 	pm.spread = 75.0
-	pm.initial_velocity_min = 3.0
-	pm.initial_velocity_max = 6.5
+	pm.initial_velocity_min = 2.0
+	pm.initial_velocity_max = 4.0
 	pm.gravity = Vector3(0, -4.0, 0)
-	pm.scale_min = 1.6
-	pm.scale_max = 3.6
+	pm.scale_min = 0.5
+	pm.scale_max = 1.2
 	var aramp := Gradient.new()
 	aramp.offsets = PackedFloat32Array([0.0, 0.2, 1.0])
 	aramp.colors = PackedColorArray([Color(1, 1, 1, 0.9), Color(1, 1, 1, 0.7), Color(1, 1, 1, 0.0)])
