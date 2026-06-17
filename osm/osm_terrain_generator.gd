@@ -33,6 +33,7 @@ const CROSSING_SIGN_TEXTURE = preload("res://textures/signs/pedestrian_crossing.
 const PARKING_SIGN_TEXTURE = preload("res://textures/signs/parking.png")
 const TRAM_STOP_SIGN_TEXTURE = preload("res://textures/signs/tram_stop.png")
 const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
+const RoadSignsLib = preload("res://osm/road_signs.gd")  # generic sign build library (Wave 0)
 const WheelDirtScript = preload("res://effects/wheel_dirt.gd")
 
 # Текстуры для деревянных одноэтажных домов (Россия)
@@ -146,6 +147,12 @@ const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slop
 @export var enable_night_mode_windows := true  # Включить подсветку окон ночью
 @export var enable_manholes := true  # Включить люки на дорогах
 @export var enable_crossing_signs := true  # Включить знаки пешеходных переходов
+@export var enable_road_signs := true       # Road-sign system (Wave 0/1A) master switch
+@export var enable_bus_stop_signs := true   # Wave 1A: bus-stop sign plate near each stop
+@export var sign_debug := false             # Default OFF: candidate/final markers + facing/approach arrows + logs
+@export var sign_debug_only_type := ""      # When set, ONLY this sign type spawns (e.g. "bus_stop")
+@export var sign_visibility_range := 130.0  # Per-sign visibility_range_end (culling, not mesh LOD)
+@export var sign_style_profile := "default" # Country/style profile for the asset registry
 @export var enable_clutter := true  # Интерактивный реквизит (урны, конусы, мешки…)
 @export var enable_fences := true  # Включить заборы (промзоны, территории)
 @export var enable_elevation := false  # Включить elevation из SRTM30m
@@ -1042,6 +1049,9 @@ func _ready() -> void:
 	_tram_stop_sign_front_mat.alpha_scissor_threshold = 0.5
 	_tram_stop_sign_front_mat.metallic = 0.3
 	_tram_stop_sign_front_mat.roughness = 0.5
+
+	# Generic road-sign build library (Wave 0). Stateless build assets only.
+	_road_signs = RoadSignsLib.new()
 
 	# Инициализируем шейдер окон (один раз для всех батчей)
 	_init_window_shader()
@@ -3521,6 +3531,12 @@ func _unload_chunk(chunk_key: String) -> void:
 				_created_tl_app_keys.erase(_tk)
 				_created_sl_keys.erase(_tk)
 			_tl_keys_by_chunk.erase(chunk_key)
+		# Road signs (Wave 0/1A): free dedup keys (sign nodes free with chunk_node;
+		# reload re-places them). Debug gizmos are chunk children → freed too.
+		if _sign_keys_by_chunk.has(chunk_key):
+			for _sk in _sign_keys_by_chunk[chunk_key]:
+				_sign_keys.erase(_sk)
+			_sign_keys_by_chunk.erase(chunk_key)
 		# Vegetation rows: free dedup keys + batch (VegRows node frees with chunk_node).
 		_deferred_veg_row_queue.erase(chunk_key)
 		_veg_row_batch.erase(chunk_key)
@@ -3734,6 +3750,8 @@ func reset_terrain() -> void:
 	_created_lamp_positions.clear()
 	_created_sign_positions.clear()
 	_created_bus_stop_positions.clear()
+	_sign_keys.clear()
+	_sign_keys_by_chunk.clear()
 	_road_segments.clear()
 	_road_spatial_hash.clear()
 	_building_segments.clear()
@@ -4891,6 +4909,7 @@ func _process_phase3_queue() -> bool:
 				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
 					continue
 			_create_bus_stop(local, _sample_elevation(local.x, local.y), tags, target)
+			_place_bus_stop_sign(local, int(stop.get("id", 0)), target, chunk_key)
 		# Done with bus stops — move to tram stops
 		entry.phase = "tram_stops"
 		entry.way_idx = 0
@@ -19345,6 +19364,116 @@ func _create_bus_stop(pos: Vector2, elevation: float, tags: Dictionary, parent: 
 	parent.add_child(stop_root)
 
 
+# ===================== ROAD SIGNS (Wave 0/1A) — placement =====================
+
+## Wave 1A: place a small bus-stop sign plate on a pole at the stop-side curb,
+## facing oncoming traffic in the near lane. The generator owns all road context;
+## RoadSignsLib builds the node. Right-curb invariant (TL gold standard): the sign
+## sits on the curb that is the near-lane driver's RIGHT, plate facing back at that
+## driver. We do NOT copy the broken generic/yield rotation.y=0 behaviour.
+func _place_bus_stop_sign(stop_pos: Vector2, stop_id: int, parent: Node3D, ck: String) -> void:
+	if not (enable_road_signs and enable_bus_stop_signs):
+		return
+	if sign_debug_only_type != "" and sign_debug_only_type != "bus_stop":
+		return
+	if _road_signs == null or parent == null or not is_instance_valid(parent):
+		return
+
+	# Unified dedup key — real OSM node id when available, else quantized position.
+	var key := ("sign_bus_stop_n%d" % stop_id) if stop_id > 0 else ("sign_bus_stop_%d_%d" % [int(round(stop_pos.x)), int(round(stop_pos.y))])
+	if _sign_keys.has(key):
+		_sign_dbg.deduped += 1
+		return
+
+	# Match the nearest vehicle carriageway (width gate handled inside the helper).
+	var ri := _find_nearest_road_at_point(stop_pos, ck)
+	if ri.is_empty():
+		ri = _find_nearest_road_at_point(stop_pos, "")  # cross-chunk fallback
+	if ri.is_empty():
+		_sign_dbg.no_road += 1
+		if sign_debug:
+			print("[SIGN] bus_stop n%d rejected: no_road" % stop_id)
+		return
+
+	var road_dir: Vector2 = ri.road_dir
+	var cl := Geometry2D.get_closest_point_to_segment(stop_pos, ri.road_p1, ri.road_p2)
+	# Outward = from road centerline toward the stop's side of the road.
+	var to_stop := stop_pos - cl
+	if to_stop.length() < 0.05:
+		to_stop = Vector2(-road_dir.y, road_dir.x)  # stop on centerline → pick a side
+	to_stop = to_stop.normalized()
+
+	# Choose the travel direction for which the stop side is the driver's RIGHT.
+	# driver_right(travel) = Vector2(-travel.y, travel.x); want it pointing to_stop.
+	var right_pos := Vector2(-road_dir.y, road_dir.x)
+	var approach_dir := road_dir if right_pos.dot(to_stop) >= 0.0 else -road_dir
+	var right_perp := Vector2(-approach_dir.y, approach_dir.x)  # driver's right = stop side
+
+	# Project to the stop-side curb (road edge + kerb offset). Never flips sides.
+	var curb := _tl_curb_point(cl, right_perp, ck)
+
+	# Light clearance: nudge ONLY along the curb (upstream); never to the far side.
+	# Still on the carriageway after a small search → reject (no_curb_slot).
+	var slot_ok := not _is_point_on_vehicle_road(curb, 0.0, ck)
+	if not slot_ok:
+		var probe_cl := cl
+		for _i in 3:
+			probe_cl -= approach_dir * 1.5
+			var probe := _tl_curb_point(probe_cl, right_perp, ck)
+			if not _is_point_on_vehicle_road(probe, 0.0, ck):
+				curb = probe
+				slot_ok = true
+				break
+	if not slot_ok:
+		_sign_dbg.no_curb_slot += 1
+		if sign_debug:
+			print("[SIGN] bus_stop n%d rejected: no_curb_slot" % stop_id)
+		return
+
+	# yaw: front (local +Z) faces the oncoming driver = faces UPSTREAM (-approach_dir).
+	var face := -approach_dir
+	var yaw := atan2(face.x, face.y)
+	var elev := _sample_elevation(curb.x, curb.y)
+	var world_pos := Vector3(curb.x, elev, curb.y)
+
+	var node: Node3D = _road_signs.build("bus_stop", "", world_pos, yaw, parent, {
+		"profile": sign_style_profile,
+		"visibility_range": sign_visibility_range,
+		"hit_handler": Callable(self, "_on_sign_hit"),
+	})
+	if node == null:
+		_sign_dbg.disabled_data += 1
+		if sign_debug:
+			print("[SIGN] bus_stop n%d rejected: missing_texture/def (profile=%s)" % [stop_id, sign_style_profile])
+		return
+
+	_sign_keys[key] = true
+	_sign_track_chunk_key(ck, key)
+	_sign_dbg.placed += 1
+	if sign_debug:
+		_sign_debug_draw(ck, stop_pos, approach_dir, right_perp, curb, face)
+		print("[SIGN] bus_stop n%d placed key=%s curb=(%.1f,%.1f) yaw=%.2f approach=(%.2f,%.2f)" % [stop_id, key, curb.x, curb.y, yaw, approach_dir.x, approach_dir.y])
+
+
+func _sign_track_chunk_key(ck: String, key: String) -> void:
+	if ck == "":
+		return
+	if not _sign_keys_by_chunk.has(ck):
+		_sign_keys_by_chunk[ck] = []
+	_sign_keys_by_chunk[ck].append(key)
+
+
+## Reuse the TL debug gizmos: magenta = raw OSM node, green = final curb position,
+## GREEN arrow = approach_dir, BLUE arrow = driver_right, YELLOW arrow = plate facing.
+func _sign_debug_draw(ck: String, raw: Vector2, approach_dir: Vector2, driver_right: Vector2, curb: Vector2, face: Vector2) -> void:
+	var ey := _sample_elevation(curb.x, curb.y) + 1.0
+	_tl_debug_marker(ck, Vector3(raw.x, _sample_elevation(raw.x, raw.y) + 0.5, raw.y), Color(1.0, 0.1, 1.0))  # magenta = raw node
+	_tl_debug_marker(ck, Vector3(curb.x, _sample_elevation(curb.x, curb.y) + 0.3, curb.y), Color(0.1, 1.0, 0.1), 0.4)  # green = final
+	_tl_debug_arrow(ck, curb, approach_dir, 5.0, Color(0.1, 1.0, 0.1), ey)   # GREEN = approach_dir
+	_tl_debug_arrow(ck, curb, driver_right, 3.5, Color(0.2, 0.4, 1.0), ey)   # BLUE = driver_right
+	_tl_debug_arrow(ck, curb, face, 3.5, Color(1.0, 1.0, 0.1), ey)           # YELLOW = face
+
+
 func _get_direction_to_nearest_road(pos: Vector2) -> Vector2:
 	"""Находит направление К ближайшей дороге (перпендикуляр)"""
 	var nearby_segs := _get_nearby_road_segments(pos)
@@ -23364,6 +23493,9 @@ func _reset_wire_state() -> void:
 	_tl_crossings.clear()
 	_tl_sl_queue.clear()
 	_tl_blink_accum = 0.0
+	# Road signs share the regen/reset lifecycle.
+	_sign_keys.clear()
+	_sign_keys_by_chunk.clear()
 	_deferred_veg_row_queue.clear()
 	_veg_row_batch.clear()
 	_veg_shrub_batch.clear()
@@ -28865,6 +28997,14 @@ var _tl_sl_queue: Dictionary = {}       # ck → Array[stop-line jobs] (built af
 var tl_sl_max_retries := 600            # safety-net frames before default placement (map-edge junctions)
 var _tl_stopline_mat: StandardMaterial3D = null
 var _tl_dbg := {"enq": 0, "placed": 0, "noroad": 0, "midblock_v2": 0, "dup_node": 0, "dup_approach": 0, "ambiguous": 0, "sl_drawn": 0, "sl_nofit": 0, "sl_late": 0}
+
+# ============================ ROAD SIGNS (Wave 0/1A) ============================
+# Generic sign system state. The build library (RoadSignsLib) owns mesh/material/
+# registry; the generator owns placement, dedup, chunk lifecycle, and debug.
+var _road_signs = null                       # RoadSignsLib instance (lazy in _ready)
+var _sign_keys: Dictionary = {}              # unified "sign_<type>_..." → true (cross-chunk dedup)
+var _sign_keys_by_chunk: Dictionary = {}     # ck → Array[String] (erased on unload)
+var _sign_dbg := {"placed": 0, "deduped": 0, "no_road": 0, "no_curb_slot": 0, "rejected_clearance": 0, "disabled_data": 0}
 
 
 # Queue one signal node (owned by chunk `ck`) for deferred placement. Node-id dedup at both enqueue

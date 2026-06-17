@@ -34,7 +34,7 @@ START_LAT = 59.149886  # from main.tscn
 START_LON = 37.949370
 CHUNK_SIZE = 210.0     # from main.tscn
 QUERY_RADIUS = 315     # maxf(210, 150) + 210/2 = 315
-CACHE_VERSION = 8  # align with osm_loader.gd CACHE_VERSION; v8 adds node[highway=traffic_signals]
+CACHE_VERSION = 9  # align with osm_loader.gd CACHE_VERSION; v9 preserves bus_stop + point_object node ids
 
 REMOTE_SERVERS = [
     "http://mc.skrup.ru:12346/api/interpreter",
@@ -220,7 +220,7 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
                 is_platform = pt in ("platform", "station")
                 if is_bus_stop or is_bus_station or is_platform:
                     bus_stops.append({
-                        "lat": el["lat"], "lon": el["lon"], "tags": tags
+                        "id": el["id"], "lat": el["lat"], "lon": el["lon"], "tags": tags
                     })
 
                 if tags.get("railway") == "tram_stop":
@@ -235,7 +235,7 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
                     })
                 else:
                     point_objects.append({
-                        "lat": el["lat"], "lon": el["lon"], "tags": tags
+                        "id": el["id"], "lat": el["lat"], "lon": el["lon"], "tags": tags
                     })
 
     for el in data.get("elements", []):

@@ -25,7 +25,7 @@ static var _queue_processor: OSMLoader = null  # Один инстанс обр�
 
 # Кеширование
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 8  # v8: добавлен node[highway=traffic_signals] (светофоры с сохранением node id)
+const CACHE_VERSION := 9  # v9: bus_stop + point_object (traffic_sign) node ids preserved in parsed cache (road-sign dedup)
 var use_cache := true
 
 var http_request: HTTPRequest
@@ -424,6 +424,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 				var is_platform: bool = pt_value == "platform" or pt_value == "station"
 				if is_bus_stop or is_bus_station or is_platform:
 					bus_stops.append({
+						"id": element.id,  # node id → stable bus-stop sign dedup
 						"lat": element.lat,
 						"lon": element.lon,
 						"tags": tags
@@ -448,6 +449,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 					})
 				else:
 					point_objects.append({
+						"id": element.id,  # preserve node id (traffic_sign et al.) — future dedup, cheap
 						"lat": element.lat,
 						"lon": element.lon,
 						"tags": tags
