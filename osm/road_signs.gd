@@ -65,6 +65,14 @@ const SIGN_DEFS := {
 		"mass": 12.0,
 		"visibility_range": 120.0,
 	},
+	"main_road": {
+		"type": "main_road",
+		"shape": "diamond",           # yellow priority-road diamond; silhouette via alpha PNG
+		"plate_size": Vector2(0.66, 0.66),
+		"pole_height": 2.6,
+		"double_sided": true, "destructible": true,
+		"collision_layer": 4, "collision_mask": 7, "mass": 12.0, "visibility_range": 130.0,
+	},
 }
 
 # ------------------------------------------------------------- style registry
