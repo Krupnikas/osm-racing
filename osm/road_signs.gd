@@ -29,6 +29,18 @@ const SIGN_DEFS := {
 		"mass": 15.0,
 		"visibility_range": 130.0,
 	},
+	"speed_limit": {
+		"type": "speed_limit",
+		"shape": "circle",            # v1: rendered as quad+alpha (PNG carries the round silhouette)
+		"plate_size": Vector2(0.62, 0.62),  # square-ish PNGs; round sign via alpha
+		"pole_height": 2.5,
+		"double_sided": true,
+		"destructible": true,
+		"collision_layer": 4,
+		"collision_mask": 7,
+		"mass": 12.0,
+		"visibility_range": 120.0,
+	},
 }
 
 # ------------------------------------------------------------- style registry
