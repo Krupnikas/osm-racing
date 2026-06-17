@@ -41,6 +41,30 @@ const SIGN_DEFS := {
 		"mass": 12.0,
 		"visibility_range": 120.0,
 	},
+	"roundabout": {
+		"type": "roundabout",
+		"shape": "circle",            # blue mandatory-roundabout sign; round silhouette via alpha PNG
+		"plate_size": Vector2(0.62, 0.62),
+		"pole_height": 2.5,
+		"double_sided": true,
+		"destructible": true,
+		"collision_layer": 4,
+		"collision_mask": 7,
+		"mass": 12.0,
+		"visibility_range": 120.0,
+	},
+	"give_way": {
+		"type": "give_way",
+		"shape": "triangle",          # inverted give-way triangle; silhouette via alpha PNG
+		"plate_size": Vector2(0.72, 0.62),  # ~PNG aspect (point-down triangle)
+		"pole_height": 2.4,
+		"double_sided": true,
+		"destructible": true,
+		"collision_layer": 4,
+		"collision_mask": 7,
+		"mass": 12.0,
+		"visibility_range": 120.0,
+	},
 }
 
 # ------------------------------------------------------------- style registry
@@ -52,6 +76,7 @@ const STYLE_TABLE := {
 	"default": {
 		"bus_stop":   "res://textures/signs/bus_stop.png",
 		"roundabout": "res://textures/signs/roundabout.png",
+		"give_way":   "res://textures/signs/give_way.png",  # procedurally generated (no pack artwork)
 		"main_road":  "res://textures/signs/main_road.png",
 		"speed_limit": {
 			"20": "res://textures/signs/speed_limit_20.png",
