@@ -491,7 +491,7 @@ func _get_npc_from_pool(force_new := false):
 		return npc
 
 	if active_npcs.size() < max_npcs:
-		# Распределение: 5% DPS, 10% Такси, 10% ПАЗ, 25% ВАЗ-2107, 10% Polo, 10% Matiz, 2% Logan, 3% Focus ST, 25% блочные
+		# Распределение: 5% DPS, 15% Такси, 10% ПАЗ, 10% ВАЗ-2107, 15% Polo, 15% Matiz, 2% Logan, 3% Focus ST, остальное — редкие иномарки/Лады
 		var rand := randf()
 		var scene_to_use: PackedScene
 		var car_type: String
@@ -500,24 +500,24 @@ func _get_npc_from_pool(force_new := false):
 			# 5% - Lada 2109 DPS
 			scene_to_use = npc_lada_scene
 			car_type = "Lada 2109 DPS"
-		elif rand < 0.15:
-			# 10% - Такси
+		elif rand < 0.20:
+			# 15% - Такси
 			scene_to_use = npc_taxi_scene
 			car_type = "Taxi"
-		elif rand < 0.25:
+		elif rand < 0.30:
 			# 10% - ПАЗ
 			scene_to_use = npc_paz_scene
 			car_type = "PAZ bus"
-		elif rand < 0.50:
-			# 25% - ВАЗ-2107
+		elif rand < 0.40:
+			# 10% - ВАЗ-2107
 			scene_to_use = npc_vaz2107_scene
 			car_type = "VAZ-2107"
-		elif rand < 0.60:
-			# 10% - VW Polo
+		elif rand < 0.55:
+			# 15% - VW Polo
 			scene_to_use = npc_polo_scene
 			car_type = "VW Polo"
 		elif rand < 0.70:
-			# 10% - Daewoo Matiz
+			# 15% - Daewoo Matiz
 			scene_to_use = npc_matiz_scene
 			car_type = "Daewoo Matiz"
 		elif rand < 0.72:
