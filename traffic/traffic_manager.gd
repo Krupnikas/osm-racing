@@ -59,6 +59,20 @@ var _profiler: Node = null
 var _log_timer: float = 0.0
 const LOG_INTERVAL := 2.0  # Логировать каждые 2 секунды
 
+# Police emergency (lights + 3D siren). Rare, moving-police only, capped. The manager owns:
+# tagging, mode roll, the global siren cap, centralized blink/duration tick, and pool-return reset.
+@export var police_emergency_enabled := true
+@export_range(0.0, 1.0, 0.01) var police_lights_only_chance := 0.20      # occasional: flashing bar, no siren
+@export_range(0.0, 1.0, 0.01) var police_lights_and_siren_chance := 0.08 # rare: bar + siren (cap-limited)
+@export var police_emergency_max_active_sirens := 1
+@export var police_emergency_min_duration := 20.0
+@export var police_emergency_max_duration := 45.0
+@export var police_emergency_siren_max_distance := 80.0  # 3D siren audible radius (tune 60–90)
+@export var police_debug := false
+var _active_police_emergency: Array = []  # NPCCars currently in LIGHTS_ONLY or LIGHTS_AND_SIREN
+var _active_police_sirens: Array = []     # subset in LIGHTS_AND_SIREN (the siren cap)
+var _police_last_reason := ""             # last activation/downgrade reason (debug)
+
 
 func _ready() -> void:
 	# Загружаем сцены NPC машин
@@ -174,6 +188,9 @@ func _process(delta: float) -> void:
 		spawn_cooldown = SPAWN_COOLDOWN_TIME
 
 	_update_despawning()
+
+	# Police emergency: centralized blink + duration tick over ACTIVE emergency cars only.
+	_update_police_emergency(delta)
 
 	# Порционное соединение перекрёстков — 2ms бюджет на кадр
 	if road_network and road_network.has_method("process_pending_connections"):
@@ -331,6 +348,9 @@ func _attempt_spawn_in_chunk(chunk_key: String, player_pos: Vector3) -> bool:
 
 	# Добавляем в списки
 	active_npcs.append(npc)
+
+	# Police emergency: roll a rare mode for MOVING police only (parked cars never reach here).
+	_maybe_activate_police_emergency(npc)
 
 	return true
 
@@ -571,6 +591,13 @@ func _get_npc_from_pool(force_new := false):
 		get_parent().add_child(npc)
 		# Подключаем сигнал despawn
 		npc.request_despawn.connect(_on_npc_request_despawn.bind(npc))
+		# Permanent police tag (object keeps its identity across pool reuse — the Lada DPS scene
+		# is the only police source). The reliable runtime identifier, not the filename.
+		if scene_to_use == npc_lada_scene:
+			npc.add_to_group("police")
+			npc.set_meta("is_police", true)
+			if police_debug:
+				print("[POLICE] tagged police NPC at instantiate")
 		return npc
 
 	return null
@@ -607,6 +634,10 @@ func _return_npc_to_pool(npc) -> void:
 	"""Возвращает NPC в pool"""
 	# Убираем из активных
 	active_npcs.erase(npc)
+
+	# CRITICAL: stop+reset any police emergency BEFORE the car is disabled/pooled, so a reused
+	# car never inherits a running siren / lit bar / stale timer / cap slot.
+	_release_police_emergency(npc)
 
 	# Очищаем визуализацию пути и целевого кубика сразу при возврате в pool
 	_clear_npc_path_visual(npc)
@@ -710,9 +741,179 @@ func clear_chunk(chunk_key: String) -> void:
 	# Despawn NPCs в этом чанке (они будут удалены distance check'ом)
 
 
+# === Police emergency orchestration ===
+
+func _maybe_activate_police_emergency(npc) -> void:
+	"""Roll a rare emergency mode for a freshly-activated MOVING police car (cap-aware)."""
+	if not police_emergency_enabled:
+		return
+	if not npc.is_in_group("police") or not npc.has_method("set_police_emergency_mode"):
+		return
+	var r := randf()
+	var mode: int = NPCCar.PoliceEmergencyMode.SILENT
+	if r < police_lights_and_siren_chance:
+		mode = NPCCar.PoliceEmergencyMode.LIGHTS_AND_SIREN
+	elif r < police_lights_and_siren_chance + police_lights_only_chance:
+		mode = NPCCar.PoliceEmergencyMode.LIGHTS_ONLY
+	if mode == NPCCar.PoliceEmergencyMode.SILENT:
+		_police_last_reason = "rolled_silent"
+		return  # most police stay silent; no tracking, no cost
+	# Siren cap: prefer downgrade to LIGHTS_ONLY over forcing SILENT.
+	if mode == NPCCar.PoliceEmergencyMode.LIGHTS_AND_SIREN and _active_police_sirens.size() >= police_emergency_max_active_sirens:
+		mode = NPCCar.PoliceEmergencyMode.LIGHTS_ONLY
+		_police_last_reason = "siren_cap_full->lights_only"
+	else:
+		_police_last_reason = ("rolled_lights_and_siren" if mode == NPCCar.PoliceEmergencyMode.LIGHTS_AND_SIREN else "rolled_lights_only")
+	var dur := randf_range(police_emergency_min_duration, police_emergency_max_duration)
+	npc.police_siren_max_distance = police_emergency_siren_max_distance
+	npc.set_police_emergency_mode(mode, dur)
+	_active_police_emergency.append(npc)
+	if mode == NPCCar.PoliceEmergencyMode.LIGHTS_AND_SIREN:
+		_active_police_sirens.append(npc)
+	if police_debug:
+		print("[POLICE] activate mode=%d dur=%.0f reason=%s (emergency=%d sirens=%d/%d)" % [
+			mode, dur, _police_last_reason, _active_police_emergency.size(), _active_police_sirens.size(), police_emergency_max_active_sirens])
+
+
+func _update_police_emergency(_delta: float) -> void:
+	"""GC pass over tracked emergency cars: the cars now self-spin their beacon and self-expire
+	their timer in NPCCar._process. Here we only release the tracking + siren-cap slot once a car
+	is gone, pooled away, or has reverted itself to SILENT."""
+	if _active_police_emergency.is_empty():
+		return
+	for i in range(_active_police_emergency.size() - 1, -1, -1):
+		var npc = _active_police_emergency[i]
+		if not is_instance_valid(npc) or not (npc in active_npcs) or not npc.is_police_emergency_active():
+			_active_police_sirens.erase(npc)
+			_active_police_emergency.remove_at(i)
+			if police_debug:
+				print("[POLICE] emergency released -> SILENT/gone (sirens=%d)" % _active_police_sirens.size())
+
+
+func _release_police_emergency(npc) -> void:
+	"""Stop emergency on the car + free its tracking/cap slot. Called on return-to-pool/despawn."""
+	_active_police_emergency.erase(npc)
+	_active_police_sirens.erase(npc)
+	if is_instance_valid(npc) and npc.has_method("stop_police_emergency"):
+		npc.stop_police_emergency()
+
+
+# === Police debug / test hooks ===
+
+func _nearest_active_police() -> Node:
+	var ppos := _get_player_position()
+	var best: Node = null
+	var best_d := INF
+	for npc in active_npcs:
+		if is_instance_valid(npc) and npc.is_in_group("police"):
+			var d: float = npc.global_position.distance_to(ppos)
+			if d < best_d:
+				best_d = d
+				best = npc
+	return best
+
+
+func _force_nearest_police(mode: int) -> bool:
+	var npc := _nearest_active_police()
+	if npc == null:
+		print("[POLICE] no active police car near player")
+		return false
+	_active_police_emergency.erase(npc)
+	_active_police_sirens.erase(npc)
+	var dur := randf_range(police_emergency_min_duration, police_emergency_max_duration)
+	npc.police_siren_max_distance = police_emergency_siren_max_distance
+	npc.set_police_emergency_mode(mode, dur)
+	if mode != NPCCar.PoliceEmergencyMode.SILENT:
+		_active_police_emergency.append(npc)
+	if mode == NPCCar.PoliceEmergencyMode.LIGHTS_AND_SIREN:
+		_active_police_sirens.append(npc)
+	print("[POLICE] forced nearest police -> mode=%d" % mode)
+	return true
+
+
+func force_nearest_police_lights_only() -> bool:
+	return _force_nearest_police(NPCCar.PoliceEmergencyMode.LIGHTS_ONLY)
+
+
+func force_nearest_police_lights_and_siren() -> bool:
+	return _force_nearest_police(NPCCar.PoliceEmergencyMode.LIGHTS_AND_SIREN)
+
+
+func force_nearest_police_silent() -> bool:
+	return _force_nearest_police(NPCCar.PoliceEmergencyMode.SILENT)
+
+
+func force_all_police_emergency_off() -> void:
+	for npc in _active_police_emergency.duplicate():
+		if is_instance_valid(npc) and npc.has_method("stop_police_emergency"):
+			npc.stop_police_emergency()
+	_active_police_emergency.clear()
+	_active_police_sirens.clear()
+	print("[POLICE] all emergency off")
+
+
+func print_active_police_emergency_count() -> void:
+	print(_police_emergency_summary())
+
+
+func _police_emergency_summary() -> String:
+	var total_police := 0
+	var silent := 0
+	var lights := 0
+	var siren := 0
+	for npc in active_npcs:
+		if is_instance_valid(npc) and npc.is_in_group("police"):
+			total_police += 1
+			match npc.get_police_emergency_mode():
+				NPCCar.PoliceEmergencyMode.LIGHTS_AND_SIREN: siren += 1
+				NPCCar.PoliceEmergencyMode.LIGHTS_ONLY: lights += 1
+				_: silent += 1
+	return "Police: %d active (silent=%d lights_only=%d lights+siren=%d) | sirens %d/%d | tracked=%d | last=%s" % [
+		total_police, silent, lights, siren, _active_police_sirens.size(), police_emergency_max_active_sirens, _active_police_emergency.size(), _police_last_reason]
+
+
+## Optional debug: spawn a police Lada near the player already in LIGHTS_AND_SIREN.
+func spawn_debug_police_car_near_player() -> Node:
+	if road_network == null or npc_lada_scene == null:
+		return null
+	var ppos := _get_player_position()
+	var best = null
+	var best_d := INF
+	if terrain_generator and terrain_generator is OSMTerrainGenerator:
+		for chunk_key in terrain_generator._loaded_chunks.keys():
+			for wp in road_network.get_waypoints_in_chunk(chunk_key):
+				var d: float = wp.position.distance_to(ppos)
+				if d > 20.0 and d < best_d:
+					best_d = d
+					best = wp
+	if best == null:
+		print("[POLICE] no waypoint near player for debug spawn")
+		return null
+	var npc = npc_lada_scene.instantiate()
+	get_parent().add_child(npc)
+	npc.request_despawn.connect(_on_npc_request_despawn.bind(npc))
+	npc.add_to_group("police")
+	npc.set_meta("is_police", true)
+	var path: Array = _build_path_from_waypoint(best, 20)
+	npc.set_path(path)
+	var sp := _calculate_spawn_position_on_lane(best, npc.chosen_lane)
+	sp.y = _raycast_ground_y(sp)
+	npc.global_position = sp
+	npc.global_rotation.y = atan2(best.direction.x, best.direction.z)
+	active_npcs.append(npc)
+	var dur := randf_range(police_emergency_min_duration, police_emergency_max_duration)
+	npc.police_siren_max_distance = police_emergency_siren_max_distance
+	npc.set_police_emergency_mode(NPCCar.PoliceEmergencyMode.LIGHTS_AND_SIREN, dur)
+	_active_police_emergency.append(npc)
+	_active_police_sirens.append(npc)
+	print("[POLICE] debug police car spawned near player at %.0f m" % best_d)
+	return npc
+
+
 func get_debug_info() -> String:
 	"""Возвращает отладочную информацию"""
 	var info := "Traffic: %d/%d NPCs active, %d in pool" % [active_npcs.size(), max_npcs, inactive_npcs.size()]
+	info += "\n" + _police_emergency_summary()
 	if road_network:
 		info += "\n" + road_network.get_debug_info()
 	return info
