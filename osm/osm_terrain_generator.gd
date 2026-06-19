@@ -10771,7 +10771,14 @@ func _spawn_parked_cars(parking_points: PackedVector2Array, parent: Node3D) -> v
 		# Применяем случайный цвет
 		_apply_parked_car_color(car)
 
+		# Parked-car alarm: enable contact reporting + attach the alarm component (it connects body_entered).
+		if car is RigidBody3D:
+			car.contact_monitor = true
+			car.max_contacts_reported = 4
 		parent.add_child(car)
+		var alarm := preload("res://traffic/parked_car_alarm.gd").new()
+		alarm.name = "ParkedCarAlarm"
+		car.add_child(alarm)
 
 
 func _find_parking_spot(parking_points: PackedVector2Array, center: Vector2, index: int, existing: Array[Vector2]) -> Vector2:
