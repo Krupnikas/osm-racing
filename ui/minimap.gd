@@ -18,15 +18,22 @@ const OPPONENT_SIZE := 8.0       # Размер точек соперников
 const CHECKPOINT_SIZE := 11.0    # Размер чекпоинтов
 const FINISH_SIZE := 14.0        # Размер финиша
 
-# Ширина линий дорог в пикселях
-const ROAD_LINE_WIDTH_MAJOR := 5.0    # ширина >= 12м (motorway, trunk, primary)
-const ROAD_LINE_WIDTH_MEDIUM := 3.5   # ширина 8-11м (secondary, tertiary)
-const ROAD_LINE_WIDTH_MINOR := 2.5    # ширина < 8м (residential, service)
-
-# Прозрачность дорог — полупрозрачные (≈половина прежних), чтобы маркер игрока читался
-const ROAD_ALPHA_MAJOR := 0.46
-const ROAD_ALPHA_MEDIUM := 0.30
-const ROAD_ALPHA_MINOR := 0.17
+# Дороги по КЛАССУ (highway), а не по физической ширине: иначе service с lanes=2
+# (≈7м) и tertiary (8м) попадают в один тир. Тиры: 0 крупные / 1 средние / 2 мелкие / 3 service.
+const ROAD_TIER_WIDTH := [5.0, 3.5, 2.5, 1.6]   # px
+# «Прозрачность» задаётся как доля подмешивания цвета дороги к фону диска — но рисуем
+# НЕПРОЗРАЧНО (см. _get_road_style), чтобы пересечения не складывались в яркие точки.
+# День: тёмные дороги на кремовом — хватает малой доли. Ночь: светлый янтарь на графите —
+# нужна бОльшая доля, иначе мелкие дорожки (service) тонут в фоне.
+const ROAD_TIER_BLEND_DAY := [0.46, 0.30, 0.17, 0.13]
+const ROAD_TIER_BLEND_NIGHT := [0.90, 0.70, 0.52, 0.42]
+const ROAD_TIER := {
+	"motorway": 0, "trunk": 0, "primary": 0,
+	"motorway_link": 0, "trunk_link": 0, "primary_link": 0,
+	"secondary": 1, "tertiary": 1, "secondary_link": 1, "tertiary_link": 1,
+	"residential": 2, "unclassified": 2, "living_street": 2, "road": 2, "busway": 2,
+	"service": 3, "track": 3, "alley": 3, "driveway": 3, "parking_aisle": 3,
+}
 
 # Безель (кольцо делений) перекрывает сетку: контент клиппится по внутреннему радиусу
 const BEZEL_INSET := 20.0
@@ -254,27 +261,28 @@ func _update_road_cache(player_pos: Vector3) -> void:
 	_update_route_segments_cache()
 
 
-func _get_road_style(width: float) -> Dictionary:
-	"""Возвращает толщину линии и цвет в зависимости от ширины дороги"""
-	var line_width: float
-	var alpha: float
-
+func _road_tier(hw: String, width: float) -> int:
+	"""Тир дороги по классу (highway). Фолбэк по физической ширине, если класс неизвестен."""
+	if ROAD_TIER.has(hw):
+		return ROAD_TIER[hw]
 	if width >= 12.0:
-		# Крупные дороги: motorway, trunk, primary
-		line_width = ROAD_LINE_WIDTH_MAJOR
-		alpha = ROAD_ALPHA_MAJOR
+		return 0
 	elif width >= 8.0:
-		# Средние дороги: secondary, tertiary
-		line_width = ROAD_LINE_WIDTH_MEDIUM
-		alpha = ROAD_ALPHA_MEDIUM
-	else:
-		# Мелкие дороги: residential, service
-		line_width = ROAD_LINE_WIDTH_MINOR
-		alpha = ROAD_ALPHA_MINOR
+		return 1
+	return 2
 
-	var base: Color = _palette()["road"]
-	var color := Color(base.r, base.g, base.b, alpha)
-	return {"width": line_width, "color": color}
+
+func _get_road_style(hw: String, width: float) -> Dictionary:
+	"""Толщина и цвет линии по классу дороги. Цвет — НЕПРОЗРАЧНЫЙ результат подмешивания
+	дороги к фону диска: одиночная линия выглядит как полупрозрачная, но пересечения двух
+	линий не складываются в яркую точку (рисуем opaque поверх opaque)."""
+	var tier := _road_tier(hw, width)
+	var pal := _palette()
+	var bg: Color = pal["bg"]
+	var road: Color = pal["road"]
+	var blend: Array = ROAD_TIER_BLEND_NIGHT if _is_night else ROAD_TIER_BLEND_DAY
+	var color := Color(bg.r, bg.g, bg.b).lerp(Color(road.r, road.g, road.b), blend[tier])
+	return {"width": ROAD_TIER_WIDTH[tier], "color": color, "tier": tier}
 
 
 func _draw_roads(player_pos: Vector3, player_rotation: float) -> void:
@@ -285,18 +293,20 @@ func _draw_roads(player_pos: Vector3, player_rotation: float) -> void:
 	# Угол вращения: +player_rotation чтобы карта вращалась в правильную сторону
 	var angle := player_rotation
 
-	# Сначала рисуем мелкие дороги, потом крупные (чтобы крупные были сверху)
-	# Сортируем сегменты по ширине
+	# Рисуем мелкие дороги первыми, крупные сверху — сортируем по ТИРУ (3→0)
 	var sorted_segments := _cached_road_segments.duplicate()
-	sorted_segments.sort_custom(func(a, b): return a.width < b.width)
+	sorted_segments.sort_custom(func(a, b):
+		return _road_tier(str(a.get("highway", "")), a.get("width", 5.0)) \
+			> _road_tier(str(b.get("highway", "")), b.get("width", 5.0)))
 
 	for seg in sorted_segments:
 		var p1: Vector2 = seg.p1
 		var p2: Vector2 = seg.p2
 		var road_width: float = seg.width
+		var hw: String = str(seg.get("highway", ""))
 
-		# Получаем стиль для этой дороги
-		var style := _get_road_style(road_width)
+		# Получаем стиль для этой дороги (по классу)
+		var style := _get_road_style(hw, road_width)
 
 		# Проверяем, на маршруте ли сегмент
 		var seg_key := _segment_key(p1, p2)

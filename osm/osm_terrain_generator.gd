@@ -5124,6 +5124,7 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 					"way_id": sync_way_id,
 					"bridge": sync_is_bridge,
 					"oneway": sync_oneway,
+					"highway": str(tags.get("highway", "")),
 				}, chunk_key)
 		if (tags.has("building") or (tags.has("amenity") and not tags.has("highway"))) and nodes.size() >= 3:
 			var bpoints := PackedVector2Array()
@@ -5333,6 +5334,7 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 			"way_id": way_id,
 			"bridge": seg_is_bridge,
 			"oneway": seg_oneway,
+			"highway": highway_type,
 		}
 		_add_road_segment_to_spatial_hash(seg, rq_ck)
 
