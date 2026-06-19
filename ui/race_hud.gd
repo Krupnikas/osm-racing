@@ -118,10 +118,9 @@ func _refresh_track_info() -> void:
 				dist += _haversine_km(a.x, a.y, b.x, b.y)
 	$TopLeftStack/TrackCard.set_track(name_text, dist)
 
-	var total_laps: int = 1
-	if track.get("total_laps") != null:
-		total_laps = int(track.total_laps)
-	$TopLeftStack/LapTimePanel.set_lap(1, total_laps)
+	# Panel is repurposed: total race time + checkpoint/progress (no fake laps).
+	$TopLeftStack/LapTimePanel.set_header("ВРЕМЯ ГОНКИ")
+	$TopLeftStack/LapTimePanel.set_delta(NAN, "")
 
 
 static func _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -151,6 +150,8 @@ func _process(delta: float) -> void:
 	if _last_standings_time > 0.2:
 		_last_standings_time = 0.0
 		_update_standings()
+		if _race_manager and _race_manager.current_state == RaceManagerScript.State.RACING:
+			_update_race_cards()
 
 
 # Pulls a simple live standings array out of RaceManager when available.
@@ -175,6 +176,29 @@ func _update_standings() -> void:
 		player_pos = 1
 		total = 1
 	$StandingsPanel.set_standings(rows, player_pos, total)
+
+
+# Top-left cards: next-turn + checkpoint/progress (geometry/math lives in RaceManager).
+func _update_race_cards() -> void:
+	if not _race_manager:
+		return
+	var card := $TopLeftStack/NextTurnCard
+	var nt: Dictionary = _race_manager.get_next_turn() if _race_manager.has_method("get_next_turn") else {}
+	if nt.get("valid", false):
+		card.visible = true
+		card.set_turn(str(nt.get("direction", "straight")), str(nt.get("severity", "medium")), int(nt.get("distance_m", 0)))
+	else:
+		card.visible = false
+
+	if _race_manager.has_method("get_race_progress"):
+		var pr: Dictionary = _race_manager.get_race_progress()
+		var panel := $TopLeftStack/LapTimePanel
+		if pr.get("is_checkpoint", false):
+			panel.set_caption("ЧЕКПОИНТ")
+			panel.set_lap(int(pr.get("checkpoint_index", 0)), int(pr.get("checkpoint_total", 0)))
+		else:
+			panel.set_caption("ПРОГРЕСС")
+			panel.set_progress(int(pr.get("progress_percent", 0)))
 
 
 func _on_near_miss(combo_count: int) -> void:
@@ -226,6 +250,16 @@ func _on_race_ready() -> void:
 	# the countdown ticks down.
 	$TopLeftStack.visible = true
 	$StandingsPanel.visible = true
+	# Fill the cards with real data NOW (current_track is set) so the player
+	# never sees the scene placeholders (track name / fake laps) during the
+	# countdown, before the race actually starts.
+	_refresh_track_info()
+	$TopLeftStack/LapTimePanel.set_header("ВРЕМЯ ГОНКИ")
+	$TopLeftStack/LapTimePanel.set_time("00:00.000")
+	$TopLeftStack/LapTimePanel.set_delta(NAN)
+	$TopLeftStack/NearMissCard.visible = false
+	_update_standings()
+	_update_race_cards()
 
 
 func _on_countdown_tick(number: int) -> void:
@@ -252,9 +286,15 @@ func _on_race_started() -> void:
 	# New HUD takes over the visible-on-screen elements.
 	$TopLeftStack.visible = true
 	$StandingsPanel.visible = true
+	# current_track is set now → fill the real track name/length (was placeholder before).
+	_refresh_track_info()
+	$TopLeftStack/LapTimePanel.set_header("ВРЕМЯ ГОНКИ")
 	$TopLeftStack/LapTimePanel.set_time("00:00.000")
 	$TopLeftStack/LapTimePanel.set_delta(NAN)
 	$TopLeftStack/NearMissCard.visible = false
+	# Prime standings + progress + next-turn immediately so no fake lap data flashes.
+	_update_standings()
+	_update_race_cards()
 
 	# Old centred TimerLabel stays hidden in racing; only used by results flow.
 	$TimerLabel.visible = false
