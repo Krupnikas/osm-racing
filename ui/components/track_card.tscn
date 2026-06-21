@@ -1,0 +1,29 @@
+[gd_scene load_steps=2 format=3 uid="uid://track_card_001"]
+
+[ext_resource type="Script" path="res://ui/components/track_card.gd" id="1"]
+
+[node name="TrackCard" type="PanelContainer"]
+custom_minimum_size = Vector2(280, 0)
+script = ExtResource("1")
+
+[node name="HBox" type="HBoxContainer" parent="."]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Left" type="VBoxContainer" parent="HBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 2
+
+[node name="Caption" type="Label" parent="HBox/Left"]
+layout_mode = 2
+text = "ТРАССА"
+
+[node name="NameLabel" type="Label" parent="HBox/Left"]
+layout_mode = 2
+text = "ПРОМЗОНА · ЮЖНАЯ"
+
+[node name="Distance" type="Label" parent="HBox"]
+layout_mode = 2
+vertical_alignment = 1
+text = "0.0 КМ"
