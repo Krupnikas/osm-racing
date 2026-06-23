@@ -1,0 +1,30 @@
+{
+  "id": "gulf-residential-mid-class-tower-2",
+  "category": "modern",
+  "style_family": "gulf_masterplan_uppermid_residential",
+  "material_tags": ["modern", "glass", "concrete", "residential_tower"],
+  "communities": ["dubai_creek_harbour", "dubai_hills", "creek_beach", "emaar_beachfront"],
+  "min_floors": 4,
+  "max_floors": 80,
+  "has_seams": false,
+  "has_roofbottom": false,
+  "atom_mode": "full_cell",
+  "atom_dir": "res://decorations/uae/dubai_creek_harbour/gulf-residential-mid-class-tower-2-atoms/",
+  "atoms": {
+    "wall": ["wall-1"],
+    "mid-wall": ["mid-wall-1"],
+    "long-wall": ["long-wall-1"],
+    "mid-window": ["mid-window-1"],
+    "mid-balcony": ["mid-balcony-1"],
+    "horizontal-seam": ["horizontal-seam-1"],
+    "horizontal-mid-seam": ["horizontal-mid-seam-1"],
+    "horizontal-long-seam": ["horizontal-long-seam-1"],
+    "vertical-seam": ["vertical-seam-1"]
+  },
+  "molecules": [
+    {"id": "t2-glass-balcony-glass", "slots": ["mid-window", "mid-balcony", "mid-window"], "tags": ["any"]},
+    {"id": "t2-glass-wall-balcony-glass", "slots": ["mid-window", "wall", "mid-balcony", "mid-window"], "tags": ["any"]},
+    {"id": "t2-glass-balcony-wall-balcony-glass", "slots": ["mid-window", "mid-balcony", "wall", "mid-balcony", "mid-window"], "tags": ["any"]},
+    {"id": "t2-glass-wall-glass", "slots": ["mid-window", "wall", "mid-window"], "tags": ["any"]}
+  ]
+}

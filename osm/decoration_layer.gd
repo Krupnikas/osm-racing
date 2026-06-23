@@ -142,6 +142,7 @@ func _load_building_overrides_json(path: String) -> void:
 		var override = BuildingOverrideScript.new()
 
 		override.osm_way_id = od.get("osm_way_id", 0)
+		override.facade_group = od.get("facade_group", "")
 
 		# Текстуры
 		if od.has("wall_texture"):

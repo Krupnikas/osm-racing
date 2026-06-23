@@ -365,6 +365,7 @@ var _chunk_pending_deferred: Dictionary = {}  # chunk_key → int — счётч
 var _window_batch_data: Dictionary = {}  # key: chunk_key -> {transforms: Array[Transform3D], colors: Array[Color], parent: Node3D}
 var _window_batch_materials: Array[ShaderMaterial] = []  # Материалы всех window batches для обновления is_night параметра
 var _facade_emission_materials: Array[ShaderMaterial] = []  # FacadeAssembler материалы с emission texture (night_factor обновляется при смене дня/ночи)
+var _facade_city: String = ""  # facade-pack city by real coords (see _detect_facade_city)
 
 # BUILDING GEOMETRY MERGE: объединяем все стены/крыши чанка в один ArrayMesh для снижения draw calls
 var _building_geo_batch: Dictionary = {}  # chunk_key -> {parent, panel_walls: {verts,uvs,normals,indices}, brick_walls, wall_walls, roofs, collisions, decorations}
@@ -554,6 +555,13 @@ var _deck_polygon_layer: Dictionary = {}  # poly_idx -> int (OSM layer tag)
 var _bridge_deck_nodes: Dictionary = {}  # poly_idx -> Array[Node3D]
 var _custom_bridge_models: Array = []  # custom models parented to self (bridge pylons etc.)
 var _placed_bridge_model_keys: Dictionary = {}  # dedup guard for self-parented models
+# Custom OSM-id landmarks (e.g. Donbass Arena, OSMLandmarks). Parented to self so they
+# survive chunk unload + are exempt from behind-camera culling. Freed in reset_terrain.
+const _LANDMARK_DEBUG := true  # one-shot per-landmark telemetry; flip false after verification
+var _landmark_models: Array = []
+var _placed_landmark_keys: Dictionary = {}  # key "landmark_<rel_id>" → true (dedup)
+var _landmark_clear_polys: Array = []  # [PackedVector2Array] (local XZ) — no trees inside landmark grounds
+var _landmark_zone_relids: Dictionary = {}  # rel_id → true (dedup for clear-poly registration)
 # Lateral exit points where _link bridge roads depart the deck polygon.
 # Deck mesh ramps down at these points so the standalone bridge road's
 # ramp is visible. Each: {pos, inward_dir, half_width, base_elev}.
@@ -3880,6 +3888,14 @@ func reset_terrain() -> void:
 			m.queue_free()
 	_custom_bridge_models.clear()
 	_placed_bridge_model_keys.clear()
+	for m in _landmark_models:
+		if is_instance_valid(m):
+			m.queue_free()
+	_landmark_models.clear()
+	_placed_landmark_keys.clear()
+	_landmark_clear_polys.clear()
+	_landmark_zone_relids.clear()
+	_facade_city = ""
 	_deferred_terrain_chunks.clear()
 
 	# Reset draw call stats (prevent stale stats across location changes)
@@ -3996,6 +4012,12 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 		if lod_level >= 1:
 			_generate_lod_chunk(osm_data, chunk_key, gen, lod_level)
 			return
+
+	# Register custom-landmark tree-clear polygons BEFORE any tree batching so no
+	# trees spawn inside the stadium grounds (runs per-chunk; dedup by rel_id).
+	_register_landmark_zones(osm_data)
+	if _facade_city == "":
+		_facade_city = _detect_facade_city(float(osm_data.get("center_lat", 0.0)), float(osm_data.get("center_lon", 0.0)))
 
 	# Pre-scan: register every node touched by a highway+bridge=yes way so
 	# road meshes downstream can detect shared bridge endpoints. Main thread,
@@ -5041,6 +5063,7 @@ func _process_phase3_queue() -> bool:
 	if phase == "finalize":
 		if chunk_key != "":
 			_place_custom_models_for_chunk(chunk_key, target)
+			_place_landmarks_for_chunk(chunk_key, osm_data)
 			_place_manual_props_for_chunk(chunk_key, target)
 			_place_market_stands_for_chunk(chunk_key, target)
 			_generate_trees_for_chunk(chunk_key, target)
@@ -10423,10 +10446,17 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 					"greenhouse", "stable", "sty", "transformer_tower",
 					"water_tower", "bunker", "bridge", "hut", "cabin"]
 			var fa_handled := false
-			if _is_cherepovets_location() and str(tags.get("building", "")) not in FA_SKIP_TYPES:
+			if _facade_city != "" and str(tags.get("building", "")) not in FA_SKIP_TYPES:
 				var btype := str(tags.get("building", ""))
 				var mat_tag := str(tags.get("building:material", ""))
-				if btype in ["garages", "garage"]:
+				var group_key := ""
+				if _facade_city == "dubai_creek_harbour":
+					mat_tag = "modern"  # FA_SKIP_TYPES already drops non-residential
+					if building_override and building_override.facade_group != "":
+						group_key = building_override.facade_group
+					else:
+						group_key = FacadeAssembler.complex_key(str(tags.get("name", tags.get("name:en", ""))))
+				elif btype in ["garages", "garage"]:
 					mat_tag = "garage"
 				elif mat_tag.is_empty():
 					var h := (way_id * 2654435761) & 0xFFFF
@@ -10441,7 +10471,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 							fa_floors = int(levels_str)
 						if fa_floors <= 0:
 							fa_floors = maxi(2, roundi(building_height / 3.2))
-					var fa_arch := FacadeAssembler.select_archetype(way_id, mat_tag, fa_floors)
+					var fa_arch := FacadeAssembler.select_archetype(way_id, mat_tag, fa_floors, group_key)
 					if FacadeAssembler.has_atoms(fa_arch):
 						var fnd_h: float = 0.0 if (building_override and building_override.no_foundation) else _get_foundation_height(points)
 						_create_3d_building_with_custom_texture(points, building_height, BuildingOverride.new(), parent, base_elev, debug_name, true)
@@ -15849,12 +15879,15 @@ func _apply_veg_thread_results() -> void:
 
 	for result in results:
 		var chunk_key: String = result.chunk_key
-		var parent: Node3D = result.parent
 
 		# Не дропаем результаты, если чанк ещё в стадии loading/finalization.
-		if not is_instance_valid(parent) or not _is_chunk_alive_for_async_work(chunk_key):
+		# ВАЖНО: проверяем валидность ДО типизированного присваивания в Node3D —
+		# иначе присваивание freed-инстанса кидает "previously freed instance"
+		# (как в _apply_building_mesh_result, где проверка идёт первой).
+		if not is_instance_valid(result.get("parent")) or not _is_chunk_alive_for_async_work(chunk_key):
 			applied += 1
 			continue
+		var parent: Node3D = result.parent
 
 		# Мёржим в существующую систему батчей
 		if not _tree_batch_data.has(chunk_key):
@@ -18563,6 +18596,9 @@ func _point_in_tree_clear_zone(pos: Vector2) -> bool:
 	for z in _tree_clear_zones:
 		if pos.distance_squared_to(z.pos) < z.r2:
 			return true
+	for poly in _landmark_clear_polys:
+		if Geometry2D.is_point_in_polygon(pos, poly):
+			return true
 	return false
 
 
@@ -18684,7 +18720,7 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 	# per-tree проверка в _add_tree_to_batch идёт в рабочем потоке и не
 	# успевает увидеть загруженный decoration_layer.
 	_ensure_tree_clear_zones()
-	if not _tree_clear_zones.is_empty():
+	if not _tree_clear_zones.is_empty() or not _landmark_clear_polys.is_empty():
 		var keep_t := func(t): return not _point_in_tree_clear_zone(Vector2(t.origin.x, t.origin.z))
 		leaf_transforms = leaf_transforms.filter(keep_t)
 		pine_transforms = pine_transforms.filter(keep_t)
@@ -18925,6 +18961,221 @@ func _place_custom_building_model(override, center: Vector2, parent: Node3D, bas
 	parent.add_child(inst)
 	print("OSM: Placed custom building model '%s' at (%.1f, %.1f), scale=%.2f, vis=%.0fm" % [
 		model_path.get_file(), center.x, center.y, scale_val, vis_range])
+
+
+# ── Custom OSM-id landmarks (footprint-aligned GLB replacement) ──────────────
+# Places a GLB for an OSM relation listed in OSMLandmarks, deriving centre /
+# rotation / scale from the relation's REAL footprint. The relation's procedural
+# geometry was already suppressed in osm_loader. Parented to self (persistent +
+# far-visible). Called once per finalized chunk; centre-chunk match + dedup key
+# guarantee exactly one instance.
+func _place_landmarks_for_chunk(chunk_key: String, osm_data: Dictionary) -> void:
+	var lms: Array = osm_data.get("landmarks", [])
+	if lms.is_empty():
+		return
+	for lm in lms:
+		var rel_id: int = int(lm.get("rel_id", 0))
+		var cfg: Dictionary = OSMLandmarks.get_config(rel_id)
+		if cfg.is_empty():
+			continue
+		var dedup_key: String = "landmark_%d" % rel_id
+		if _placed_landmark_keys.has(dedup_key):
+			continue
+		# Building outline (relation outer) → used for TIGHT collision.
+		var bld_pts: Array = _footprint_to_local(lm.get("footprint", []))
+		if bld_pts.size() < 3:
+			push_warning("Landmark %d: footprint too small (%d pts)" % [rel_id, bld_pts.size()])
+			continue
+		# Fit outline (e.g. pedestrian ring) → used for centre/rotation/scale so the
+		# model is INSCRIBED in it. Falls back to the building outline when absent.
+		var fit_pts: Array = _footprint_to_local(lm.get("fit_footprint", []))
+		var place_pts: Array = fit_pts if fit_pts.size() >= 3 else bld_pts
+		var centre: Vector2 = _polygon_centroid_xz(place_pts)
+		# Only the chunk owning the centre places it (single placement, correct timing
+		# so the centre chunk's elevation grid is ready for grounding).
+		var cx: int = int(floor(centre.x / chunk_size))
+		var cz: int = int(floor(centre.y / chunk_size))
+		if ("%d,%d" % [cx, cz]) != chunk_key:
+			continue
+		# Fit-outline dominant axis (PCA) + extents along principal/secondary axes
+		var pca: Dictionary = _footprint_pca_xz(place_pts, centre)
+		var fit_length: float = pca.get("length", 0.0)
+		var fit_width: float = pca.get("width", 0.0)
+		var ev: Vector2 = pca.get("ev", Vector2(1, 0))
+		# Load + instantiate model (cached)
+		var model_path: String = cfg.get("model", "")
+		if not _custom_model_cache.has(model_path):
+			if ResourceLoader.exists(model_path):
+				_custom_model_cache[model_path] = load(model_path)
+			else:
+				push_warning("Landmark model not found: " + model_path)
+				continue
+		var scene: PackedScene = _custom_model_cache[model_path]
+		if not scene:
+			continue
+		var inst: Node3D = scene.instantiate()
+		# Real-vertex model AABB (model space, unscaled) — never trust get_aabb (junk AABB bug)
+		var mab: AABB = _scene_real_vertex_aabb(inst)
+		if mab.size == Vector3.ZERO:
+			push_warning("Landmark %d: model has no real vertices" % rel_id)
+			inst.queue_free()
+			continue
+		# Uniform scale: INSCRIBE the model in the fit outline — fit the binding axis so
+		# the whole model stays inside the ring on BOTH axes (preserves aspect ratio).
+		var model_long: float = max(mab.size.x, mab.size.z)
+		var model_short: float = min(mab.size.x, mab.size.z)
+		var s_long: float = (fit_length / model_long) if model_long > 0.001 else 1.0
+		var s_short: float = (fit_width / model_short) if model_short > 0.001 else 1.0
+		var fit_scale: float = min(s_long, s_short)
+		var scale_mult: float = cfg.get("scale_mult", 1.0)
+		var scale_val: float = fit_scale * scale_mult
+		# Rotation: align model's long horizontal axis to fit-outline dominant axis,
+		# then visual correction. Working in local XZ already accounts for north→−Z.
+		var model_long_is_x: bool = mab.size.x >= mab.size.z
+		var base_yaw_rad: float
+		if model_long_is_x:
+			base_yaw_rad = atan2(-ev.y, ev.x)
+		else:
+			base_yaw_rad = atan2(ev.x, ev.y)
+		var rotation_offset: float = cfg.get("rotation_offset_deg", 0.0)
+		var yaw_deg: float = rad_to_deg(base_yaw_rad) + rotation_offset
+		# Ground: terrain elevation under centre + lift the model's real base onto it
+		var ground_y: float = _sample_elevation(centre.x, centre.y)
+		var y_offset: float = cfg.get("y_offset", 0.0)
+		var world_y: float = ground_y + (-mab.position.y * scale_val) + y_offset
+		inst.scale = Vector3.ONE * scale_val
+		inst.rotation_degrees.y = yaw_deg
+		inst.position = Vector3(centre.x, world_y, centre.y)
+		inst.name = "Landmark_%d_%s" % [rel_id, str(cfg.get("name", "")).replace(" ", "_")]
+		# Far-visible persistent landmark: no shadow, large visibility range, self-parented
+		_set_no_shadow_recursive(inst)
+		var vis_range: float = cfg.get("visibility_range", 2000.0)
+		_set_visibility_range_recursive(inst, vis_range)
+		# Collision: "footprint" = tight prism on the building outline; "box" = AABB.
+		var coll_mode: String = cfg.get("collision", "")
+		if coll_mode == "footprint":
+			_add_footprint_collision(inst, bld_pts, ground_y, mab.size.y * scale_val)
+		elif coll_mode == "box":
+			_add_box_collision_to_model(inst, mab)
+		add_child(inst)
+		_landmark_models.append(inst)
+		_placed_landmark_keys[dedup_key] = true
+		if _LANDMARK_DEBUG:
+			var bld_pca: Dictionary = _footprint_pca_xz(bld_pts, _polygon_centroid_xz(bld_pts))
+			print("LANDMARK[%d] '%s' PLACED — procedural geometry suppressed at loader" % [rel_id, cfg.get("name", "?")])
+			print("  fit pts=%d (ring), building pts=%d | centre_local=(%.1f, %.1f) owner_chunk=%s" % [place_pts.size(), bld_pts.size(), centre.x, centre.y, chunk_key])
+			print("  fit_dims: %.1f x %.1f m | building_dims: %.1f x %.1f m | model_dims=(%.1f, %.1f, %.1f)" % [fit_length, fit_width, bld_pca.get("length", 0.0), bld_pca.get("width", 0.0), mab.size.x, mab.size.y, mab.size.z])
+			print("  rotation: base=%.1f° offset=%.1f° → yaw=%.1f° (model long axis=%s)" % [rad_to_deg(base_yaw_rad), rotation_offset, yaw_deg, ("X" if model_long_is_x else "Z")])
+			print("  scale: inscribe(min %.4f,%.4f)=%.4f × mult=%.3f = %.4f → model world=%.1f x %.1f m" % [s_long, s_short, fit_scale, scale_mult, scale_val, model_long * scale_val, model_short * scale_val])
+			print("  ground_y=%.2f y_off=%.2f → world=(%.1f, %.2f, %.1f) vis=%.0fm coll=%s" % [ground_y, y_offset, centre.x, world_y, centre.y, vis_range, coll_mode])
+
+
+# Convert an OSM footprint ([{lat,lon}…]) to local XZ Vector2 points.
+func _footprint_to_local(footprint: Array) -> Array:
+	var out: Array = []
+	for p in footprint:
+		out.append(_latlon_to_local(p.get("lat", 0.0), p.get("lon", 0.0)))
+	return out
+
+
+# Register a landmark's grounds as a tree-clear polygon (no trees inside). Uses the
+# fit outline (ring) when present, else the building footprint. Dedup by rel_id.
+# Called per-chunk at generation start so it beats tree batching in every overlapping chunk.
+func _register_landmark_zones(osm_data: Dictionary) -> void:
+	var lms: Array = osm_data.get("landmarks", [])
+	for lm in lms:
+		var rel_id: int = int(lm.get("rel_id", 0))
+		if rel_id == 0 or _landmark_zone_relids.has(rel_id):
+			continue
+		var fp: Array = lm.get("fit_footprint", [])
+		if fp.size() < 3:
+			fp = lm.get("footprint", [])
+		if fp.size() < 3:
+			continue
+		var poly := PackedVector2Array()
+		for p in fp:
+			poly.append(_latlon_to_local(p.get("lat", 0.0), p.get("lon", 0.0)))
+		_landmark_clear_polys.append(poly)
+		_landmark_zone_relids[rel_id] = true
+
+
+# Tight collision: a convex prism following the building outline (not the wide AABB).
+# Body is top_level (world space) so it ignores the model's scale/rotation; it is a child
+# of the model so it is freed with it.
+func _add_footprint_collision(inst: Node3D, world_pts: Array, base_y: float, height: float) -> void:
+	if world_pts.size() < 3:
+		return
+	var body := StaticBody3D.new()
+	body.name = "ModelCollision"
+	body.collision_layer = 1
+	body.collision_mask = 0
+	inst.add_child(body)
+	body.top_level = true
+	body.global_position = Vector3.ZERO
+	body.global_rotation = Vector3.ZERO
+	var pts3 := PackedVector3Array()
+	var h: float = max(height, 5.0)
+	for p in world_pts:
+		pts3.append(Vector3(p.x, base_y, p.y))
+		pts3.append(Vector3(p.x, base_y + h, p.y))
+	var shape := ConvexPolygonShape3D.new()
+	shape.points = pts3
+	var cs := CollisionShape3D.new()
+	cs.shape = shape
+	body.add_child(cs)
+
+
+# Area-weighted polygon centroid in XZ (shoelace); falls back to vertex average.
+func _polygon_centroid_xz(pts: Array) -> Vector2:
+	var n: int = pts.size()
+	if n == 0:
+		return Vector2.ZERO
+	var area: float = 0.0
+	var cx: float = 0.0
+	var cz: float = 0.0
+	for i in range(n):
+		var a: Vector2 = pts[i]
+		var b: Vector2 = pts[(i + 1) % n]
+		var cross: float = a.x * b.y - b.x * a.y
+		area += cross
+		cx += (a.x + b.x) * cross
+		cz += (a.y + b.y) * cross
+	if abs(area) < 0.0001:
+		var avg: Vector2 = Vector2.ZERO
+		for p in pts:
+			avg += p
+		return avg / float(n)
+	area *= 0.5
+	return Vector2(cx / (6.0 * area), cz / (6.0 * area))
+
+
+# Principal-axis (PCA) of footprint XZ points → dominant direction + extents.
+func _footprint_pca_xz(pts: Array, centre: Vector2) -> Dictionary:
+	var a: float = 0.0
+	var b: float = 0.0
+	var c: float = 0.0
+	for p in pts:
+		var dx: float = p.x - centre.x
+		var dz: float = p.y - centre.y
+		a += dx * dx
+		b += dx * dz
+		c += dz * dz
+	var phi: float = 0.5 * atan2(2.0 * b, a - c)
+	var ev: Vector2 = Vector2(cos(phi), sin(phi))   # principal direction (X, Z)
+	var perp: Vector2 = Vector2(-ev.y, ev.x)
+	var min_u: float = INF
+	var max_u: float = -INF
+	var min_v: float = INF
+	var max_v: float = -INF
+	for p in pts:
+		var d: Vector2 = p - centre
+		var u: float = d.dot(ev)
+		var v: float = d.dot(perp)
+		min_u = min(min_u, u)
+		max_u = max(max_u, u)
+		min_v = min(min_v, v)
+		max_v = max(max_v, v)
+	return {"angle": phi, "ev": ev, "length": max_u - min_u, "width": max_v - min_v}
 
 
 func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
@@ -29576,6 +29827,17 @@ func _purge_chunk_queues(chunk_key: String) -> void:
 
 
 ## Проверяет, находится ли текущая локация в Череповце
+func _detect_facade_city(lat: float, lon: float) -> String:
+	# Facade-pack city by REAL OSM coords (start_lat is pinned to the fixed origin, so
+	# it cannot be used here). Returns "" for cities with no pack so the generic
+	# flat-texture fallback runs and no pack leaks across cities.
+	if lat >= 59.05 and lat <= 59.22 and lon >= 37.80 and lon <= 38.10:
+		return "cherepovets"
+	if lat >= 25.16 and lat <= 25.24 and lon >= 55.32 and lon <= 55.40:
+		return "dubai_creek_harbour"
+	return ""
+
+
 func _is_cherepovets_location() -> bool:
 	# Простая проверка: если decoration_layer загружен, значит Череповец
 	# (decoration_layer загружается только для активированных городов)

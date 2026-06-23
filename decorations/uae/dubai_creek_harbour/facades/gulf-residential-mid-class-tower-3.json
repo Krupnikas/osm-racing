@@ -1,0 +1,34 @@
+{
+  "id": "gulf-residential-mid-class-tower-3",
+  "category": "modern",
+  "style_family": "gulf_masterplan_uppermid_residential",
+  "material_tags": ["modern", "glass", "concrete", "residential_tower"],
+  "communities": ["dubai_creek_harbour", "dubai_hills", "creek_beach", "emaar_beachfront"],
+  "min_floors": 4,
+  "max_floors": 80,
+  "has_seams": false,
+  "has_roofbottom": false,
+  "atom_mode": "full_cell",
+  "atom_dir": "res://decorations/uae/dubai_creek_harbour/gulf-residential-mid-class-tower-3-atoms/",
+  "atoms": {
+    "wall": ["wall-1"],
+    "mid-wall": ["mid-wall-1"],
+    "long-wall": ["long-wall-1"],
+    "window": ["window-1"],
+    "mid-balcony": ["mid-balcony-1"],
+    "technical-louver": ["technical-louver-1"],
+    "horizontal-seam": ["horizontal-seam-1"],
+    "horizontal-mid-seam": ["horizontal-mid-seam-1"],
+    "horizontal-long-seam": ["horizontal-long-seam-1"],
+    "vertical-seam": ["vertical-seam-1"]
+  },
+  "molecules": [
+    {"id": "t3-window-window-balcony-servicewall", "slots": ["window", "window", "mid-balcony", "mid-wall"], "tags": ["any"]},
+    {"id": "t3-window-balcony-window-servicewall", "slots": ["window", "mid-balcony", "window", "mid-wall"], "tags": ["any"]},
+    {"id": "t3-window-window-window-servicewall", "slots": ["window", "window", "window", "mid-wall"], "tags": ["any"]},
+    {"id": "t3-balcony-window-balcony-servicewall", "slots": ["mid-balcony", "window", "mid-balcony", "mid-wall"], "tags": ["any"]}
+  ],
+  "_future_crown_molecules": [
+    {"id": "t3-louver-louver-louver-servicewall", "slots": ["technical-louver", "technical-louver", "technical-louver", "mid-wall"], "note": "upper/service-zone louver band; needs crown-band placement, not body tiling"}
+  ]
+}

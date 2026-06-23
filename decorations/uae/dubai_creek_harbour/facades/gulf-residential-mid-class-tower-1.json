@@ -1,0 +1,36 @@
+{
+  "id": "gulf-residential-mid-class-tower-1",
+  "category": "modern",
+  "style_family": "gulf_masterplan_uppermid_residential",
+  "material_tags": ["modern", "glass", "concrete", "residential_tower"],
+  "communities": ["dubai_creek_harbour", "dubai_hills", "creek_beach", "emaar_beachfront"],
+  "min_floors": 4,
+  "max_floors": 80,
+  "has_seams": false,
+  "has_roofbottom": false,
+  "atom_mode": "overlay",
+  "atom_dir": "res://decorations/uae/dubai_creek_harbour/gulf-residential-mid-class-tower-1-atoms/",
+  "atoms": {
+    "wall": ["wall-1"],
+    "mid-wall": ["mid-wall-1"],
+    "long-wall": ["long-wall-1"],
+    "window": ["window-1"],
+    "mid-window": ["mid-window-1"],
+    "mid-balcony": ["mid-balcony-1"],
+    "long-balcony": ["long-balcony-1"]
+  },
+  "slot_overrides": {
+    "window": {"overlay_offset_top_px": 0},
+    "mid-window": {"overlay_offset_top_px": 0}
+  },
+  "slot_extrusion": {
+    "mid-balcony": {"depth_m": 0.5, "shape": "box"},
+    "long-balcony": {"depth_m": 0.5, "shape": "box"}
+  },
+  "molecules": [
+    {"id": "t1-window-midbal-window", "slots": ["window", "mid-balcony", "window"], "tags": ["any"]},
+    {"id": "t1-midwin-midbal-midwin", "slots": ["mid-window", "mid-balcony", "mid-window"], "tags": ["any"]},
+    {"id": "t1-window-midwin-midbal-window", "slots": ["window", "mid-window", "mid-balcony", "window"], "tags": ["any"]},
+    {"id": "t1-longbal-midwin-window", "slots": ["long-balcony", "mid-window", "window"], "tags": ["any"]}
+  ]
+}

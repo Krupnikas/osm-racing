@@ -11,6 +11,13 @@ class_name FacadeAssembler
 ## caller keeps its existing flat-texture code unchanged.
 
 const ARCHETYPES_DIR := "res://decorations/russia/cherepovets/facades/"
+# Archetype JSONs are loaded from every dir here into one shared cache. select_archetype()
+# filters by `category`, so Cherepovets (panel/brick/garage) and DCH (modern) never mix.
+# Add more city dirs here to register their facade packs.
+const ARCHETYPE_DIRS := [
+	"res://decorations/russia/cherepovets/facades/",
+	"res://decorations/uae/dubai_creek_harbour/facades/",
+]
 const WALL_SHADER := preload("res://osm/facade_111_125.gdshader")
 
 # Slot role → {bg atom-category, overlay atom-category, width in metres,
@@ -30,6 +37,7 @@ const SLOT_CATALOG: Dictionary = {
 	"roofbottom":      {"bg": "roofbottom",      "overlay": "",             "width_m": 3.2, "overlay_offset_top_px": 0},
 	"long-roofbottom": {"bg": "long-roofbottom", "overlay": "",             "width_m": 6.4, "overlay_offset_top_px": 0},
 	"long-garage":     {"bg": "long-wall",       "overlay": "long-garage",  "width_m": 6.4, "overlay_offset_top_px": 0},
+	"technical-louver":{"bg": "technical-louver","overlay": "",            "width_m": 3.2, "overlay_offset_top_px": 0},
 }
 
 # Pixel-to-metre scale for overlay sizing — must match atom texture authoring.
@@ -73,7 +81,7 @@ var edge_patterns: Dictionary = {}
 ## Select the best archetype for a building, or return {} if none qualifies.
 ## `material_tag` is the raw value of the OSM `building:material` tag.
 ## `floors` is the number of storeys (from building:levels or estimated).
-static func select_archetype(way_id: int, material_tag: String, floors: int) -> Dictionary:
+static func select_archetype(way_id: int, material_tag: String, floors: int, group_key: String = "") -> Dictionary:
 	_ensure_loaded()
 	var category := _tag_to_category(material_tag)
 	if category.is_empty():
@@ -91,7 +99,13 @@ static func select_archetype(way_id: int, material_tag: String, floors: int) -> 
 	# Stable sort so pick order is deterministic regardless of file-system order.
 	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		return str(a["id"]) < str(b["id"]))
-	var h: int = (way_id * 2654435761) & 0x7FFFFFFF
+	# Same complex/group key -> same archetype (e.g. Creek Gate Tower 1 & 2); fall back
+	# to way_id when no group key so standalone buildings stay varied.
+	var h: int
+	if not group_key.is_empty():
+		h = hash(group_key) & 0x7FFFFFFF
+	else:
+		h = (way_id * 2654435761) & 0x7FFFFFFF
 	return candidates[h % candidates.size()]
 
 
@@ -223,6 +237,15 @@ func _build_edge(p1: Vector2, p2: Vector2, edge_len: float,
 			var _so: Dictionary = archetype.get("slot_overrides", {})
 			if _so.has(role):
 				info.merge(_so[role], true)
+
+			# Full-cell archetypes (modern Gulf towers): the role's OWN opaque atom is
+			# the whole-cell background (edge-to-edge), not a small overlay on a wall.
+			# Redirects window/balcony/louver roles; falls back if that atom is missing.
+			if str(archetype.get("atom_mode", "overlay")) == "full_cell":
+				var _ra2: Dictionary = archetype.get("_resolved_atoms", {})
+				if _ra2.has(role) and not (_ra2[role] as Array).is_empty():
+					info["bg"] = role
+					info["overlay"] = ""
 
 			var bg_path := _pick_atom(info["bg"], floor_idx, edge_idx, slot["slot_idx"], 0, archetype)
 			if not bg_path.is_empty():
@@ -633,23 +656,24 @@ func _load_tex(path: String) -> Texture2D:
 static func _ensure_loaded() -> void:
 	if not _cache.is_empty():
 		return
-	var dir := DirAccess.open(ARCHETYPES_DIR)
-	if dir == null:
-		return
-	dir.list_dir_begin()
-	var fname := dir.get_next()
-	while fname != "":
-		if fname.ends_with(".json"):
-			var f := FileAccess.open(ARCHETYPES_DIR + fname, FileAccess.READ)
-			if f:
-				var json := JSON.new()
-				if json.parse(f.get_as_text()) == OK:
-					var raw: Dictionary = json.get_data()
-					var resolved := _resolve_atoms(raw)
-					_cache[str(raw.get("id", fname))] = resolved
-				f.close()
-		fname = dir.get_next()
-	dir.list_dir_end()
+	for adir: String in ARCHETYPE_DIRS:
+		var dir := DirAccess.open(adir)
+		if dir == null:
+			continue
+		dir.list_dir_begin()
+		var fname := dir.get_next()
+		while fname != "":
+			if fname.ends_with(".json"):
+				var f := FileAccess.open(adir + fname, FileAccess.READ)
+				if f:
+					var json := JSON.new()
+					if json.parse(f.get_as_text()) == OK:
+						var raw: Dictionary = json.get_data()
+						var resolved := _resolve_atoms(raw)
+						_cache[str(raw.get("id", fname))] = resolved
+					f.close()
+			fname = dir.get_next()
+		dir.list_dir_end()
 
 
 # Pre-resolve all atom file references into absolute paths so runtime code
@@ -676,6 +700,21 @@ static func _resolve_atoms(raw: Dictionary) -> Dictionary:
 	return out
 
 
+# Derive a stable "complex" key from a building name by stripping a trailing
+# tower/building/phase number or cardinal, so all towers of one development
+# (e.g. "Creek Gate Tower 1/2", "The Cove Building 1/2") share one archetype.
+static func complex_key(raw: String) -> String:
+	var s := raw.strip_edges().to_lower()
+	if s.is_empty():
+		return ""
+	var re := RegEx.new()
+	re.compile("\\s*(?:tower|building|block|bldg|phase)?\\s*(?:north|south|east|west|[0-9]+|[ivx]{1,4}|[a-d])\\s*$")
+	var m := re.search(s)
+	if m != null and m.get_start() > 0:
+		s = s.substr(0, m.get_start()).strip_edges()
+	return s
+
+
 static func _tag_to_category(tag: String) -> String:
 	if tag == "panel" or tag == "large_panel":
 		return "panel"
@@ -683,6 +722,8 @@ static func _tag_to_category(tag: String) -> String:
 		return "brick"
 	if tag == "garage":
 		return "garage"
+	if tag == "modern":
+		return "modern"
 	return ""
 
 

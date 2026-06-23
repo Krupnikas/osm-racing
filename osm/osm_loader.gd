@@ -25,7 +25,7 @@ static var _queue_processor: OSMLoader = null  # Один инстанс обр�
 
 # Кеширование
 const CACHE_DIR := "user://osm_cache/"
-const CACHE_VERSION := 10  # v10: node[highway=give_way] queried + parsed (give_way_nodes w/ node id) for Wave 1C give-way signs
+const CACHE_VERSION := 11  # v11: custom-landmark relations (OSMLandmarks) suppressed + footprint captured into "landmarks"
 var use_cache := true
 
 var http_request: HTTPRequest
@@ -391,6 +391,8 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 	var bridge_decks := []  # Bridge deck outlines (relation man_made=bridge type=multipolygon)
 	var traffic_signals := []  # Светофоры (node highway=traffic_signals) — с сохранением node id для дедупликации
 	var give_way_nodes := []  # Знаки «уступи дорогу» (node highway=give_way) — node id сохраняется (Wave 1C)
+	var landmarks := []  # Кастомные лэндмарки (OSMLandmarks): footprint+rel_id; процедурная геометрия подавлена
+	var landmark_member_way_ids := {}  # way_id → true: member ways лэндмарк-relations, удаляются из ways
 
 	# Собираем все узлы
 	for element in data.get("elements", []):
@@ -506,6 +508,41 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 		if element.get("type") == "relation":
 			relations_found += 1
 			var tags: Dictionary = element.get("tags", {})
+			# Custom landmark override (detected by RELATION id, not name): capture the outer
+			# footprint for footprint-aligned GLB placement and suppress ALL procedural geometry
+			# (rings + every member way) so no walls/roof/footprint/duplicate polygons remain.
+			var rel_id_int: int = int(element.get("id", 0))
+			if OSMLandmarks.has_relation(rel_id_int):
+				var lm_footprint: Array = []
+				for member in element.get("members", []):
+					if member.get("type") == "way":
+						var mref: int = int(member.get("ref", 0))
+						if mref > 0:
+							landmark_member_way_ids[mref] = true
+						if member.get("role", "outer") == "outer":
+							for point in member.get("geometry", []):
+								lm_footprint.append({
+									"lat": point.get("lat", 0.0),
+									"lon": point.get("lon", 0.0)
+								})
+				# Optional fit-way footprint (e.g. the pedestrian ring the stadium is inscribed in).
+				# It is NOT a relation member → it is NOT suppressed; we only read its geometry.
+				var lm_fit_footprint: Array = []
+				var fit_way_id: int = int(OSMLandmarks.get_config(rel_id_int).get("fit_way_id", 0))
+				if fit_way_id > 0 and way_by_id.has(fit_way_id):
+					for nd in way_by_id[fit_way_id]:
+						lm_fit_footprint.append({
+							"lat": nd.get("lat", 0.0),
+							"lon": nd.get("lon", 0.0)
+						})
+				landmarks.append({
+					"rel_id": rel_id_int,
+					"footprint": lm_footprint,
+					"fit_footprint": lm_fit_footprint,
+					"tags": tags
+				})
+				print("OSM: Custom landmark relation %d ('%s') — %d footprint pts, %d fit-way pts, %d member ways suppressed" % [rel_id_int, tags.get("name", "?"), lm_footprint.size(), lm_fit_footprint.size(), landmark_member_way_ids.size()])
+				continue  # do NOT generate any procedural geometry for this relation
 			# Multipolygon: outer members are individual ways (often open lines) that need to
 			# be JOINED head-to-tail into closed rings. Concatenating them naively or treating
 			# each as a polygon both produce broken geometry for relations like the Rybinsk
@@ -576,6 +613,18 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 		if deduped > 0:
 			print("OSM: Deduped %d ways that are members of building/amenity relations" % deduped)
 
+	# Fully remove member ways of custom-landmark relations so no procedural geometry
+	# (including any standalone member-way building) survives — the GLB replaces them.
+	if not landmark_member_way_ids.is_empty():
+		var kept: Array = []
+		for way_data in ways:
+			if not landmark_member_way_ids.has(int(way_data.get("id", 0))):
+				kept.append(way_data)
+		var removed: int = ways.size() - kept.size()
+		ways = kept
+		if removed > 0:
+			print("OSM: Removed %d member ways for %d custom landmark(s)" % [removed, landmarks.size()])
+
 	if relations_found > 0:
 		print("OSM: Found %d relations, %d with valid geometry" % [relations_found, relations_with_nodes])
 
@@ -595,6 +644,7 @@ func _parse_osm_data(data: Dictionary) -> Dictionary:
 		"bridge_decks": bridge_decks,
 		"traffic_signals": traffic_signals,
 		"give_way_nodes": give_way_nodes,
+		"landmarks": landmarks,
 	}
 
 ## Joins relation outer member ways head-to-tail into closed rings.

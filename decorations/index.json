@@ -13,6 +13,18 @@
         "max_lon": 38.05
       },
       "enabled": true
+    },
+    {
+      "id": "dubai_creek_harbour",
+      "name": "Dubai Creek Harbour",
+      "path": "uae/dubai_creek_harbour/",
+      "bounds": {
+        "min_lat": 25.18,
+        "max_lat": 25.22,
+        "min_lon": 55.33,
+        "max_lon": 55.38
+      },
+      "enabled": true
     }
   ]
 }

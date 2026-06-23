@@ -26,6 +26,7 @@ const LOCATIONS := [
 	{"ru": "Москва (Отрадное)",       "en": "MOSCOW",        "lat": 55.860580, "lon": 37.599646, "dist_km":   492, "races": 6, "status": "unlocked", "chunk": "moscow"},
 	{"ru": "Тбилиси (Важа-Пшавела)",  "en": "TBILISI",       "lat": 41.723972, "lon": 44.730502, "dist_km":  2140, "races": 4, "status": "unlocked", "chunk": "tbilisi"},
 	{"ru": "Дубай (Крик)",            "en": "DUBAI / CREEK", "lat": 25.208591, "lon": 55.344100, "dist_km":  4220, "races": 3, "status": "unlocked", "chunk": "dubai"},
+	{"ru": "Донбасс Арена",           "en": "DONBASS ARENA", "lat": 48.0200783, "lon": 37.8068528, "dist_km": 1240, "races": 0, "status": "unlocked", "chunk": "donbass_arena"},
 ]
 
 static var _fira_tight: FontVariation = null
@@ -684,6 +685,7 @@ func _length_for(loc: Dictionary) -> String:
 		"cherepovets": "3.4 КМ", "noviy_vek": "2.8 КМ",
 		"ledoviy_dvorets": "4.2 КМ", "oktyabrsky_most": "2.1 КМ",
 		"moscow": "5.0 КМ", "tbilisi": "3.6 КМ", "dubai": "6.2 КМ",
+		"donbass_arena": "4.0 КМ",
 	}
 	return t.get(loc["chunk"], "—")
 
@@ -693,6 +695,7 @@ func _traffic_for(loc: Dictionary) -> String:
 		"cherepovets": "СРЕДНИЙ", "noviy_vek": "СРЕДНИЙ",
 		"ledoviy_dvorets": "СЛАБЫЙ", "oktyabrsky_most": "СРЕДНИЙ",
 		"moscow": "ВЫСОКИЙ", "tbilisi": "ВЫСОКИЙ", "dubai": "ВЫСОКИЙ",
+		"donbass_arena": "СРЕДНИЙ",
 	}
 	return t.get(loc["chunk"], "—")
 
@@ -702,6 +705,7 @@ func _weather_for(loc: Dictionary) -> String:
 		"cherepovets": "ЯСНО", "noviy_vek": "ЯСНО",
 		"ledoviy_dvorets": "ОБЛАЧНО", "oktyabrsky_most": "ЯСНО",
 		"moscow": "ОБЛАЧНО", "tbilisi": "ЯСНО", "dubai": "ЖАРКО",
+		"donbass_arena": "ЯСНО",
 	}
 	return t.get(loc["chunk"], "—")
 

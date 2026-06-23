@@ -5,6 +5,7 @@ extends Resource
 
 # Идентификация здания (один из способов)
 @export var osm_way_id: int = 0  # OSM way ID (приоритет)
+@export var facade_group: String = ""  # towers sharing this key get the same facade archetype
 @export var position: Vector2 = Vector2.ZERO  # Позиция центра (lat, lon)
 @export var match_radius: float = 10.0  # Радиус поиска по позиции
 

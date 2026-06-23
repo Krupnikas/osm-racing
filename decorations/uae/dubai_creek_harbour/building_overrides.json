@@ -1,0 +1,102 @@
+{
+  "_note": "DCH per-building floor overrides. height_override = floors * 3.2 because the facade floor count is round(building_height/3.2) when no building:levels tag exists (osm_terrain_generator fa_floors). DORMANT until DCH facade runtime selection is wired (currently gated by _is_cherepovets_location). Only named OSM towers are keyed by osm_way_id; anonymous footprints rely on the floor-safety default. Full inventory: research/dch_building_inventory.json",
+  "building_overrides": [
+    {
+      "comment": "Harbour Views (51 floors)",
+      "osm_way_id": 498085698,
+      "height_override": 163.2,
+      "_floors": 51,
+      "_source": "propsearch.ae/dubai/harbour-views"
+    },
+    {
+      "comment": "The Grand / Address Grand T1 (62 floors)",
+      "osm_way_id": 570444830,
+      "height_override": 198.4,
+      "_floors": 62,
+      "_source": "propsearch.ae/dubai/the-grand-at-dubai-creek-harbour"
+    },
+    {
+      "comment": "Creekside 18 (37 floors)",
+      "osm_way_id": 498085696,
+      "height_override": 118.4,
+      "_floors": 37,
+      "_source": "propsearch.ae/dubai/creekside-18-tower-b"
+    },
+    {
+      "comment": "Palace Residences / Palace hotel (44 floors)",
+      "osm_way_id": 662003493,
+      "height_override": 140.8,
+      "_floors": 44,
+      "_source": "propsearch.ae/dubai/palace-residences"
+    },
+    {
+      "comment": "Harbour Gate (≈38 floors; cluster T1=41/T2=36)",
+      "osm_way_id": 541342450,
+      "height_override": 121.6,
+      "_floors": 38,
+      "_source": "propsearch.ae/dubai/harbour-gate"
+    },
+    {
+      "comment": "Creek Rise / Creek Heights (≈41; cluster T1=36/T2=46, low conf)",
+      "osm_way_id": 541342452,
+      "height_override": 131.2,
+      "_floors": 41,
+      "_source": "propsearch.ae/dubai/creek-rise-tower-2"
+    },
+    {
+      "comment": "Island Park I (11 floors)",
+      "osm_way_id": 541342455,
+      "height_override": 35.2,
+      "_floors": 11,
+      "_source": "propsearch.ae/dubai/island-park-1"
+    },
+    {
+      "comment": "Creek Gate Tower 1 (30 floors)",
+      "osm_way_id": 1126874635,
+      "height_override": 96.0,
+      "_floors": 30,
+      "_source": "propsearch.ae/dubai/dubai-creek-gate",
+      "facade_group": "creek_gate"
+    },
+    {
+      "comment": "Creek Gate Tower 2 (36 floors)",
+      "osm_way_id": 1126874634,
+      "height_override": 115.2,
+      "_floors": 36,
+      "_source": "propsearch.ae/dubai/dubai-creek-gate",
+      "facade_group": "creek_gate"
+    },
+    {
+      "comment": "Creek Horizon Tower 1 (39 floors)",
+      "osm_way_id": 1133800700,
+      "height_override": 124.8,
+      "_floors": 39,
+      "_source": "propsearch.ae/dubai/creek-horizon",
+      "facade_group": "creek_horizon"
+    },
+    {
+      "comment": "Creek Horizon Tower 2 (34 floors)",
+      "osm_way_id": 1126854412,
+      "height_override": 108.8,
+      "_floors": 34,
+      "_source": "propsearch.ae/dubai/creek-horizon",
+      "facade_group": "creek_horizon"
+    },
+    {
+      "comment": "The Cove Building 1 (6 floors)",
+      "osm_way_id": 1126837511,
+      "height_override": 19.2,
+      "_floors": 6,
+      "_source": "propsearch.ae/dubai/the-cove",
+      "facade_group": "the_cove"
+    },
+    {
+      "comment": "The Cove Building 2 (6 floors)",
+      "osm_way_id": 1126837510,
+      "height_override": 19.2,
+      "_floors": 6,
+      "_source": "propsearch.ae/dubai/the-cove",
+      "facade_group": "the_cove"
+    }
+  ]
+}
