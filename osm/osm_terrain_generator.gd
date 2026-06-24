@@ -10449,7 +10449,8 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 			var forced_facade_id := ""
 			if building_override and building_override.facade_archetype_id != "":
 				forced_facade_id = building_override.facade_archetype_id
-			if (not forced_facade_id.is_empty() or _facade_city != "") and (not forced_facade_id.is_empty() or str(tags.get("building", "")) not in FA_SKIP_TYPES):
+			var sov_lowrise := _is_sovetsky_lowrise(tags)
+			if (not forced_facade_id.is_empty() or sov_lowrise or _facade_city != "") and (not forced_facade_id.is_empty() or sov_lowrise or str(tags.get("building", "")) not in FA_SKIP_TYPES):
 				var btype := str(tags.get("building", ""))
 				var mat_tag := str(tags.get("building:material", ""))
 				var group_key := ""
@@ -10463,6 +10464,8 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 						group_key = FacadeAssembler.complex_key(str(tags.get("name", tags.get("name:en", ""))))
 				elif btype in ["garages", "garage"]:
 					mat_tag = "garage"
+				elif sov_lowrise:
+					mat_tag = "historic_lowrise"  # Советский проспект <=86, low-rise historic fabric
 				elif mat_tag.is_empty():
 					var h := (way_id * 2654435761) & 0xFFFF
 					mat_tag = "brick" if h < 26214 else "panel"  # 26214/65536 ≈ 40 %
@@ -10477,6 +10480,10 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 						if fa_floors <= 0:
 							fa_floors = maxi(2, roundi(building_height / 3.2))
 					var fa_arch := FacadeAssembler.get_archetype(forced_facade_id) if not forced_facade_id.is_empty() else FacadeAssembler.select_archetype(way_id, mat_tag, fa_floors, group_key)
+					# Sovetsky low-rise with >3 floors has no historic_lowrise archetype; fall back to panel/brick.
+					if sov_lowrise and not FacadeAssembler.has_atoms(fa_arch):
+						var hsf := (way_id * 2654435761) & 0xFFFF
+						fa_arch = FacadeAssembler.select_archetype(way_id, "brick" if hsf < 26214 else "panel", fa_floors, "")
 					if FacadeAssembler.has_atoms(fa_arch):
 						var fnd_h: float = 0.0 if (building_override and building_override.no_foundation) else _get_foundation_height(points)
 						_create_3d_building_with_custom_texture(points, building_height, BuildingOverride.new(), parent, base_elev, debug_name, true)
@@ -29841,6 +29848,30 @@ func _detect_facade_city(lat: float, lon: float) -> String:
 	if lat >= 25.16 and lat <= 25.24 and lon >= 55.32 and lon <= 55.40:
 		return "dubai_creek_harbour"
 	return ""
+
+
+# Buildings on Советский проспект with house number <= 86 get the historic
+# low-rise facade palette (Sovetsky pipeline scope, docs/SOVETSKY_LOWRISE_FACADE_PIPELINE.md).
+# Numbers <= 86 sit south of проспект Победы (the documented "selected side"), so the
+# number rule alone isolates the correct stretch. Floor (1-3) filtering happens at
+# archetype selection (historic_lowrise archetypes are min 1 / max 3 floors), with a
+# panel/brick fallback for taller buildings on the same street. Cherepovets only.
+func _is_sovetsky_lowrise(tags: Dictionary) -> bool:
+	if _facade_city != "cherepovets":
+		return false
+	if str(tags.get("addr:street", "")) != "Советский проспект":
+		return false
+	var hn := str(tags.get("addr:housenumber", ""))
+	var digits := ""
+	for ch in hn:
+		if ch >= "0" and ch <= "9":
+			digits += ch
+		else:
+			break
+	if digits.is_empty():
+		return false
+	var num := int(digits)
+	return num >= 1 and num <= 86
 
 
 func _is_cherepovets_location() -> bool:

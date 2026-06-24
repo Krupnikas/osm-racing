@@ -169,6 +169,24 @@ Kurmanova numbers:
 - `mid-window-1.png` alpha bbox width: `673 px`;
 - `entrance-1.png` alpha bbox width: `688 px`.
 
+### `mid-window-alt` slot in `FacadeAssembler`
+
+File:
+
+- `osm/facade_assembler.gd`
+
+Added slot:
+
+```text
+mid-window-alt: bg=mid-wall, overlay=mid-window-alt, width=4.8m, overlay_offset_top_px=80
+```
+
+This is a second mid-width window role, not a different bay width. It is used
+when a facade keeps a single 4.8 m rhythm but has two different window families
+inside that rhythm. The first concrete use is Sovetsky ref-10, where the ground
+floor has both two-leaf and three-leaf lower windows, while the upper floor
+remaps both roles back to the same upper decorative window.
+
 ### Forced facade archetype by building override
 
 Files:
@@ -343,6 +361,127 @@ Key idea:
   storefronts and the upper floor into three windows;
 - storefront signage and readable brand text are deliberately excluded.
 
+Quality correction:
+
+- the initial procedural/PIL placeholder pass was rejected because it simplified
+  walls, windows, storefronts, and entrance into flat rectangles;
+- the pack was regenerated with imagegen/photo-style sources;
+- chroma-key sources for window/storefront/entrance were converted to alpha
+  locally;
+- source files are preserved in
+  `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-orange-commercial-plaster-1/source_imagegen/`.
+
+#### `sovetsky-lowrise-rose-three-storey-commercial-1`
+
+Folder:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-rose-three-storey-commercial-1/`
+
+Manifest:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_archetypes/sovetsky-lowrise-rose-three-storey-commercial-1.json`
+
+Primary reference:
+
+- `data/facade_pipeline/cherepovets_sovetsky/references/sovetsky-ref-07.jpg`
+
+Key idea:
+
+- three-storey salmon/rose plaster historic facade;
+- reddish rusticated commercial ground floor;
+- tall dark upper-floor windows;
+- white vertical pilasters approximated via `vertical-seam-1.png`;
+- ground floor uses `storefront-window` and `shop-entrance` through
+  `floor_atom_overrides`;
+- middle/top floors remap `mid-window` and `entrance` to `tall-window`;
+- generated with imagegen/photo-style wall sources and chroma-key overlay
+  extraction, not procedural drawing.
+
+#### `sovetsky-lowrise-white-business-center-1`
+
+Folder:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-white-business-center-1/`
+
+Manifest:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_archetypes/sovetsky-lowrise-white-business-center-1.json`
+
+Primary reference:
+
+- `data/facade_pipeline/cherepovets_sovetsky/references/sovetsky-ref-08.jpg`
+
+Key idea:
+
+- white/light-grey historic business-center facade;
+- arched upper windows with layered plaster archivolts;
+- ground-floor barred windows with black wrought-iron grilles;
+- glass business entrance with rounded dark canopy;
+- grey plinth baked into `lower-*` wall atoms until the assembler gains a
+  dedicated plinth slot;
+- signage/readable text excluded;
+- seam correction: final `vertical-seam` and `horizontal-seam` are
+  texture-derived white plaster/cornice strips without accidental arch
+  fragments.
+
+#### `sovetsky-lowrise-cream-civic-commercial-1`
+
+Folder:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-cream-civic-commercial-1/`
+
+Manifest:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_archetypes/sovetsky-lowrise-cream-civic-commercial-1.json`
+
+Primary reference:
+
+- `data/facade_pipeline/cherepovets_sovetsky/references/sovetsky-ref-09.jpg`
+
+Key idea:
+
+- one-storey cream/beige civic-commercial facade;
+- grey metal roof/eave and grey plinth;
+- separate window scales:
+  - `window` is the narrow `2x3` window;
+  - `mid-window` is the wider `3x3` window;
+- central entrance includes the ornate canopy, but signage, stickers, ramps,
+  rails, steps, wires, poles, and street furniture are excluded;
+- generated with imagegen/photo-style wall sources and chroma-key overlay
+  extraction.
+
+#### `sovetsky-lowrise-red-yellow-telecom-commercial-1`
+
+Folder:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-red-yellow-telecom-commercial-1/`
+
+Manifest:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_archetypes/sovetsky-lowrise-red-yellow-telecom-commercial-1.json`
+
+Primary reference:
+
+- `data/facade_pipeline/cherepovets_sovetsky/references/sovetsky-ref-10.jpg`
+
+Key idea:
+
+- two-storey red/yellow commercial low-rise;
+- upper floor uses red horizontal siding/plank-like wall atoms and heavy white
+  decorative window casings;
+- ground floor uses yellow plaster with grey plinth and wider lower windows;
+- central dark wooden entrance with a small gabled canopy;
+- signs, readable telecom branding, posters, railings, steps, wires, tree
+  occlusion, and street furniture are excluded;
+- all primary openings are modeled as aligned 4.8 m mid-bays: upper window,
+  lower two-leaf window, lower three-leaf window, and entrance;
+- `mid-window-alt` carries the lower two-leaf window without abusing balcony
+  roles or falling back to a regular 3.2 m `window`;
+- `floor_atom_overrides` keep upper and lower materials/windows separate:
+  - ground `mid-window` -> `lower-window-3leaf`;
+  - ground `mid-window-alt` -> `lower-window-2leaf`;
+  - upper `mid-window`, `mid-window-alt`, and `entrance` -> `upper-window`.
+
 #### `sovetsky-lowrise-red-brick-classic-1`
 
 Folder:
@@ -377,10 +516,40 @@ Key idea:
 - ground and upper windows differ;
 - implemented through `floor_atom_overrides`.
 
+### Sovetsky runtime promotion (2026-06-24)
+
+All nine Sovetsky low-rise archetypes were promoted from the pipeline into the
+runtime:
+
+- atoms copied to `decorations/russia/cherepovets/<archetype>-atoms/` (182 PNGs,
+  imported by the Godot editor);
+- manifests copied to `decorations/russia/cherepovets/facades/`;
+- `red-brick-classic` recategorized from `brick` to `historic_lowrise` so it
+  stays scoped to Советский проспект instead of leaking onto random brick
+  low-rises city-wide.
+
+Selection rule (docs/SOVETSKY_LOWRISE_FACADE_PIPELINE.md scope):
+
+- `FacadeAssembler._tag_to_category("historic_lowrise")` -> `historic_lowrise`;
+- `osm_terrain_generator._is_sovetsky_lowrise(tags)` returns true when
+  `addr:street == "Советский проспект"` and the leading house number is `<= 86`
+  (Cherepovets only). Numbers `<= 86` sit south of проспект Победы (verified from
+  OSM geometry), so the number rule alone isolates the documented side; no
+  separate side filter is needed;
+- matched buildings get `mat_tag = "historic_lowrise"`, bypassing `FA_SKIP_TYPES`
+  so commercial-ground-floor buildings are still handled;
+- floor range (1-3) is enforced by each archetype's `min_floors`/`max_floors`;
+  a Советский проспект building with `> 3` floors finds no `historic_lowrise`
+  archetype and falls back to the normal panel/brick hash.
+
+In-engine verified: booting free roam at `59.1253, 37.9305` applies the nine
+`sovetsky-lowrise-*` archetypes across the ≤86 stretch (distributed by floor
+count), while taller buildings on the same street use panel/brick.
+
 ### Sovetsky caveats
 
-- These are pipeline/generated draft archetypes, not all installed as runtime
-  production archetypes yet.
+- The archetype atoms are AI/imagegen-generated; visual fidelity is stylized
+  district fabric, not building-accurate portraits.
 - Grey plinths are visible on several references but the generic assembler does
   not yet have a `plinth` or `foundation-band` atom slot.
 - White corner quoins/rustication are visible on some references, but the generic
@@ -517,6 +686,9 @@ Known recurring non-fatal output:
 - Add a generic `plinth` / `foundation-band` slot for historic low-rise facades.
 - Add true podium/body/crown vertical zonation for DCH towers.
 - Add column-preserving molecule support for DCH.
-- Decide which generated Sovetsky draft archetypes should be promoted into
-  `decorations/russia/cherepovets/facades/`.
+- DONE: all nine Sovetsky archetypes promoted into
+  `decorations/russia/cherepovets/facades/` and wired to Советский проспект ≤86
+  via `_is_sovetsky_lowrise` / `historic_lowrise` category.
 - Add in-engine glass material/reflection support for modern DCH facades.
+- Consider per-way pinning for the most building-specific Sovetsky archetypes
+  (business-center, telecom) if hashed placement looks wrong on a given house.

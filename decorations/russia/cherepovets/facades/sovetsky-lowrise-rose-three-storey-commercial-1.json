@@ -1,0 +1,173 @@
+{
+  "id": "sovetsky-lowrise-rose-three-storey-commercial-1",
+  "status": "draft_assets_not_installed",
+  "category": "historic_lowrise",
+  "material_tags": [
+    "plaster",
+    "stucco",
+    "historic",
+    "lowrise",
+    "rose",
+    "three_storey",
+    "commercial_ground_floor"
+  ],
+  "district_tags": [
+    "sovetsky_avenue",
+    "cherepovets_center",
+    "merchant_lowrise"
+  ],
+  "street_scope": {
+    "city": "cherepovets",
+    "street": "Sovetsky Avenue",
+    "max_house_number": 86,
+    "side_note": "selected side of Prospekt Pobedy"
+  },
+  "min_floors": 2,
+  "max_floors": 3,
+  "has_seams": true,
+  "has_roofbottom": true,
+  "signage_policy": "ignore_in_archetype_apply_algorithm_later",
+  "atom_dir": "res://decorations/russia/cherepovets/sovetsky-lowrise-rose-three-storey-commercial-1-atoms/",
+  "source_atom_dir": "res://data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-rose-three-storey-commercial-1/",
+  "source_references": [
+    "data/facade_pipeline/cherepovets_sovetsky/references/sovetsky-ref-07.jpg"
+  ],
+  "atoms": {
+    "lower-wall": [
+      "lower-wall-1"
+    ],
+    "lower-mid-wall": [
+      "lower-mid-wall-1"
+    ],
+    "lower-long-wall": [
+      "lower-long-wall-1"
+    ],
+    "upper-wall": [
+      "upper-wall-1"
+    ],
+    "upper-mid-wall": [
+      "upper-mid-wall-1"
+    ],
+    "upper-long-wall": [
+      "upper-long-wall-1"
+    ],
+    "wall": [
+      "wall-1"
+    ],
+    "mid-wall": [
+      "mid-wall-1"
+    ],
+    "long-wall": [
+      "long-wall-1"
+    ],
+    "window": [
+      "window-1"
+    ],
+    "mid-window": [
+      "mid-window-1"
+    ],
+    "tall-window": [
+      "tall-window-1"
+    ],
+    "storefront-window": [
+      "storefront-window-1"
+    ],
+    "shop-entrance": [
+      "shop-entrance-1"
+    ],
+    "entrance": [
+      "entrance-1"
+    ],
+    "horizontal-seam": [
+      "horizontal-seam-1"
+    ],
+    "horizontal-mid-seam": [
+      "horizontal-mid-seam-1"
+    ],
+    "horizontal-long-seam": [
+      "horizontal-long-seam-1"
+    ],
+    "vertical-seam": [
+      "vertical-seam-1"
+    ],
+    "roofbottom": [
+      "roofbottom-1"
+    ],
+    "long-roofbottom": [
+      "long-roofbottom-1"
+    ]
+  },
+  "floor_atom_overrides": {
+    "ground": {
+      "wall": "lower-wall",
+      "mid-wall": "lower-mid-wall",
+      "long-wall": "lower-long-wall",
+      "mid-window": "storefront-window",
+      "entrance": "shop-entrance"
+    },
+    "middle": {
+      "wall": "upper-wall",
+      "mid-wall": "upper-mid-wall",
+      "long-wall": "upper-long-wall",
+      "mid-window": "tall-window",
+      "entrance": "tall-window"
+    },
+    "upper": {
+      "wall": "upper-wall",
+      "mid-wall": "upper-mid-wall",
+      "long-wall": "upper-long-wall",
+      "mid-window": "tall-window",
+      "entrance": "tall-window"
+    },
+    "top": {
+      "wall": "upper-wall",
+      "mid-wall": "upper-mid-wall",
+      "long-wall": "upper-long-wall",
+      "mid-window": "tall-window",
+      "entrance": "tall-window"
+    }
+  },
+  "slot_overrides": {
+    "window": {
+      "overlay_offset_top_px": 22
+    },
+    "mid-window": {
+      "overlay_offset_top_px": 22
+    },
+    "entrance": {
+      "overlay_offset_top_px": 0
+    }
+  },
+  "molecules": [
+    {
+      "id": "sov-rose-window-entrance-window",
+      "slots": [
+        "mid-window",
+        "entrance",
+        "mid-window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "sov-rose-wide-window-run",
+      "slots": [
+        "mid-window",
+        "wall",
+        "entrance",
+        "wall",
+        "mid-window"
+      ],
+      "tags": [
+        "long"
+      ]
+    }
+  ],
+  "runtime_requirements": [
+    "Draft assets only; copy approved atoms into runtime atom_dir and install JSON under decorations/russia/cherepovets/facades/ before in-game use.",
+    "Signage, readable text, posters, wires, and street furniture are excluded from atoms.",
+    "White vertical pilasters are approximated using vertical-seam texture; this works for repeated pilasters but is not a true corner-aware trim system.",
+    "Ground-floor commercial frontage is modeled through floor_atom_overrides on mid-window/entrance slots."
+  ]
+}

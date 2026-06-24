@@ -1,0 +1,143 @@
+{
+  "id": "sovetsky-lowrise-cream-civic-commercial-1",
+  "status": "draft_assets_not_installed",
+  "category": "historic_lowrise",
+  "material_tags": [
+    "plaster",
+    "stucco",
+    "historic",
+    "lowrise",
+    "cream",
+    "civic",
+    "commercial_ground_floor",
+    "single_storey"
+  ],
+  "district_tags": [
+    "sovetsky_avenue",
+    "cherepovets_center",
+    "merchant_lowrise"
+  ],
+  "street_scope": {
+    "city": "cherepovets",
+    "street": "Sovetsky Avenue",
+    "max_house_number": 86,
+    "side_note": "selected side of Prospekt Pobedy"
+  },
+  "min_floors": 1,
+  "max_floors": 1,
+  "has_seams": true,
+  "has_roofbottom": true,
+  "signage_policy": "ignore_in_archetype_apply_algorithm_later",
+  "atom_dir": "res://decorations/russia/cherepovets/sovetsky-lowrise-cream-civic-commercial-1-atoms/",
+  "source_atom_dir": "res://data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-cream-civic-commercial-1/",
+  "source_references": [
+    "data/facade_pipeline/cherepovets_sovetsky/references/sovetsky-ref-09.jpg"
+  ],
+  "atoms": {
+    "wall": [
+      "wall-1"
+    ],
+    "mid-wall": [
+      "mid-wall-1"
+    ],
+    "long-wall": [
+      "long-wall-1"
+    ],
+    "lower-wall": [
+      "lower-wall-1"
+    ],
+    "lower-mid-wall": [
+      "lower-mid-wall-1"
+    ],
+    "lower-long-wall": [
+      "lower-long-wall-1"
+    ],
+    "window": [
+      "window-1"
+    ],
+    "mid-window": [
+      "mid-window-1"
+    ],
+    "entrance": [
+      "entrance-1"
+    ],
+    "horizontal-seam": [
+      "horizontal-seam-1"
+    ],
+    "horizontal-mid-seam": [
+      "horizontal-mid-seam-1"
+    ],
+    "horizontal-long-seam": [
+      "horizontal-long-seam-1"
+    ],
+    "vertical-seam": [
+      "vertical-seam-1"
+    ],
+    "roofbottom": [
+      "roofbottom-1"
+    ],
+    "long-roofbottom": [
+      "long-roofbottom-1"
+    ]
+  },
+  "floor_atom_overrides": {
+    "ground": {
+      "wall": "lower-wall",
+      "mid-wall": "lower-mid-wall",
+      "long-wall": "lower-long-wall"
+    }
+  },
+  "slot_overrides": {
+    "window": {
+      "overlay_offset_top_px": 0
+    },
+    "mid-window": {
+      "overlay_offset_top_px": 0
+    },
+    "entrance": {
+      "overlay_offset_top_px": 0
+    }
+  },
+  "molecules": [
+    {
+      "id": "sov-cream-civic-window-mid-entrance-window",
+      "slots": [
+        "window",
+        "mid-window",
+        "entrance",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "sov-cream-civic-mid-window-entrance-mid-window",
+      "slots": [
+        "mid-window",
+        "entrance",
+        "mid-window"
+      ],
+      "tags": [
+        "long"
+      ]
+    },
+    {
+      "id": "sov-cream-civic-window-mid-window",
+      "slots": [
+        "window",
+        "mid-window",
+        "window"
+      ],
+      "tags": [
+        "any"
+      ]
+    }
+  ],
+  "runtime_requirements": [
+    "Draft assets only; copy approved atoms into runtime atom_dir and install JSON under decorations/russia/cherepovets/facades/ before in-game use.",
+    "Both window scales are required: window is the 2x3 narrow type, mid-window is the 3x3 wide type.",
+    "Signs, stickers, stand boards, railings, ramps, steps, wires, poles, and street furniture are excluded from atoms.",
+    "Grey plinth is baked into lower wall atoms until the assembler gets a dedicated plinth/foundation-band slot."
+  ]
+}

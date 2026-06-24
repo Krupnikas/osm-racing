@@ -4,6 +4,29 @@ Scope: Cherepovets, Sovetsky Avenue, buildings with street numbers `<= 86` on
 the selected side of Prospekt Pobedy. Only low-rise buildings are in scope:
 `1-3` floors.
 
+## Runtime Status (2026-06-24): PROMOTED & WIRED
+
+All nine archetypes below are live in the runtime, not just pipeline drafts:
+
+- atoms in `decorations/russia/cherepovets/<archetype>-atoms/` (imported);
+- manifests in `decorations/russia/cherepovets/facades/`;
+- all set to `category: "historic_lowrise"` (incl. `red-brick-classic`, moved
+  off `brick` so it does not leak city-wide).
+
+Selection (see `osm/osm_terrain_generator.gd._is_sovetsky_lowrise` +
+`osm/facade_assembler.gd`):
+
+- a building qualifies when `addr:street == "Советский проспект"` and the leading
+  house number is `<= 86` (Cherepovets only);
+- numbers `<= 86` lie south of проспект Победы (verified from OSM geometry), so
+  the number rule alone captures the documented "selected side" — no separate
+  side filter exists;
+- qualifying buildings bypass `FA_SKIP_TYPES` (commercial ground floors included)
+  and get `mat_tag = "historic_lowrise"`, then a hashed archetype filtered by
+  floor count;
+- `> 3` floors on the same street find no low-rise archetype and fall back to the
+  normal panel/brick selection.
+
 Reference folder:
 
 - `/Users/alekseiaksenov/Documents/sovetsky`
@@ -297,6 +320,12 @@ Draft archetype manifest:
 
 Important modeling decision:
 
+- The first procedural placeholder version of this pack was rejected: its walls,
+  windows, storefronts, and entrance looked like simplified rectangles rather
+  than facade atoms. The current pack was regenerated as photo-style/imagegen
+  assets. Wall atoms come from orange plaster material generations; window,
+  storefront, and entrance atoms come from chroma-key imagegen sources with
+  local alpha extraction.
 - This is a commercial-ground-floor variant, not just another two-tone plaster
   wall. The same molecule is reused on all floors, but `floor_atom_overrides`
   changes the ground floor into storefronts.
@@ -312,6 +341,8 @@ Important modeling decision:
 - The white corner rustication should become a future `corner-trim`,
   `edge-trim`, or corner-aware assembler feature. Using `vertical-seam` for
   this would incorrectly repeat white quoins between every bay.
+- Source imagegen files and raw alpha extractions are kept under:
+  `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-orange-commercial-plaster-1/source_imagegen/`
 
 Molecules:
 
@@ -326,6 +357,361 @@ Molecules:
     "id": "sov-orange-wide-store-run",
     "slots": ["mid-window", "wall", "entrance", "wall", "mid-window"],
     "tags": ["long"]
+  }
+]
+```
+
+### `sovetsky-lowrise-rose-three-storey-commercial-1`
+
+Primary reference:
+
+- `sovetsky-ref-07.jpg`
+
+Look:
+
+- three-storey salmon / dusty rose historic plaster facade;
+- repeated white vertical pilasters between facade bays;
+- tall dark brown upper-floor windows with divided panes;
+- white/cream sill blocks and small brackets under upper windows;
+- reddish-brown rusticated commercial ground floor;
+- storefront windows and a central commercial entrance on the ground floor;
+- all shop signs, readable text, posters, wires, street furniture, and UI
+  elements are excluded from atoms.
+
+Generated atom folder:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-rose-three-storey-commercial-1/`
+
+Generated atoms:
+
+- `upper-wall-1.png` `512x512 RGB`
+- `upper-mid-wall-1.png` `768x512 RGB`
+- `upper-long-wall-1.png` `1024x512 RGB`
+- `lower-wall-1.png` `512x512 RGB`
+- `lower-mid-wall-1.png` `768x512 RGB`
+- `lower-long-wall-1.png` `1024x512 RGB`
+- `wall-1.png` / `mid-wall-1.png` / `long-wall-1.png` compatibility aliases
+  for the upper wall set
+- `tall-window-1.png` `512x512 RGBA`
+- `window-1.png` / `mid-window-1.png` compatibility aliases for
+  `tall-window`
+- `storefront-window-1.png` `768x512 RGBA`
+- `shop-entrance-1.png` `768x512 RGBA`
+- `entrance-1.png` `768x512 RGBA` compatibility alias for `shop-entrance`
+- `vertical-seam-1.png` `30x572 RGB`
+- `horizontal-seam-1.png` / `horizontal-mid-seam-1.png` /
+  `horizontal-long-seam-1.png`
+- `roofbottom-1.png` `512x512 RGB`
+- `long-roofbottom-1.png` `1024x512 RGB`
+
+QA sheets:
+
+- `sovetsky-lowrise-rose-three-storey-commercial-1_atoms_contact_sheet.png`
+- `sovetsky-lowrise-rose-three-storey-commercial-1_molecule_preview.png`
+
+Draft archetype manifest:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_archetypes/sovetsky-lowrise-rose-three-storey-commercial-1.json`
+
+Important modeling decision:
+
+- This pack uses imagegen/photo-style wall materials and chroma-key overlay
+  atoms. It should not be approximated procedurally with simple rectangles.
+- The main molecule is `mid-window / entrance / mid-window`.
+- Ground floor:
+  - `mid-window` becomes `storefront-window`;
+  - `entrance` becomes `shop-entrance`;
+  - walls use the reddish rusticated `lower-*` atom set.
+- Middle/top floors:
+  - `mid-window` and `entrance` both become `tall-window`;
+  - walls use the salmon/rose `upper-*` atom set.
+- White pilasters are represented through `vertical-seam-1.png`. This is
+  acceptable for repeated pilasters between bays, but it is still not a true
+  corner-aware pilaster system.
+- Source imagegen files and raw alpha extractions are kept under:
+  `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-rose-three-storey-commercial-1/source_imagegen/`
+
+Molecules:
+
+```json
+[
+  {
+    "id": "sov-rose-window-entrance-window",
+    "slots": ["mid-window", "entrance", "mid-window"],
+    "tags": ["any"]
+  },
+  {
+    "id": "sov-rose-wide-window-run",
+    "slots": ["mid-window", "wall", "entrance", "wall", "mid-window"],
+    "tags": ["long"]
+  }
+]
+```
+
+### `sovetsky-lowrise-white-business-center-1`
+
+Primary reference:
+
+- `sovetsky-ref-08.jpg`
+
+Look:
+
+- white / light grey historic business-center facade;
+- two-storey commercial building;
+- upper floor has tall arched windows with layered plaster archivolts;
+- ground floor has barred windows with decorative black wrought-iron grilles;
+- one or more glass business entrances with dark rounded half-dome canopy;
+- grey plinth along the bottom of the ground floor;
+- the `БИЗНЕС ЦЕНТР` sign, stand boards, street signs, wires, poles, tree
+  occlusion, and readable text are excluded from atoms.
+
+Generated atom folder:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-white-business-center-1/`
+
+Generated atoms:
+
+- `upper-wall-1.png` `512x512 RGB`
+- `upper-mid-wall-1.png` `768x512 RGB`
+- `upper-long-wall-1.png` `1024x512 RGB`
+- `lower-wall-1.png` `512x512 RGB`
+- `lower-mid-wall-1.png` `768x512 RGB`
+- `lower-long-wall-1.png` `1024x512 RGB`
+- `wall-1.png` / `mid-wall-1.png` / `long-wall-1.png` compatibility aliases
+  for the upper wall set
+- `arched-window-1.png` `512x512 RGBA`
+- `barred-window-1.png` `512x512 RGBA`
+- `business-entrance-1.png` `768x512 RGBA`
+- `entrance-1.png` `768x512 RGBA` compatibility alias for
+  `business-entrance`
+- `vertical-seam-1.png` `30x572 RGB`
+- `horizontal-seam-1.png` / `horizontal-mid-seam-1.png` /
+  `horizontal-long-seam-1.png`
+- `roofbottom-1.png` `512x512 RGB`
+- `long-roofbottom-1.png` `1024x512 RGB`
+
+QA sheets:
+
+- `sovetsky-lowrise-white-business-center-1_atoms_contact_sheet.png`
+- `sovetsky-lowrise-white-business-center-1_molecule_preview.png`
+
+Draft archetype manifest:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_archetypes/sovetsky-lowrise-white-business-center-1.json`
+
+Important modeling decision:
+
+- Ground-floor metal grilles are architectural facade details, so they are part
+  of the `barred-window` atom. Text signs and stand boards remain excluded.
+- The grey plinth is currently baked into `lower-*` wall atoms because the
+  assembler still has no dedicated `plinth` / `foundation-band` slot.
+- The first attempt at derived seams accidentally carried arched-window shapes
+  into `vertical-seam` / `horizontal-seam`; this was corrected. Final seams are
+  texture-derived white plaster/cornice strips without arch fragments.
+- Source imagegen files and raw alpha extractions are kept under:
+  `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-white-business-center-1/source_imagegen/`
+
+Molecules:
+
+```json
+[
+  {
+    "id": "sov-white-window-entrance-window",
+    "slots": ["window", "entrance", "window"],
+    "tags": ["any"]
+  },
+  {
+    "id": "sov-white-window-wall-entrance-window",
+    "slots": ["window", "wall", "entrance", "window"],
+    "tags": ["long"]
+  },
+  {
+    "id": "sov-white-four-window-run",
+    "slots": ["window", "window", "window", "window"],
+    "tags": ["long"]
+  }
+]
+```
+
+### `sovetsky-lowrise-cream-civic-commercial-1`
+
+Primary reference:
+
+- `sovetsky-ref-09.jpg`
+
+Look:
+
+- one-storey cream / warm beige civic-commercial facade;
+- tall grey metal roof/eave with white chimney-like roof posts in the source;
+- white vertical pilaster/bay divisions;
+- grey plinth along the bottom;
+- two window proportions are present and must stay separate:
+  - regular `window`: narrow `2x3` white-framed window;
+  - `mid-window`: wider `3x3` white-framed window with a horizontal blind/sign
+    panel above the glass;
+- central glass entrance with an ornate shallow grey metal canopy;
+- signs, stickers, stand boards, rails, ramps, steps, wires, poles, street
+  furniture, and readable text are excluded from atoms.
+
+Generated atom folder:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-cream-civic-commercial-1/`
+
+Generated atoms:
+
+- `wall-1.png` `512x512 RGB`
+- `mid-wall-1.png` `768x512 RGB`
+- `long-wall-1.png` `1024x512 RGB`
+- `lower-wall-1.png` `512x512 RGB`
+- `lower-mid-wall-1.png` `768x512 RGB`
+- `lower-long-wall-1.png` `1024x512 RGB`
+- `window-1.png` `512x512 RGBA` narrow `2x3` window
+- `mid-window-1.png` `768x512 RGBA` wide `3x3` window
+- `entrance-1.png` `768x512 RGBA`
+- `vertical-seam-1.png` `30x572 RGB`
+- `horizontal-seam-1.png` / `horizontal-mid-seam-1.png` /
+  `horizontal-long-seam-1.png`
+- `roofbottom-1.png` `512x512 RGB`
+- `long-roofbottom-1.png` `1024x512 RGB`
+
+QA sheets:
+
+- `sovetsky-lowrise-cream-civic-commercial-1_atoms_contact_sheet.png`
+- `sovetsky-lowrise-cream-civic-commercial-1_molecule_preview.png`
+
+Draft archetype manifest:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_archetypes/sovetsky-lowrise-cream-civic-commercial-1.json`
+
+Important modeling decision:
+
+- Do not collapse `window` and `mid-window` into one image. The source facade
+  visibly has both narrow `2x3` and wide `3x3` windows.
+- The current preview molecule intentionally shows both window scales next to
+  the entrance: `window / mid-window / entrance / window`.
+- The grey plinth is currently baked into `lower-*` wall atoms because the
+  assembler still has no dedicated `plinth` / `foundation-band` slot.
+- The entrance atom includes the decorative canopy because it is architectural,
+  not signage. Stairs/ramps/railings remain excluded.
+- Source imagegen files and raw alpha extractions are kept under:
+  `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-cream-civic-commercial-1/source_imagegen/`
+
+Molecules:
+
+```json
+[
+  {
+    "id": "sov-cream-civic-window-mid-entrance-window",
+    "slots": ["window", "mid-window", "entrance", "window"],
+    "tags": ["any"]
+  },
+  {
+    "id": "sov-cream-civic-mid-window-entrance-mid-window",
+    "slots": ["mid-window", "entrance", "mid-window"],
+    "tags": ["long"]
+  },
+  {
+    "id": "sov-cream-civic-window-mid-window",
+    "slots": ["window", "mid-window", "window"],
+    "tags": ["any"]
+  }
+]
+```
+
+### `sovetsky-lowrise-red-yellow-telecom-commercial-1`
+
+Primary reference:
+
+- `sovetsky-ref-10.jpg`
+
+Look:
+
+- two-storey historic low-rise with a red upper floor and pale yellow
+  commercial ground floor;
+- upper floor has deep red / red-brown horizontal painted siding or plank-like
+  wall texture;
+- upper windows have heavy white decorative casings with panelled side trim;
+- ground floor has pale yellow plaster and grey block/stone plinth;
+- lower windows are wider, white-framed, and include the diagonal internal
+  grille/curtain pattern seen in the reference;
+- central dark wooden entrance with a small shallow gabled canopy;
+- telecom logos, shop signs, readable text, posters, railings, steps, wires,
+  tree occlusion, and street furniture are excluded from atoms.
+
+Generated atom folder:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-red-yellow-telecom-commercial-1/`
+
+Generated atoms:
+
+- `upper-wall-1.png` `512x512 RGB`
+- `upper-mid-wall-1.png` `768x512 RGB`
+- `upper-long-wall-1.png` `1024x512 RGB`
+- `lower-wall-1.png` `512x512 RGB`
+- `lower-mid-wall-1.png` `768x512 RGB`
+- `lower-long-wall-1.png` `1024x512 RGB`
+- `wall-1.png` / `mid-wall-1.png` / `long-wall-1.png` compatibility aliases
+  for the upper wall set
+- `upper-window-1.png` `768x512 RGBA` mid-bay upper decorative window
+- `lower-window-2leaf-1.png` `768x512 RGBA` lower two-leaf window
+- `lower-window-3leaf-1.png` `768x512 RGBA` lower three-leaf window
+- `mid-window-1.png` `768x512 RGBA` compatibility alias for
+  `lower-window-3leaf`
+- `mid-window-alt-1.png` `768x512 RGBA` compatibility alias for
+  `lower-window-2leaf`
+- `entrance-1.png` `768x512 RGBA`
+- `vertical-seam-1.png` `30x572 RGB`
+- `horizontal-seam-1.png` / `horizontal-mid-seam-1.png` /
+  `horizontal-long-seam-1.png`
+- `roofbottom-1.png` `512x512 RGB`
+- `long-roofbottom-1.png` `1024x512 RGB`
+
+QA sheets:
+
+- `sovetsky-lowrise-red-yellow-telecom-commercial-1_atoms_contact_sheet.png`
+- `sovetsky-lowrise-red-yellow-telecom-commercial-1_molecule_preview.png`
+
+Generated archetype manifest:
+
+- `data/facade_pipeline/cherepovets_sovetsky/generated_archetypes/sovetsky-lowrise-red-yellow-telecom-commercial-1.json`
+
+Important modeling decision:
+
+- This pack is generated as a normal photo-style pipeline output, not as a
+  placeholder draft. (Promoted to runtime on 2026-06-24 — see the runtime status
+  section at the top of this document.)
+- All primary facade openings in this reference are mid-bay openings. Do not
+  mix regular `window` with `mid-window` here:
+  - upper decorative window is a mid-bay atom;
+  - lower two-leaf window is a mid-bay atom;
+  - lower three-leaf window is a mid-bay atom;
+  - entrance is a mid-bay atom.
+- `mid-window-alt` exists for this case: it carries the second lower-floor
+  window family while keeping the same 4.8 m bay width as `mid-window`.
+- `floor_atom_overrides` separate the two materials and window families:
+  - ground floor uses `lower-*` yellow/plinth wall atoms;
+  - ground `mid-window` maps to `lower-window-3leaf`;
+  - ground `mid-window-alt` maps to `lower-window-2leaf`;
+  - upper floor maps `mid-window`, `mid-window-alt`, and `entrance` to
+    `upper-window`, keeping the bay grid aligned.
+- The grey plinth is baked into `lower-*` wall atoms until a dedicated
+  `plinth` / `foundation-band` slot exists.
+- Source imagegen files and raw alpha extractions are kept under:
+  `data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-red-yellow-telecom-commercial-1/source_imagegen/`
+
+Molecules:
+
+```json
+[
+  {
+    "id": "sov-telecom-mid-alt-mid-entrance-mid-alt",
+    "slots": ["mid-window-alt", "mid-window", "entrance", "mid-window", "mid-window-alt"],
+    "tags": ["any"]
+  },
+  {
+    "id": "sov-telecom-mid-entrance-mid",
+    "slots": ["mid-window", "entrance", "mid-window"],
+    "tags": ["short"]
   }
 ]
 ```

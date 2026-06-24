@@ -32,6 +32,7 @@ const SLOT_CATALOG: Dictionary = {
 	"long-wall":       {"bg": "long-wall",       "overlay": "",            "width_m": 6.4, "overlay_offset_top_px": 0},
 	"window":          {"bg": "wall",            "overlay": "window",      "width_m": 3.2, "overlay_offset_top_px": 80},
 	"mid-window":      {"bg": "mid-wall",        "overlay": "mid-window",  "width_m": 4.8, "overlay_offset_top_px": 80},
+	"mid-window-alt":  {"bg": "mid-wall",        "overlay": "mid-window-alt", "width_m": 4.8, "overlay_offset_top_px": 80},
 	"entrance":        {"bg": "mid-wall",        "overlay": "entrance",    "width_m": 4.8, "overlay_offset_top_px": 0},
 	"mid-balcony":     {"bg": "mid-wall",        "overlay": "mid-balcony", "width_m": 4.8, "overlay_offset_top_px": 0},
 	"long-balcony":    {"bg": "long-wall",       "overlay": "long-balcony","width_m": 6.4, "overlay_offset_top_px": 0},
@@ -757,6 +758,8 @@ static func _tag_to_category(tag: String) -> String:
 		return "garage"
 	if tag == "modern":
 		return "modern"
+	if tag == "historic_lowrise":
+		return "historic_lowrise"
 	return ""
 
 

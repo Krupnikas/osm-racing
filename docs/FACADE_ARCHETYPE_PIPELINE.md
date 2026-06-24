@@ -52,6 +52,14 @@
 | `brick` | `brick` |
 | `garage` | `garage` |
 | `modern` | `modern` |
+| `historic_lowrise` | `historic_lowrise` |
+
+`modern` и `historic_lowrise` — синтетические теги, выставляемые в
+`osm_terrain_generator.gd`, а не из OSM. `modern` ставится для DCH;
+`historic_lowrise` ставится для зданий на Советском проспекте (№≤86) через
+`_is_sovetsky_lowrise()` — это переводит низкоэтажку 1–3 этажа на палитру
+Советского, минуя `FA_SKIP_TYPES`, а здания >3 этажей на той же улице падают в
+обычный panel/brick. Подробности: `docs/SOVETSKY_LOWRISE_FACADE_PIPELINE.md`.
 
 Важно: поле `material_tags` в JSON сейчас описательное. Селекция реально
 использует `category`, `min_floors`, `max_floors` и hash `way_id`.
@@ -146,6 +154,7 @@
 | `long-wall` | `long-wall` | none | 6.4 m |
 | `window` | `wall` | `window` | 3.2 m |
 | `mid-window` | `mid-wall` | `mid-window` | 4.8 m |
+| `mid-window-alt` | `mid-wall` | `mid-window-alt` | 4.8 m |
 | `entrance` | `mid-wall` | `entrance` | 4.8 m |
 | `mid-balcony` | `mid-wall` | `mid-balcony` | 4.8 m |
 | `long-balcony` | `long-wall` | `long-balcony` | 6.4 m |
@@ -162,6 +171,11 @@
 `entrance` intentionally uses the same 4.8 m mid-bay width as `mid-window`.
 This lets a shop/office entrance replace one mid-window bay on the ground floor
 without changing the bay grid on upper floors.
+
+`mid-window-alt` is the same 4.8 m bay as `mid-window`, but carries a second
+window atom family. Use it when a reference facade keeps one mid-bay rhythm but
+has two visually distinct window types in that rhythm, for example lower-floor
+two-leaf and three-leaf windows on the same Sovetsky Avenue facade.
 
 Отдельно у molecules есть tags `any`, `short`, `long`. Класс ребра считается
 на стороне здания: edge считается `long`, если его длина больше или равна

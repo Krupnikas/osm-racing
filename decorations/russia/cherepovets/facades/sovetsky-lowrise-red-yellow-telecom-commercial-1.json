@@ -1,0 +1,162 @@
+{
+  "id": "sovetsky-lowrise-red-yellow-telecom-commercial-1",
+  "status": "generated_assets_ready",
+  "category": "historic_lowrise",
+  "material_tags": [
+    "wood",
+    "plaster",
+    "historic",
+    "lowrise",
+    "red_upper",
+    "yellow_ground",
+    "commercial_ground_floor"
+  ],
+  "district_tags": [
+    "sovetsky_avenue",
+    "cherepovets_center",
+    "merchant_lowrise"
+  ],
+  "street_scope": {
+    "city": "cherepovets",
+    "street": "Sovetsky Avenue",
+    "max_house_number": 86,
+    "side_note": "selected side of Prospekt Pobedy"
+  },
+  "min_floors": 2,
+  "max_floors": 2,
+  "has_seams": true,
+  "has_roofbottom": true,
+  "signage_policy": "ignore_in_archetype_apply_algorithm_later",
+  "atom_dir": "res://decorations/russia/cherepovets/sovetsky-lowrise-red-yellow-telecom-commercial-1-atoms/",
+  "source_atom_dir": "res://data/facade_pipeline/cherepovets_sovetsky/generated_atoms/sovetsky-lowrise-red-yellow-telecom-commercial-1/",
+  "source_references": [
+    "data/facade_pipeline/cherepovets_sovetsky/references/sovetsky-ref-10.jpg"
+  ],
+  "atoms": {
+    "upper-wall": [
+      "upper-wall-1"
+    ],
+    "upper-mid-wall": [
+      "upper-mid-wall-1"
+    ],
+    "upper-long-wall": [
+      "upper-long-wall-1"
+    ],
+    "lower-wall": [
+      "lower-wall-1"
+    ],
+    "lower-mid-wall": [
+      "lower-mid-wall-1"
+    ],
+    "lower-long-wall": [
+      "lower-long-wall-1"
+    ],
+    "wall": [
+      "wall-1"
+    ],
+    "mid-wall": [
+      "mid-wall-1"
+    ],
+    "long-wall": [
+      "long-wall-1"
+    ],
+    "upper-window": [
+      "upper-window-1"
+    ],
+    "lower-window-2leaf": [
+      "lower-window-2leaf-1"
+    ],
+    "lower-window-3leaf": [
+      "lower-window-3leaf-1"
+    ],
+    "mid-window": [
+      "mid-window-1"
+    ],
+    "mid-window-alt": [
+      "mid-window-alt-1"
+    ],
+    "entrance": [
+      "entrance-1"
+    ],
+    "horizontal-seam": [
+      "horizontal-seam-1"
+    ],
+    "horizontal-mid-seam": [
+      "horizontal-mid-seam-1"
+    ],
+    "horizontal-long-seam": [
+      "horizontal-long-seam-1"
+    ],
+    "vertical-seam": [
+      "vertical-seam-1"
+    ],
+    "roofbottom": [
+      "roofbottom-1"
+    ],
+    "long-roofbottom": [
+      "long-roofbottom-1"
+    ]
+  },
+  "floor_atom_overrides": {
+    "ground": {
+      "wall": "lower-wall",
+      "mid-wall": "lower-mid-wall",
+      "long-wall": "lower-long-wall",
+      "mid-window": "lower-window-3leaf",
+      "mid-window-alt": "lower-window-2leaf"
+    },
+    "upper": {
+      "wall": "upper-wall",
+      "mid-wall": "upper-mid-wall",
+      "long-wall": "upper-long-wall",
+      "mid-window": "upper-window",
+      "mid-window-alt": "upper-window",
+      "entrance": "upper-window"
+    }
+  },
+  "slot_overrides": {
+    "mid-window": {
+      "overlay_offset_top_px": 0
+    },
+    "mid-window-alt": {
+      "overlay_offset_top_px": 0
+    },
+    "entrance": {
+      "overlay_offset_top_px": 0
+    }
+  },
+  "molecules": [
+    {
+      "id": "sov-telecom-mid-alt-mid-entrance-mid-alt",
+      "slots": [
+        "mid-window-alt",
+        "mid-window",
+        "entrance",
+        "mid-window",
+        "mid-window-alt"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "sov-telecom-mid-entrance-mid",
+      "slots": [
+        "mid-window",
+        "entrance",
+        "mid-window"
+      ],
+      "tags": [
+        "short"
+      ]
+    }
+  ],
+  "runtime_requirements": [
+    "Generated assets are production-quality pipeline outputs, but still need promotion/copy into runtime atom_dir before in-game use.",
+    "Signs, telecom logos, readable text, posters, railings, steps, wires, tree occlusion, and street furniture are excluded from atoms.",
+    "All primary openings in this reference are modeled as 4.8 m mid-bays: upper window, lower two-leaf window, lower three-leaf window, and entrance.",
+    "The mid-window-alt slot exists to carry the second lower-floor mid-width window family without abusing balcony roles.",
+    "Ground floor maps mid-window to lower-window-3leaf and mid-window-alt to lower-window-2leaf; upper floor maps mid-window, mid-window-alt, and entrance to upper-window so the bays stay aligned.",
+    "Grey plinth is baked into lower wall atoms until the assembler gets a dedicated plinth/foundation-band slot."
+  ]
+}
