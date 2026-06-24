@@ -1,6 +1,12 @@
 {
   "building_overrides": [
     {
+      "osm_way_id": 45119820,
+      "comment": "13 улица Курманова (NORTHIS)",
+      "facade_archetype": "kurmanova-13-brick-commercial-1",
+      "height_override": 10.5
+    },
+    {
       "osm_way_id": 45836637,
       "comment": "39 Северное шоссе",
       "wall_texture": "buildings/111-125.png",

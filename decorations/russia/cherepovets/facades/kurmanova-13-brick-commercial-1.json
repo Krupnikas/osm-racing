@@ -1,0 +1,149 @@
+{
+  "id": "kurmanova-13-brick-commercial-1",
+  "category": "special_way",
+  "material_tags": [
+    "red_brick",
+    "silicate_brick",
+    "commercial",
+    "kurmanova_13"
+  ],
+  "district_tags": [
+    "cherepovets",
+    "kurmanova_street",
+    "way_45119820"
+  ],
+  "way_scope": {
+    "osm_way_id": 45119820,
+    "address": "13 Kurmanova Street",
+    "source_reference": "data/facade_pipeline/cherepovets_kurmanova/references/kurmanova-13-source.png"
+  },
+  "min_floors": 1,
+  "max_floors": 4,
+  "atom_mode": "overlay",
+  "has_seams": true,
+  "has_roofbottom": true,
+  "signage_policy": "way_specific_entrance_sign_allowed",
+  "atom_dir": "res://decorations/russia/cherepovets/kurmanova-13-brick-commercial-1-atoms/",
+  "atoms": {
+    "wall": [
+      "wall-1"
+    ],
+    "mid-wall": [
+      "mid-wall-1"
+    ],
+    "long-wall": [
+      "long-wall-1"
+    ],
+    "red-wall": [
+      "red-wall-1"
+    ],
+    "red-mid-wall": [
+      "red-mid-wall-1"
+    ],
+    "red-long-wall": [
+      "red-long-wall-1"
+    ],
+    "white-wall": [
+      "white-wall-1"
+    ],
+    "white-mid-wall": [
+      "white-mid-wall-1"
+    ],
+    "white-long-wall": [
+      "white-long-wall-1"
+    ],
+    "mid-window": [
+      "mid-window-1"
+    ],
+    "gable-window": [
+      "gable-window-1"
+    ],
+    "entrance": [
+      "entrance-1"
+    ],
+    "horizontal-seam": [
+      "horizontal-seam-1"
+    ],
+    "horizontal-mid-seam": [
+      "horizontal-mid-seam-1"
+    ],
+    "horizontal-long-seam": [
+      "horizontal-long-seam-1"
+    ],
+    "vertical-seam": [
+      "vertical-seam-1"
+    ],
+    "roofbottom": [
+      "roofbottom-1"
+    ],
+    "long-roofbottom": [
+      "long-roofbottom-1"
+    ]
+  },
+  "floor_atom_overrides": {
+    "ground": {
+      "wall": "red-wall",
+      "mid-wall": "red-mid-wall",
+      "long-wall": "red-long-wall",
+      "mid-window": "mid-window",
+      "entrance": "entrance"
+    },
+    "middle": {
+      "wall": "red-wall",
+      "mid-wall": "red-mid-wall",
+      "long-wall": "red-long-wall",
+      "entrance": "mid-window"
+    },
+    "top": {
+      "wall": "white-wall",
+      "mid-wall": "white-mid-wall",
+      "long-wall": "white-long-wall",
+      "mid-window": "gable-window",
+      "entrance": "none"
+    },
+    "upper": {
+      "wall": "red-wall",
+      "mid-wall": "red-mid-wall",
+      "long-wall": "red-long-wall"
+    }
+  },
+  "slot_overrides": {
+    "mid-window": {
+      "overlay_offset_top_px": 92
+    },
+    "entrance": {
+      "overlay_offset_top_px": 0
+    }
+  },
+  "molecules": [
+    {
+      "id": "kur13-window-entrance-window",
+      "slots": [
+        "mid-window",
+        "entrance",
+        "mid-window"
+      ],
+      "tags": [
+        "any"
+      ]
+    },
+    {
+      "id": "kur13-window-wall-entrance-wall-window",
+      "slots": [
+        "mid-window",
+        "wall",
+        "entrance",
+        "wall",
+        "mid-window"
+      ],
+      "tags": [
+        "long"
+      ]
+    }
+  ],
+  "runtime_notes": [
+    "This is a forced archetype for OSM way 45119820, not a generic citywide style.",
+    "The entrance atom is intentionally the same 768x512 mid-bay size as mid-window-1.",
+    "The top floor maps mid-window to gable-window and entrance to a missing atom category so the entrance does not repeat above ground."
+  ]
+}

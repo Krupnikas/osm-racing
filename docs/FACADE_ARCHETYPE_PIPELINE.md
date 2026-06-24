@@ -14,6 +14,16 @@
   overrides, включая Северное шоссе 35/37/39.
 - `osm/osm_terrain_generator.gd` - точка подключения фасадов к OSM-зданиям.
 
+Связанные implementation-документы:
+
+- `docs/FACADE_IMPLEMENTATION_LOG_2026_06_24.md` - что было сделано для DCH,
+  Советского проспекта и Курманова 13.
+- `docs/KURMANOVA_13_FACADE_OVERRIDE.md` - точечный фасадный override для OSM
+  way `45119820`.
+- `docs/DCH_PIPELINE_PROGRESS.md` - прогресс и выводы DCH-пайплайна.
+- `docs/SOVETSKY_LOWRISE_FACADE_PIPELINE.md` - low-rise пайплайн для
+  Советского проспекта.
+
 ## Где включается FacadeAssembler
 
 В `osm/osm_terrain_generator.gd` генерация здания идет по приоритетам:
@@ -23,6 +33,9 @@
    если у override есть `wall_texture_path`.
 3. Другие explicit `wall_texture` / `color_tint` идут старым flat texture путем.
 4. Для обычных зданий в Череповце пробуется `FacadeAssembler`.
+   Way-specific override может принудительно выбрать конкретный
+   `FacadeAssembler` архетип через `facade_archetype`, даже если здание не
+   проходит обычный material/category подбор.
 5. Если архетип не найден или нет atom-текстур, используется старый fallback.
 
 Для `FacadeAssembler` материал берется из `building:material`. Если тега нет,
@@ -38,9 +51,12 @@
 | `large_panel` | `panel` |
 | `brick` | `brick` |
 | `garage` | `garage` |
+| `modern` | `modern` |
 
 Важно: поле `material_tags` в JSON сейчас описательное. Селекция реально
 использует `category`, `min_floors`, `max_floors` и hash `way_id`.
+Исключение: `building_overrides.json` может задать `facade_archetype`, тогда
+архетип берется напрямую по `id` через `FacadeAssembler.get_archetype()`.
 
 ## Архетипы и "наследование"
 
@@ -56,7 +72,23 @@
 - `molecules`
 - optional `forbidden`
 - optional `slot_overrides`
+- optional `floor_atom_overrides`
 - optional `slot_extrusion`
+
+Для точечных зданий можно использовать override:
+
+```json
+{
+  "osm_way_id": 45119820,
+  "comment": "13 улица Курманова (NORTHIS)",
+  "facade_archetype": "kurmanova-13-brick-commercial-1",
+  "height_override": 10.5
+}
+```
+
+Такой forced archetype не участвует в обычной выборке по `building:material`.
+Это нужно для landmark/special зданий, где look должен быть конкретным, а не
+статистическим.
 
 Сейчас нет полноценного поля `parent`. Наследование сделано практично:
 атом роли может быть массивом локальных файлов или ссылкой на другой каталог:
@@ -74,6 +106,35 @@
 друга: они повторяют одинаковые molecules и общие окна/балконы, меняя только
 цветовые wall/seam атомы.
 
+## Этажные переопределения атомов
+
+Некоторые малоэтажные исторические фасады не сводятся к одному цвету стены:
+например, на Советском проспекте у двухэтажных домов нижний этаж может быть
+охристым, а верхний кремовым. Для этого есть `floor_atom_overrides`.
+
+Пример:
+
+```json
+"floor_atom_overrides": {
+  "ground": {
+    "wall": "lower-wall",
+    "mid-wall": "lower-mid-wall",
+    "long-wall": "lower-long-wall",
+    "window": "window"
+  },
+  "upper": {
+    "wall": "upper-wall",
+    "mid-wall": "upper-mid-wall",
+    "long-wall": "upper-long-wall",
+    "window": "arched-window"
+  }
+}
+```
+
+Поддерживаемые зоны: `ground`, `middle`, `upper`, опционально `top`.
+Если для зоны или категории нет переопределения, используется исходная
+категория из slot catalog. Это сохраняет поведение старых архетипов.
+
 ## Слоты: short, mid, long
 
 `FacadeAssembler.SLOT_CATALOG` задает базовую сетку:
@@ -85,6 +146,7 @@
 | `long-wall` | `long-wall` | none | 6.4 m |
 | `window` | `wall` | `window` | 3.2 m |
 | `mid-window` | `mid-wall` | `mid-window` | 4.8 m |
+| `entrance` | `mid-wall` | `entrance` | 4.8 m |
 | `mid-balcony` | `mid-wall` | `mid-balcony` | 4.8 m |
 | `long-balcony` | `long-wall` | `long-balcony` | 6.4 m |
 | `roofbottom` | `roofbottom` | none | 3.2 m |
@@ -96,6 +158,10 @@
 - short/default bay: 3.2 m (`wall`, `window`)
 - mid bay: 4.8 m (`mid-wall`, `mid-window`, `mid-balcony`)
 - long bay: 6.4 m (`long-wall`, `long-balcony`)
+
+`entrance` intentionally uses the same 4.8 m mid-bay width as `mid-window`.
+This lets a shop/office entrance replace one mid-window bay on the ground floor
+without changing the bay grid on upper floors.
 
 Отдельно у molecules есть tags `any`, `short`, `long`. Класс ребра считается
 на стороне здания: edge считается `long`, если его длина больше или равна
@@ -141,6 +207,7 @@ Overlay atoms используют свой реальный PNG size:
 |---|---:|---|---:|
 | `window` | `320x320 px` | центр `wall` / `window` slot | `80 px` |
 | `mid-window` | `480x320 px` или близко к ширине mid-секции | центр `mid-wall` | `80 px` |
+| `entrance` | обычно `768x512 px` | центр `mid-wall` | `0 px` |
 | `mid-balcony` | обычно `768x512 px` | центр `mid-wall` | `0 px` |
 | `long-balcony` | обычно до `1024x512 px` | центр `long-wall` | `0 px` |
 | `entrance` в 111-125 | `768x512 px` | `mid-wall-entrance` | `0 px` |

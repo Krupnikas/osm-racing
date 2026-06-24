@@ -5,6 +5,9 @@ what works, **dead-ends to NOT repeat**, the corrected approach, and the atom sp
 Companion to [DUBAI_CREEK_HARBOUR_FACADE_PIPELINE_PLAN.md](DUBAI_CREEK_HARBOUR_FACADE_PIPELINE_PLAN.md)
 and [DCH_FACADE_PRIOR_ART.md](DCH_FACADE_PRIOR_ART.md).
 
+Implementation summary for the DCH/Sovetsky/Kurmanova facade runtime pass:
+[FACADE_IMPLEMENTATION_LOG_2026_06_24.md](FACADE_IMPLEMENTATION_LOG_2026_06_24.md).
+
 ---
 
 ## ★ HEADLINE FINDING (2026-06-23) — the approach correction

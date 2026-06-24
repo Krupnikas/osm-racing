@@ -10446,11 +10446,16 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 					"greenhouse", "stable", "sty", "transformer_tower",
 					"water_tower", "bunker", "bridge", "hut", "cabin"]
 			var fa_handled := false
-			if _facade_city != "" and str(tags.get("building", "")) not in FA_SKIP_TYPES:
+			var forced_facade_id := ""
+			if building_override and building_override.facade_archetype_id != "":
+				forced_facade_id = building_override.facade_archetype_id
+			if (not forced_facade_id.is_empty() or _facade_city != "") and (not forced_facade_id.is_empty() or str(tags.get("building", "")) not in FA_SKIP_TYPES):
 				var btype := str(tags.get("building", ""))
 				var mat_tag := str(tags.get("building:material", ""))
 				var group_key := ""
-				if _facade_city == "dubai_creek_harbour":
+				if not forced_facade_id.is_empty():
+					mat_tag = ""
+				elif _facade_city == "dubai_creek_harbour":
 					mat_tag = "modern"  # FA_SKIP_TYPES already drops non-residential
 					if building_override and building_override.facade_group != "":
 						group_key = building_override.facade_group
@@ -10461,7 +10466,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 				elif mat_tag.is_empty():
 					var h := (way_id * 2654435761) & 0xFFFF
 					mat_tag = "brick" if h < 26214 else "panel"  # 26214/65536 ≈ 40 %
-				if not mat_tag.is_empty():
+				if not forced_facade_id.is_empty() or not mat_tag.is_empty():
 					var fa_floors := 0
 					if btype in ["garages", "garage"]:
 						fa_floors = 1
@@ -10471,7 +10476,7 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 							fa_floors = int(levels_str)
 						if fa_floors <= 0:
 							fa_floors = maxi(2, roundi(building_height / 3.2))
-					var fa_arch := FacadeAssembler.select_archetype(way_id, mat_tag, fa_floors, group_key)
+					var fa_arch := FacadeAssembler.get_archetype(forced_facade_id) if not forced_facade_id.is_empty() else FacadeAssembler.select_archetype(way_id, mat_tag, fa_floors, group_key)
 					if FacadeAssembler.has_atoms(fa_arch):
 						var fnd_h: float = 0.0 if (building_override and building_override.no_foundation) else _get_foundation_height(points)
 						_create_3d_building_with_custom_texture(points, building_height, BuildingOverride.new(), parent, base_elev, debug_name, true)

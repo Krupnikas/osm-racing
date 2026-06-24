@@ -32,6 +32,7 @@ const SLOT_CATALOG: Dictionary = {
 	"long-wall":       {"bg": "long-wall",       "overlay": "",            "width_m": 6.4, "overlay_offset_top_px": 0},
 	"window":          {"bg": "wall",            "overlay": "window",      "width_m": 3.2, "overlay_offset_top_px": 80},
 	"mid-window":      {"bg": "mid-wall",        "overlay": "mid-window",  "width_m": 4.8, "overlay_offset_top_px": 80},
+	"entrance":        {"bg": "mid-wall",        "overlay": "entrance",    "width_m": 4.8, "overlay_offset_top_px": 0},
 	"mid-balcony":     {"bg": "mid-wall",        "overlay": "mid-balcony", "width_m": 4.8, "overlay_offset_top_px": 0},
 	"long-balcony":    {"bg": "long-wall",       "overlay": "long-balcony","width_m": 6.4, "overlay_offset_top_px": 0},
 	"roofbottom":      {"bg": "roofbottom",      "overlay": "",             "width_m": 3.2, "overlay_offset_top_px": 0},
@@ -119,6 +120,13 @@ static func has_atoms(archetype: Dictionary) -> bool:
 	if wall_paths is Array and not (wall_paths as Array).is_empty():
 		return ResourceLoader.exists((wall_paths as Array)[0])
 	return false
+
+
+static func get_archetype(archetype_id: String) -> Dictionary:
+	_ensure_loaded()
+	if archetype_id.is_empty() or not _cache.has(archetype_id):
+		return {}
+	return _cache[archetype_id]
 
 
 # ── Public build ───────────────────────────────────────────────────────────
@@ -247,12 +255,13 @@ func _build_edge(p1: Vector2, p2: Vector2, edge_len: float,
 					info["bg"] = role
 					info["overlay"] = ""
 
-			var bg_path := _pick_atom(info["bg"], floor_idx, edge_idx, slot["slot_idx"], 0, archetype)
+			var bg_cat := _floor_atom_category(info["bg"], floor_idx, floor_count, archetype)
+			var bg_path := _pick_atom(bg_cat, floor_idx, edge_idx, slot["slot_idx"], 0, archetype)
 			if not bg_path.is_empty():
 				_emit_quad(p1, edge_dir, outward_2d, normal_3d,
 						t_l, t_r, y_bot, y_top, Z_WALL, bg_path, false)
 
-			var ov_cat: String = info["overlay"]
+			var ov_cat: String = _floor_atom_category(info["overlay"], floor_idx, floor_count, archetype)
 			if not ov_cat.is_empty():
 				var ov_path := _pick_atom(ov_cat, floor_idx, edge_idx, slot["slot_idx"], 1, archetype)
 				if not ov_path.is_empty():
@@ -453,6 +462,30 @@ func _plain_wall_pattern(edge_len: float) -> Array:
 
 
 # ── Atom resolution ────────────────────────────────────────────────────────
+
+# Allows archetypes to remap atom categories by floor zone, for example
+# ground floor ochre plaster and upper floors pale plaster on Sovetsky low-rises.
+func _floor_atom_category(category: String, floor_idx: int, floor_count: int, archetype: Dictionary) -> String:
+	if category.is_empty():
+		return category
+	var overrides = archetype.get("floor_atom_overrides", {})
+	if not (overrides is Dictionary) or (overrides as Dictionary).is_empty():
+		return category
+	var zones: Array[String] = []
+	if floor_idx <= 0:
+		zones.append("ground")
+	else:
+		if floor_idx >= floor_count - 1:
+			zones.append("top")
+		else:
+			zones.append("middle")
+		zones.append("upper")
+	for zone: String in zones:
+		var zone_map = (overrides as Dictionary).get(zone, {})
+		if zone_map is Dictionary and (zone_map as Dictionary).has(category):
+			return str((zone_map as Dictionary)[category])
+	return category
+
 
 # Deterministic pseudo-random atom pick; returns "" if atom is missing on disk.
 func _pick_atom(category: String, floor_idx: int, edge_idx: int, slot_idx: int, kind: int, archetype: Dictionary) -> String:

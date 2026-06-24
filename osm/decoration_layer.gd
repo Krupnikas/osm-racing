@@ -143,6 +143,7 @@ func _load_building_overrides_json(path: String) -> void:
 
 		override.osm_way_id = od.get("osm_way_id", 0)
 		override.facade_group = od.get("facade_group", "")
+		override.facade_archetype_id = od.get("facade_archetype", od.get("facade_archetype_id", ""))
 
 		# Текстуры
 		if od.has("wall_texture"):
