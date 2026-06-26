@@ -836,6 +836,26 @@ func get_destination_name() -> String:
 	return _destination_name
 
 
+# Read-only getters used by the HUD's live trip card (Card 2). Pure reads,
+# no side effects — they do not change gameplay behaviour.
+func get_trip_elapsed() -> float:
+	if _state != State.DRIVING:
+		return 0.0
+	return Time.get_ticks_msec() / 1000.0 - _trip_start_time
+
+
+func get_estimated_time() -> float:
+	return _estimated_time
+
+
+func get_speed_pct() -> float:
+	return _get_speed_bonus_pct()
+
+
+func get_safe_pct() -> float:
+	return _safe_driving_pct
+
+
 func get_available_pickups() -> Array:
 	var positions: Array = []
 	for order in _available_orders:
