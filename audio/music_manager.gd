@@ -37,6 +37,12 @@ var current_category: int = Category.MENU
 var current_track_path: String = ""
 var music_player: AudioStreamPlayer
 
+# Дакинг под речь пассажира («Извоз»): приглушаем ОФФСЕТ плеера, а не громкость
+# шины «Music» (она — пользовательская настройка). Restore всегда в 0.0.
+const SPEECH_DUCK_DB := -7.0
+var _speech_ducked := false
+var _duck_tween: Tween
+
 func _ready() -> void:
 	music_player = AudioStreamPlayer.new()
 	music_player.bus = "Music"
@@ -79,6 +85,21 @@ func play_previous_track() -> void:
 
 func stop_music() -> void:
 	music_player.stop()
+
+## Лёгкий даккинг музыки на время реплики пассажира. Тянем volume_db ПЛЕЕРА
+## (база 0.0) — относительно пользовательской громкости шины «Music».
+func set_speech_duck(on: bool) -> void:
+	if _speech_ducked == on:
+		return
+	_speech_ducked = on
+	if not is_instance_valid(music_player):
+		return
+	if _duck_tween and _duck_tween.is_valid():
+		_duck_tween.kill()
+	var target: float = SPEECH_DUCK_DB if on else 0.0
+	var dur: float = 0.2 if on else 0.4
+	_duck_tween = create_tween()
+	_duck_tween.tween_property(music_player, "volume_db", target, dur)
 
 func get_current_track_name() -> String:
 	return current_track_path.get_file().get_basename()

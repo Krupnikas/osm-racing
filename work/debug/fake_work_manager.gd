@@ -18,6 +18,7 @@ var safe_pct: float = 1.0
 var dest: String = "ул. Ленина"
 var dropoff: Vector3 = Vector3.ZERO
 var car: Node3D = null
+var voice: String = ""
 
 
 func get_state() -> int: return state
@@ -28,6 +29,7 @@ func get_safe_pct() -> float: return safe_pct
 func get_car() -> Node3D: return car
 func get_dropoff_pos() -> Vector3: return dropoff
 func get_destination_name() -> String: return dest
+func get_passenger_voice() -> String: return voice
 func accept_order() -> void: pass
 func decline_order() -> void: pass
 func finish_result_screen() -> void: pass

@@ -5,6 +5,7 @@ extends Node3D
 
 const WorkManagerScript = preload("res://work/work_manager.gd")
 const WorkHudScript = preload("res://work/work_hud.gd")
+const PassengerVoiceScript = preload("res://work/passenger_voice.gd")
 
 var _terrain: Node3D
 var _car: Node3D
@@ -275,3 +276,9 @@ func _setup_work_mode() -> void:
 
 	work_manager.setup(car, terrain, work_hud)
 	work_hud.setup(work_manager)
+
+	var passenger_voice := Node.new()
+	passenger_voice.name = "PassengerVoice"
+	passenger_voice.set_script(PassengerVoiceScript)
+	add_child(passenger_voice)
+	passenger_voice.setup(work_manager, car, terrain)
