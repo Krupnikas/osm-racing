@@ -30,3 +30,6 @@ performance*.log
 
 # Node dependency caches (vendored MCP server etc.) — never commit
 node_modules/
+
+# Generated preview/screenshot artifacts (e.g. work_hud preview renders)
+artifacts/
