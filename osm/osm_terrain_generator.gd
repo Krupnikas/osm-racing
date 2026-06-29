@@ -4869,6 +4869,7 @@ func _process_phase3_queue() -> bool:
 			elif tags.has("waterway") and enable_water:
 				_create_waterway(nodes, tags, target, null)
 		# Done with ways — move to intersections
+		_record_perf("p3_ways", Time.get_ticks_usec() - t0)
 		entry.phase = "intersections"
 		entry.way_idx = 0
 		# Pre-build intersection keys list for iteration
@@ -4945,6 +4946,7 @@ func _process_phase3_queue() -> bool:
 			if major_road_count >= 1:
 				_create_intersection_patch(pos, target, intersection_idx, max_height_offset, chunk_key)
 		# Done with intersections — move to points
+		_record_perf("p3_intersections", Time.get_ticks_usec() - t0)
 		entry.phase = "points"
 		entry.way_idx = 0
 		return true
@@ -4979,6 +4981,7 @@ func _process_phase3_queue() -> bool:
 					else:
 						_create_street_lamp(local, pt_elev, target)
 		# Done with points — move to bus stops
+		_record_perf("p3_points", Time.get_ticks_usec() - t0)
 		entry.phase = "bus_stops"
 		entry.way_idx = 0
 		return true
@@ -5087,10 +5090,32 @@ func _process_phase3_queue() -> bool:
 		return true
 
 	if phase == "finalize":
+		# Инкрементальный finalize: custom-модели и market-стенды (load+instantiate
+		# до ~68мс и ~33мс на чанк) ставятся порциями по бюджету кадра с курсором,
+		# чтобы один чанк не пробивал кадр. Бухгалтерия завершения — только в конце.
 		if chunk_key != "":
-			_place_custom_models_for_chunk(chunk_key, target)
+			var fin_step: int = entry.get("fin_step", 0)
+			if fin_step == 0:
+				var _c0 := Time.get_ticks_usec()
+				var ci: int = _place_custom_models_incremental(chunk_key, target, entry.get("fin_idx", 0), t0, budget_us)
+				_record_perf("p3_fin_custom", Time.get_ticks_usec() - _c0)
+				if ci >= 0:
+					entry["fin_idx"] = ci
+					return true  # не закончили — продолжим в следующем кадре
+				entry["fin_step"] = 1
+				entry["fin_idx"] = 0
+				return true
+			if fin_step == 1:
+				var _m0 := Time.get_ticks_usec()
+				var mi: int = _place_market_stands_incremental(chunk_key, target, entry.get("fin_idx", 0), t0, budget_us)
+				_record_perf("p3_fin_market", Time.get_ticks_usec() - _m0)
+				if mi >= 0:
+					entry["fin_idx"] = mi
+					return true
+				entry["fin_step"] = 2
+				return true
+			# fin_step >= 2: дешёвые шаги (props + queue деревьев), затем бухгалтерия
 			_place_manual_props_for_chunk(chunk_key, target)
-			_place_market_stands_for_chunk(chunk_key, target)
 			_generate_trees_for_chunk(chunk_key, target)
 		var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
 		if not _pending_batch_chunks.has(batch_chunk_key):
@@ -19371,10 +19396,17 @@ func _place_custom_building_model(override, center: Vector2, parent: Node3D, bas
 		model_path.get_file(), center.x, center.y, scale_val, vis_range])
 
 
-func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
+## Инкрементальный: ставит custom-модели этого чанка порциями. start_idx — курсор
+## по get_custom_models(); возвращает следующий индекс если бюджет исчерпан, или -1
+## когда все модели чанка размещены.
+func _place_custom_models_incremental(chunk_key: String, parent: Node3D, start_idx: int, t0: int, budget_us: int) -> int:
 	if not _decoration_layer:
-		return
-	for entry in _decoration_layer.get_custom_models():
+		return -1
+	var _models: Array = _decoration_layer.get_custom_models()
+	var _mi := start_idx
+	while _mi < _models.size():
+		var entry: Dictionary = _models[_mi]
+		_mi += 1
 		var model_path: String = entry.model
 		if model_path.is_empty():
 			continue
@@ -19437,6 +19469,10 @@ func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
 			parent.add_child(inst)
 		print("OSM: Placed custom model '%s' at (%.1f, %.1f) in chunk %s, scale=%.1f" % [
 			model_path.get_file(), pos.x, pos.y, chunk_key, scale_val])
+		# Бюджет: проверяем после каждой РАЗМЕЩЁННОЙ модели (load+instantiate дорого)
+		if (Time.get_ticks_usec() - t0) > budget_us:
+			return _mi
+	return -1
 
 
 var _market_stand_scene: PackedScene = null
@@ -19446,16 +19482,19 @@ var _debug_market_stands: bool = false  # default OFF (placement + per-stand log
 # no auto-search, no relocation, no default coordinate (empty config → nothing spawns). See
 # docs/WATERMELON_STAND_PLAN.md §6. Chunk-owned (parented to the chunk → freed on unload, rebuilt
 # intact on reload). Overlaps are NOT fixed here — the stand logs and keeps its configured position.
-func _place_market_stands_for_chunk(chunk_key: String, parent: Node3D) -> void:
+## Инкрементальный: ставит market-стенды порциями. start_idx — плоский курсор по
+## (entry × stand). Возвращает следующий индекс если бюджет исчерпан, или -1 когда всё.
+func _place_market_stands_incremental(chunk_key: String, parent: Node3D, start_idx: int, t0: int, budget_us: int) -> int:
 	if not _decoration_layer:
-		return
+		return -1
 	var entries: Array = _decoration_layer.get_market_stands()
 	if entries.is_empty():
-		return
+		return -1
 	if _market_stand_scene == null:
 		if not ResourceLoader.exists("res://models/market/market_watermelon_stand.tscn"):
-			return
+			return -1
 		_market_stand_scene = load("res://models/market/market_watermelon_stand.tscn")
+	var _flat := 0
 	for ei in range(entries.size()):
 		var e: Dictionary = entries[ei]
 		var lat: float = e.lat
@@ -19469,6 +19508,10 @@ func _place_market_stands_for_chunk(chunk_key: String, parent: Node3D) -> void:
 		var count: int = int(e.stand_count)
 		var spacing: float = float(e.spacing)
 		for i in range(count):
+			var this_flat := _flat
+			_flat += 1
+			if this_flat < start_idx:
+				continue  # уже размещён в предыдущем кадре
 			var off := (float(i) - float(count - 1) * 0.5) * spacing
 			var pos := anchor + frontage * off  # EXACT: anchor + configured offset only
 			var cx := int(floor(pos.x / chunk_size))
@@ -19491,6 +19534,10 @@ func _place_market_stands_for_chunk(chunk_key: String, parent: Node3D) -> void:
 			if _debug_market_stands:
 				print("[WMELON] placed %s anchor(%.6f,%.6f) local=(%.2f,%.2f) yaw=%.0f chunk=%s" % [
 					sname, lat, lon, pos.x, pos.y, float(e.yaw), chunk_key])
+			# Бюджет: после каждого размещённого стенда (instantiate дорого)
+			if (Time.get_ticks_usec() - t0) > budget_us:
+				return _flat
+	return -1
 
 
 func _set_visibility_range_recursive(node: Node, range_end: float) -> void:
