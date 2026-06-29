@@ -51,8 +51,12 @@ const Z_VSEAM  := 0.045
 
 # Static cache: archetype id → resolved archetype Dictionary.
 static var _cache: Dictionary = {}
-# Static texture cache: path → Texture2D|null.
+# Static texture cache: path → Texture2D|null. WRITTEN only on the main thread (commit/_load_tex).
 static var _tex_cache: Dictionary = {}
+# Static atom-presence cache: path → bool. Pre-warmed on the main thread (prewarm_atom_cache),
+# then READ-ONLY during threaded compute() — separate from _tex_cache so the worker thread
+# never touches a dict the main thread is writing (no data race).
+static var _atom_exists: Dictionary = {}
 
 # Per-build mesh accumulators: atom_path → {verts, uvs, normals, indices, alpha}.
 var _batches: Dictionary = {}
@@ -121,8 +125,24 @@ func build(
 		way_id: int,
 		archetype: Dictionary,
 		floor_count: int = 0) -> void:
+	# Synchronous path (backward compat): compute geometry then commit nodes.
+	if compute(points, building_height, base_elev, foundation_h, way_id, archetype, floor_count):
+		commit(parent)
+
+
+## Computes facade geometry into _batches + edge_patterns. THREAD-SAFE: no Node access,
+## no texture loading. Requires prewarm_atom_cache() on the main thread beforehand so the
+## atom-presence cache (_tex_cache) is read-only here. Returns true if geometry was produced.
+func compute(
+		points: PackedVector2Array,
+		building_height: float,
+		base_elev: float,
+		foundation_h: float,
+		way_id: int,
+		archetype: Dictionary,
+		floor_count: int = 0) -> bool:
 	if points.size() < 3 or archetype.is_empty():
-		return
+		return false
 	_batches.clear()
 	emission_materials.clear()
 	edge_patterns.clear()
@@ -133,7 +153,7 @@ func build(
 	var roof_y       := base_elev + building_height
 	var avail_h      := roof_y - foundation_y
 	if avail_h <= 0.5:
-		return
+		return false
 
 	if floor_count <= 0:
 		floor_count = maxi(2, roundi(avail_h / 3.2))
@@ -165,7 +185,14 @@ func build(
 		_build_edge(p1, p2, edge_len, foundation_y, floor_h, seam_h,
 				crown_h, floor_count, is_ccw, edge_idx, archetype, edge_class)
 
-	# Commit accumulated geometry as MeshInstance3D children.
+	return not _batches.is_empty()
+
+
+## Commits the computed geometry as MeshInstance3D children. MAIN THREAD ONLY
+## (creates meshes/materials, loads textures, adds nodes). Call after compute().
+func commit(parent: Node3D) -> void:
+	if not is_instance_valid(parent):
+		return
 	for atom_path: String in _batches.keys():
 		var batch: Dictionary = _batches[atom_path]
 		var verts: PackedVector3Array = batch["verts"]
@@ -445,10 +472,11 @@ func _pick_atom(category: String, floor_idx: int, edge_idx: int, slot_idx: int, 
 	h = h * 1103515245 + 12345 + kind      * 2053
 	h = h & 0x7FFFFFFF
 	var path: String = arr[h % arr.size()]
-	# Presence check (cached).
-	if not _tex_cache.has(path):
-		_tex_cache[path] = ResourceLoader.exists(path)
-	return path if _tex_cache[path] else ""
+	# Presence check via read-only _atom_exists (pre-warmed on main thread). If a path
+	# wasn't pre-warmed, fall back to a non-caching exists() check (thread-safe, no write).
+	if _atom_exists.has(path):
+		return path if _atom_exists[path] else ""
+	return path if ResourceLoader.exists(path) else ""
 
 
 # ── Quad emission ──────────────────────────────────────────────────────────
@@ -650,6 +678,22 @@ static func _ensure_loaded() -> void:
 				f.close()
 		fname = dir.get_next()
 	dir.list_dir_end()
+
+
+## Pre-resolves atom-presence for ALL archetypes into the static _tex_cache on the MAIN
+## thread. compute() reads _tex_cache via _pick_atom; pre-warming here means the worker
+## thread never WRITES the shared cache (no data race). Safe to call repeatedly.
+static func prewarm_atom_cache() -> void:
+	_ensure_loaded()
+	for arch_id: String in _cache:
+		var ra: Dictionary = _cache[arch_id].get("_resolved_atoms", {})
+		for category: String in ra:
+			var paths = ra[category]
+			if paths is Array:
+				for p in paths:
+					var ps := str(p)
+					if not _atom_exists.has(ps):
+						_atom_exists[ps] = ResourceLoader.exists(ps)
 
 
 # Pre-resolve all atom file references into absolute paths so runtime code

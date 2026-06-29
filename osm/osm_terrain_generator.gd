@@ -398,6 +398,10 @@ var _tree_batches_to_finalize: Array[String] = []  # Chunk keys ready for finali
 var _veg_mutex: Mutex
 var _veg_thread_results: Array = []  # Готовые результаты из воркер-тредов
 var _pending_veg_tasks: int = 0  # Счётчик активных задач
+# Фасады зданий (FacadeAssembler) — compute в воркер-треде (~150мс), commit на главном
+var _facade_mutex: Mutex
+var _facade_results: Array = []  # Готовые фасады, ждут commit на главном потоке
+var _pending_facade_tasks: int = 0
 var _bush_mesh: ArrayMesh  # Меш куста (Buxus), нормализован до BUSH_HEIGHT
 var _bush_shadow_mesh: ArrayMesh  # Плоский эллипс-диск (blob-тень под кустом)
 var _bush_available := false  # true если модель куста загрузилась
@@ -1002,7 +1006,11 @@ func _ready() -> void:
 	_curb_collision_mutex = Mutex.new()
 	_road_mutex = Mutex.new()
 	_veg_mutex = Mutex.new()
+	_facade_mutex = Mutex.new()
 	_terrain_thread_mutex = Mutex.new()
+	# Пред-прогрев atom-кэша фасадов (на главном потоке), чтобы compute() в воркере
+	# только читал статик-кэш — иначе гонка данных при записи из потоков.
+	FacadeAssembler.prewarm_atom_cache()
 
 	osm_loader = OSMLoaderScript.new()
 	add_child(osm_loader)
@@ -2206,6 +2214,12 @@ func _process(delta: float) -> void:
 		_process_road_extract_queue()
 		_record_perf("road_extract", Time.get_ticks_usec() - t0)
 
+	# Commit готовых фасадов зданий (геометрия посчитана в воркер-треде)
+	if not _facade_results.is_empty():
+		t0 = Time.get_ticks_usec()
+		_process_facade_results()
+		_record_perf("facade_commit", Time.get_ticks_usec() - t0)
+
 	# Lazy chunk activation — включаем видимость через N кадров после финализации
 	t0 = Time.get_ticks_usec()
 	_process_chunk_activation()
@@ -2531,7 +2545,7 @@ func _check_initial_load_complete() -> void:
 	var pending_road_snapshot: int = _pending_road_tasks
 	var road_results_pending: int = _road_results.size()
 	_road_mutex.unlock()
-	var total_queued: int = _building_results.size() + _road_queue_total_size() + road_results_pending + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + pending_road_snapshot + _pending_veg_tasks + _pending_terrain_tasks + _deferred_total_size(_deferred_lamp_queue) + _deferred_total_size(_deferred_manhole_queue) + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_total_size(_deferred_footway_queue) + _deferred_total_size(_deferred_billboard_queue) + _chunk_activation_pending.size() + _deferred_total_size(_deferred_lamp_lights) + _phase3_queue.size()
+	var total_queued: int = _building_results.size() + _road_queue_total_size() + road_results_pending + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + pending_road_snapshot + _pending_veg_tasks + _pending_terrain_tasks + _deferred_total_size(_deferred_lamp_queue) + _deferred_total_size(_deferred_manhole_queue) + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_total_size(_deferred_footway_queue) + _deferred_total_size(_deferred_billboard_queue) + _chunk_activation_pending.size() + _deferred_total_size(_deferred_lamp_lights) + _phase3_queue.size() + _pending_facade_tasks + _facade_results.size()
 
 	# DEBUG: Детальное логирование очередей
 	if loaded_count >= total_chunks and total_queued > 0:
@@ -3766,6 +3780,10 @@ func reset_terrain() -> void:
 	_veg_thread_results.clear()
 	_pending_veg_tasks = 0
 	_veg_mutex.unlock()
+	_facade_mutex.lock()
+	_facade_results.clear()
+	_pending_facade_tasks = 0
+	_facade_mutex.unlock()
 	_terrain_objects_queue.clear()
 	_infrastructure_queue.clear()
 	if _clutter_manager:
@@ -10446,13 +10464,24 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 					var fa_arch := FacadeAssembler.select_archetype(way_id, mat_tag, fa_floors)
 					if FacadeAssembler.has_atoms(fa_arch):
 						var fnd_h: float = 0.0 if (building_override and building_override.no_foundation) else _get_foundation_height(points)
+						# База-коробка остаётся синхронной (дёшево, ~0.4мс) — здание сразу видно.
 						_create_3d_building_with_custom_texture(points, building_height, BuildingOverride.new(), parent, base_elev, debug_name, true)
+						# Геометрия фасада (~150мс) выносится в воркер-тред: compute() считает
+						# меши в потоке, commit() создаёт MeshInstance на главном (_process_facade_results).
+						# Главная причина лётного фриза зданий.
 						var _fa := FacadeAssembler.new()
-						_fa.build(points, building_height, base_elev, parent, fnd_h, way_id, fa_arch, fa_floors)
-						_facade_emission_materials.append_array(_fa.emission_materials)
-						fa_bays = _fa.edge_patterns.duplicate()
+						_facade_mutex.lock()
+						_pending_facade_tasks += 1
+						_facade_mutex.unlock()
+						WorkerThreadPool.add_task(_compute_facade_thread.bind({
+							"fa": _fa, "points": points, "height": building_height,
+							"base_elev": base_elev, "fnd_h": fnd_h, "way_id": way_id,
+							"arch": fa_arch, "floors": fa_floors, "parent": parent,
+							"chunk_key": _get_chunk_key_from_node(parent), "gen": _load_generation,
+						}))
+						# fa_bays недоступны (фасад отложен) — для жилых домов витрин почти нет.
+						fa_bays = {}
 						fa_handled = true
-						print("[FacadeAssembler] archetype=%s way=%d floors=%d" % [fa_arch.get("id", "?"), way_id, fa_floors])
 
 			if not fa_handled:
 					# Fallback: original flat-texture logic.
@@ -25361,6 +25390,52 @@ func _process_road_extract_queue() -> void:
 		_extract_road_for_traffic_fast(item.points, item.tags)
 		if not _initial_loading and (Time.get_ticks_usec() - t0) > budget_us:
 			break
+
+
+## Воркер-тред: считает геометрию фасада (тяжёлый цикл ~150мс) вне главного потока.
+## Только чтение статик-кэшей (atom-presence пред-прогрет). Результат — в _facade_results.
+func _compute_facade_thread(task: Dictionary) -> void:
+	var fa: FacadeAssembler = task["fa"]
+	var ok := false
+	if is_instance_valid(fa):
+		ok = fa.compute(task["points"], task["height"], task["base_elev"],
+				task["fnd_h"], task["way_id"], task["arch"], task["floors"])
+	_facade_mutex.lock()
+	if ok:
+		_facade_results.append(task)
+	_pending_facade_tasks -= 1
+	_facade_mutex.unlock()
+
+
+## Главный поток: commit готовых фасадов (создание MeshInstance, дёшево). Бюджет на кадр.
+func _process_facade_results() -> void:
+	if _facade_results.is_empty():
+		return
+	_facade_mutex.lock()
+	var batch: Array = _facade_results
+	_facade_results = []
+	_facade_mutex.unlock()
+
+	var t0 := Time.get_ticks_usec()
+	var budget_us: int = 500000 if _initial_loading else 4000
+	var applied := 0
+	for task in batch:
+		var parent: Node3D = task["parent"]
+		var fa: FacadeAssembler = task["fa"]
+		if is_instance_valid(parent) and int(task["gen"]) == _load_generation \
+				and _is_chunk_alive_for_async_work(task["chunk_key"]) and is_instance_valid(fa):
+			fa.commit(parent)
+			_facade_emission_materials.append_array(fa.emission_materials)
+		applied += 1
+		if applied > 1 and (Time.get_ticks_usec() - t0) > budget_us:
+			break
+
+	# Вернуть необработанные обратно
+	if applied < batch.size():
+		_facade_mutex.lock()
+		for i in range(applied, batch.size()):
+			_facade_results.append(batch[i])
+		_facade_mutex.unlock()
 
 
 # Fast variant: accepts pre-computed local_points
