@@ -9624,7 +9624,14 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 		"parking": relevant_parking,
 		"water_shore": relevant_water_shore,
 		"chunk_rect": chunk_rect,
-		"chunk_size": chunk_size
+		"chunk_size": chunk_size,
+		# Mesh-build inputs (curb + grid triangulation now run on the worker too).
+		# elev_grid dict is assigned wholesale on elevation arrival, never mutated
+		# in place → safe to pass by reference. gen guards against stale chunks.
+		"elev_grid": _chunk_elevation_data.get(chunk_key, {}),
+		"enable_elevation": enable_elevation,
+		"enable_ground_plane": enable_ground_plane,
+		"gen": _load_generation,
 	}
 	_pending_terrain_tasks += 1
 	WorkerThreadPool.add_task(_compute_terrain_clipping_thread.bind(task_data))
@@ -21104,14 +21111,182 @@ func _compute_terrain_clipping_thread(task_data: Dictionary) -> void:
 		ccw_polys = new_ccw
 	var filtered_polys: Array[PackedVector2Array] = ccw_polys
 
+	# Build mesh arrays here on the worker (curb + 5m-grid triangulation +
+	# per-vertex elevation sampling). This is the heavy ~47ms that used to run
+	# on the main thread in _finalize_terrain_mesh. Pure compute: only touches
+	# the immutable elev_grid passed in task_data + Geometry2D + static helpers.
+	var geo: Dictionary = _build_terrain_geometry(chunk_key, filtered_polys, task_data)
+
 	# Отправляем результат в main thread через mutex-protected массив
 	var result := {
 		"chunk_key": chunk_key,
-		"terrain_polys": filtered_polys
+		"geo": geo,
+		"gen": int(task_data.get("gen", _load_generation)),
 	}
 	_terrain_thread_mutex.lock()
 	_terrain_thread_results.append(result)
 	_terrain_thread_mutex.unlock()
+
+
+## Строит массивы вершин/индексов для меша террейна (бордюры + триангуляция по
+## сетке 5м + сэмплинг высоты). Чистый компьют — вызывается из worker thread.
+## Читает только переданные аргументы (elev_grid иммутабелен) + Geometry2D +
+## статические хелперы. НИКАКИХ Node/RenderingServer/Material вызовов.
+func _build_terrain_geometry(chunk_key: String, terrain_polys: Array[PackedVector2Array], task_data: Dictionary) -> Dictionary:
+	var coords: PackedStringArray = chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+	var t_chunk_size: float = task_data.get("chunk_size", chunk_size)
+	var min_x := float(chunk_x) * t_chunk_size
+	var max_x := min_x + t_chunk_size
+	var min_z := float(chunk_z) * t_chunk_size
+	var max_z := min_z + t_chunk_size
+	var sidewalk_height := 0.11
+
+	var _te_grid_data: Dictionary = task_data.get("elev_grid", {})
+	var _te_grid: Array = _te_grid_data.get("grid", [])
+	var _te_grid_res: int = _te_grid_data.get("grid_res", 0)
+	var _te_base_x: float = _te_grid_data.get("base_x", 0.0)
+	var _te_base_z: float = _te_grid_data.get("base_z", 0.0)
+	var _te_step: float = _te_grid_data.get("grid_step", 5.0)
+	var _enable_elev: bool = task_data.get("enable_elevation", false)
+	var _enable_gp: bool = task_data.get("enable_ground_plane", false)
+	var _te_has_elev: bool = _enable_elev and _te_grid.size() >= _te_grid_res and _te_grid_res >= 2
+
+	# Бордюры по внутренним краям (где террейн граничит с дорогой)
+	var curb_verts := PackedVector3Array()
+	var curb_norms := PackedVector3Array()
+	var curb_idxs := PackedInt32Array()
+	var boundary_eps := 0.1
+
+	for poly in terrain_polys:
+		var pn := poly.size()
+		var curb_w := 0.15
+		var top := sidewalk_height
+		var bot := -3.0  # Extend below terrain to cover elevation differences
+
+		# Miter outer-точка для каждой вершины — внешняя сторона встык
+		var miter_out: PackedVector2Array = PackedVector2Array()
+		miter_out.resize(pn)
+		for vi in range(pn):
+			var d_prev := (poly[vi] - poly[(vi - 1 + pn) % pn]).normalized()
+			var d_next := (poly[(vi + 1) % pn] - poly[vi]).normalized()
+			var out_prev := Vector2(d_prev.y, -d_prev.x)
+			var out_next := Vector2(d_next.y, -d_next.x)
+			var avg := out_prev + out_next
+			if avg.length_squared() > 0.001:
+				var n := avg.normalized()
+				var dot := n.dot(out_next)
+				if dot > 0.3:
+					miter_out[vi] = poly[vi] + n * (curb_w / dot)
+				else:
+					miter_out[vi] = poly[vi] + out_next * curb_w
+			else:
+				miter_out[vi] = poly[vi] + Vector2(d_next.y, -d_next.x) * curb_w
+
+		for ei in range(pn):
+			var p1: Vector2 = poly[ei]
+			var p2: Vector2 = poly[(ei + 1) % pn]
+			var p1_on_boundary := absf(p1.x - min_x) < boundary_eps or absf(p1.x - max_x) < boundary_eps or absf(p1.y - min_z) < boundary_eps or absf(p1.y - max_z) < boundary_eps
+			var p2_on_boundary := absf(p2.x - min_x) < boundary_eps or absf(p2.x - max_x) < boundary_eps or absf(p2.y - min_z) < boundary_eps or absf(p2.y - max_z) < boundary_eps
+			if p1_on_boundary and p2_on_boundary:
+				continue
+			var dir := (p2 - p1).normalized()
+			var outward := Vector2(dir.y, -dir.x)
+			# Outer: miter (встык), на границе чанка — простое смещение по outward
+			var p1_out: Vector2
+			var p2_out: Vector2
+			if p1_on_boundary:
+				p1_out = p1 + outward * curb_w
+			else:
+				p1_out = miter_out[ei]
+			if p2_on_boundary:
+				p2_out = p2 + outward * curb_w
+			else:
+				p2_out = miter_out[(ei + 1) % pn]
+			# Inner: overlap (пересекаются), на границе — без overlap
+			if not p1_on_boundary:
+				p1 -= dir * curb_w
+			if not p2_on_boundary:
+				p2 += dir * curb_w
+			var e1 := _sample_elevation_local(p1.x, p1.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
+			var e2 := _sample_elevation_local(p2.x, p2.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
+			var top1 := top + e1
+			var top2 := top + e2
+			var bot1 := bot + e1
+			var bot2 := bot + e2
+			var n_front := Vector3(outward.x, 0.0, outward.y)
+			var ci := curb_verts.size()
+			# Передняя грань
+			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))
+			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))
+			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))
+			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))
+			for _j in 4: curb_norms.append(n_front)
+			# Верхняя грань
+			curb_verts.append(Vector3(p1.x, top1, p1.y))
+			curb_verts.append(Vector3(p2.x, top2, p2.y))
+			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))
+			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))
+			for _j in 4: curb_norms.append(Vector3.UP)
+			# Нижняя грань
+			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))
+			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))
+			curb_verts.append(Vector3(p2.x, bot2, p2.y))
+			curb_verts.append(Vector3(p1.x, bot1, p1.y))
+			for _j in 4: curb_norms.append(Vector3.DOWN)
+			# Передняя грань (offset 0) — 0,1,2 / 0,2,3
+			curb_idxs.append(ci + 0); curb_idxs.append(ci + 1); curb_idxs.append(ci + 2)
+			curb_idxs.append(ci + 0); curb_idxs.append(ci + 2); curb_idxs.append(ci + 3)
+			# Верхняя грань (offset 4) — 0,2,1 / 0,3,2
+			curb_idxs.append(ci + 4); curb_idxs.append(ci + 6); curb_idxs.append(ci + 5)
+			curb_idxs.append(ci + 4); curb_idxs.append(ci + 7); curb_idxs.append(ci + 6)
+			# Нижняя грань (offset 8) — 0,1,2 / 0,2,3
+			curb_idxs.append(ci + 8); curb_idxs.append(ci + 9); curb_idxs.append(ci + 10)
+			curb_idxs.append(ci + 8); curb_idxs.append(ci + 10); curb_idxs.append(ci + 11)
+
+	# Split terrain polygons into 5m grid cells, triangulate, sample elevation.
+	var grid_polys: Array[PackedVector2Array] = []
+	for poly in terrain_polys:
+		grid_polys.append_array(_split_polygon_by_grid(poly, 5.0))
+
+	var all_vertices := PackedVector3Array()
+	var all_uvs := PackedVector2Array()
+	var all_normals := PackedVector3Array()
+	var all_indices := PackedInt32Array()
+	var uv_scale := 0.25
+
+	for poly in grid_polys:
+		var indices := _triangulate_cell_nw_se(poly)
+		if indices.size() < 3:
+			continue
+		var base_idx: int = all_vertices.size()
+		for p in poly:
+			var h := sidewalk_height + _sample_elevation_local(p.x, p.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
+			all_vertices.append(Vector3(p.x, h, p.y))
+			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
+			all_normals.append(Vector3.UP)
+		for idx in indices:
+			all_indices.append(base_idx + idx)
+
+	# Ground plane verts (same polys, sidewalk_height below) — only if enabled
+	var gp_verts := PackedVector3Array()
+	if _enable_gp and _enable_elev and not all_vertices.is_empty():
+		gp_verts.resize(all_vertices.size())
+		for vi in all_vertices.size():
+			var v := all_vertices[vi]
+			gp_verts[vi] = Vector3(v.x, v.y - sidewalk_height, v.z)
+
+	return {
+		"curb_verts": curb_verts,
+		"curb_norms": curb_norms,
+		"curb_idxs": curb_idxs,
+		"t_verts": all_vertices,
+		"t_uvs": all_uvs,
+		"t_norms": all_normals,
+		"t_idxs": all_indices,
+		"gp_verts": gp_verts,
+	}
 
 
 ## Применяет готовые результаты клиппинга террейна из worker threads (main thread).
@@ -21132,19 +21307,23 @@ func _apply_terrain_thread_results() -> void:
 	for result in batch:
 		_pending_terrain_tasks -= 1
 		var chunk_key: String = result.chunk_key
-		var terrain_polys: Array[PackedVector2Array] = result.terrain_polys
+		var geo: Dictionary = result.get("geo", {})
 
 		var parent: Node3D = _get_chunk_node(chunk_key)
 		if not parent or not _is_chunk_alive(chunk_key):
 			applied += 1
 			continue
-
-		if terrain_polys.is_empty():
-			print("OSM: ChunkTerrain %s: no polygons after clipping" % chunk_key)
+		# Discard results from a superseded load generation (chunk reloaded).
+		if int(result.get("gen", _load_generation)) != _load_generation:
 			applied += 1
 			continue
 
-		_finalize_terrain_mesh(chunk_key, parent, terrain_polys)
+		var t_idxs: PackedInt32Array = geo.get("t_idxs", PackedInt32Array())
+		if t_idxs.is_empty():
+			applied += 1
+			continue
+
+		_finalize_terrain_mesh(chunk_key, parent, geo)
 		applied += 1
 		if applied > 1 and (Time.get_ticks_usec() - t0) > TERRAIN_APPLY_BUDGET_USEC:
 			break
@@ -21539,163 +21718,29 @@ func _process_lod_chunk_queue() -> void:
 
 ## Финализация террейн меша: триангуляция + бордюры + ArrayMesh + коллизия.
 ## Вызывается из _process_terrain_gen_queue после завершения клиппинга.
-func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Array[PackedVector2Array]) -> void:
+## Commit-only: массивы уже построены в worker thread (_build_terrain_geometry).
+## Здесь — только main-thread работа: ArrayMesh + материал + _rs_add_mesh +
+## отложенная коллизия. Никакого тяжёлого компьюта.
+func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, geo: Dictionary) -> void:
 	if not is_instance_valid(parent):
 		return
 
-	var coords: Array = chunk_key.split(",")
-	var chunk_x := int(coords[0])
-	var chunk_z := int(coords[1])
-	var min_x := float(chunk_x) * chunk_size
-	var max_x := min_x + chunk_size
-	var min_z := float(chunk_z) * chunk_size
-	var max_z := min_z + chunk_size
-	var sidewalk_height := 0.11
-
-	# Use this chunk's own elevation data directly to avoid float precision
-	# issues at chunk boundaries where floor(pos / chunk_size) might map
-	# a boundary vertex to an adjacent chunk that has no elevation data → y=0 spike.
-	var _te_grid_data: Dictionary = _chunk_elevation_data.get(chunk_key, {})
-	var _te_grid: Array = _te_grid_data.get("grid", [])
-	var _te_grid_res: int = _te_grid_data.get("grid_res", 0)
-	var _te_base_x: float = _te_grid_data.get("base_x", 0.0)
-	var _te_base_z: float = _te_grid_data.get("base_z", 0.0)
-	var _te_step: float = _te_grid_data.get("grid_step", 5.0)
-	var _te_has_elev: bool = enable_elevation and _te_grid.size() >= _te_grid_res and _te_grid_res >= 2
-
-	# Бордюры по внутренним краям (где террейн граничит с дорогой)
-	var curb_verts := PackedVector3Array()
-	var curb_norms := PackedVector3Array()
-	var curb_idxs := PackedInt32Array()
-	var boundary_eps := 0.1
-
-	for poly in terrain_polys:
-		var pn := poly.size()
-		var curb_w := 0.15
-		var top := sidewalk_height
-		var bot := -3.0  # Extend below terrain to cover elevation differences
-
-		# Miter outer-точка для каждой вершины — внешняя сторона встык
-		var miter_out: PackedVector2Array = PackedVector2Array()
-		miter_out.resize(pn)
-		for vi in range(pn):
-			var d_prev := (poly[vi] - poly[(vi - 1 + pn) % pn]).normalized()
-			var d_next := (poly[(vi + 1) % pn] - poly[vi]).normalized()
-			var out_prev := Vector2(d_prev.y, -d_prev.x)
-			var out_next := Vector2(d_next.y, -d_next.x)
-			var avg := out_prev + out_next
-			if avg.length_squared() > 0.001:
-				var n := avg.normalized()
-				var dot := n.dot(out_next)
-				if dot > 0.3:
-					miter_out[vi] = poly[vi] + n * (curb_w / dot)
-				else:
-					miter_out[vi] = poly[vi] + out_next * curb_w
-			else:
-				miter_out[vi] = poly[vi] + Vector2(d_next.y, -d_next.x) * curb_w
-
-		for ei in range(pn):
-			var p1: Vector2 = poly[ei]
-			var p2: Vector2 = poly[(ei + 1) % pn]
-			var p1_on_boundary := absf(p1.x - min_x) < boundary_eps or absf(p1.x - max_x) < boundary_eps or absf(p1.y - min_z) < boundary_eps or absf(p1.y - max_z) < boundary_eps
-			var p2_on_boundary := absf(p2.x - min_x) < boundary_eps or absf(p2.x - max_x) < boundary_eps or absf(p2.y - min_z) < boundary_eps or absf(p2.y - max_z) < boundary_eps
-			if p1_on_boundary and p2_on_boundary:
-				continue
-			var dir := (p2 - p1).normalized()
-			var outward := Vector2(dir.y, -dir.x)
-			# Outer: miter (встык), на границе чанка — простое смещение по outward
-			var p1_out: Vector2
-			var p2_out: Vector2
-			if p1_on_boundary:
-				p1_out = p1 + outward * curb_w
-			else:
-				p1_out = miter_out[ei]
-			if p2_on_boundary:
-				p2_out = p2 + outward * curb_w
-			else:
-				p2_out = miter_out[(ei + 1) % pn]
-			# Inner: overlap (пересекаются), на границе — без overlap
-			if not p1_on_boundary:
-				p1 -= dir * curb_w
-			if not p2_on_boundary:
-				p2 += dir * curb_w
-			var e1 := _sample_elevation_local(p1.x, p1.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
-			var e2 := _sample_elevation_local(p2.x, p2.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
-			var top1 := top + e1
-			var top2 := top + e2
-			var bot1 := bot + e1
-			var bot2 := bot + e2
-			var n_front := Vector3(outward.x, 0.0, outward.y)
-			var ci := curb_verts.size()
-			# Передняя грань
-			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))
-			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))
-			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))
-			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))
-			for _j in 4: curb_norms.append(n_front)
-			# Верхняя грань
-			curb_verts.append(Vector3(p1.x, top1, p1.y))
-			curb_verts.append(Vector3(p2.x, top2, p2.y))
-			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))
-			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))
-			for _j in 4: curb_norms.append(Vector3.UP)
-			# Нижняя грань
-			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))
-			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))
-			curb_verts.append(Vector3(p2.x, bot2, p2.y))
-			curb_verts.append(Vector3(p1.x, bot1, p1.y))
-			for _j in 4: curb_norms.append(Vector3.DOWN)
-			# Передняя грань (offset 0) — 0,1,2 / 0,2,3
-			curb_idxs.append(ci + 0); curb_idxs.append(ci + 1); curb_idxs.append(ci + 2)
-			curb_idxs.append(ci + 0); curb_idxs.append(ci + 2); curb_idxs.append(ci + 3)
-			# Верхняя грань (offset 4) — 0,2,1 / 0,3,2
-			curb_idxs.append(ci + 4); curb_idxs.append(ci + 6); curb_idxs.append(ci + 5)
-			curb_idxs.append(ci + 4); curb_idxs.append(ci + 7); curb_idxs.append(ci + 6)
-			# Нижняя грань (offset 8) — 0,1,2 / 0,2,3
-			curb_idxs.append(ci + 8); curb_idxs.append(ci + 9); curb_idxs.append(ci + 10)
-			curb_idxs.append(ci + 8); curb_idxs.append(ci + 10); curb_idxs.append(ci + 11)
-
+	# Бордюры (геометрия посчитана в воркере)
+	var curb_verts: PackedVector3Array = geo.get("curb_verts", PackedVector3Array())
 	if curb_verts.size() > 0:
 		var curb_arrays := []
 		curb_arrays.resize(Mesh.ARRAY_MAX)
 		curb_arrays[Mesh.ARRAY_VERTEX] = curb_verts
-		curb_arrays[Mesh.ARRAY_NORMAL] = curb_norms
-		curb_arrays[Mesh.ARRAY_INDEX] = curb_idxs
+		curb_arrays[Mesh.ARRAY_NORMAL] = geo.get("curb_norms", PackedVector3Array())
+		curb_arrays[Mesh.ARRAY_INDEX] = geo.get("curb_idxs", PackedInt32Array())
 		var curb_mesh := ArrayMesh.new()
 		curb_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, curb_arrays)
 		_rs_add_mesh(chunk_key, curb_mesh, _curb_material, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_CURB)
 
-	# Split terrain polygons into 5m grid cells — same as sidewalk grid.
-	# Terrain and sidewalk both sample _sample_elevation at 5m multiples, so
-	# within each 5m triangle sidewalk = terrain + height_offset exactly.
-	# Coarser terrain grid causes linear interpolation to exceed bicubic at
-	# concave points, making terrain poke through sidewalks.
-	var grid_polys: Array[PackedVector2Array] = []
-	for poly in terrain_polys:
-		grid_polys.append_array(_split_polygon_by_grid(poly, 5.0))
-
-	# Триангулируем полигоны
-	var all_vertices := PackedVector3Array()
-	var all_uvs := PackedVector2Array()
-	var all_normals := PackedVector3Array()
-	var all_indices := PackedInt32Array()
-	var uv_scale := 0.25
-	var total_tris := 0
-
-	for poly in grid_polys:
-		var indices := _triangulate_cell_nw_se(poly)
-		if indices.size() < 3:
-			continue
-		var base_idx: int = all_vertices.size()
-		for p in poly:
-			var h := sidewalk_height + _sample_elevation_local(p.x, p.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
-			all_vertices.append(Vector3(p.x, h, p.y))
-			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
-			all_normals.append(Vector3.UP)
-		for idx in indices:
-			all_indices.append(base_idx + idx)
-		total_tris += indices.size() / 3
-
+	var all_vertices: PackedVector3Array = geo.get("t_verts", PackedVector3Array())
+	var all_uvs: PackedVector2Array = geo.get("t_uvs", PackedVector2Array())
+	var all_normals: PackedVector3Array = geo.get("t_norms", PackedVector3Array())
+	var all_indices: PackedInt32Array = geo.get("t_idxs", PackedInt32Array())
 	if all_indices.is_empty():
 		return
 
@@ -21722,13 +21767,9 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 
 	_rs_add_mesh(chunk_key, arr_mesh, material, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_TERRAIN)
 
-	# Ground plane: same polygons, 0.5m below raw elevation (fills holes)
-	if enable_ground_plane and enable_elevation:
-		var gp_verts := PackedVector3Array()
-		gp_verts.resize(all_vertices.size())
-		for vi in all_vertices.size():
-			var v := all_vertices[vi]
-			gp_verts[vi] = Vector3(v.x, v.y - sidewalk_height, v.z)
+	# Ground plane: vertices уже посчитаны в воркере (0.11м ниже)
+	var gp_verts: PackedVector3Array = geo.get("gp_verts", PackedVector3Array())
+	if gp_verts.size() > 0:
 		var gp_arrays := []
 		gp_arrays.resize(Mesh.ARRAY_MAX)
 		gp_arrays[Mesh.ARRAY_VERTEX] = gp_verts
@@ -21751,8 +21792,6 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 
 	if _draw_call_logging_enabled:
 		_draw_call_stats["terrain"] += 1
-
-	# Применяем elevation если уже готов
 
 
 
