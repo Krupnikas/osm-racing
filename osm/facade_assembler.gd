@@ -53,6 +53,7 @@ const Z_VSEAM  := 0.045
 static var _cache: Dictionary = {}
 # Static texture cache: path → Texture2D|null. WRITTEN only on the main thread (commit/_load_tex).
 static var _tex_cache: Dictionary = {}
+static var _main_thread_id: int = 0  # set in prewarm_atom_cache (main thread) — guards off-main load()
 # Static atom-presence cache: path → bool. Pre-warmed on the main thread (prewarm_atom_cache),
 # then READ-ONLY during threaded compute() — separate from _tex_cache so the worker thread
 # never touches a dict the main thread is writing (no data race).
@@ -640,6 +641,10 @@ func _emission_path_for(atom_path: String) -> String:
 	var suffix := base.substr(dash + 1)       # e.g. "1"
 	var emit_path := dir + prefix + "-emission-" + suffix + ".png"
 	if not _tex_cache.has(emit_path):
+		# Off-main cache miss: never write the shared cache from a worker (race) —
+		# treat as "no emission". Prewarm fills this on the main thread.
+		if _main_thread_id != 0 and OS.get_thread_caller_id() != _main_thread_id:
+			return ""
 		_tex_cache[emit_path] = ResourceLoader.exists(emit_path)
 	if _tex_cache[emit_path]:
 		return emit_path
@@ -649,6 +654,10 @@ func _emission_path_for(atom_path: String) -> String:
 func _load_tex(path: String) -> Texture2D:
 	if _tex_cache.has(path) and _tex_cache[path] is Texture2D:
 		return _tex_cache[path]
+	# Off-main cache miss: load() is main-thread-only and writing _tex_cache from a
+	# worker races → crash. Skip gracefully (prewarm should have filled this).
+	if _main_thread_id != 0 and OS.get_thread_caller_id() != _main_thread_id:
+		return null
 	var tex: Texture2D = null
 	if ResourceLoader.exists(path):
 		tex = load(path)
@@ -684,6 +693,7 @@ static func _ensure_loaded() -> void:
 ## thread. compute() reads _tex_cache via _pick_atom; pre-warming here means the worker
 ## thread never WRITES the shared cache (no data race). Safe to call repeatedly.
 static func prewarm_atom_cache() -> void:
+	_main_thread_id = OS.get_thread_caller_id()  # prewarm runs on the main thread
 	_ensure_loaded()
 	for arch_id: String in _cache:
 		var ra: Dictionary = _cache[arch_id].get("_resolved_atoms", {})
@@ -694,6 +704,33 @@ static func prewarm_atom_cache() -> void:
 					var ps := str(p)
 					if not _atom_exists.has(ps):
 						_atom_exists[ps] = ResourceLoader.exists(ps)
+					# CRITICAL: pre-LOAD the actual textures (atom + emission) into the
+					# shared static _tex_cache on the MAIN thread. compute() runs on a
+					# worker and calls _load_tex/_emission_path_for to read texture sizes
+					# and emission presence; load() is main-thread-only and writing
+					# _tex_cache from the worker races (→ crash). Pre-filling here makes
+					# both worker AND commit pure cache reads — nobody writes _tex_cache.
+					if _atom_exists[ps] and not (_tex_cache.has(ps) and _tex_cache[ps] is Texture2D):
+						_tex_cache[ps] = load(ps)
+					_prewarm_emission(ps)
+
+
+## Pre-resolves the emission sibling of an atom path into _tex_cache (main thread).
+## Mirrors _emission_path_for's derivation, but LOADS the texture (or stores false)
+## so the worker's _emission_path_for / commit's _load_tex never write the cache.
+static func _prewarm_emission(atom_path: String) -> void:
+	var dir := atom_path.get_base_dir() + "/"
+	var base := atom_path.get_file().get_basename()
+	var dash := base.rfind("-")
+	if dash < 0:
+		return
+	var emit_path := dir + base.substr(0, dash) + "-emission-" + base.substr(dash + 1) + ".png"
+	if _tex_cache.has(emit_path) and _tex_cache[emit_path] is Texture2D:
+		return
+	if ResourceLoader.exists(emit_path):
+		_tex_cache[emit_path] = load(emit_path)   # Texture2D (truthy → presence ok)
+	else:
+		_tex_cache[emit_path] = false             # presence: missing
 
 
 # Pre-resolve all atom file references into absolute paths so runtime code
