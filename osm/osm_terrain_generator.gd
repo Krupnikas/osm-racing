@@ -245,6 +245,7 @@ var _created_sign_positions: Dictionary = {}  # Позиции созданны�
 var _created_bus_stop_positions: Dictionary = {}  # Позиции созданных остановок для избежания дубликатов
 var _custom_model_cache: Dictionary = {}  # path -> PackedScene
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
+var _pending_parked_cars: Array = []  # [{points, parent}] — спавн машин по 1 парковке/кадр
 var _crossing_sign_front_mat: StandardMaterial3D
 var _crossing_sign_back_mat: StandardMaterial3D
 
@@ -2242,6 +2243,12 @@ func _process(delta: float) -> void:
 		_process_footway_kerb_results()
 		_record_perf("fin_footway_commit", Time.get_ticks_usec() - t0)
 
+	# Спавн припаркованных машин — по одной парковке за кадр (instantiate дорого)
+	if not _pending_parked_cars.is_empty():
+		t0 = Time.get_ticks_usec()
+		_process_parked_cars_queue()
+		_record_perf("parked_cars", Time.get_ticks_usec() - t0)
+
 	# Lazy chunk activation — включаем видимость через N кадров после финализации
 	t0 = Time.get_ticks_usec()
 	_process_chunk_activation()
@@ -2567,7 +2574,7 @@ func _check_initial_load_complete() -> void:
 	var pending_road_snapshot: int = _pending_road_tasks
 	var road_results_pending: int = _road_results.size()
 	_road_mutex.unlock()
-	var total_queued: int = _building_results.size() + _road_queue_total_size() + road_results_pending + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + pending_road_snapshot + _pending_veg_tasks + _pending_terrain_tasks + _deferred_total_size(_deferred_lamp_queue) + _deferred_total_size(_deferred_manhole_queue) + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_total_size(_deferred_footway_queue) + _deferred_total_size(_deferred_billboard_queue) + _chunk_activation_pending.size() + _deferred_total_size(_deferred_lamp_lights) + _phase3_queue.size() + _pending_facade_tasks + _facade_results.size() + _pending_road_finalize_tasks + _road_finalize_results.size() + _pending_footway_tasks + _footway_kerb_results.size()
+	var total_queued: int = _building_results.size() + _road_queue_total_size() + road_results_pending + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + pending_road_snapshot + _pending_veg_tasks + _pending_terrain_tasks + _deferred_total_size(_deferred_lamp_queue) + _deferred_total_size(_deferred_manhole_queue) + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_total_size(_deferred_footway_queue) + _deferred_total_size(_deferred_billboard_queue) + _chunk_activation_pending.size() + _deferred_total_size(_deferred_lamp_lights) + _phase3_queue.size() + _pending_facade_tasks + _facade_results.size() + _pending_road_finalize_tasks + _road_finalize_results.size() + _pending_footway_tasks + _footway_kerb_results.size() + _pending_parked_cars.size()
 
 	# DEBUG: Детальное логирование очередей
 	if loaded_count >= total_chunks and total_queued > 0:
@@ -3819,6 +3826,7 @@ func reset_terrain() -> void:
 	_paving_dispatched.clear()
 	_vegetation_queue.clear()
 	_pending_parking_signs.clear()
+	_pending_parked_cars.clear()
 	_curb_queue.clear()
 	_curb_smoothed_queue.clear()
 	_curb_mesh_state.clear()
@@ -10987,8 +10995,8 @@ func _create_parking(points: PackedVector2Array, parent: Node3D, chunk_key: Stri
 
 	# Примечание: полигон уже добавлен в _chunk_parking_hashes в первом проходе
 
-	# 1. Создаём асфальтовую поверхность
-	_create_parking_surface(points, parent)
+	# 1. Создаём асфальтовую поверхность (коллизия отложена)
+	_create_parking_surface(points, parent, chunk_key)
 
 	# 2. Сохраняем данные для отложенного создания знака
 	# (знак создаётся после загрузки всех чанков, когда все дороги известны)
@@ -10997,7 +11005,8 @@ func _create_parking(points: PackedVector2Array, parent: Node3D, chunk_key: Stri
 		"parent": parent
 	})
 
-	# 3. Добавляем припаркованные машины (0-2 штуки)
+	# 3. Припаркованные машины: планирование дёшево (математика) — выполняем сразу,
+	# а тяжёлый instantiate каждой машины очередь раскидывает по 1/кадр.
 	_spawn_parked_cars(points, parent)
 
 
@@ -11056,18 +11065,33 @@ func _find_parking_sign_position(parking_points: PackedVector2Array) -> Dictiona
 	return {"position": sign_pos, "rotation": rotation}
 
 
-func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void:
-	"""Создаёт асфальтовую поверхность парковки"""
+func _create_parking_surface(points: PackedVector2Array, parent: Node3D, chunk_key: String = "") -> void:
+	"""Создаёт асфальтовую поверхность парковки (ArrayMesh + ОТЛОЖЕННАЯ коллизия)."""
 	# Split into grid cells so parking follows terrain slope accurately
 	var grid_polys := _split_polygon_by_grid(points, 5.0)
 
-	var mesh := MeshInstance3D.new()
-	mesh.name = "ParkingSurface"
+	# Строим индексированные массивы (нужны и для меша, и для отложенной коллизии).
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var norms := PackedVector3Array()
+	var idxs := PackedInt32Array()
+	var height_offset := 0.005  # Высота парковки вровень с дорогами
+	var uv_ws := 1.0 / 6.0      # World-space UV (совпадает с дорогами/перекрёстками)
+	for cell_poly in grid_polys:
+		var tri := Geometry2D.triangulate_polygon(cell_poly)
+		if tri.size() < 3:
+			continue
+		var base_idx: int = verts.size()
+		for p in cell_poly:
+			verts.append(Vector3(p.x, _sample_elevation(p.x, p.y) + height_offset, p.y))
+			uvs.append(Vector2(p.x * uv_ws, p.y * uv_ws))
+			norms.append(Vector3.UP)
+		for ix in tri:
+			idxs.append(base_idx + ix)
+	if idxs.is_empty():
+		return
 
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-
-	# Создаём материал — тот же шейдер что и дороги (PBR текстура + roughness + wet mode)
+	# Материал — тот же шейдер что и дороги (PBR текстура + roughness + wet mode)
 	var albedo_tex: Texture2D = _road_textures.get("intersection", null)
 	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
 	var roughness_tex: Texture2D = _road_textures.get("road_roughness", null)
@@ -11080,54 +11104,44 @@ func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void
 	if material is ShaderMaterial:
 		WetRoadMaterial.apply_road_type_params(material, "intersection")
 
-	st.set_material(material)
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_NORMAL] = norms
+	arr[Mesh.ARRAY_INDEX] = idxs
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
 
-	# Высота парковки вровень с дорогами (service = 0.004)
-	var height_offset := 0.005
+	var mesh := MeshInstance3D.new()
+	mesh.name = "ParkingSurface"
+	mesh.mesh = arr_mesh
+	mesh.material_override = material
+	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mesh)
 
-	# Добавляем вершины треугольников
-	var uv_ws := 1.0 / 6.0  # World-space UV (совпадает с дорогами и перекрёстками)
-	for cell_poly in grid_polys:
-		var indices := Geometry2D.triangulate_polygon(cell_poly)
-		if indices.size() < 3:
-			continue
-		for i in range(0, indices.size(), 3):
-			for j in range(3):
-				var idx = indices[i + j]
-				var p = cell_poly[idx]
-				var h = _sample_elevation(p.x, p.y) + height_offset
-				st.set_uv(Vector2(p.x * uv_ws, p.y * uv_ws))
-				st.set_normal(Vector3.UP)
-				st.add_vertex(Vector3(p.x, h, p.y))
-
-	mesh.mesh = st.commit()
-
-	# Collision — StaticBody3D with trimesh collision
+	# Коллизия — ОТЛОЖЕННАЯ (ConcavePolygonShape3D ~5-25мс BVH вместо синхронного
+	# create_trimesh_collision, который и давал ~25мс фриз в фазе ways).
+	var ck := chunk_key
+	if ck.is_empty() and parent.name.begins_with("Chunk_"):
+		ck = parent.name.substr(6)
 	var body := StaticBody3D.new()
 	body.name = "ParkingCollision"
 	body.collision_layer = 1
 	body.collision_mask = 1
 	body.add_to_group("Road")
-	body.add_child(mesh)
-	mesh.create_trimesh_collision()
-	for child in mesh.get_children():
-		if child is StaticBody3D:
-			var col_shape := child.get_child(0)
-			if col_shape is CollisionShape3D:
-				child.remove_child(col_shape)
-				body.add_child(col_shape)
-			child.queue_free()
-	parent.add_child(body)
+	_budgeted_add_child(parent, body)
+	_deferred_append(_deferred_road_collisions, ck, {
+		"body": body,
+		"vertices": verts,
+		"indices": idxs,
+	})
 
 	# Track material for wet mode toggle
-	if material is ShaderMaterial:
-		var chunk_key := ""
-		if parent.name.begins_with("Chunk_"):
-			chunk_key = parent.name.substr(6)
-		if chunk_key != "":
-			if not _chunk_road_materials.has(chunk_key):
-				_chunk_road_materials[chunk_key] = []
-			_chunk_road_materials[chunk_key].append(material)
+	if material is ShaderMaterial and ck != "":
+		if not _chunk_road_materials.has(ck):
+			_chunk_road_materials[ck] = []
+		_chunk_road_materials[ck].append(material)
 
 
 func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_key: String = "") -> void:
@@ -11185,71 +11199,73 @@ func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_k
 			_chunk_road_materials[ck].append(material)
 
 
+## Бюджетно инстанцирует припаркованные машины: ПО ОДНОЙ за кадр (instantiate
+## vehicle-сцены ~40-50мс — раньше давал фриз в фазе ways). Пропускает мёртвые чанки.
+func _process_parked_cars_queue() -> void:
+	var t0 := Time.get_ticks_usec()
+	var budget_us: int = 500000 if _initial_loading else 4000
+	while not _pending_parked_cars.is_empty():
+		var req: Dictionary = _pending_parked_cars.pop_front()
+		var parent: Node3D = req["parent"]
+		if is_instance_valid(parent):
+			_instantiate_parked_car(req["pos"], float(req["rand"]), float(req["rotation_y"]), parent)
+		# Один instantiate уже пробивает 4мс-бюджет → ровно 1 машина за кадр.
+		if (Time.get_ticks_usec() - t0) > budget_us:
+			break
+
+
+## Планировщик (дёшево, на главном потоке в фазе ways): считает позиции/модели и
+## кладёт по-машинно в очередь. Без instantiate — тяжёлая часть отложена в очередь.
 func _spawn_parked_cars(parking_points: PackedVector2Array, parent: Node3D) -> void:
-	"""Спавнит 0-2 припаркованных машины на парковке"""
 	if parking_points.size() < 3:
 		return
-
-	# Количество машин: 0, 1 или 2 (случайно)
-	var car_count: int = randi() % 3
+	var car_count: int = randi() % 3  # 0, 1 или 2
 	if car_count == 0:
 		return
-
-	# Вычисляем центр парковки
 	var center := Vector2.ZERO
 	for pt in parking_points:
 		center += pt
 	center /= parking_points.size()
-
-	# Направление "вдоль" парковки (параллельно ближайшей дороге)
 	var parking_dir := _get_parking_direction(parking_points, center)
-
-	# Позиции для машин (разнесённые)
 	var spawned_positions: Array[Vector2] = []
-
 	for i in range(car_count):
 		var pos := _find_parking_spot(parking_points, center, i, spawned_positions)
 		if pos == Vector2.ZERO:
 			continue
-
 		spawned_positions.append(pos)
+		var rotation_y: float = atan2(parking_dir.x, parking_dir.y) + (randf() - 0.5) * deg_to_rad(10)
+		_pending_parked_cars.append({
+			"pos": pos,
+			"rand": randf(),  # выбор модели
+			"rotation_y": rotation_y,
+			"parent": parent,
+		})
 
-		# Выбираем случайную модель (60% коробка, 20% такси, 20% лада ДПС)
-		var car: Node3D
-		var rand := randf()
-		if rand < 0.6:
-			car = _parked_car_scene.instantiate()
-		elif rand < 0.8:
-			car = _parked_taxi_scene.instantiate()
-		else:
-			car = _parked_lada_scene.instantiate()
 
-		# Получаем высоту
-		var elevation: float = _sample_elevation(pos.x, pos.y)
-
-		# Позиционируем
-		car.position = Vector3(pos.x, elevation, pos.y)
-
-		# Поворот вдоль парковки (+ небольшая вариация ±5°)
-		var rotation_variation: float = (randf() - 0.5) * deg_to_rad(10)
-		car.rotation.y = atan2(parking_dir.x, parking_dir.y) + rotation_variation
-
-		# Отключаем только AI/управление, физика остаётся для столкновений
-		# freeze = false - машина реагирует на удары
-		car.set_process(false)  # Отключаем _process (AI логику)
-		# Оставляем physics_process для физики столкновений
-
-		# Применяем случайный цвет
-		_apply_parked_car_color(car)
-
-		# Parked-car alarm: enable contact reporting + attach the alarm component (it connects body_entered).
-		if car is RigidBody3D:
-			car.contact_monitor = true
-			car.max_contacts_reported = 4
-		parent.add_child(car)
-		var alarm := preload("res://traffic/parked_car_alarm.gd").new()
-		alarm.name = "ParkedCarAlarm"
-		car.add_child(alarm)
+## Тяжёлая часть: instantiate одной vehicle-сцены + цвет + alarm (главный поток, 1/кадр).
+func _instantiate_parked_car(pos: Vector2, rand: float, rotation_y: float, parent: Node3D) -> void:
+	# Выбираем случайную модель (60% коробка, 20% такси, 20% лада ДПС)
+	var car: Node3D
+	if rand < 0.6:
+		car = _parked_car_scene.instantiate()
+	elif rand < 0.8:
+		car = _parked_taxi_scene.instantiate()
+	else:
+		car = _parked_lada_scene.instantiate()
+	var elevation: float = _sample_elevation(pos.x, pos.y)
+	car.position = Vector3(pos.x, elevation, pos.y)
+	car.rotation.y = rotation_y
+	# Отключаем AI/_process; physics_process остаётся для физики столкновений
+	car.set_process(false)
+	_apply_parked_car_color(car)
+	# Parked-car alarm: enable contact reporting + attach the alarm component.
+	if car is RigidBody3D:
+		car.contact_monitor = true
+		car.max_contacts_reported = 4
+	parent.add_child(car)
+	var alarm := preload("res://traffic/parked_car_alarm.gd").new()
+	alarm.name = "ParkedCarAlarm"
+	car.add_child(alarm)
 
 
 func _find_parking_spot(parking_points: PackedVector2Array, center: Vector2, index: int, existing: Array[Vector2]) -> Vector2:
