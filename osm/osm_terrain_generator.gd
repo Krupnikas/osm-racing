@@ -245,7 +245,14 @@ var _created_sign_positions: Dictionary = {}  # Позиции созданны�
 var _created_bus_stop_positions: Dictionary = {}  # Позиции созданных остановок для избежания дубликатов
 var _custom_model_cache: Dictionary = {}  # path -> PackedScene
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
-var _pending_parked_cars: Array = []  # [{points, parent}] — спавн машин по 1 парковке/кадр
+var _pending_parked_cars: Array = []  # [{pos, rand, rotation_y, parent, chunk_key}] — по 1 машине/кадр
+# Пул припаркованных машин: ~95мс add_child тяжёлой VehicleBody3D-сцены платится
+# только пока пул наполняется; при выгрузке чанка машины не фрятся, а прячутся в
+# _parked_free и переиспользуются (reposition/show — дёшево).
+var _parked_free: Array = []          # свободные машины (под генератором, скрыты)
+var _parked_active: Dictionary = {}   # chunk_key -> Array[Node3D] активных
+var _parked_total: int = 0            # всего создано (для потолка)
+const PARKED_POOL_MAX := 28           # потолок пула (в плотных районах лишние пропускаем)
 var _crossing_sign_front_mat: StandardMaterial3D
 var _crossing_sign_back_mat: StandardMaterial3D
 
@@ -3533,6 +3540,15 @@ func _unload_chunk(chunk_key: String) -> void:
 		_deferred_lamp_lights.erase(chunk_key)
 		_deferred_road_collisions.erase(chunk_key)
 		_deferred_terrain_collisions.erase(chunk_key)
+		# Возвращаем припаркованные машины в пул (живут под генератором, не фрятся с чанком)
+		_return_parked_cars(chunk_key)
+		# Отбрасываем ещё не обработанные заявки на машины этого чанка
+		if not _pending_parked_cars.is_empty():
+			var _kept_pc: Array = []
+			for _pcr in _pending_parked_cars:
+				if _pcr.get("chunk_key", "") != chunk_key:
+					_kept_pc.append(_pcr)
+			_pending_parked_cars = _kept_pc
 		_deferred_footway_queue.erase(chunk_key)
 		_deferred_billboard_queue.erase(chunk_key)
 		_deferred_billboard_road_queue.erase(chunk_key)
@@ -3827,6 +3843,11 @@ func reset_terrain() -> void:
 	_vegetation_queue.clear()
 	_pending_parking_signs.clear()
 	_pending_parked_cars.clear()
+	# Припаркованные машины: возвращаем активные в пул (скрыты, переиспользуются в новом мире)
+	for _pck in _parked_active.keys():
+		for _pcar in _parked_active[_pck]:
+			_release_parked_car(_pcar)
+	_parked_active.clear()
 	_curb_queue.clear()
 	_curb_smoothed_queue.clear()
 	_curb_mesh_state.clear()
@@ -11199,17 +11220,26 @@ func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_k
 			_chunk_road_materials[ck].append(material)
 
 
-## Бюджетно инстанцирует припаркованные машины: ПО ОДНОЙ за кадр (instantiate
-## vehicle-сцены ~40-50мс — раньше давал фриз в фазе ways). Пропускает мёртвые чанки.
+## Бюджетно выдаёт припаркованные машины ПО ОДНОЙ за кадр. Переиспользует машины
+## из пула (дёшево); создаёт новую (~95мс add_child) только если пул пуст и не достигнут
+## потолок. Пропускает выгруженные чанки.
 func _process_parked_cars_queue() -> void:
 	var t0 := Time.get_ticks_usec()
 	var budget_us: int = 500000 if _initial_loading else 4000
 	while not _pending_parked_cars.is_empty():
 		var req: Dictionary = _pending_parked_cars.pop_front()
-		var parent: Node3D = req["parent"]
-		if is_instance_valid(parent):
-			_instantiate_parked_car(req["pos"], float(req["rand"]), float(req["rotation_y"]), parent)
-		# Один instantiate уже пробивает 4мс-бюджет → ровно 1 машина за кадр.
+		var ck: String = req.get("chunk_key", "")
+		# Чанк выгрузился, пока заявка ждала — пропускаем.
+		if ck == "" or not _loaded_chunks.has(ck):
+			continue
+		var car: Node3D = _acquire_parked_car()
+		if car == null:
+			break  # пул на потолке — больше в этом проходе не создаём
+		_configure_parked_car(car, req)
+		if not _parked_active.has(ck):
+			_parked_active[ck] = []
+		_parked_active[ck].append(car)
+		# Один свежий instantiate уже пробивает 4мс-бюджет → ~1 новая машина за кадр.
 		if (Time.get_ticks_usec() - t0) > budget_us:
 			break
 
@@ -11222,6 +11252,7 @@ func _spawn_parked_cars(parking_points: PackedVector2Array, parent: Node3D) -> v
 	var car_count: int = randi() % 3  # 0, 1 или 2
 	if car_count == 0:
 		return
+	var ck := _get_chunk_key_from_node(parent)
 	var center := Vector2.ZERO
 	for pt in parking_points:
 		center += pt
@@ -11236,15 +11267,23 @@ func _spawn_parked_cars(parking_points: PackedVector2Array, parent: Node3D) -> v
 		var rotation_y: float = atan2(parking_dir.x, parking_dir.y) + (randf() - 0.5) * deg_to_rad(10)
 		_pending_parked_cars.append({
 			"pos": pos,
-			"rand": randf(),  # выбор модели
 			"rotation_y": rotation_y,
 			"parent": parent,
+			"chunk_key": ck,
 		})
 
 
-## Тяжёлая часть: instantiate одной vehicle-сцены + цвет + alarm (главный поток, 1/кадр).
-func _instantiate_parked_car(pos: Vector2, rand: float, rotation_y: float, parent: Node3D) -> void:
-	# Выбираем случайную модель (60% коробка, 20% такси, 20% лада ДПС)
+## Берёт машину из пула (дёшево) или создаёт новую (~95мс, пока пул наполняется).
+## null если достигнут потолок пула.
+func _acquire_parked_car() -> Node3D:
+	while not _parked_free.is_empty():
+		var c: Node3D = _parked_free.pop_back()
+		if is_instance_valid(c):
+			return c
+	if _parked_total >= PARKED_POOL_MAX:
+		return null
+	# Создаём новую vehicle-сцену (тяжёлый add_child — один раз на слот пула).
+	var rand := randf()
 	var car: Node3D
 	if rand < 0.6:
 		car = _parked_car_scene.instantiate()
@@ -11252,20 +11291,52 @@ func _instantiate_parked_car(pos: Vector2, rand: float, rotation_y: float, paren
 		car = _parked_taxi_scene.instantiate()
 	else:
 		car = _parked_lada_scene.instantiate()
-	var elevation: float = _sample_elevation(pos.x, pos.y)
-	car.position = Vector3(pos.x, elevation, pos.y)
-	car.rotation.y = rotation_y
-	# Отключаем AI/_process; physics_process остаётся для физики столкновений
-	car.set_process(false)
-	_apply_parked_car_color(car)
-	# Parked-car alarm: enable contact reporting + attach the alarm component.
+	car.set_process(false)  # отключаем AI/_process; physics_process остаётся
 	if car is RigidBody3D:
 		car.contact_monitor = true
 		car.max_contacts_reported = 4
-	parent.add_child(car)
+	# Машины пула живут под генератором (не под чанком) → не фрятся при выгрузке.
+	add_child(car)
 	var alarm := preload("res://traffic/parked_car_alarm.gd").new()
 	alarm.name = "ParkedCarAlarm"
 	car.add_child(alarm)
+	_parked_total += 1
+	return car
+
+
+## Размещает машину пула на парковке (дёшево: позиция/цвет/видимость).
+func _configure_parked_car(car: Node3D, req: Dictionary) -> void:
+	var pos: Vector2 = req["pos"]
+	car.global_position = Vector3(pos.x, _sample_elevation(pos.x, pos.y), pos.y)
+	car.rotation.y = float(req["rotation_y"])
+	car.collision_layer = 4
+	car.collision_mask = 1
+	if car is RigidBody3D:
+		car.freeze = false  # реагирует на удары (alarm на столкновении)
+	car.visible = true
+	_apply_parked_car_color(car)
+
+
+## Возвращает машину в пул: прячет, замораживает, отключает коллизию, убирает вниз.
+func _release_parked_car(car: Node3D) -> void:
+	if not is_instance_valid(car):
+		return
+	car.visible = false
+	car.collision_layer = 0
+	car.collision_mask = 0
+	if car is RigidBody3D:
+		car.freeze = true
+	car.global_position = Vector3(0.0, -3000.0, 0.0)
+	_parked_free.append(car)
+
+
+## Вызывается при выгрузке чанка — возвращает все его машины в пул (не фрит).
+func _return_parked_cars(chunk_key: String) -> void:
+	if not _parked_active.has(chunk_key):
+		return
+	for car in _parked_active[chunk_key]:
+		_release_parked_car(car)
+	_parked_active.erase(chunk_key)
 
 
 func _find_parking_spot(parking_points: PackedVector2Array, center: Vector2, index: int, existing: Array[Vector2]) -> Vector2:
