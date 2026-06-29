@@ -65,6 +65,15 @@ var _race_route: RaceRoute  # Маршрут для AI
 var _opponents: Array = []  # Array[RacerAI] - спавненные соперники
 var _finish_order: Array = []  # [{name, time, is_player}] - порядок финиша
 
+# Live HUD data (standings / progress / next-turn) — считается по запросу на такте HUD (5 Гц)
+static var race_hud_debug := false
+var _standings_state := {}   # { key: { last_pos: int } } — для стрелок тренда
+var _player_seg_hint := 0    # кэш сегмента маршрута для проекции игрока (инкрементальный поиск)
+const STANDINGS_MIN_SPEED := 8.0   # м/с — пол знаменателя для оценки гэпа
+const NEXT_TURN_LOOKAHEAD := 250.0 # м — окно поиска ближайшего поворота
+const NEXT_TURN_MIN_DEG := 18.0    # ° — порог «значимого» изгиба
+const NEXT_TURN_FLIP := true       # XZ-базис зеркалит cross → left/right перевёрнуты, флипаем (подтверждено в игре)
+
 
 func _ready() -> void:
 	await get_tree().process_frame
@@ -377,6 +386,10 @@ func _build_race_route() -> void:
 	"""Строит маршрут гонки для AI соперников"""
 	if not current_track:
 		return
+
+	# Сброс live-HUD кэшей под новую гонку
+	_standings_state.clear()
+	_player_seg_hint = 0
 
 	# Приоритет маршрутов:
 	# 1. Dense route_points (>10 точек) — лучший вариант
@@ -1375,3 +1388,176 @@ func get_current_checkpoint_index() -> int:
 func is_checkpoint_mode() -> bool:
 	"""Проверить активен ли режим чекпоинтов"""
 	return _checkpoint_mode
+
+
+# ===== LIVE HUD DATA (standings / progress / next-turn) =====
+# Считается по запросу из race_hud.gd на такте 0.2с. Геометрия — переиспользуем RaceRoute.
+
+func _xz(v: Vector3) -> Vector2:
+	return Vector2(v.x, v.z)
+
+
+## Проекция игрока на маршрут (инкрементально от кэш-хинта). Возвращает дистанцию от старта (м).
+func _project_player_distance() -> float:
+	if _car == null or not is_instance_valid(_car) or _race_route == null or _race_route.points.size() < 2:
+		return 0.0
+	var proj: Dictionary = _race_route.project_position(_car.global_position, maxi(0, _player_seg_hint - 1))
+	_player_seg_hint = int(proj.get("segment_idx", _player_seg_hint))
+	return float(proj.get("distance", 0.0))
+
+
+## Живая таблица мест для StandingsPanel. Форма, которую уже потребляет race_hud._update_standings():
+## { rows: [{name, is_player, trend, gap_seconds}], player_pos, total }.
+func get_live_standings() -> Dictionary:
+	if _race_route == null or _race_route.points.size() < 2:
+		return {}
+	# Allow during COUNTDOWN too (opponents + route already exist) so the panel
+	# is correct the moment the cards appear, not only once RACING begins.
+	if current_state != State.RACING and current_state != State.FINISHED and current_state != State.COUNTDOWN:
+		return {}
+
+	var total_len: float = _race_route.total_length
+
+	# Финиш: ключ -> {rank, time}. Игрок матчится по is_player, соперники по имени.
+	var finish_rank := {}
+	for i in range(_finish_order.size()):
+		var f: Dictionary = _finish_order[i]
+		var fkey: String = "player" if bool(f.get("is_player", false)) else "name:%s" % str(f.get("name", ""))
+		finish_rank[fkey] = {"rank": i, "time": float(f.get("time", 0.0))}
+
+	# Сущности
+	var entries := []
+	var p_fin: Dictionary = finish_rank.get("player", {})
+	entries.append({
+		"key": "player", "name": "ВЫ", "is_player": true,
+		"distance": (total_len if not p_fin.is_empty() else _project_player_distance()),
+		"finished": not p_fin.is_empty(),
+		"finish_rank": int(p_fin.get("rank", 1 << 20)),
+		"finish_time": float(p_fin.get("time", 0.0)),
+	})
+	for opp in _opponents:
+		if not is_instance_valid(opp):
+			continue
+		var nm: String = str(opp.racer_name) if opp.get("racer_name") != null else "AI"
+		var o_fin: Dictionary = finish_rank.get("name:%s" % nm, {})
+		var od: float = float(opp.get_race_progress()) if opp.has_method("get_race_progress") else 0.0
+		entries.append({
+			"key": "opp_%d" % opp.get_instance_id(), "name": nm, "is_player": false,
+			"distance": (total_len if not o_fin.is_empty() else od),
+			"finished": not o_fin.is_empty(),
+			"finish_rank": int(o_fin.get("rank", 1 << 20)),
+			"finish_time": float(o_fin.get("time", 0.0)),
+		})
+
+	# Сортировка: финишировавшие первыми (по порядку финиша), затем активные по дистанции (убыв.)
+	entries.sort_custom(func(a, b):
+		if a["finished"] != b["finished"]:
+			return a["finished"]
+		if a["finished"] and b["finished"]:
+			return a["finish_rank"] < b["finish_rank"]
+		return a["distance"] > b["distance"])
+
+	# Позиция игрока + опорные значения
+	var player_pos := 1
+	var player_entry: Dictionary = entries[0]
+	for i in range(entries.size()):
+		if entries[i]["is_player"]:
+			player_pos = i + 1
+			player_entry = entries[i]
+			break
+
+	var p_speed := STANDINGS_MIN_SPEED
+	if _car_rigidbody and is_instance_valid(_car_rigidbody):
+		p_speed = maxf(STANDINGS_MIN_SPEED, _car_rigidbody.linear_velocity.length())
+
+	# Строки + тренд (vs прошлый опрос) + гэп относительно игрока
+	var rows := []
+	var new_state := {}
+	for i in range(entries.size()):
+		var e: Dictionary = entries[i]
+		var place := i + 1
+		var trend := 0
+		if _standings_state.has(e["key"]):
+			var last_pos: int = int(_standings_state[e["key"]].get("last_pos", place))
+			trend = 1 if last_pos > place else (-1 if last_pos < place else 0)
+		new_state[e["key"]] = {"last_pos": place}
+
+		var gap := 0.0
+		if not e["is_player"]:
+			if e["finished"] and player_entry["finished"]:
+				gap = e["finish_time"] - player_entry["finish_time"]   # раньше финишировал → < 0 (зелёный)
+			else:
+				gap = (player_entry["distance"] - e["distance"]) / p_speed  # впереди → < 0 (зелёный)
+			if is_nan(gap) or is_inf(gap):
+				gap = 0.0
+			gap = clampf(gap, -3599.0, 3599.0)
+		rows.append({"name": e["name"], "is_player": e["is_player"], "trend": trend, "gap_seconds": gap})
+	_standings_state = new_state
+
+	if race_hud_debug:
+		var dbg := []
+		for i in range(entries.size()):
+			dbg.append("%d.%s d=%.0f%s" % [i + 1, entries[i]["name"], entries[i]["distance"], " FIN" if entries[i]["finished"] else ""])
+		print("[RaceHUD] standings pos=%d/%d spd=%.1f | %s" % [player_pos, entries.size(), p_speed, ", ".join(dbg)])
+
+	return {"rows": rows, "player_pos": player_pos, "total": entries.size()}
+
+
+## Прогресс гонки для панели игрока (sprint % или чекпоинт X/Y). Только данные игрока.
+func get_race_progress() -> Dictionary:
+	var out := {
+		"is_checkpoint": is_checkpoint_mode(),
+		"progress_percent": 0,
+		"checkpoint_index": 0,
+		"checkpoint_total": 0,
+		"checkpoint_timer": 0.0,
+		"distance_to_finish": 0.0,
+	}
+	if is_checkpoint_mode():
+		out["checkpoint_index"] = _current_checkpoint_index + 1
+		if current_track and current_track.get("checkpoints") != null:
+			out["checkpoint_total"] = (current_track.checkpoints as Array).size()
+		out["checkpoint_timer"] = _checkpoint_timer
+	if _race_route and _race_route.total_length > 1.0:
+		var d := _project_player_distance()
+		out["progress_percent"] = int(round(_race_route.get_progress_percent(d)))
+		out["distance_to_finish"] = maxf(0.0, _race_route.total_length - d)
+	return out
+
+
+## Ближайший значимый поворот впереди по маршруту. Форма под NextTurnCard.set_turn().
+## { valid, direction(left|right|straight), severity(easy|medium|sharp), distance_m }.
+func get_next_turn() -> Dictionary:
+	if (current_state != State.RACING and current_state != State.COUNTDOWN) or _race_route == null:
+		return {"valid": false}
+	var pts: Array = _race_route.points
+	if pts.size() < 3 or _car == null or not is_instance_valid(_car):
+		return {"valid": false}
+	var proj: Dictionary = _race_route.project_position(_car.global_position, maxi(0, _player_seg_hint - 1))
+	var cur_dist: float = float(proj.get("distance", 0.0))
+	var start_idx: int = int(proj.get("segment_idx", 0))
+	for i in range(start_idx, pts.size() - 2):
+		var pv = pts[i + 1]   # вершина потенциального изгиба
+		var vdist: float = pv.distance_from_start
+		if vdist < cur_dist:
+			continue
+		if vdist - cur_dist > NEXT_TURN_LOOKAHEAD:
+			break
+		var d_in := _xz(pts[i + 1].position - pts[i].position)
+		var d_out := _xz(pts[i + 2].position - pts[i + 1].position)
+		if d_in.length() < 0.05 or d_out.length() < 0.05:
+			continue
+		d_in = d_in.normalized()
+		d_out = d_out.normalized()
+		var ang := rad_to_deg(acos(clampf(d_in.dot(d_out), -1.0, 1.0)))
+		if ang < NEXT_TURN_MIN_DEG:
+			continue
+		var cross := d_in.x * d_out.y - d_in.y * d_out.x
+		var is_left := (cross > 0.0) != NEXT_TURN_FLIP
+		var direction := "left" if is_left else "right"
+		var severity := "sharp" if ang >= 60.0 else ("medium" if ang >= 30.0 else "easy")
+		var dist_m := int(round(vdist - cur_dist))
+		if race_hud_debug:
+			print("[RaceHUD] next_turn dir=%s sev=%s ang=%.0f dist=%d cross=%.2f" % [direction, severity, ang, dist_m, cross])
+		return {"valid": true, "direction": direction, "severity": severity, "distance_m": dist_m}
+	return {"valid": false}

@@ -34,7 +34,7 @@ START_LAT = 59.149886  # from main.tscn
 START_LON = 37.949370
 CHUNK_SIZE = 210.0     # from main.tscn
 QUERY_RADIUS = 315     # maxf(210, 150) + 210/2 = 315
-CACHE_VERSION = 8  # align with osm_loader.gd CACHE_VERSION; v8 adds node[highway=traffic_signals]
+CACHE_VERSION = 10  # align with osm_loader.gd CACHE_VERSION; v10 adds node[highway=give_way] (give_way_nodes w/ node id)
 
 REMOTE_SERVERS = [
     "http://mc.skrup.ru:12346/api/interpreter",
@@ -129,6 +129,7 @@ def build_overpass_query(center_lat: float, center_lon: float, radius_m: int) ->
   node["public_transport"="platform"]({b});
   node["public_transport"="station"]({b});
   node["railway"="tram_stop"]({b});
+  node["highway"="give_way"]({b});
 );
 out body geom;
 >;
@@ -196,6 +197,7 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
     pedestrian_areas = []
     bridge_decks = []
     traffic_signals = []  # node highway=traffic_signals — keep node id for dedup
+    give_way_nodes = []  # node highway=give_way — keep node id (Wave 1C give-way signs)
 
     for el in data.get("elements", []):
         if el.get("type") == "node":
@@ -220,7 +222,7 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
                 is_platform = pt in ("platform", "station")
                 if is_bus_stop or is_bus_station or is_platform:
                     bus_stops.append({
-                        "lat": el["lat"], "lon": el["lon"], "tags": tags
+                        "id": el["id"], "lat": el["lat"], "lon": el["lon"], "tags": tags
                     })
 
                 if tags.get("railway") == "tram_stop":
@@ -233,9 +235,14 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
                     traffic_signals.append({
                         "id": el["id"], "lat": el["lat"], "lon": el["lon"], "tags": tags
                     })
+                elif tags.get("highway") == "give_way":
+                    # Give-way: dedicated array w/ node id (Wave 1C); excluded from generic point_objects
+                    give_way_nodes.append({
+                        "id": el["id"], "lat": el["lat"], "lon": el["lon"], "tags": tags
+                    })
                 else:
                     point_objects.append({
-                        "lat": el["lat"], "lon": el["lon"], "tags": tags
+                        "id": el["id"], "lat": el["lat"], "lon": el["lon"], "tags": tags
                     })
 
     for el in data.get("elements", []):
@@ -330,6 +337,7 @@ def parse_osm_data(data: dict, center_lat: float, center_lon: float) -> dict:
         "pedestrian_areas": pedestrian_areas,
         "bridge_decks": bridge_decks,
         "traffic_signals": traffic_signals,
+        "give_way_nodes": give_way_nodes,
     }
 
 

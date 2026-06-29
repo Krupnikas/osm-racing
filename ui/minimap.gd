@@ -10,30 +10,64 @@ const MAP_CENTER := Vector2(140, 140)  # Центр карты (с отступ�
 const WORLD_RADIUS := 150.0      # Радиус видимости в мировых метрах
 const CACHE_EXTRA_RADIUS := 100.0  # Дополнительный радиус кэширования (впереди и сзади)
 
-# Цвета (как на референсе NFS)
-const BG_COLOR := Color(0.12, 0.12, 0.15, 0.85)    # Тёмный фон
-const ROAD_COLOR_BASE := Color(0.65, 0.65, 0.65)   # Базовый серый для дорог
-const BORDER_COLOR := Color(0.35, 0.4, 0.5, 1.0)   # Серая рамка
+# Цвета берутся из палитры день/ночь (_palette(), ниже). Рамка:
 const BORDER_WIDTH := 4.0
 
-# Цвета маркеров
-const PLAYER_COLOR := Color(0.2, 0.9, 0.3, 1.0)    # Зелёная стрелка
-const OPPONENT_COLOR := Color(1.0, 0.35, 0.2, 1.0) # Красные/оранжевые точки
-const CHECKPOINT_COLOR := Color(1.0, 0.85, 0.0, 1.0)  # Жёлтые чекпоинты
-const PLAYER_SIZE := 14.0        # Размер стрелки игрока
+# Размеры маркеров
 const OPPONENT_SIZE := 8.0       # Размер точек соперников
 const CHECKPOINT_SIZE := 11.0    # Размер чекпоинтов
 const FINISH_SIZE := 14.0        # Размер финиша
 
-# Ширина линий дорог в пикселях
-const ROAD_LINE_WIDTH_MAJOR := 5.0    # ширина >= 12м (motorway, trunk, primary)
-const ROAD_LINE_WIDTH_MEDIUM := 3.5   # ширина 8-11м (secondary, tertiary)
-const ROAD_LINE_WIDTH_MINOR := 2.5    # ширина < 8м (residential, service)
+# Дороги по КЛАССУ (highway), а не по физической ширине: иначе service с lanes=2
+# (≈7м) и tertiary (8м) попадают в один тир. Тиры: 0 крупные / 1 средние / 2 мелкие / 3 service.
+const ROAD_TIER_WIDTH := [5.0, 3.5, 2.5, 1.6]   # px
+# «Прозрачность» задаётся как доля подмешивания цвета дороги к фону диска — но рисуем
+# НЕПРОЗРАЧНО (см. _get_road_style), чтобы пересечения не складывались в яркие точки.
+# День: тёмные дороги на кремовом — хватает малой доли. Ночь: светлый янтарь на графите —
+# нужна бОльшая доля, иначе мелкие дорожки (service) тонут в фоне.
+const ROAD_TIER_BLEND_DAY := [0.46, 0.30, 0.17, 0.13]
+const ROAD_TIER_BLEND_NIGHT := [0.90, 0.70, 0.52, 0.42]
+const ROAD_TIER := {
+	"motorway": 0, "trunk": 0, "primary": 0,
+	"motorway_link": 0, "trunk_link": 0, "primary_link": 0,
+	"secondary": 1, "tertiary": 1, "secondary_link": 1, "tertiary_link": 1,
+	"residential": 2, "unclassified": 2, "living_street": 2, "road": 2, "busway": 2,
+	"service": 3, "track": 3, "alley": 3, "driveway": 3, "parking_aisle": 3,
+}
 
-# Прозрачность дорог (чем меньше дорога, тем прозрачнее)
-const ROAD_ALPHA_MAJOR := 0.95
-const ROAD_ALPHA_MEDIUM := 0.8
-const ROAD_ALPHA_MINOR := 0.55
+# Безель (кольцо делений) перекрывает сетку: контент клиппится по внутреннему радиусу
+const BEZEL_INSET := 20.0
+var _content_radius: float:
+	get:
+		return MAP_RADIUS - BEZEL_INSET
+
+# Палитра день/ночь (парная спидометру). Переключается по сигналу night_mode_manager.
+var _is_night := false
+const DAY := {
+	"bg":         Color("#f4eccc", 0.90),   # кремовый диск, почти непрозрачный
+	"border":     Color("#3c2814", 0.55),   # тёмная оправа
+	"road":       Color("#1c1612"),         # тёмные дороги (альфа из _get_road_style)
+	"route":      Color("#1fc8d8", 0.72),   # циановый маршрут
+	"player":     Color("#3f8a1e"),         # зелёная стрелка
+	"opponent":   Color("#b3251e"),         # красные соперники
+	"checkpoint": Color("#c0871e"),         # янтарный чекпоинт
+	"tick":       Color("#1c1612", 0.45),   # деления безеля
+	"halo":       Color("#f8f1de", 0.82),   # подложка под стрелкой
+}
+const NIGHT := {
+	"bg":         Color("#14110e", 0.92),
+	"border":     Color("#ffb450", 0.30),
+	"road":       Color("#ffd17a"),
+	"route":      Color("#5fd8e8", 0.72),
+	"player":     Color("#9ddc7a"),
+	"opponent":   Color("#ff6b5a"),
+	"checkpoint": Color("#ffc24d"),
+	"tick":       Color("#ffd17a", 0.50),
+	"halo":       Color("#080706", 0.78),
+}
+
+func _palette() -> Dictionary:
+	return NIGHT if _is_night else DAY
 
 # Ссылки
 var _car: Node3D
@@ -58,8 +92,7 @@ var _show_checkpoints := false
 # Маршрут гонки (визуализация)
 var _route_points_local: Array = []  # Array[Vector2] - точки маршрута в локальных координатах (x, z)
 var _route_segments: Dictionary = {}  # {segment_key: true} - сегменты на маршруте
-const ROUTE_COLOR := Color(0.3, 0.7, 1.0, 0.95)  # Голубой
-const ROUTE_LINE_WIDTH := 4.0  # Ширина линии маршрута
+const ROUTE_LINE_WIDTH := 5.5  # Ширина линии маршрута (цвет — из палитры)
 const ROUTE_MATCH_DISTANCE := 6.0  # Метры - максимальное расстояние от отрезка маршрута
 
 # Маркеры режима работы (такси)
@@ -86,7 +119,20 @@ func _ready() -> void:
 	# Пробуем найти terrain generator
 	_try_find_terrain_generator()
 
+	# Подписка на день/ночь (палитра парная спидометру)
+	var nm := get_tree().current_scene.find_child("NightModeManager", true, false)
+	if nm and nm.has_signal("night_mode_changed"):
+		if not nm.night_mode_changed.is_connected(_on_night_mode_changed):
+			nm.night_mode_changed.connect(_on_night_mode_changed)
+		if "is_night" in nm:
+			_is_night = nm.is_night   # начальное состояние
+
 	print("MiniMap: Initialized (car=%s, terrain=%s)" % [_car != null, _terrain_generator != null])
+	queue_redraw()
+
+
+func _on_night_mode_changed(is_night: bool) -> void:
+	_is_night = is_night
 	queue_redraw()
 
 
@@ -114,8 +160,9 @@ func _draw() -> void:
 	_update_road_cache(player_pos)
 
 	# 1. Рисуем фон (круг)
-	draw_circle(MAP_CENTER, MAP_RADIUS + 2, BORDER_COLOR)
-	draw_circle(MAP_CENTER, MAP_RADIUS, BG_COLOR)
+	var pal := _palette()
+	draw_circle(MAP_CENTER, MAP_RADIUS + 2, pal["border"])
+	draw_circle(MAP_CENTER, MAP_RADIUS, pal["bg"])
 
 	# 2. Рисуем дороги (с вращением и clipping)
 	_draw_roads(player_pos, player_rotation)
@@ -142,15 +189,35 @@ func _draw() -> void:
 	# 5. Рисуем игрока (всегда в центре, стрелка вверх)
 	_draw_player_marker()
 
-	# 6. Рисуем рамку поверх всего
-	draw_arc(MAP_CENTER, MAP_RADIUS, 0, TAU, 64, BORDER_COLOR, BORDER_WIDTH, true)
+	# 6. Безель (кольцо делений + рамка) поверх всего — визуально обрезает сетку
+	_draw_bezel()
+
+
+func _draw_bezel() -> void:
+	"""Кольцо делений по краю (как у спидометра) + тонкое внутреннее кольцо + рамка."""
+	var pal := _palette()
+	var tick: Color = pal["tick"]
+	for i in 60:
+		var a := deg_to_rad(i * 6.0 - 90.0)
+		var major := i % 5 == 0
+		var r1 := MAP_RADIUS - (13.0 if major else 7.0)
+		var r2 := MAP_RADIUS - 2.0
+		var col := tick
+		col.a = tick.a * (1.0 if major else 0.56)
+		var dir := Vector2(cos(a), sin(a))
+		draw_line(MAP_CENTER + dir * r1, MAP_CENTER + dir * r2, col, 2.0 if major else 1.0, true)
+	# тонкое внутреннее кольцо (граница контента)
+	draw_arc(MAP_CENTER, MAP_RADIUS - 17.0, 0, TAU, 64, Color(pal["border"], 0.5), 1.0, true)
+	# внешняя рамка
+	draw_arc(MAP_CENTER, MAP_RADIUS, 0, TAU, 64, pal["border"], BORDER_WIDTH, true)
 
 
 func _draw_empty_map() -> void:
 	"""Рисует пустую карту (когда нет машины)"""
-	draw_circle(MAP_CENTER, MAP_RADIUS + 2, BORDER_COLOR)
-	draw_circle(MAP_CENTER, MAP_RADIUS, BG_COLOR)
-	draw_arc(MAP_CENTER, MAP_RADIUS, 0, TAU, 64, BORDER_COLOR, BORDER_WIDTH, true)
+	var pal := _palette()
+	draw_circle(MAP_CENTER, MAP_RADIUS + 2, pal["border"])
+	draw_circle(MAP_CENTER, MAP_RADIUS, pal["bg"])
+	_draw_bezel()
 
 
 func _update_road_cache(player_pos: Vector3) -> void:
@@ -194,26 +261,28 @@ func _update_road_cache(player_pos: Vector3) -> void:
 	_update_route_segments_cache()
 
 
-func _get_road_style(width: float) -> Dictionary:
-	"""Возвращает толщину линии и цвет в зависимости от ширины дороги"""
-	var line_width: float
-	var alpha: float
-
+func _road_tier(hw: String, width: float) -> int:
+	"""Тир дороги по классу (highway). Фолбэк по физической ширине, если класс неизвестен."""
+	if ROAD_TIER.has(hw):
+		return ROAD_TIER[hw]
 	if width >= 12.0:
-		# Крупные дороги: motorway, trunk, primary
-		line_width = ROAD_LINE_WIDTH_MAJOR
-		alpha = ROAD_ALPHA_MAJOR
+		return 0
 	elif width >= 8.0:
-		# Средние дороги: secondary, tertiary
-		line_width = ROAD_LINE_WIDTH_MEDIUM
-		alpha = ROAD_ALPHA_MEDIUM
-	else:
-		# Мелкие дороги: residential, service
-		line_width = ROAD_LINE_WIDTH_MINOR
-		alpha = ROAD_ALPHA_MINOR
+		return 1
+	return 2
 
-	var color := Color(ROAD_COLOR_BASE.r, ROAD_COLOR_BASE.g, ROAD_COLOR_BASE.b, alpha)
-	return {"width": line_width, "color": color}
+
+func _get_road_style(hw: String, width: float) -> Dictionary:
+	"""Толщина и цвет линии по классу дороги. Цвет — НЕПРОЗРАЧНЫЙ результат подмешивания
+	дороги к фону диска: одиночная линия выглядит как полупрозрачная, но пересечения двух
+	линий не складываются в яркую точку (рисуем opaque поверх opaque)."""
+	var tier := _road_tier(hw, width)
+	var pal := _palette()
+	var bg: Color = pal["bg"]
+	var road: Color = pal["road"]
+	var blend: Array = ROAD_TIER_BLEND_NIGHT if _is_night else ROAD_TIER_BLEND_DAY
+	var color := Color(bg.r, bg.g, bg.b).lerp(Color(road.r, road.g, road.b), blend[tier])
+	return {"width": ROAD_TIER_WIDTH[tier], "color": color, "tier": tier}
 
 
 func _draw_roads(player_pos: Vector3, player_rotation: float) -> void:
@@ -224,23 +293,25 @@ func _draw_roads(player_pos: Vector3, player_rotation: float) -> void:
 	# Угол вращения: +player_rotation чтобы карта вращалась в правильную сторону
 	var angle := player_rotation
 
-	# Сначала рисуем мелкие дороги, потом крупные (чтобы крупные были сверху)
-	# Сортируем сегменты по ширине
+	# Рисуем мелкие дороги первыми, крупные сверху — сортируем по ТИРУ (3→0)
 	var sorted_segments := _cached_road_segments.duplicate()
-	sorted_segments.sort_custom(func(a, b): return a.width < b.width)
+	sorted_segments.sort_custom(func(a, b):
+		return _road_tier(str(a.get("highway", "")), a.get("width", 5.0)) \
+			> _road_tier(str(b.get("highway", "")), b.get("width", 5.0)))
 
 	for seg in sorted_segments:
 		var p1: Vector2 = seg.p1
 		var p2: Vector2 = seg.p2
 		var road_width: float = seg.width
+		var hw: String = str(seg.get("highway", ""))
 
-		# Получаем стиль для этой дороги
-		var style := _get_road_style(road_width)
+		# Получаем стиль для этой дороги (по классу)
+		var style := _get_road_style(hw, road_width)
 
 		# Проверяем, на маршруте ли сегмент
 		var seg_key := _segment_key(p1, p2)
 		if _route_segments.has(seg_key):
-			style.color = ROUTE_COLOR
+			style.color = _palette()["route"]
 
 		# Трансформируем точки
 		var rel1 := p1 - player_pos_2d
@@ -262,11 +333,12 @@ func _draw_roads(player_pos: Vector3, player_rotation: float) -> void:
 		var screen1 := MAP_CENTER + rot1 * scale
 		var screen2 := MAP_CENTER + rot2 * scale
 
-		# Clip по кругу
+		# Clip по внутреннему радиусу (безель остаётся снаружи)
+		var cr := _content_radius
 		var from_center1 := screen1 - MAP_CENTER
 		var from_center2 := screen2 - MAP_CENTER
-		var inside1 := from_center1.length() <= MAP_RADIUS
-		var inside2 := from_center2.length() <= MAP_RADIUS
+		var inside1 := from_center1.length() <= cr
+		var inside2 := from_center2.length() <= cr
 
 		if inside1 and inside2:
 			# Обе точки внутри - рисуем линию
@@ -285,7 +357,7 @@ func _draw_roads(player_pos: Vector3, player_rotation: float) -> void:
 			# пересечения и рисуем хорду.
 			var closest := Geometry2D.get_closest_point_to_segment(
 				MAP_CENTER, screen1, screen2)
-			if closest.distance_to(MAP_CENTER) <= MAP_RADIUS:
+			if closest.distance_to(MAP_CENTER) <= cr:
 				var clip1 := _clip_to_circle(closest, screen1)
 				var clip2 := _clip_to_circle(closest, screen2)
 				draw_line(clip1, clip2, style.color, style.width, true)
@@ -307,29 +379,31 @@ func _draw_route_line(player_pos: Vector3, player_rotation: float) -> void:
 		var rot: Vector2 = rel.rotated(angle)
 		screen_pts.append(MAP_CENTER + rot * scale)
 
-	# Рисуем сегменты с клиппингом по кругу
+	# Рисуем сегменты с клиппингом по внутреннему радиусу
+	var route_col: Color = _palette()["route"]
+	var cr := _content_radius
 	for i in range(screen_pts.size() - 1):
 		var s1: Vector2 = screen_pts[i]
 		var s2: Vector2 = screen_pts[i + 1]
 
 		var d1: float = (s1 - MAP_CENTER).length()
 		var d2: float = (s2 - MAP_CENTER).length()
-		var in1: bool = d1 <= MAP_RADIUS
-		var in2: bool = d2 <= MAP_RADIUS
+		var in1: bool = d1 <= cr
+		var in2: bool = d2 <= cr
 
 		if in1 and in2:
-			draw_line(s1, s2, ROUTE_COLOR, ROUTE_LINE_WIDTH, true)
+			draw_line(s1, s2, route_col, ROUTE_LINE_WIDTH, true)
 		elif in1:
-			draw_line(s1, _clip_to_circle(s1, s2), ROUTE_COLOR, ROUTE_LINE_WIDTH, true)
+			draw_line(s1, _clip_to_circle(s1, s2), route_col, ROUTE_LINE_WIDTH, true)
 		elif in2:
-			draw_line(_clip_to_circle(s2, s1), s2, ROUTE_COLOR, ROUTE_LINE_WIDTH, true)
+			draw_line(_clip_to_circle(s2, s1), s2, route_col, ROUTE_LINE_WIDTH, true)
 		else:
 			# Обе снаружи — проверяем пересечение через центр
 			var mid := (s1 + s2) / 2.0
-			if (mid - MAP_CENTER).length() <= MAP_RADIUS:
+			if (mid - MAP_CENTER).length() <= cr:
 				var c1 := _clip_to_circle(MAP_CENTER, s1)
 				var c2 := _clip_to_circle(MAP_CENTER, s2)
-				draw_line(c1, c2, ROUTE_COLOR, ROUTE_LINE_WIDTH, true)
+				draw_line(c1, c2, route_col, ROUTE_LINE_WIDTH, true)
 
 
 func _clip_to_circle(inside_point: Vector2, outside_point: Vector2) -> Vector2:
@@ -340,7 +414,7 @@ func _clip_to_circle(inside_point: Vector2, outside_point: Vector2) -> Vector2:
 	# Решаем квадратное уравнение для пересечения с окружностью
 	var a := dir.dot(dir)
 	var b := 2.0 * to_center.dot(dir)
-	var c := to_center.dot(to_center) - MAP_RADIUS * MAP_RADIUS
+	var c := to_center.dot(to_center) - _content_radius * _content_radius
 
 	var discriminant := b * b - 4.0 * a * c
 	if discriminant < 0:
@@ -378,26 +452,27 @@ func _draw_opponents(player_pos: Vector3, player_rotation: float) -> void:
 		var screen_pos := MAP_CENTER + rotated * scale
 
 		# Проверяем что внутри круга
-		if (screen_pos - MAP_CENTER).length() <= MAP_RADIUS - OPPONENT_SIZE:
+		if (screen_pos - MAP_CENTER).length() <= _content_radius - OPPONENT_SIZE:
 			# Рисуем точку соперника
-			draw_circle(screen_pos, OPPONENT_SIZE, OPPONENT_COLOR)
+			draw_circle(screen_pos, OPPONENT_SIZE, _palette()["opponent"])
 
 			# Маленькая белая точка в центре для лучшей видимости
 			draw_circle(screen_pos, 2.0, Color.WHITE)
 
 
 func _draw_player_marker() -> void:
-	"""Рисует стрелку игрока в центре (направлена вверх)"""
-	# Треугольная стрелка вверх (как на референсе)
-	var tip := MAP_CENTER + Vector2(0, -PLAYER_SIZE)
-	var left := MAP_CENTER + Vector2(-PLAYER_SIZE * 0.6, PLAYER_SIZE * 0.5)
-	var right := MAP_CENTER + Vector2(PLAYER_SIZE * 0.6, PLAYER_SIZE * 0.5)
-
-	var points := PackedVector2Array([tip, left, right])
-	draw_colored_polygon(points, PLAYER_COLOR)
-
-	# Белая обводка для лучшей видимости
-	draw_polyline(PackedVector2Array([tip, left, right, tip]), Color.WHITE, 1.5, true)
+	"""Крупная стрелка игрока в центре с подложкой-гало (читается поверх дорог)."""
+	var pal := _palette()
+	# Подложка-гало (пропорции от прототипа R150 → наш R130)
+	draw_circle(MAP_CENTER, 17.0, pal["halo"])
+	draw_arc(MAP_CENTER, 17.0, 0, TAU, 24, Color(pal["player"], 0.55), 1.5, true)
+	# Стрелка с выемкой сзади
+	var tip := MAP_CENTER + Vector2(0, -16)
+	var left := MAP_CENTER + Vector2(-10, 11)
+	var notch := MAP_CENTER + Vector2(0, 5)
+	var right := MAP_CENTER + Vector2(10, 11)
+	draw_colored_polygon(PackedVector2Array([tip, left, notch, right]), pal["player"])
+	draw_polyline(PackedVector2Array([tip, left, notch, right, tip]), Color.WHITE, 1.5, true)
 
 
 # ===== ПУБЛИЧНЫЕ МЕТОДЫ =====
@@ -579,9 +654,9 @@ func _draw_checkpoints(player_pos: Vector3, player_rotation: float) -> void:
 		var screen_pos := MAP_CENTER + rotated * scale
 
 		# Проверяем что внутри круга
-		if (screen_pos - MAP_CENTER).length() <= MAP_RADIUS - CHECKPOINT_SIZE:
+		if (screen_pos - MAP_CENTER).length() <= _content_radius - CHECKPOINT_SIZE:
 			# Текущий чекпоинт - ярче, следующие - бледнее
-			var color := CHECKPOINT_COLOR
+			var color: Color = _palette()["checkpoint"]
 			if i > _current_checkpoint_index:
 				color.a = 0.5
 
@@ -613,7 +688,7 @@ func _draw_finish_marker(player_pos: Vector3, player_rotation: float) -> void:
 	var screen_pos := MAP_CENTER + rotated * scale
 
 	# Проверяем что внутри круга
-	if (screen_pos - MAP_CENTER).length() > MAP_RADIUS - FINISH_SIZE:
+	if (screen_pos - MAP_CENTER).length() > _content_radius - FINISH_SIZE:
 		return
 
 	# Рисуем шахматный кружок (8 сегментов)

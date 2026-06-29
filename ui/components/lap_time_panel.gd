@@ -50,6 +50,23 @@ func set_lap(current: int, total: int) -> void:
 	_lap_total.text = "/%02d" % total
 
 
+# Repurpose (v1): the panel shows total race time + checkpoint/progress, not laps.
+func set_header(text: String) -> void:
+	if _hdr_label:
+		_hdr_label.text = text
+
+
+func set_caption(text: String) -> void:
+	if _lap_caption:
+		_lap_caption.text = text
+
+
+# Sprint progress as a single big "NN%" (no /total), to avoid baseline/width drift.
+func set_progress(percent: int) -> void:
+	_lap_current.text = "%d%%" % clampi(percent, 0, 100)
+	_lap_total.text = ""
+
+
 # Splits "MM:SS.mmm" so the milliseconds are tinted with the accent color.
 func set_time(text: String) -> void:
 	var dot := text.find(".")

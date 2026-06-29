@@ -19,6 +19,7 @@ var _building_overrides: Array = []  # Array[BuildingOverride]
 var _landuse_tree_overrides: Dictionary = {}  # way_id -> {dense: bool}
 var _custom_models: Array = []  # Array of {model, lat, lon, rotation_y, scale}
 var _roadside_props: Array = []  # Array of {type, lat, lon, rotation_y, variant} (manual kiosk/box)
+var _market_stands: Array = []  # Array of {lat, lon, yaw, stand_count, spacing, scale} (manual)
 
 # Spatial index для быстрого поиска
 var _billboard_spatial_hash: Dictionary = {}  # cell_key -> Array[int] (индексы)
@@ -252,6 +253,18 @@ func _load_building_overrides_json(path: String) -> void:
 			"variant": pd.get("variant", -1),  # -1 = auto by hash
 		})
 
+	# Market watermelon stands — EXACT manual placement only; anchor authoritative, no relocation.
+	var stands_data: Array = data.get("market_stands", [])
+	for sd in stands_data:
+		_market_stands.append({
+			"lat": sd.get("lat", 0.0),
+			"lon": sd.get("lon", 0.0),
+			"yaw": sd.get("yaw", 256.0),
+			"stand_count": sd.get("stand_count", 2),
+			"spacing": sd.get("spacing", 1.6),
+			"scale": sd.get("scale", 1.0),
+		})
+
 	# Landuse overrides (деревья на конкретных landuse зонах)
 	var landuse_data: Array = data.get("landuse_overrides", [])
 	for lo in landuse_data:
@@ -318,6 +331,9 @@ func get_custom_models() -> Array:
 
 func get_roadside_props() -> Array:
 	return _roadside_props
+
+func get_market_stands() -> Array:
+	return _market_stands
 
 
 func get_billboards_in_chunk(chunk_min: Vector2, chunk_max: Vector2) -> Array:

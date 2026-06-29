@@ -70,6 +70,7 @@ var _pickup_pos := Vector3.ZERO
 var _dropoff_pos := Vector3.ZERO
 var _fare: int = 0
 var _destination_name: String = ""
+var _passenger_voice: String = ""  # голос пассажира текущей поездки (см. work/passenger_voice.gd)
 
 # Бонусы
 var _safe_driving_pct: float = 1.0  # 0.0 - 1.0
@@ -95,6 +96,8 @@ const STREET_NAMES: Array[String] = [
 	"ул. Горького", "ул. Лермонтова", "ул. Комсомольская", "ул. Парковая",
 	"ул. Заводская", "ул. Набережная", "пр. Революции", "ул. Октябрьская",
 ]
+
+const PASSENGER_VOICES: Array[String] = ["oleg", "old-tuminah", "elena-tymanova"]
 
 
 func setup(car: Node3D, terrain_generator: Node, hud: Node) -> void:
@@ -366,6 +369,7 @@ func accept_order() -> void:
 	_trip_start_time = Time.get_ticks_msec() / 1000.0
 	_safe_driving_pct = 1.0
 	_had_collision = false
+	_passenger_voice = PASSENGER_VOICES[randi() % PASSENGER_VOICES.size()]
 
 	# Убираем людей на пикапах
 	_clear_persons()
@@ -397,6 +401,7 @@ func decline_order() -> void:
 		_available_orders.remove_at(_current_order_idx)
 	_current_order_idx = -1
 	_state = State.SEARCHING
+	_passenger_voice = ""
 
 	# Генерируем замену
 	var new_order := _generate_order()
@@ -464,6 +469,7 @@ func finish_result_screen() -> void:
 	"""Вызывается из HUD когда игрок закрывает экран результата"""
 	_unfreeze_car()
 	_state = State.SEARCHING
+	_passenger_voice = ""
 	_refresh_timer = 0.0
 	_spawn_orders()
 
@@ -834,6 +840,30 @@ func get_car() -> Node3D:
 
 func get_destination_name() -> String:
 	return _destination_name
+
+
+# Read-only getters used by the HUD's live trip card (Card 2). Pure reads,
+# no side effects — they do not change gameplay behaviour.
+func get_trip_elapsed() -> float:
+	if _state != State.DRIVING:
+		return 0.0
+	return Time.get_ticks_msec() / 1000.0 - _trip_start_time
+
+
+func get_estimated_time() -> float:
+	return _estimated_time
+
+
+func get_speed_pct() -> float:
+	return _get_speed_bonus_pct()
+
+
+func get_safe_pct() -> float:
+	return _safe_driving_pct
+
+
+func get_passenger_voice() -> String:
+	return _passenger_voice
 
 
 func get_available_pickups() -> Array:

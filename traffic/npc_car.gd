@@ -57,6 +57,29 @@ var _lights_enabled := false
 var _is_night := false
 var _is_raining := false
 
+# Police emergency (Wave: police lights + siren). Modes assigned ONLY by TrafficManager for
+# MOVING police NPCs; parked police never get a mode. Lightbar + siren are OWNED children so
+# they free with the car — but because cars are POOLED (reused), they MUST also be reset on
+# return-to-pool via stop_police_emergency() (a looping siren must never outlive the car).
+enum PoliceEmergencyMode { SILENT, LIGHTS_ONLY, LIGHTS_AND_SIREN }
+const POLICE_SIREN_PATH := "res://audio/sfx/police-siren.mp3"
+# Rotating blue beacon (real Russian проблесковый маяк): a SpotLight3D beaming forward + a bit
+# down, spinning around Y at the existing roof blue-lamp position, plus a small emissive dome.
+# v1 = BLUE only (red/orange beacons are future). NO procedural lightbar — the model already has
+# the lamp meshes; we only add the rotating beam + glow.
+const BEACON_SPIN := TAU * 1.1        # ~1.1 rev/sec
+const BEACON_TILT_DEG := -22.0        # beam points forward + a bit down
+const BEACON_LAMP_LOCAL := Vector3(0.33, 1.21, -0.17)  # blue roof cone on the Lada 2109 ДПС (car-local; MCP-measured)
+var police_emergency_mode: int = PoliceEmergencyMode.SILENT
+var emergency_active := false
+var emergency_siren_enabled := false
+var police_siren_max_distance := 80.0  # set by TrafficManager before activation
+var _emergency_time_left := 0.0
+var _police_beacon: Node3D = null          # spinning pivot at the blue lamp
+var _beacon_light: SpotLight3D = null
+var _beacon_glow_mat: StandardMaterial3D = null
+var _police_siren: AudioStreamPlayer3D = null
+
 # Wheel rotation
 var _wheel_mesh_nodes: Array[MeshInstance3D] = []
 var _wheel_radius := 0.3
@@ -689,6 +712,169 @@ func _setup_lights() -> void:
 	_lights = NPCCarLightsScript.new()
 	add_child(_lights)
 	_lights.setup_lights(self)
+
+
+# === Police emergency: rotating blue beacon + 3D siren ===
+
+## Apply a police emergency mode. SILENT = off; LIGHTS_ONLY = rotating blue beacon, no siren;
+## LIGHTS_AND_SIREN = rotating beacon + looping 3D siren. The manager decides the mode (incl.
+## the siren cap); this just applies it. duration<0 leaves the timer untouched.
+func set_police_emergency_mode(mode: int, duration: float = -1.0) -> void:
+	police_emergency_mode = mode
+	if duration >= 0.0:
+		_emergency_time_left = duration
+	match mode:
+		PoliceEmergencyMode.SILENT:
+			emergency_active = false
+			emergency_siren_enabled = false
+			_stop_police_siren()
+			_hide_police_beacon()
+		PoliceEmergencyMode.LIGHTS_ONLY:
+			emergency_active = true
+			emergency_siren_enabled = false
+			_stop_police_siren()
+			_ensure_police_beacon()
+			if _police_beacon:
+				_police_beacon.visible = true
+		PoliceEmergencyMode.LIGHTS_AND_SIREN:
+			emergency_active = true
+			_ensure_police_beacon()
+			if _police_beacon:
+				_police_beacon.visible = true
+			_start_police_siren()
+
+
+func get_police_emergency_mode() -> int:
+	return police_emergency_mode
+
+
+func is_police_emergency_active() -> bool:
+	return emergency_active and police_emergency_mode != PoliceEmergencyMode.SILENT
+
+
+func has_police_siren_active() -> bool:
+	return emergency_siren_enabled and police_emergency_mode == PoliceEmergencyMode.LIGHTS_AND_SIREN
+
+
+## Full reset to SILENT — MUST be called by the manager on return-to-pool / despawn so a pooled
+## (reused) car never inherits a running siren, a spinning beacon, or a stale timer.
+func stop_police_emergency() -> void:
+	set_police_emergency_mode(PoliceEmergencyMode.SILENT)
+	_emergency_time_left = 0.0
+
+
+## Self-driven beacon spin + duration countdown. Runs in _process (NOT _physics_process) so it
+## keeps spinning while the car is physics-frozen for debug/screenshots (we only ever disable
+## _physics_process there). Cheap early-out for the non-emergency cars. When the timer runs out
+## the car reverts to SILENT itself; the manager's GC pass releases the siren cap next frame.
+func _process(delta: float) -> void:
+	if not emergency_active:
+		return
+	if _police_beacon and is_instance_valid(_police_beacon):
+		_police_beacon.rotation.y += BEACON_SPIN * delta
+	if _emergency_time_left > 0.0:
+		_emergency_time_left -= delta
+		if _emergency_time_left <= 0.0:
+			set_police_emergency_mode(PoliceEmergencyMode.SILENT)
+
+
+## Build the rotating blue beacon at the roof blue cone: a spinning pivot carrying (a) a SpotLight
+## that beams forward + a bit down and sweeps as the pivot spins, and (b) an additive emissive cone
+## shell + soft halo so the lamp glows over its dark plastic texture (day & night). v1 = BLUE only.
+func _ensure_police_beacon() -> void:
+	if _police_beacon != null and is_instance_valid(_police_beacon):
+		return
+	_police_beacon = Node3D.new()
+	_police_beacon.name = "PoliceBeacon"
+	add_child(_police_beacon)
+	_police_beacon.position = BEACON_LAMP_LOCAL
+	# Sweeping beam — blue SpotLight pointing forward (-Z) tilted a bit down; sweeps as the pivot spins.
+	_beacon_light = SpotLight3D.new()
+	_beacon_light.name = "BeaconBeam"
+	_beacon_light.light_color = Color(0.25, 0.45, 1.0)
+	_beacon_light.light_energy = 5.0
+	_beacon_light.spot_range = 22.0
+	_beacon_light.spot_angle = 30.0
+	_beacon_light.spot_attenuation = 1.0
+	_beacon_light.shadow_enabled = false
+	_beacon_light.rotation_degrees = Vector3(BEACON_TILT_DEG, 0.0, 0.0)
+	_police_beacon.add_child(_beacon_light)
+	# Glowing cone shell over the model's blue cone (additive, unshaded, no depth write so it never
+	# z-fights the merged body mesh) — makes the lamp itself read as lit instead of dark plastic.
+	var cone := MeshInstance3D.new()
+	cone.name = "BeaconGlowCone"
+	var cm := CylinderMesh.new()
+	cm.top_radius = 0.014
+	cm.bottom_radius = 0.05
+	cm.height = 0.08
+	cm.radial_segments = 16
+	cone.mesh = cm
+	cone.position = Vector3(0.0, 0.04, 0.0)
+	_beacon_glow_mat = _make_beacon_glow_mat(Color(0.35, 0.6, 1.0), Color(0.3, 0.55, 1.0, 0.9), 6.0)
+	cone.material_override = _beacon_glow_mat
+	cone.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	cone.visibility_range_end = 160.0
+	_police_beacon.add_child(cone)
+	# Soft halo for bloom around the lamp.
+	var halo := MeshInstance3D.new()
+	halo.name = "BeaconHalo"
+	var hm := SphereMesh.new()
+	hm.radius = 0.075
+	hm.height = 0.15
+	halo.mesh = hm
+	halo.position = Vector3(0.0, 0.05, 0.0)
+	halo.material_override = _make_beacon_glow_mat(Color(0.25, 0.45, 1.0), Color(0.25, 0.45, 1.0, 0.2), 1.6)
+	halo.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	halo.visibility_range_end = 160.0
+	_police_beacon.add_child(halo)
+
+
+## Additive, unshaded, depth-write-off glow material (shared shape for cone shell + halo).
+func _make_beacon_glow_mat(emis: Color, albedo: Color, energy: float) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	m.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	m.albedo_color = albedo
+	m.emission_enabled = true
+	m.emission = emis
+	m.emission_energy_multiplier = energy
+	return m
+
+
+func _hide_police_beacon() -> void:
+	if _police_beacon and is_instance_valid(_police_beacon):
+		_police_beacon.visible = false
+
+
+func _start_police_siren() -> void:
+	emergency_siren_enabled = true
+	if not ResourceLoader.exists(POLICE_SIREN_PATH):
+		emergency_siren_enabled = false  # asset missing — lights still work, siren gated
+		return
+	if _police_siren == null or not is_instance_valid(_police_siren):
+		_police_siren = AudioStreamPlayer3D.new()
+		_police_siren.name = "PoliceSiren"
+		var st: AudioStream = load(POLICE_SIREN_PATH)
+		if st is AudioStreamMP3:
+			(st as AudioStreamMP3).loop = true  # looping siren (one-shot finished-connect pattern would never fire)
+		_police_siren.stream = st
+		_police_siren.bus = "SFX"
+		_police_siren.attenuation_model = AudioStreamPlayer3D.ATTENUATION_INVERSE_DISTANCE
+		_police_siren.unit_size = 8.0
+		_police_siren.position = Vector3(0.0, 1.0, 0.0)
+		add_child(_police_siren)
+	_police_siren.max_distance = police_siren_max_distance
+	if not _police_siren.playing:
+		_police_siren.play()
+
+
+func _stop_police_siren() -> void:
+	emergency_siren_enabled = false
+	if _police_siren and is_instance_valid(_police_siren) and _police_siren.playing:
+		_police_siren.stop()
 
 
 func _connect_to_night_mode() -> void:

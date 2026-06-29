@@ -33,6 +33,7 @@ const CROSSING_SIGN_TEXTURE = preload("res://textures/signs/pedestrian_crossing.
 const PARKING_SIGN_TEXTURE = preload("res://textures/signs/parking.png")
 const TRAM_STOP_SIGN_TEXTURE = preload("res://textures/signs/tram_stop.png")
 const DecorationLayerScript = preload("res://osm/decoration_layer.gd")
+const RoadSignsLib = preload("res://osm/road_signs.gd")  # generic sign build library (Wave 0)
 const WheelDirtScript = preload("res://effects/wheel_dirt.gd")
 
 # Текстуры для деревянных одноэтажных домов (Россия)
@@ -146,6 +147,17 @@ const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slop
 @export var enable_night_mode_windows := true  # Включить подсветку окон ночью
 @export var enable_manholes := true  # Включить люки на дорогах
 @export var enable_crossing_signs := true  # Включить знаки пешеходных переходов
+@export var enable_road_signs := true       # Road-sign system (Wave 0/1A) master switch
+@export var enable_bus_stop_signs := true   # Wave 1A: bus-stop sign plate near each stop
+@export var enable_speed_limit_signs := true # Wave 1B: speed-limit signs from OSM maxspeed (change-point)
+@export var enable_roundabout_signs := true  # Wave 1C: roundabout sign on each approach to a roundabout
+@export var enable_give_way_signs := true    # Wave 1C: give-way signs at OSM highway=give_way nodes
+@export var enable_main_road_signs := true   # Wave 2: main-road sign on the clearly-major road at a major/minor junction
+@export var enable_give_way_heuristic := true # Wave 2: heuristic give-way on the clearly-minor road at a major/minor junction
+@export var sign_debug := false             # Default OFF: candidate/final markers + facing/approach arrows + logs
+@export var sign_debug_only_type := ""      # When set, ONLY this sign type spawns (e.g. "bus_stop")
+@export var sign_visibility_range := 130.0  # Per-sign visibility_range_end (culling, not mesh LOD)
+@export var sign_style_profile := "default" # Country/style profile for the asset registry
 @export var enable_clutter := true  # Интерактивный реквизит (урны, конусы, мешки…)
 @export var enable_fences := true  # Включить заборы (промзоны, территории)
 @export var enable_elevation := false  # Включить elevation из SRTM30m
@@ -1042,6 +1054,9 @@ func _ready() -> void:
 	_tram_stop_sign_front_mat.alpha_scissor_threshold = 0.5
 	_tram_stop_sign_front_mat.metallic = 0.3
 	_tram_stop_sign_front_mat.roughness = 0.5
+
+	# Generic road-sign build library (Wave 0). Stateless build assets only.
+	_road_signs = RoadSignsLib.new()
 
 	# Инициализируем шейдер окон (один раз для всех батчей)
 	_init_window_shader()
@@ -3521,6 +3536,38 @@ func _unload_chunk(chunk_key: String) -> void:
 				_created_tl_app_keys.erase(_tk)
 				_created_sl_keys.erase(_tk)
 			_tl_keys_by_chunk.erase(chunk_key)
+		# Road signs (Wave 0/1A): free dedup keys (sign nodes free with chunk_node;
+		# reload re-places them). Debug gizmos are chunk children → freed too.
+		if _sign_keys_by_chunk.has(chunk_key):
+			for _sk in _sign_keys_by_chunk[chunk_key]:
+				_sign_keys.erase(_sk)
+			_sign_keys_by_chunk.erase(chunk_key)
+		# Deferred sign jobs (speed + roundabout) + speed min-spacing positions + per-chunk cap.
+		_deferred_sign_queue.erase(chunk_key)
+		if _speed_pos_by_chunk.has(chunk_key):
+			for _sp in _speed_pos_by_chunk[chunk_key]:
+				var _scell := _speed_cell(_sp)
+				if _speed_pos_hash.has(_scell):
+					var _arr: Array = _speed_pos_hash[_scell]
+					for _k in range(_arr.size() - 1, -1, -1):
+						if (_arr[_k].p as Vector2) == _sp:
+							_arr.remove_at(_k)
+					if _arr.is_empty():
+						_speed_pos_hash.erase(_scell)
+			_speed_pos_by_chunk.erase(chunk_key)
+		_speed_count_by_chunk.erase(chunk_key)
+		# Sign furniture-clearance positions (all new sign types).
+		if _sign_pos_by_chunk.has(chunk_key):
+			for _fp in _sign_pos_by_chunk[chunk_key]:
+				var _fcell := _sign_furn_cell(_fp)
+				if _sign_pos_hash.has(_fcell):
+					var _farr: Array = _sign_pos_hash[_fcell]
+					for _fk in range(_farr.size() - 1, -1, -1):
+						if (_farr[_fk] as Vector2) == _fp:
+							_farr.remove_at(_fk)
+					if _farr.is_empty():
+						_sign_pos_hash.erase(_fcell)
+			_sign_pos_by_chunk.erase(chunk_key)
 		# Vegetation rows: free dedup keys + batch (VegRows node frees with chunk_node).
 		_deferred_veg_row_queue.erase(chunk_key)
 		_veg_row_batch.erase(chunk_key)
@@ -3734,6 +3781,14 @@ func reset_terrain() -> void:
 	_created_lamp_positions.clear()
 	_created_sign_positions.clear()
 	_created_bus_stop_positions.clear()
+	_sign_keys.clear()
+	_sign_keys_by_chunk.clear()
+	_speed_pos_hash.clear()
+	_speed_pos_by_chunk.clear()
+	_speed_count_by_chunk.clear()
+	_deferred_sign_queue.clear()
+	_sign_pos_hash.clear()
+	_sign_pos_by_chunk.clear()
 	_road_segments.clear()
 	_road_spatial_hash.clear()
 	_building_segments.clear()
@@ -4652,6 +4707,7 @@ func _process_phase3_queue() -> bool:
 	if phase == "ways":
 		var chunk_entrance_nodes: Array = osm_data.get("entrance_nodes", [])
 		var chunk_poi_nodes: Array = osm_data.get("poi_nodes", [])
+		var roundabout_nodes: Dictionary = result.get("roundabout_nodes", {})  # Wave 1C approach detection
 		var way_idx: int = entry.way_idx
 		while way_idx < ways.size():
 			if (Time.get_ticks_usec() - t0) > budget_us:
@@ -4692,6 +4748,9 @@ func _process_phase3_queue() -> bool:
 			if tags.has("highway"):
 				_create_road(nodes, tags, target, null, way_id_raw, true)  # skip_spatial_hash: already built by Phase 1+2
 				_maybe_enqueue_road_works(way_id_raw, tags, nodes, target, chunk_key)
+				_enqueue_speed_limit_signs_for_way(way_id_raw, tags, nodes, target, chunk_key)
+				_enqueue_roundabout_signs_for_way(way_id_raw, tags, nodes, roundabout_nodes, chunk_key)
+				_enqueue_priority_signs_for_way(way_id_raw, tags, nodes, chunk_key)
 			elif tags.get("railway", "") == "tram":
 				var tram_dedup_key := "%d_%s" % [way_id_raw, chunk_key]
 				if _dispatched_tram_ways.has(tram_dedup_key):
@@ -4893,6 +4952,7 @@ func _process_phase3_queue() -> bool:
 				if local.x < chunk_min_x or local.x >= chunk_max_x or local.y < chunk_min_z or local.y >= chunk_max_z:
 					continue
 			_create_bus_stop(local, _sample_elevation(local.x, local.y), tags, target)
+			_place_bus_stop_sign(local, int(stop.get("id", 0)), target, chunk_key)
 		# Done with bus stops — move to tram stops
 		entry.phase = "tram_stops"
 		entry.way_idx = 0
@@ -4915,7 +4975,24 @@ func _process_phase3_queue() -> bool:
 				var rn = traffic_mgr.get_road_network()
 				if rn:
 					rn.tram_stop_positions.append(Vector3(local.x, _sample_elevation(local.x, local.y), local.y))
-		# Done with tram stops — move to pedestrian areas
+		# Done with tram stops — move to give-way nodes
+		entry.phase = "give_way"
+		entry.way_idx = 0
+		return true
+
+	if phase == "give_way":
+		# Wave 1C: give-way signs at OSM highway=give_way nodes (center-filtered -> owner chunk
+		# has elevation ready, so immediate placement is correctly grounded).
+		var gw_nodes: Array = osm_data.get("give_way_nodes", [])
+		var gw_idx: int = entry.way_idx
+		while gw_idx < gw_nodes.size():
+			var gw: Dictionary = gw_nodes[gw_idx]
+			gw_idx += 1
+			var gloc: Vector2 = _latlon_to_local(gw.get("lat", 0.0), gw.get("lon", 0.0))
+			if filter_by_chunk:
+				if gloc.x < chunk_min_x or gloc.x >= chunk_max_x or gloc.y < chunk_min_z or gloc.y >= chunk_max_z:
+					continue
+			_place_give_way_sign(gloc, int(gw.get("id", 0)), target, chunk_key)
 		entry.phase = "pedestrian_areas"
 		entry.way_idx = 0
 		return true
@@ -4967,6 +5044,7 @@ func _process_phase3_queue() -> bool:
 		if chunk_key != "":
 			_place_custom_models_for_chunk(chunk_key, target)
 			_place_manual_props_for_chunk(chunk_key, target)
+			_place_market_stands_for_chunk(chunk_key, target)
 			_generate_trees_for_chunk(chunk_key, target)
 		var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
 		if not _pending_batch_chunks.has(batch_chunk_key):
@@ -5048,6 +5126,7 @@ func _generate_terrain_sync(osm_data: Dictionary, parent: Node3D, chunk_key: Str
 					"way_id": sync_way_id,
 					"bridge": sync_is_bridge,
 					"oneway": sync_oneway,
+					"highway": str(tags.get("highway", "")),
 				}, chunk_key)
 		if (tags.has("building") or (tags.has("amenity") and not tags.has("highway"))) and nodes.size() >= 3:
 			var bpoints := PackedVector2Array()
@@ -5257,6 +5336,7 @@ func _create_road(nodes: Array, tags: Dictionary, parent: Node3D, _loader: Node,
 			"way_id": way_id,
 			"bridge": seg_is_bridge,
 			"oneway": seg_oneway,
+			"highway": highway_type,
 		}
 		_add_road_segment_to_spatial_hash(seg, rq_ck)
 
@@ -10695,7 +10775,14 @@ func _spawn_parked_cars(parking_points: PackedVector2Array, parent: Node3D) -> v
 		# Применяем случайный цвет
 		_apply_parked_car_color(car)
 
+		# Parked-car alarm: enable contact reporting + attach the alarm component (it connects body_entered).
+		if car is RigidBody3D:
+			car.contact_monitor = true
+			car.max_contacts_reported = 4
 		parent.add_child(car)
+		var alarm := preload("res://traffic/parked_car_alarm.gd").new()
+		alarm.name = "ParkedCarAlarm"
+		car.add_child(alarm)
 
 
 func _find_parking_spot(parking_points: PackedVector2Array, center: Vector2, index: int, existing: Array[Vector2]) -> Vector2:
@@ -14681,6 +14768,11 @@ func _process_road_queue() -> void:
 	# Stop lines build in a later pass so the approach's zebra crossings are recorded first.
 	if enable_osm_traffic_signals and not _tl_sl_queue.is_empty():
 		_process_tl_sl_queue(Time.get_ticks_usec() + (500000 if _initial_loading else 3000))
+
+	# Deferred road signs (speed-limit + roundabout): build once the owner chunk is loaded
+	# + elevation ready.
+	if enable_road_signs and not _deferred_sign_queue.is_empty():
+		_process_sign_queue(Time.get_ticks_usec() + (500000 if _initial_loading else 3000))
 
 	# Process deferred ROADSIDE-PROP walking (budgeted), mirrors the billboard walk.
 	if enable_roadside_props and (Time.get_ticks_usec() - queue_start) <= TOTAL_BUDGET_USEC:
@@ -18905,6 +18997,60 @@ func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
 			model_path.get_file(), pos.x, pos.y, chunk_key, scale_val])
 
 
+var _market_stand_scene: PackedScene = null
+var _debug_market_stands: bool = false  # default OFF (placement + per-stand logs/markers)
+
+# Watermelon market stands — EXACT manual placement only. The configured anchor is authoritative:
+# no auto-search, no relocation, no default coordinate (empty config → nothing spawns). See
+# docs/WATERMELON_STAND_PLAN.md §6. Chunk-owned (parented to the chunk → freed on unload, rebuilt
+# intact on reload). Overlaps are NOT fixed here — the stand logs and keeps its configured position.
+func _place_market_stands_for_chunk(chunk_key: String, parent: Node3D) -> void:
+	if not _decoration_layer:
+		return
+	var entries: Array = _decoration_layer.get_market_stands()
+	if entries.is_empty():
+		return
+	if _market_stand_scene == null:
+		if not ResourceLoader.exists("res://models/market/market_watermelon_stand.tscn"):
+			return
+		_market_stand_scene = load("res://models/market/market_watermelon_stand.tscn")
+	for ei in range(entries.size()):
+		var e: Dictionary = entries[ei]
+		var lat: float = e.lat
+		var lon: float = e.lon
+		if lat == 0.0 or lon == 0.0:
+			continue
+		var anchor := _latlon_to_local(lat, lon)
+		var yaw_rad := deg_to_rad(float(e.yaw))
+		# frontage axis = the stand's local +X after yaw (Godot Y-rot basis x = (cos, 0, -sin))
+		var frontage := Vector2(cos(yaw_rad), -sin(yaw_rad))
+		var count: int = int(e.stand_count)
+		var spacing: float = float(e.spacing)
+		for i in range(count):
+			var off := (float(i) - float(count - 1) * 0.5) * spacing
+			var pos := anchor + frontage * off  # EXACT: anchor + configured offset only
+			var cx := int(floor(pos.x / chunk_size))
+			var cz := int(floor(pos.y / chunk_size))
+			if "%d,%d" % [cx, cz] != chunk_key:
+				continue
+			var sname := "MarketWatermelonStand_%d_%d" % [ei, i]
+			if parent.has_node(NodePath(sname)):
+				continue  # already built for this loaded chunk (no double-spawn)
+			var ground := _sample_elevation(pos.x, pos.y)  # Y-only grounding — never X/Z drift
+			var stand: Node3D = _market_stand_scene.instantiate()
+			stand.name = sname
+			stand.set("stand_index", ei * 10 + i)
+			stand.set("wmelon_debug", _debug_market_stands)
+			# Small lift so the pallet rests ON the terrain rather than sinking into the grass texture.
+			stand.position = Vector3(pos.x, ground + 0.06, pos.y)
+			stand.rotation.y = yaw_rad
+			stand.scale = Vector3.ONE * float(e.scale)
+			parent.add_child(stand)
+			if _debug_market_stands:
+				print("[WMELON] placed %s anchor(%.6f,%.6f) local=(%.2f,%.2f) yaw=%.0f chunk=%s" % [
+					sname, lat, lon, pos.x, pos.y, float(e.yaw), chunk_key])
+
+
 func _set_visibility_range_recursive(node: Node, range_end: float) -> void:
 	if node is GeometryInstance3D:
 		node.visibility_range_end = range_end
@@ -19290,6 +19436,710 @@ func _create_bus_stop(pos: Vector2, elevation: float, tags: Dictionary, parent: 
 	stop_root.add_child(body)
 
 	parent.add_child(stop_root)
+
+
+# ===================== ROAD SIGNS (Wave 0/1A) — placement =====================
+
+## Wave 1A: place a small bus-stop sign plate on a pole at the stop-side curb,
+## facing oncoming traffic in the near lane. The generator owns all road context;
+## RoadSignsLib builds the node. Right-curb invariant (TL gold standard): the sign
+## sits on the curb that is the near-lane driver's RIGHT, plate facing back at that
+## driver. We do NOT copy the broken generic/yield rotation.y=0 behaviour.
+func _place_bus_stop_sign(stop_pos: Vector2, stop_id: int, parent: Node3D, ck: String) -> void:
+	if not (enable_road_signs and enable_bus_stop_signs):
+		return
+	if sign_debug_only_type != "" and sign_debug_only_type != "bus_stop":
+		return
+	if _road_signs == null or parent == null or not is_instance_valid(parent):
+		return
+
+	# Unified dedup key — real OSM node id when available, else quantized position.
+	var key := ("sign_bus_stop_n%d" % stop_id) if stop_id > 0 else ("sign_bus_stop_%d_%d" % [int(round(stop_pos.x)), int(round(stop_pos.y))])
+	if _sign_keys.has(key):
+		_sign_dbg.deduped += 1
+		return
+
+	# Match the nearest vehicle carriageway (width gate handled inside the helper).
+	var ri := _find_nearest_road_at_point(stop_pos, ck)
+	if ri.is_empty():
+		ri = _find_nearest_road_at_point(stop_pos, "")  # cross-chunk fallback
+	if ri.is_empty():
+		_sign_dbg.no_road += 1
+		if sign_debug:
+			print("[SIGN] bus_stop n%d rejected: no_road" % stop_id)
+		return
+
+	var road_dir: Vector2 = ri.road_dir
+	var cl := Geometry2D.get_closest_point_to_segment(stop_pos, ri.road_p1, ri.road_p2)
+	# Outward = from road centerline toward the stop's side of the road.
+	var to_stop := stop_pos - cl
+	if to_stop.length() < 0.05:
+		to_stop = Vector2(-road_dir.y, road_dir.x)  # stop on centerline → pick a side
+	to_stop = to_stop.normalized()
+
+	# Choose the travel direction for which the stop side is the driver's RIGHT.
+	# driver_right(travel) = Vector2(-travel.y, travel.x); want it pointing to_stop.
+	var right_pos := Vector2(-road_dir.y, road_dir.x)
+	var approach_dir := road_dir if right_pos.dot(to_stop) >= 0.0 else -road_dir
+
+	# Right-curb projection + along-curb clearance (shared by all sign types).
+	var place := _sign_resolve_curb(cl, approach_dir, ck)
+	if not place.ok:
+		_sign_dbg.no_curb_slot += 1
+		if sign_debug:
+			print("[SIGN] bus_stop n%d rejected: no_curb_slot" % stop_id)
+		return
+	var right_perp: Vector2 = place.right_perp
+	var curb: Vector2 = place.curb
+	var face: Vector2 = place.face
+	var yaw: float = place.yaw
+	var elev := _sample_elevation(curb.x, curb.y)
+	var world_pos := Vector3(curb.x, elev, curb.y)
+
+	var node: Node3D = _road_signs.build("bus_stop", "", world_pos, yaw, parent, {
+		"profile": sign_style_profile,
+		"visibility_range": sign_visibility_range,
+		"hit_handler": Callable(self, "_on_sign_hit"),
+	})
+	if node == null:
+		_sign_dbg.disabled_data += 1
+		if sign_debug:
+			print("[SIGN] bus_stop n%d rejected: missing_texture/def (profile=%s)" % [stop_id, sign_style_profile])
+		return
+
+	_sign_keys[key] = true
+	_sign_track_chunk_key(ck, key)
+	_sign_dbg.placed += 1
+	if sign_debug:
+		_sign_debug_draw(ck, stop_pos, approach_dir, right_perp, curb, face)
+		print("[SIGN] bus_stop n%d placed key=%s curb=(%.1f,%.1f) yaw=%.2f approach=(%.2f,%.2f)" % [stop_id, key, curb.x, curb.y, yaw, approach_dir.x, approach_dir.y])
+
+
+func _sign_track_chunk_key(ck: String, key: String) -> void:
+	if ck == "":
+		return
+	if not _sign_keys_by_chunk.has(ck):
+		_sign_keys_by_chunk[ck] = []
+	_sign_keys_by_chunk[ck].append(key)
+
+
+## Reuse the TL debug gizmos: magenta = raw OSM node, green = final curb position,
+## GREEN arrow = approach_dir, BLUE arrow = driver_right, YELLOW arrow = plate facing.
+func _sign_debug_draw(ck: String, raw: Vector2, approach_dir: Vector2, driver_right: Vector2, curb: Vector2, face: Vector2) -> void:
+	var ey := _sample_elevation(curb.x, curb.y) + 1.0
+	_tl_debug_marker(ck, Vector3(raw.x, _sample_elevation(raw.x, raw.y) + 0.5, raw.y), Color(1.0, 0.1, 1.0))  # magenta = raw node
+	_tl_debug_marker(ck, Vector3(curb.x, _sample_elevation(curb.x, curb.y) + 0.3, curb.y), Color(0.1, 1.0, 0.1), 0.4)  # green = final
+	_tl_debug_arrow(ck, curb, approach_dir, 5.0, Color(0.1, 1.0, 0.1), ey)   # GREEN = approach_dir
+	_tl_debug_arrow(ck, curb, driver_right, 3.5, Color(0.2, 0.4, 1.0), ey)   # BLUE = driver_right
+	_tl_debug_arrow(ck, curb, face, 3.5, Color(1.0, 1.0, 0.1), ey)           # YELLOW = face
+
+
+## Shared right-curb solver (TL gold-standard invariant). Given a centerline point
+## `cl` and the driver's travel direction `approach_dir`, returns the near-side RIGHT
+## curb point + facing yaw. Clearance nudges ONLY upstream along the curb — never to
+## the far side. ok=false → no valid right-curb slot (caller rejects, never flips side).
+func _sign_resolve_curb(cl: Vector2, approach_dir: Vector2, ck: String, road_width: float = -1.0) -> Dictionary:
+	var right_perp := Vector2(-approach_dir.y, approach_dir.x)
+	var curb: Vector2
+	if road_width > 0.0:
+		# WIDTH-BASED (preferred when the matched carriageway width is known): sit exactly
+		# half-width + kerb offset from the centreline. Avoids the edge-search overshooting
+		# onto the verge when a crossing/parallel road keeps the outward ray "on road"
+		# (that put signs 2-3 m into the grass on narrow streets).
+		curb = cl + right_perp * (road_width * 0.5 + tl_curb_offset)
+	else:
+		curb = _tl_curb_point(cl, right_perp, ck)
+	var ok := not _is_point_on_vehicle_road(curb, 0.0, ck)
+	if not ok:
+		# Still on carriageway (e.g. landed on a crossing road) → nudge upstream along the curb.
+		var probe_cl := cl
+		for _i in 3:
+			probe_cl -= approach_dir * 1.5
+			var probe: Vector2
+			if road_width > 0.0:
+				probe = probe_cl + right_perp * (road_width * 0.5 + tl_curb_offset)
+			else:
+				probe = _tl_curb_point(probe_cl, right_perp, ck)
+			if not _is_point_on_vehicle_road(probe, 0.0, ck):
+				curb = probe
+				ok = true
+				break
+	var face := -approach_dir
+	return {"curb": curb, "yaw": atan2(face.x, face.y), "right_perp": right_perp, "face": face, "ok": ok}
+
+
+## Is local pos inside chunk `ck`'s bounds? (Highway ways are processed by every
+## overlapping chunk, so each candidate is owned by the single chunk containing it.)
+func _pos_in_chunk(p: Vector2, ck: String) -> bool:
+	if ck == "":
+		return true
+	var c := ck.split(",")
+	if c.size() < 2:
+		return true
+	var minx := int(c[0]) * chunk_size
+	var minz := int(c[1]) * chunk_size
+	return p.x >= minx and p.x < minx + chunk_size and p.y >= minz and p.y < minz + chunk_size
+
+
+## Normalize an OSM maxspeed string to an integer km/h. Returns 0 = no usable value
+## (absent / non-numeric like "RU:urban"/"walk"/"none"); a NEGATIVE value flags an
+## unsupported unit (mph — we do not convert) so the caller counts it as disabled.
+func _parse_maxspeed(raw: String) -> int:
+	var s := raw.strip_edges().to_lower()
+	if s == "":
+		return 0
+	var num := ""
+	for i in s.length():
+		var ch := s[i]
+		if ch >= "0" and ch <= "9":
+			num += ch
+		elif num != "":
+			break
+	if num == "":
+		return 0  # non-numeric → no data (not counted as a disabled value)
+	var v := int(num)
+	if "mph" in s:
+		return -v  # mph unsupported (no conversion) → caller counts it
+	return v
+
+
+# === SPEED-LIMIT SIGNS (Wave 1B) — change-point placement from OSM maxspeed ===
+# Generated during the way-walk (full way tags + polyline in scope; maxspeed is NOT
+# in the road segment hash). One candidate per allowed travel direction at the way's
+# junction entry (= where the limit applies), suppressed by per-value min-spacing +
+# per-chunk caps so it does NOT spam periodically.
+func _enqueue_speed_limit_signs_for_way(way_id: int, tags: Dictionary, nodes: Array, parent: Node3D, ck: String) -> void:
+	if not (enable_road_signs and enable_speed_limit_signs):
+		return
+	if sign_debug_only_type != "" and sign_debug_only_type != "speed_limit":
+		return
+	if _road_signs == null or not is_instance_valid(parent):
+		return
+	if nodes.size() < 2:
+		return
+	var v := _parse_maxspeed(str(tags.get("maxspeed", "")))
+	if v == 0:
+		return  # no maxspeed data on this way
+	if not (v in SPEED_SUPPORTED):
+		_sign_dbg.disabled_by_value += 1
+		if sign_debug:
+			print("[SIGN] speed_limit w%d disabled_by_value raw='%s'" % [way_id, str(tags.get("maxspeed", ""))])
+		return
+
+	var pts := PackedVector2Array()
+	for n in nodes:
+		pts.append(_latlon_to_local(n.lat, n.lon))
+	if pts.size() < 2:
+		return
+
+	# oneway gating (respect -1/reverse).
+	var ow := str(tags.get("oneway", "")).to_lower()
+	var fwd_ok := true
+	var bwd_ok := true
+	if ow in ["yes", "true", "1"]:
+		bwd_ok = false
+	elif ow in ["-1", "reverse"]:
+		fwd_ok = false
+	# Roundabouts are implicitly one-way along node order.
+	if str(tags.get("junction", "")) in ["roundabout", "circular"]:
+		bwd_ok = false
+
+	# v1 placement: large-interval sampling ALONG the way, ENQUEUED under the chunk that
+	# physically CONTAINS each sample (the owner). Actual build is DEFERRED to
+	# _process_speed_queue, which fires only once the owner chunk is loaded AND its
+	# elevation is ready — this is what prevents y=0 burial (the bug where the "initial"
+	# bulk pass placed signs before far-point elevation loaded) and gives correct parenting.
+	# True per-route change-points need way-adjacency topology we don't have in v1; the dense
+	# sampling + per-value min-spacing (applied at build) keep it sparse, never periodic.
+	var samples := _sample_polyline(pts, SPEED_SAMPLE_STEP)
+	for si in samples.size():
+		var sp: Vector2 = samples[si].pos
+		var dir: Vector2 = samples[si].dir
+		if fwd_ok:
+			_enqueue_speed_job(way_id, v, sp, dir, si, 0)
+		if bwd_ok:
+			_enqueue_speed_job(way_id, v, sp, -dir, si, 1)
+
+
+## Wave 1C: roundabout sign on each APPROACH road entering a roundabout. An approach is a
+## non-ring highway way whose endpoint node coincides with a roundabout ring node; the sign
+## is posted upstream of the ring on the driver's right, facing the approaching driver.
+## Deferred-queued (elevation-safe). Conservative: one-way EXIT approaches get no sign.
+func _enqueue_roundabout_signs_for_way(way_id: int, tags: Dictionary, nodes: Array, roundabout_nodes: Dictionary, ck: String) -> void:
+	if not (enable_road_signs and enable_roundabout_signs):
+		return
+	if sign_debug_only_type != "" and sign_debug_only_type != "roundabout":
+		return
+	if _road_signs == null or nodes.size() < 2 or roundabout_nodes.is_empty():
+		return
+	# The ring way itself is NOT an approach.
+	if str(tags.get("junction", "")) in ["roundabout", "circular"] or str(tags.get("highway", "")) == "mini_roundabout":
+		return
+	var ow := str(tags.get("oneway", "")).to_lower()
+	var fwd_ok := true   # travel in node order 0 -> last
+	var bwd_ok := true   # travel reverse last -> 0
+	if ow in ["yes", "true", "1"]:
+		bwd_ok = false
+	elif ow in ["-1", "reverse"]:
+		fwd_ok = false
+	var last := nodes.size() - 1
+	# Endpoint 0 on the ring: a driver APPROACHES it travelling reverse (last -> 0).
+	if bwd_ok and roundabout_nodes.has("%.6f,%.6f" % [nodes[0].lat, nodes[0].lon]):
+		var p0 := _latlon_to_local(nodes[0].lat, nodes[0].lon)
+		var p1 := _latlon_to_local(nodes[1].lat, nodes[1].lon)
+		var inward := (p0 - p1).normalized()  # travel direction INTO the ring
+		_sign_enqueue("roundabout", "sign_roundabout_w%d_a0" % way_id, p0 - inward * ROUND_APPROACH_OFFSET, inward)
+	# Endpoint last on the ring: a driver APPROACHES it travelling forward (0 -> last).
+	if fwd_ok and roundabout_nodes.has("%.6f,%.6f" % [nodes[last].lat, nodes[last].lon]):
+		var pl := _latlon_to_local(nodes[last].lat, nodes[last].lon)
+		var plm := _latlon_to_local(nodes[last - 1].lat, nodes[last - 1].lon)
+		var inward2 := (pl - plm).normalized()
+		_sign_enqueue("roundabout", "sign_roundabout_w%d_a1" % way_id, pl - inward2 * ROUND_APPROACH_OFFSET, inward2)
+
+
+## Wave 2: main-road / heuristic give-way via a CONSERVATIVE road-class heuristic at this way's
+## junction endpoints. Compares THIS way's class to the crossing roads' classes (sampled at the
+## junction). Only acts when the hierarchy is clearly unambiguous (rank gap >= 1, major >= tertiary);
+## otherwise skips + counts ambiguous. Deferred-queued (elevation-safe). Traffic lights do NOT
+## block — they're a clearance constraint handled in the finalizer.
+func _enqueue_priority_signs_for_way(way_id: int, tags: Dictionary, nodes: Array, ck: String) -> void:
+	if not enable_road_signs or not (enable_main_road_signs or enable_give_way_heuristic):
+		return
+	if sign_debug_only_type != "" and not (sign_debug_only_type in ["main_road", "give_way"]):
+		return
+	if _road_signs == null or nodes.size() < 2:
+		return
+	if str(tags.get("junction", "")) in ["roundabout", "circular"]:
+		return  # never put priority signs on the ring itself
+	var r_this := _road_class_rank(str(tags.get("highway", "")))
+	if r_this < 0:
+		return  # unknown/non-vehicle class
+	var pts := PackedVector2Array()
+	for n in nodes:
+		pts.append(_latlon_to_local(n.lat, n.lon))
+	if pts.size() < 2:
+		return
+	var ow := str(tags.get("oneway", "")).to_lower()
+	var fwd_ok := not (ow in ["-1", "reverse"])  # travel 0->last allowed
+	var bwd_ok := not (ow in ["yes", "true", "1"])  # travel last->0 allowed
+	var last := pts.size() - 1
+	if bwd_ok:
+		_eval_priority_endpoint(way_id, r_this, pts[0], (pts[0] - pts[1]).normalized(), 0, ck)
+	if fwd_ok:
+		_eval_priority_endpoint(way_id, r_this, pts[last], (pts[last] - pts[last - 1]).normalized(), 1, ck)
+
+
+## Evaluate one way-endpoint junction: sample the crossing arms' classes, decide major/minor
+## conservatively, and enqueue main_road / give_way_heur upstream of the junction (right curb,
+## facing the approaching driver). Uses the FAST spatial-hash intersection lookup.
+func _eval_priority_endpoint(way_id: int, r_this: int, jnode: Vector2, approach_dir: Vector2, end_idx: int, ck: String) -> void:
+	if approach_dir.length() < 0.01:
+		return
+	approach_dir = approach_dir.normalized()
+	var ii := _find_nearby_intersection(jnode, 18.0, ck)
+	if ii < 0:
+		ii = _find_nearby_intersection(jnode, 18.0, "")
+	if ii < 0 or ii >= _intersection_roads.size():
+		return  # endpoint not a detected junction → not a crossing, skip
+	var inter_c: Vector2 = _intersection_positions[ii]
+	var arms: Array = _intersection_roads[ii]
+	if arms.size() < 2:
+		return  # not a real crossing
+	# Max class rank among the CROSSING roads (exclude this way's own arm).
+	var r_other := -1
+	for arm in arms:
+		var adir: Vector2 = arm.get("direction", Vector2.ZERO)
+		if adir.length() < 0.01 or adir.dot(-approach_dir) > 0.7:
+			continue  # this way's own outgoing arm
+		var ari := _find_nearest_road_at_point(inter_c + adir * 14.0, "")
+		if ari.is_empty():
+			continue
+		var rk := _road_class_rank(str(ari.get("road_highway", "")))
+		if rk > r_other:
+			r_other = rk
+	if r_other < 0:
+		return  # no classifiable crossing road
+	var pos := jnode - approach_dir * PRIO_APPROACH_OFFSET  # upstream of the junction
+	# CONSERVATIVE: require a clear TWO-STEP class gap (not just one). main-road only for
+	# tertiary+ that is clearly the dominant road; heuristic give-way only for a real street
+	# (residential+, not a service driveway) yielding to a clearly-higher (secondary+) road.
+	# This avoids the very common residential↔tertiary case spamming signs.
+	if enable_main_road_signs and r_this >= 2 and r_this >= r_other + 1:
+		_sign_enqueue("main_road", "sign_main_road_w%d_a%d" % [way_id, end_idx], pos, approach_dir)
+	elif enable_give_way_heuristic and r_this >= 1 and r_other >= r_this + 2:
+		_sign_enqueue("give_way_heur", "sign_give_way_heur_w%d_a%d" % [way_id, end_idx], pos, approach_dir)
+	else:
+		_prio_dbg.skipped_ambiguous_class += 1
+
+
+## Wave 1C: give-way sign at an OSM highway=give_way node. Anchored to the nearest junction
+## (approach direction toward it), placed near-side right curb facing the approaching driver.
+## Immediate (called center-filtered in phase3, so the owner chunk's elevation is ready).
+## Rejects (counts ambiguous) when no clear approach direction can be resolved.
+func _place_give_way_sign(node_pos: Vector2, node_id: int, parent: Node3D, ck: String) -> void:
+	if not (enable_road_signs and enable_give_way_signs):
+		return
+	if sign_debug_only_type != "" and sign_debug_only_type != "give_way":
+		return
+	if _road_signs == null or not is_instance_valid(parent):
+		return
+	var key := ("sign_give_way_n%d" % node_id) if node_id > 0 else ("sign_give_way_%d_%d" % [int(round(node_pos.x)), int(round(node_pos.y))])
+	if _sign_keys.has(key):
+		_sign_dbg.deduped += 1
+		return
+	var ri := _find_nearest_road_at_point(node_pos, ck)
+	if ri.is_empty():
+		ri = _find_nearest_road_at_point(node_pos, "")
+	if ri.is_empty():
+		_sign_dbg.no_road += 1
+		if sign_debug:
+			print("[SIGN] give_way n%d rejected: no_road" % node_id)
+		return
+	# Anchor to the nearest junction so we know which way the driver faces.
+	var ii := _pfence_nearest_intersection(node_pos, 45.0)
+	if ii < 0:
+		_sign_dbg.ambiguous += 1
+		if sign_debug:
+			print("[SIGN] give_way n%d rejected: no_junction" % node_id)
+		return
+	var road_dir: Vector2 = ri.road_dir
+	var inter_c: Vector2 = _intersection_positions[ii]
+	var s := road_dir.dot(inter_c - node_pos)
+	if absf(s) < 1.0:
+		_sign_dbg.ambiguous += 1  # give_way sits on the junction node → approach undecidable
+		if sign_debug:
+			print("[SIGN] give_way n%d rejected: ambiguous(on-junction)" % node_id)
+		return
+	# Give-way is for the driver EXITING the minor road ONTO the major road: the sign sits on
+	# that driver's right and faces them. Empirically that is the road direction AWAY from the
+	# junction here (negated vs "toward junction") — flips both curb side and facing together.
+	var approach_dir := -road_dir * signf(s)
+	var cl := Geometry2D.get_closest_point_to_segment(node_pos, ri.road_p1, ri.road_p2)
+	var curb := _sign_finalize("give_way", "", key, cl, approach_dir, ri.road_width, ck, parent)
+	if curb == Vector2.INF:
+		if sign_debug:
+			print("[SIGN] give_way n%d rejected: clearance/curb" % node_id)
+		return
+	if sign_debug:
+		print("[SIGN] give_way n%d placed key=%s" % [node_id, key])
+
+
+## Enqueue ONE speed-sign candidate (deferred, elevation-safe).
+func _enqueue_speed_job(way_id: int, value: int, sample_pt: Vector2, approach_dir: Vector2, sample_idx: int, dir_idx: int) -> void:
+	if approach_dir.length() < 0.01:
+		return
+	var key := "sign_speed_limit_w%d_s%d_a%d" % [way_id, sample_idx, dir_idx]
+	_sign_enqueue("speed_limit", key, sample_pt, approach_dir.normalized(), {"value": value})
+
+
+## Generic deferred-sign enqueue under the chunk that physically CONTAINS `pos` (the owner).
+## Build is deferred to _process_sign_queue (fires only when the owner is loaded + elevation
+## ready → correct grounding/parent). Tolerates duplicate jobs (deduped at build by key).
+func _sign_enqueue(type: String, key: String, pos: Vector2, approach_dir: Vector2, extra: Dictionary = {}) -> void:
+	if approach_dir.length() < 0.01:
+		return
+	if _sign_keys.has(key):
+		return  # already placed
+	var owner_ck := "%d,%d" % [int(floor(pos.x / chunk_size)), int(floor(pos.y / chunk_size))]
+	if not _deferred_sign_queue.has(owner_ck):
+		_deferred_sign_queue[owner_ck] = []
+	var job := {"type": type, "key": key, "pos": pos, "dir": approach_dir.normalized()}
+	for k in extra:
+		job[k] = extra[k]
+	_deferred_sign_queue[owner_ck].append(job)
+
+
+## Drain deferred sign jobs per owner chunk, but ONLY when that chunk is loaded and its
+## elevation is ready (correct grounding). Dispatches by job type. Time-budgeted.
+func _process_sign_queue(deadline_usec: int) -> void:
+	if _deferred_sign_queue.is_empty():
+		return
+	var done_keys: Array = []
+	for ck in _deferred_sign_queue.keys():
+		if Time.get_ticks_usec() > deadline_usec:
+			break
+		if not _loaded_chunks.has(ck):
+			continue  # owner not loaded — keep jobs (unload erases truly-gone chunks)
+		if enable_elevation and not _chunk_elevation_data.has(ck):
+			continue  # elevation not ready — retry next pass
+		var parent: Node3D = _loaded_chunks[ck]
+		if not is_instance_valid(parent):
+			continue
+		var jobs: Array = _deferred_sign_queue[ck]
+		var i := 0
+		while i < jobs.size() and Time.get_ticks_usec() <= deadline_usec:
+			var job: Dictionary = jobs[i]
+			match str(job.type):
+				"speed_limit":
+					_speed_build_job(job, ck, parent)
+				"roundabout":
+					_round_build_job(job, ck, parent)
+				_:
+					_w2_build_job(job, ck, parent)  # main_road / give_way_heur
+			i += 1
+		if i >= jobs.size():
+			done_keys.append(ck)
+		else:
+			_deferred_sign_queue[ck] = jobs.slice(i)
+	for ck in done_keys:
+		_deferred_sign_queue.erase(ck)
+
+
+## Shared finalize: junction-core / water / FURNITURE clearance + right-curb projection +
+## build + commit + debug. Returns the placed curb on success, or Vector2.INF on reject.
+## Road/intersection lookups use ck="" (global) for chunk-seam tolerance.
+func _sign_finalize(def_type: String, variant: String, key: String, cl: Vector2, approach_dir: Vector2, road_width: float, owner_ck: String, parent: Node3D) -> Vector2:
+	var c := cl
+	var guard := 0
+	# Nudge UPSTREAM (away from the junction/roundabout), i.e. against approach_dir which
+	# always points toward the junction — pushing +approach_dir would drive the sign deeper
+	# into the core (wrong, esp. for roundabout approaches).
+	while _is_point_in_intersection_shape(c, true, "") >= 0 and guard < 4:
+		c -= approach_dir * 6.0
+		guard += 1
+	_sign_last_reject = ""
+	if _is_point_in_intersection_shape(c, true, "") >= 0:
+		_sign_last_reject = "in_core"
+		_sign_dbg.rejected_clearance += 1
+		return Vector2.INF
+	if _is_point_in_water(c, ""):
+		_sign_last_reject = "water"
+		_sign_dbg.rejected_clearance += 1
+		return Vector2.INF
+	var place := _sign_resolve_curb(c, approach_dir, "", road_width)
+	if not place.ok:
+		_sign_last_reject = "no_curb_slot"
+		_sign_dbg.no_curb_slot += 1
+		return Vector2.INF
+	var curb: Vector2 = place.curb
+	# Traffic lights are a CLEARANCE constraint, not a semantic blocker: on conflict, try only
+	# curb-parallel adjustment (along the road, same side) within a small window before rejecting.
+	if _sign_near_tl(curb):
+		var fixed := false
+		for k in [1.0, -1.0, 2.0, -2.0, 3.0]:
+			var probe: Vector2 = curb + approach_dir * (k * 3.0)
+			if not _sign_near_tl(probe) and not _is_point_on_vehicle_road(probe, 0.0, "") and not _sign_near_signs(probe):
+				curb = probe
+				fixed = true
+				break
+		if not fixed:
+			_sign_last_reject = "tl_conflict"
+			_sign_dbg.rejected_clearance += 1
+			return Vector2.INF
+	# Other signs / shelters — never stack on top of an existing sign or a bus shelter.
+	if _sign_near_signs(curb):
+		_sign_last_reject = "existing_sign"
+		_sign_dbg.rejected_clearance += 1
+		return Vector2.INF
+	var elev := _sample_elevation(curb.x, curb.y)
+	var node: Node3D = _road_signs.build(def_type, variant, Vector3(curb.x, elev, curb.y), place.yaw, parent, {
+		"profile": sign_style_profile,
+		"visibility_range": sign_visibility_range,
+		"hit_handler": Callable(self, "_on_sign_hit"),
+	})
+	if node == null:
+		_sign_last_reject = "missing_texture"
+		_sign_dbg.disabled_data += 1
+		return Vector2.INF
+	_sign_keys[key] = true
+	_sign_track_chunk_key(owner_ck, key)
+	_sign_register_furniture(owner_ck, curb)
+	_sign_dbg.placed += 1
+	if sign_debug:
+		_sign_debug_draw(owner_ck, cl, approach_dir, place.right_perp, curb, place.face)
+	return curb
+
+
+## Build one queued SPEED-LIMIT sign: per-value min-spacing + per-chunk cap, then finalize.
+func _speed_build_job(job: Dictionary, ck: String, parent: Node3D) -> void:
+	var key: String = job.key
+	if _sign_keys.has(key):
+		_sign_dbg.deduped += 1
+		return
+	var value: int = int(job.value)
+	var cl: Vector2 = job.pos
+	var ri := _find_nearest_road_at_point(cl, "")  # must be a real vehicle road (width for tight curb)
+	if ri.is_empty():
+		_speed_dbg.not_on_road += 1
+		return
+	if _speed_sign_too_close(cl, value):
+		_speed_dbg.spacing += 1
+		return
+	if int(_speed_count_by_chunk.get(ck, 0)) >= SPEED_PER_CHUNK_CAP:
+		_speed_dbg.cap += 1
+		return
+	var curb := _sign_finalize("speed_limit", str(value), key, cl, job.dir, ri.road_width, ck, parent)
+	if curb == Vector2.INF:
+		return
+	_speed_register_pos(ck, curb, value)
+	_speed_count_by_chunk[ck] = int(_speed_count_by_chunk.get(ck, 0)) + 1
+
+
+## Build one queued ROUNDABOUT approach sign (dedup by approach key; shared finalize).
+func _round_build_job(job: Dictionary, ck: String, parent: Node3D) -> void:
+	var key: String = job.key
+	if _sign_keys.has(key):
+		_sign_dbg.deduped += 1
+		return
+	var ri := _find_nearest_road_at_point(job.pos, "")
+	if ri.is_empty():
+		_speed_dbg.not_on_road += 1
+		return
+	_sign_finalize("roundabout", "", key, job.pos, job.dir, ri.road_width, ck, parent)
+
+
+## Build one queued WAVE-2 priority sign (main_road / give_way_heur) via the shared finalize.
+## Maps placement/reject outcomes to the priority counters.
+func _w2_build_job(job: Dictionary, ck: String, parent: Node3D) -> void:
+	var key: String = job.key
+	if _sign_keys.has(key):
+		_sign_dbg.deduped += 1
+		return
+	var jtype := str(job.type)  # "main_road" or "give_way_heur"
+	var ri := _find_nearest_road_at_point(job.pos, "")
+	if ri.is_empty():
+		_prio_dbg.skipped_clearance += 1
+		return
+	var def_type := "give_way" if jtype == "give_way_heur" else jtype  # heuristic give-way uses the give_way face/def
+	var curb := _sign_finalize(def_type, "", key, job.pos, job.dir, ri.road_width, ck, parent)
+	var placed := curb != Vector2.INF
+	if jtype == "main_road":
+		if placed: _prio_dbg.placed_main_road += 1
+		else: _prio_count_reject()
+	else:
+		if placed: _prio_dbg.placed_give_way += 1
+		else: _prio_count_reject()
+
+
+## Map the last _sign_finalize reject reason to a priority-sign counter.
+func _prio_count_reject() -> void:
+	match _sign_last_reject:
+		"tl_conflict":
+			_prio_dbg.skipped_tl_conflict += 1
+		"existing_sign":
+			_prio_dbg.skipped_existing_sign += 1
+		_:
+			_prio_dbg.skipped_clearance += 1
+
+
+## Sample a polyline by arc length: returns [{pos:Vector2, dir:Vector2}] every `step`
+## metres (and at distance 0). dir = the local segment tangent (forward travel sense).
+func _sample_polyline(pts: PackedVector2Array, step: float) -> Array:
+	var out: Array = []
+	if pts.size() < 2 or step <= 0.0:
+		return out
+	var dist_total := 0.0
+	var next_at := 0.0
+	for i in range(pts.size() - 1):
+		var a: Vector2 = pts[i]
+		var b: Vector2 = pts[i + 1]
+		var seg := b - a
+		var seg_len := seg.length()
+		if seg_len < 0.01:
+			continue
+		var dir := seg / seg_len
+		var seg_start := dist_total
+		var seg_end := dist_total + seg_len
+		while next_at <= seg_end + 0.001:
+			var t: float = maxf(next_at - seg_start, 0.0)
+			out.append({"pos": a + dir * t, "dir": dir})
+			next_at += step
+		dist_total = seg_end
+	return out
+
+
+func _speed_cell(p: Vector2) -> Vector2i:
+	return Vector2i(int(floor(p.x / SPEED_MIN_SPACING_SAME_VALUE)), int(floor(p.y / SPEED_MIN_SPACING_SAME_VALUE)))
+
+
+func _speed_sign_too_close(p: Vector2, value: int) -> bool:
+	var c := _speed_cell(p)
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var cell := Vector2i(c.x + dx, c.y + dy)
+			if _speed_pos_hash.has(cell):
+				for e in _speed_pos_hash[cell]:
+					if int(e.v) == value and p.distance_to(e.p) < SPEED_MIN_SPACING_SAME_VALUE:
+						return true
+	return false
+
+
+func _speed_register_pos(ck: String, p: Vector2, value: int) -> void:
+	var c := _speed_cell(p)
+	if not _speed_pos_hash.has(c):
+		_speed_pos_hash[c] = []
+	_speed_pos_hash[c].append({"p": p, "v": value})
+	if not _speed_pos_by_chunk.has(ck):
+		_speed_pos_by_chunk[ck] = []
+	_speed_pos_by_chunk[ck].append(p)
+
+
+# === Sign furniture clearance (Wave 1C; also fixes signs sitting inside shelters/bins) ===
+func _sign_furn_cell(p: Vector2) -> Vector2i:
+	return Vector2i(int(floor(p.x / SIGN_FURNITURE_CLEAR)), int(floor(p.y / SIGN_FURNITURE_CLEAR)))
+
+
+## True if `pos` is too close to a traffic light pole (slightly larger radius so the sign
+## also doesn't sit directly in front of / behind the signal head). TLs are a CLEARANCE
+## constraint — the finalizer first tries curb-parallel adjustment before rejecting.
+func _sign_near_tl(pos: Vector2) -> bool:
+	var ri := int(ceil(SIGN_TL_CLEAR))
+	for dx in range(-ri, ri + 1):
+		for dz in range(-ri, ri + 1):
+			if _created_tl_positions.has("tl_%d_%d" % [int(pos.x) + dx, int(pos.y) + dz]):
+				return true
+	return false
+
+
+## True if `pos` is too close to a bus shelter, a legacy crossing/parking/tram sign, or another
+## already-placed new road sign. (Lamps are intentionally NOT checked — signs coexist with lamp
+## posts and they are too dense; checking them over-rejects legitimate signs.)
+func _sign_near_signs(pos: Vector2) -> bool:
+	var r := SIGN_FURNITURE_CLEAR
+	var ri := int(ceil(r))
+	for dx in range(-ri, ri + 1):
+		for dz in range(-ri, ri + 1):
+			var kx := int(pos.x) + dx
+			var kz := int(pos.y) + dz
+			if _created_bus_stop_positions.has("bs_%d_%d" % [kx, kz]):
+				return true
+			if _created_sign_positions.has("ts_%d_%d" % [kx, kz]):
+				return true
+	var c := _sign_furn_cell(pos)
+	for dx2 in range(-1, 2):
+		for dz2 in range(-1, 2):
+			for q in _sign_pos_hash.get(Vector2i(c.x + dx2, c.y + dz2), []):
+				if pos.distance_to(q) < r:
+					return true
+	return false
+
+
+## Composite (kept for any non-finalize callers): TL or sign/shelter conflict.
+func _sign_near_furniture(pos: Vector2) -> bool:
+	return _sign_near_tl(pos) or _sign_near_signs(pos)
+
+
+## OSM highway class → priority rank (higher = more important). Used by the conservative
+## main-road / heuristic give-way comparison. Similar/unknown classes rank equal → ambiguous.
+func _road_class_rank(highway: String) -> int:
+	match highway:
+		"motorway", "motorway_link", "trunk", "trunk_link": return 5
+		"primary", "primary_link": return 4
+		"secondary", "secondary_link": return 3
+		"tertiary", "tertiary_link": return 2
+		"unclassified", "residential", "living_street": return 1
+		"service", "track": return 0
+		_: return -1  # unknown → never use for a confident comparison
+
+
+func _sign_register_furniture(ck: String, pos: Vector2) -> void:
+	var c := _sign_furn_cell(pos)
+	if not _sign_pos_hash.has(c):
+		_sign_pos_hash[c] = []
+	_sign_pos_hash[c].append(pos)
+	if not _sign_pos_by_chunk.has(ck):
+		_sign_pos_by_chunk[ck] = []
+	_sign_pos_by_chunk[ck].append(pos)
 
 
 func _get_direction_to_nearest_road(pos: Vector2) -> Vector2:
@@ -23311,6 +24161,15 @@ func _reset_wire_state() -> void:
 	_tl_crossings.clear()
 	_tl_sl_queue.clear()
 	_tl_blink_accum = 0.0
+	# Road signs share the regen/reset lifecycle.
+	_sign_keys.clear()
+	_sign_keys_by_chunk.clear()
+	_speed_pos_hash.clear()
+	_speed_pos_by_chunk.clear()
+	_speed_count_by_chunk.clear()
+	_deferred_sign_queue.clear()
+	_sign_pos_hash.clear()
+	_sign_pos_by_chunk.clear()
 	_deferred_veg_row_queue.clear()
 	_veg_row_batch.clear()
 	_veg_shrub_batch.clear()
@@ -28812,6 +29671,37 @@ var _tl_sl_queue: Dictionary = {}       # ck → Array[stop-line jobs] (built af
 var tl_sl_max_retries := 600            # safety-net frames before default placement (map-edge junctions)
 var _tl_stopline_mat: StandardMaterial3D = null
 var _tl_dbg := {"enq": 0, "placed": 0, "noroad": 0, "midblock_v2": 0, "dup_node": 0, "dup_approach": 0, "ambiguous": 0, "sl_drawn": 0, "sl_nofit": 0, "sl_late": 0}
+
+# ============================ ROAD SIGNS (Wave 0/1A) ============================
+# Generic sign system state. The build library (RoadSignsLib) owns mesh/material/
+# registry; the generator owns placement, dedup, chunk lifecycle, and debug.
+var _road_signs = null                       # RoadSignsLib instance (lazy in _ready)
+var _sign_keys: Dictionary = {}              # unified "sign_<type>_..." → true (cross-chunk dedup)
+var _sign_keys_by_chunk: Dictionary = {}     # ck → Array[String] (erased on unload)
+var _sign_dbg := {"placed": 0, "deduped": 0, "no_road": 0, "no_curb_slot": 0, "rejected_clearance": 0, "disabled_data": 0, "disabled_by_value": 0, "ambiguous": 0}
+# Deferred build queue (shared by speed-limit + roundabout): owner_ck → Array[typed job];
+# built only when the owner chunk is loaded + elevation ready (no y=0 burial).
+var _deferred_sign_queue: Dictionary = {}
+# Furniture clearance: new signs avoid shelters/TLs/legacy-signs + each other.
+const SIGN_FURNITURE_CLEAR := 2.2            # m: a sign must not sit this close to a shelter/legacy/other sign
+const SIGN_TL_CLEAR := 3.5                   # m: a sign must not sit this close to a traffic-light pole/head
+var _sign_pos_hash: Dictionary = {}          # Vector2i cell (SIGN_FURNITURE_CLEAR) → Array[Vector2] (placed new signs)
+var _sign_pos_by_chunk: Dictionary = {}      # ck → Array[Vector2] (free on unload)
+var _sign_last_reject := ""                  # reason set by _sign_finalize on the most recent reject
+# Wave 2 priority signs (main-road / heuristic give-way) — class heuristic + TL coexistence.
+const PRIO_APPROACH_OFFSET := 15.0           # m upstream of the junction the priority sign is posted
+const PRIO_WIDTH_MARGIN := 2.5               # m: "clearly wider/narrower" threshold for the major/minor call
+var _prio_dbg := {"skipped_tl_conflict": 0, "skipped_existing_sign": 0, "skipped_clearance": 0, "skipped_ambiguous_class": 0, "placed_main_road": 0, "placed_give_way": 0}
+# Speed-limit (Wave 1B) anti-spam: supported values + change-point placement state.
+const SPEED_SUPPORTED := [20, 40, 60, 90]
+const SPEED_SAMPLE_STEP := 350.0             # v1 large-interval sampling ALONG a way (deferred queue owns by sample position, so dense sampling no longer needed); approximates change-point placement
+const SPEED_MIN_SPACING_SAME_VALUE := 250.0  # suppress another SAME-value sign within this radius (the real density control, large interval)
+const SPEED_PER_CHUNK_CAP := 24              # generous per-proc-chunk safety net (min-spacing is the real control; "initial" bulk pass needs headroom)
+const ROUND_APPROACH_OFFSET := 22.0          # m upstream of the roundabout ring the approach sign is posted (Wave 1C)
+var _speed_pos_hash: Dictionary = {}         # Vector2i cell → Array[{p:Vector2, v:int}] (min-spacing query)
+var _speed_pos_by_chunk: Dictionary = {}     # ck → Array[Vector2] (positions to free on unload)
+var _speed_count_by_chunk: Dictionary = {}   # ck → int (per-chunk cap)
+var _speed_dbg := {"cand": 0, "not_on_road": 0, "spacing": 0, "cap": 0}  # speed-specific per-gate diagnostics
 
 
 # Queue one signal node (owned by chunk `ck`) for deferred placement. Node-id dedup at both enqueue

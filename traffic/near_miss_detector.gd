@@ -30,6 +30,13 @@ func _ready() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	# Lazy re-acquire: _ready() can run before the player car joins the "car"
+	# group (or before TrafficManager exists), which left these null forever
+	# and silently disabled near-miss detection.
+	if not is_instance_valid(player_car):
+		player_car = get_tree().get_first_node_in_group("car")
+	if not is_instance_valid(traffic_manager):
+		traffic_manager = get_parent().get_node_or_null("TrafficManager") as TrafficManager
 	if not player_car or not traffic_manager:
 		return
 
