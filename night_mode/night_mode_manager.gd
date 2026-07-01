@@ -361,7 +361,7 @@ func _create_moon_light() -> void:
 	_moon_light.light_color = MOON_LIGHT_COLOR
 	_moon_light.light_energy = 0.0
 	_moon_light.shadow_enabled = true
-	_moon_light.directional_shadow_max_distance = 300.0
+	_moon_light.directional_shadow_max_distance = 200.0
 	_moon_light.rotation_degrees = Vector3(-35, 145, 0)
 	get_tree().current_scene.add_child(_moon_light)
 
@@ -509,15 +509,15 @@ func enable_night_mode() -> void:
 
 		# NFS Underground style bloom
 		_environment.glow_enabled = true
-		_environment.glow_intensity = 1.8
-		_environment.glow_bloom = 0.4
-		_environment.glow_blend_mode = Environment.GLOW_BLEND_MODE_ADDITIVE
-		_environment.glow_hdr_threshold = 0.5
+		_environment.glow_intensity = 1.2
+		_environment.glow_bloom = 0.2
+		_environment.glow_blend_mode = Environment.GLOW_BLEND_MODE_SCREEN
+		_environment.glow_hdr_threshold = 0.7
 		_environment.glow_hdr_scale = 2.0
 
 		# Tonemap
-		_environment.tonemap_mode = Environment.TONE_MAPPER_ACES
-		_environment.tonemap_exposure = 1.1
+		_environment.tonemap_mode = Environment.TONE_MAPPER_AGX
+		_environment.tonemap_exposure = 1.4
 		_environment.tonemap_white = 6.0
 
 		# Volumetric fog — атмосферная подсветка фонарей, но не «суп»
