@@ -255,6 +255,9 @@ func _show_world() -> void:
 					return
 				_car_rb.linear_velocity = Vector3.ZERO
 				_car_rb.angular_velocity = Vector3.ZERO
+			# --shot: держим машину замороженной для стабильных скриншотов (без отката).
+			if OS.get_cmdline_user_args().has("--shot"):
+				_car_rb.freeze = true
 
 
 func _setup_work_mode() -> void:

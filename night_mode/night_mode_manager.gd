@@ -140,9 +140,10 @@ func _ready() -> void:
 
 	# CLI аргументы
 	var args := OS.get_cmdline_args()
-	if args.has("--night"):
+	var uargs := OS.get_cmdline_user_args()
+	if args.has("--night") or uargs.has("--night"):
 		start_night = true
-	var start_rain := args.has("--rain")
+	var start_rain := args.has("--rain") or uargs.has("--rain")
 
 	if start_night:
 		enable_night_mode()
@@ -301,7 +302,7 @@ func _create_night_sky() -> void:
 shader_type sky;
 
 uniform vec3 moon_direction = vec3(-0.3, 0.6, 0.4);
-uniform float moon_size = 0.08;
+uniform float moon_size = 0.01;
 uniform float star_density = 0.0015;
 
 float hash(vec2 p) {
@@ -330,7 +331,7 @@ void sky() {
 	vec3 moon_dir = normalize(moon_direction);
 	float moon_dist = distance(dir, moon_dir);
 	float moon = smoothstep(moon_size, moon_size * 0.5, moon_dist);
-	float moon_glow = smoothstep(moon_size * 8.0, moon_size, moon_dist) * 0.5;
+	float moon_glow = pow(smoothstep(moon_size * 4.0, moon_size, moon_dist), 2.5) * 0.25;
 	col += vec3(0.85, 0.9, 1.0) * moon * 1.5;
 	col += vec3(0.3, 0.4, 0.7) * moon_glow;
 
@@ -370,8 +371,12 @@ func _create_moon_light() -> void:
 	_moon_light.light_energy = 0.0
 	_moon_light.shadow_enabled = true
 	_moon_light.directional_shadow_max_distance = 200.0
-	_moon_light.rotation_degrees = Vector3(-35, 145, 0)
+	_moon_light.rotation_degrees = Vector3(-15, 145, 0)
 	get_tree().current_scene.add_child(_moon_light)
+	# Диск луны в ночном небе — по реальному направлению лунного света (не хардкод),
+	# чтобы луна и её тени/подсветка совпадали. basis.z смотрит «к источнику» (в небо).
+	if _night_sky:
+		_night_sky.set_shader_parameter("moon_direction", _moon_light.global_transform.basis.z)
 
 
 # === Дождь ===
