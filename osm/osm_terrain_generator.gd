@@ -22323,6 +22323,28 @@ func _residential_within(point: Vector2, radius: float) -> bool:
 					return true
 	return false
 
+
+# Per-azimuth "cityness" (0..255) from the GLOBAL building footprint hash — feeds the
+# day sky's data-driven horizon silhouette (rooftops where built-up, treeline where
+# open). Cheap: sectors × few ring samples × hash lookup; called ~1/sec from
+# NightModeManager. Azimuth matches the sky shader (az = atan(dir.x, dir.z)), so the
+# sample direction is Vector2(sin(az), cos(az)) = (x, z).
+func get_horizon_profile(center: Vector2, sectors: int = 128, inner_r: float = 320.0, outer_r: float = 500.0) -> PackedByteArray:
+	var out := PackedByteArray()
+	out.resize(sectors)
+	var radii := [inner_r, lerpf(inner_r, outer_r, 0.4), lerpf(inner_r, outer_r, 0.75), outer_r]
+	var margin := 28.0
+	for i in range(sectors):
+		var az := (float(i) / float(sectors)) * TAU - PI
+		var d := Vector2(sin(az), cos(az))
+		var hits := 0
+		for r in radii:
+			if _building_clip_within(center + d * r, margin):
+				hits += 1
+		out[i] = int(round(255.0 * float(hits) / float(radii.size())))
+	return out
+
+
 # Gates for a candidate at world-XZ `pos` whose chunk `ck` is loaded (cheap → expensive).
 # `outward` = unit direction from the road toward the board (used to detect medians).
 func _billboard_candidate_ok(pos: Vector2, ck: String, outward: Vector2) -> bool:

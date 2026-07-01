@@ -20,6 +20,12 @@ uniform float treeline_top : hint_range(0.0, 0.1) = 0.012;
 uniform float treeline_jitter : hint_range(0.0, 0.06) = 0.028;
 uniform float treeline_strength : hint_range(0.0, 1.0) = 0.75;
 uniform float treeline_aerial : hint_range(0.0, 1.0) = 0.55;
+// Силуэт по данным: профиль «застроенности» по азимуту (R = 0 открыто .. 1 город).
+uniform sampler2D horizon_profile : filter_linear, repeat_enable;
+uniform bool horizon_profile_enabled = false;
+uniform vec3 rooftop_color : source_color = vec3(0.28, 0.28, 0.31);
+uniform float rooftop_top : hint_range(0.0, 0.15) = 0.05;
+uniform float rooftop_jitter : hint_range(0.0, 0.06) = 0.02;
 
 float h11(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float vnoise(vec2 p) {
@@ -57,14 +63,20 @@ void sky() {
 	float haze = pow(clamp(1.0 - abs(dir.y) / horizon_haze_height, 0.0, 1.0), 2.0);
 	col = mix(col, horizon_haze_color, haze * horizon_haze_strength);
 
-	// Низкая рваная лесополоса, прижатая к горизонту. Рисуется на куполе неба →
-	// перекрывается ближними зданиями и видна только в открытом дальнем крае.
+	// Силуэт горизонта: крыши там, где город (профиль из OSM), лесополоса — где открыто.
+	// Рисуется на куполе неба → перекрывается ближними зданиями, виден только в дальнем крае.
 	float az = atan(dir.x, dir.z);                 // азимут вокруг купола
-	float jitter = fbm2(vec2(az * 2.2, 0.0));      // «зубчатость» верхушки
-	float top = treeline_top + jitter * treeline_jitter;
-	float tree = smoothstep(top, top - 0.008, dir.y) * smoothstep(-0.004, 0.003, dir.y);
-	vec3 tcol = mix(treeline_color, horizon_haze_color, treeline_aerial); // аэроперспектива
-	col = mix(col, tcol, tree * treeline_strength);
+	float cityness = 0.0;
+	if (horizon_profile_enabled) {
+		cityness = texture(horizon_profile, vec2(az / TAU + 0.5, 0.5)).r;
+	}
+	float jitter = fbm2(vec2(az * mix(2.2, 5.0, cityness), 0.0));  // город — мельче/зубчатее
+	float top = mix(treeline_top, rooftop_top, cityness)
+	          + jitter * mix(treeline_jitter, rooftop_jitter, cityness);
+	float sil = smoothstep(top, top - 0.008, dir.y) * smoothstep(-0.004, 0.003, dir.y);
+	vec3 base_col = mix(treeline_color, rooftop_color, cityness);
+	vec3 scol = mix(base_col, horizon_haze_color, treeline_aerial); // аэроперспектива
+	col = mix(col, scol, sil * treeline_strength);
 
 	COLOR = col;
 }

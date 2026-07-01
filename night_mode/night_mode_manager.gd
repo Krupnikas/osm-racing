@@ -28,6 +28,14 @@ var _car: Node  # VehicleBody3D — для скорости дождя
 
 # HDRI дневное небо
 var _day_hdri_material: ShaderMaterial
+
+# Data-driven горизонт-силуэт (дневное небо): профиль застроенности по азимуту.
+const HORIZON_SECTORS := 128
+const HORIZON_UPDATE_DIST := 40.0
+var _horizon_last_pos := Vector3(1e9, 0.0, 1e9)
+var _horizon_timer := 0.0
+var _horizon_img: Image
+var _horizon_tex: ImageTexture
 var _day_clear_tex: Texture2D
 var _day_rain_tex: Texture2D
 
@@ -410,7 +418,36 @@ func _create_rain_system() -> void:
 	add_child(_rain_system)
 
 
-func _process(_delta: float) -> void:
+func _update_horizon_profile(delta: float) -> void:
+	_horizon_timer -= delta
+	if not _day_hdri_material:
+		return
+	if not _car or not is_instance_valid(_car):
+		_car = get_tree().get_first_node_in_group("car")
+		if not _car:
+			return
+	if not _terrain_generator or not _terrain_generator.has_method("get_horizon_profile"):
+		return
+	var pos: Vector3 = _car.global_position
+	if _horizon_timer > 0.0 and pos.distance_to(_horizon_last_pos) < HORIZON_UPDATE_DIST:
+		return
+	_horizon_timer = 2.0
+	_horizon_last_pos = pos
+	var bytes: PackedByteArray = _terrain_generator.get_horizon_profile(Vector2(pos.x, pos.z), HORIZON_SECTORS)
+	if bytes.size() != HORIZON_SECTORS:
+		return
+	if _horizon_img == null:
+		_horizon_img = Image.create_from_data(HORIZON_SECTORS, 1, false, Image.FORMAT_L8, bytes)
+		_horizon_tex = ImageTexture.create_from_image(_horizon_img)
+	else:
+		_horizon_img.set_data(HORIZON_SECTORS, 1, false, Image.FORMAT_L8, bytes)
+		_horizon_tex.update(_horizon_img)
+	_day_hdri_material.set_shader_parameter("horizon_profile", _horizon_tex)
+	_day_hdri_material.set_shader_parameter("horizon_profile_enabled", true)
+
+
+func _process(delta: float) -> void:
+	_update_horizon_profile(delta)
 	# Rain follows camera + velocity-based direction
 	if _rain_system and _rain_system.emitting:
 		var camera := get_viewport().get_camera_3d()
