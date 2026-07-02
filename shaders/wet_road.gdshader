@@ -174,6 +174,18 @@ void fragment() {
 		dry_rough = mix(dry_rough, dry_rough * 0.9, band * wheel_wear);
 	}
 
+	// D: крошащийся край дороги — тёмный грязный кант у обочины, сломанный шумом.
+	// Масштабируется износом (asphalt_wear) → в Дубае почти нет, в Череповце заметно.
+	if (asphalt_wear > 0.0 && road_width_m >= 3.5) {
+		float across_e = (UV2.y > 0.5) ? UV2.x : (UV.x - 0.5) * road_width_m;   // м от осевой
+		float edge_m = road_width_m * 0.5 - abs(across_e);                       // м до края (0 = у бордюра)
+		float edge_band = smoothstep(0.9, 0.0, edge_m);                          // ~0.9 м у края (шире)
+		float ejit = texture(noise_micro_tex, world_pos.xz * 0.4).r;             // рваный, не линия
+		float edge_amt = edge_band * mix(0.55, 1.0, ejit) * clamp(asphalt_wear * 2.2, 0.0, 1.0);
+		dry_albedo *= mix(1.0, 0.5, edge_amt);                                   // ЗАМЕТНО темнее/грязнее
+		dry_rough = mix(dry_rough, min(dry_rough * 1.15, 1.0), edge_amt);        // грубее
+	}
+
 	// === МОКРАЯ ДОРОГА ===
 	// Мокрый асфальт: сильное потемнение albedo (вода впитывается, свет поглощается)
 	vec3 wet_albedo = albedo * 0.35;
