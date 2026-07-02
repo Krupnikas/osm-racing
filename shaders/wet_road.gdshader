@@ -243,6 +243,8 @@ void fragment() {
 	float det_fade = clamp(1.0 - (cam_dist - detail_fade_start) / detail_fade_len, 0.0, 1.0) * detail_normal_strength;
 	dn.xy *= det_fade;
 	vec3 comb_n = normalize(vec3(bn.xy + dn.xy, max(bn.z * dn.z, 0.05)));   // whiteout-бленд
+	// E1 (Lagarde): в лужах нормаль → плоская (зеркало) → чище отражения (SSR/fresnel).
+	comb_n = normalize(mix(comb_n, vec3(0.0, 0.0, 1.0), puddle_factor * 0.85));
 	NORMAL_MAP = comb_n * 0.5 + 0.5;
 	NORMAL_MAP_DEPTH = normal_strength;
 }
