@@ -31,6 +31,13 @@ uniform vec3 base_road_color = vec3(0.085, 0.072, 0.055);
 uniform float normal_strength : hint_range(0.0, 2.0) = 0.8;
 uniform bool use_texture = true;
 
+// A4: detail-нормаль — второй, более мелкий масштаб нормали для чёткости вблизи (whiteout-бленд).
+// Гаснет с дистанцией (иначе высокочастотная нормаль мерцает вдали).
+uniform float detail_normal_scale : hint_range(1.0, 12.0) = 4.0;
+uniform float detail_normal_strength : hint_range(0.0, 1.5) = 0.6;
+uniform float detail_fade_start : hint_range(2.0, 60.0) = 14.0;
+uniform float detail_fade_len : hint_range(4.0, 60.0) = 22.0;
+
 // Параметры мокрой дороги
 global uniform float wetness_global;
 uniform bool is_night = false;
@@ -217,7 +224,13 @@ void fragment() {
 	METALLIC = metallic;
 	SPECULAR = specular;
 
-	// Normal map
-	NORMAL_MAP = texture(normal_texture, asph_uv).rgb;
+	// Normal map — A4: база + мелкая detail-нормаль (whiteout), detail гаснет с дистанцией.
+	vec3 bn = texture(normal_texture, asph_uv).rgb * 2.0 - 1.0;
+	vec3 dn = texture(normal_texture, asph_uv * detail_normal_scale).rgb * 2.0 - 1.0;
+	float cam_dist = length(world_pos - CAMERA_POSITION_WORLD);
+	float det_fade = clamp(1.0 - (cam_dist - detail_fade_start) / detail_fade_len, 0.0, 1.0) * detail_normal_strength;
+	dn.xy *= det_fade;
+	vec3 comb_n = normalize(vec3(bn.xy + dn.xy, max(bn.z * dn.z, 0.05)));   // whiteout-бленд
+	NORMAL_MAP = comb_n * 0.5 + 0.5;
 	NORMAL_MAP_DEPTH = normal_strength;
 }
