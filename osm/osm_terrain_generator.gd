@@ -443,10 +443,12 @@ var _lamp_batches_to_finalize: Array[String] = []  # Chunk keys ready for finali
 # accumulated at road-apply, finalized at road-finalize, auto-freed with the chunk node.
 var enable_road_decals := true
 const DECAL_VARIANTS := 3                 # свежая-тёмная / средняя / старая-серая
+const SNAKE_VARIANTS := 5                 # варианты формы битумных змеек (разнообразие)
 var _decal_batch_data: Dictionary = {}   # chunk_key -> {parent, buckets:Array[Array[Transform3D]]}
 var _decal_quad_mesh: Mesh = null
-var _decal_materials: Array = []          # по одному материалу на вариант
-var _asphalt_src_img: Image = null        # исходник асфальта (014) для зерна заплаток
+var _decal_materials: Array = []          # заплатки: по материалу на вариант
+var _snake_materials: Array = []          # битумные змейки: по материалу на вариант
+var _asphalt_src_img: Image = null        # (не используется) исходник асфальта для заплаток
 # TEMP streaming-lamp diagnosis (remove after fix)
 var lamp_debug := false   # debug logging for lamp/wire streaming (LAMP-FIN/UNLOAD/WIRE-ENQ/LAMP-DBG) — off in shipped builds
 var _lamp_dbg_skip_road := 0
@@ -22273,6 +22275,15 @@ func _ensure_road_decal_assets() -> void:
 		_make_patch_material(shader, asph, 37, 0.70, 0.022, 0.26, 0.86),   # средняя
 		_make_patch_material(shader, asph, 73, 0.92, 0.018, 0.18, 0.88),   # старая серая (почти как дорога)
 	]
+	# Битумные змейки: широкие тёмно-серые матовые извилистые ленты (шпательная заливка трещин).
+	# 5 вариантов формы (разные seed → разное число/позиции лент: одиночные, кресты и т.п.).
+	_snake_materials = [
+		_make_snake_material(shader, asph, 211, 0.48, 0.018),
+		_make_snake_material(shader, asph, 251, 0.40, 0.026),
+		_make_snake_material(shader, asph, 307, 0.44, 0.020),
+		_make_snake_material(shader, asph, 353, 0.50, 0.016),
+		_make_snake_material(shader, asph, 419, 0.42, 0.024),
+	]
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(1.0, 1.0)   # XZ, нормаль +Y; масштаб по X (поперёк) и Z (вдоль); материал — per-variant override
 	_decal_quad_mesh = plane
@@ -22335,6 +22346,69 @@ func _make_patch_material(shader: Shader, asph: Texture2D, seed_v: int, darken: 
 	return mat
 
 
+# Битумная змейка: широкая тёмно-серая МАТОВАЯ извилистая лента (domain-warped изолиния) с
+# переменной шириной + слегка выступает (валик). Запекается → мипы держат дистанцию без смаза.
+func _make_snake_material(shader: Shader, asph: Texture2D, seed_v: int, darken: float, halfwidth: float) -> Material:
+	var S := 128
+	var wob := FastNoiseLite.new()
+	wob.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	wob.frequency = 0.03
+	wob.seed = seed_v
+	# Несколько ПРЯМЫХ лент: вертикальные (вдоль дороги) + иногда горизонтальные (поперёк),
+	# слегка неровный, но в целом ровный край (лёгкое дрожание). Квад ориентируется по дороге.
+	var rg := RandomNumberGenerator.new()
+	rg.seed = seed_v
+	# Каждая лента: Vector2(центр, полуширина). Ширина ВАРЬИРУЕТСЯ от заданной до чуть тоньше.
+	var vlines: Array = []
+	for _i in range(rg.randi_range(1, 2)):
+		vlines.append(Vector2(rg.randf_range(0.22, 0.78), rg.randf_range(halfwidth * 0.6, halfwidth)))
+	var hlines: Array = []
+	for _j in range(rg.randi_range(0, 1)):
+		hlines.append(Vector2(rg.randf_range(0.28, 0.72), rg.randf_range(halfwidth * 0.6, halfwidth)))
+	var msk := PackedFloat32Array()
+	msk.resize(S * S)
+	var shp := Image.create(S, S, false, Image.FORMAT_R8)
+	for y in S:
+		for x in S:
+			var u := float(x) / float(S - 1)
+			var v := float(y) / float(S - 1)
+			var m := 0.0
+			for cu in vlines:
+				var hw: float = cu.y
+				var w := wob.get_noise_2d(0.0, float(y)) * 0.02          # лёгкая неровность края вдоль ленты
+				m = maxf(m, 1.0 - smoothstep(hw * 0.75, hw, absf(u - cu.x + w)))
+			for cv in hlines:
+				var hw2: float = cv.y
+				var w2 := wob.get_noise_2d(float(x), 500.0) * 0.02
+				m = maxf(m, 1.0 - smoothstep(hw2 * 0.75, hw2, absf(v - cv.x + w2)))
+			msk[y * S + x] = m
+			shp.set_pixel(x, y, Color(m, 0.0, 0.0))
+	var nrm := Image.create(S, S, false, Image.FORMAT_RGB8)
+	for y in S:
+		for x in S:
+			var hl := msk[y * S + max(x - 1, 0)]
+			var hr := msk[y * S + min(x + 1, S - 1)]
+			var hd := msk[max(y - 1, 0) * S + x]
+			var hu := msk[min(y + 1, S - 1) * S + x]
+			# Нормаль — ЕЛЕ-ЕЛЕ валик (0.2 вместо 1.6): едва выступает, без теней/засветов.
+			var nv := Vector3(-(hr - hl) * 0.2, -(hu - hd) * 0.2, 1.0).normalized()
+			nrm.set_pixel(x, y, Color(nv.x * 0.5 + 0.5, nv.y * 0.5 + 0.5, nv.z * 0.5 + 0.5))
+	shp.generate_mipmaps()
+	nrm.generate_mipmaps()
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	mat.set_shader_parameter("asphalt_tex", asph)
+	mat.set_shader_parameter("shape_tex", ImageTexture.create_from_image(shp))
+	mat.set_shader_parameter("shape_normal", ImageTexture.create_from_image(nrm))
+	mat.set_shader_parameter("asphalt_world_scale", 0.8)
+	mat.set_shader_parameter("patch_tint", Vector3(0.60, 0.59, 0.57))  # нейтрально-тёмный битум
+	mat.set_shader_parameter("darken", darken)                          # тёмно-серый (не чёрный)
+	mat.set_shader_parameter("rough", 0.6)                              # матовее (меньше глянца)
+	mat.set_shader_parameter("spec", 0.12)                             # почти без блеска
+	mat.render_priority = 2                                             # поверх заплаток
+	return mat
+
+
 func _accumulate_road_decals(road_points: PackedVector2Array, width: float, parent: Node3D) -> void:
 	if not enable_road_decals or _facade_city != "cherepovets":
 		return  # регион-гейт: заплатки только в Череповце (Дубай — идеальный асфальт)
@@ -22356,47 +22430,73 @@ func _accumulate_road_decals(road_points: PackedVector2Array, width: float, pare
 		return
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash(ck) + int(abs(pts[0].x) * 13.0) + int(abs(pts[0].y) * 7.0)  # детерминировано по чанку
-	if rng.randf() < 0.55:
-		return  # большинство дорог — вообще без заплаток (резко реже)
 	var half := width * 0.5
-	var d: float = rng.randf_range(25.0, 70.0)
-	var seg := 0
-	while d < total - 2.0:
-		while seg < n - 2 and cum[seg + 1] < d:
-			seg += 1
-		var seg_len: float = cum[seg + 1] - cum[seg]
-		if seg_len < 0.001:
-			d += 14.0
-			continue
-		var t: float = (d - cum[seg]) / seg_len
-		var p1 := pts[seg]
-		var p2 := pts[seg + 1]
-		var rp := p1.lerp(p2, t)
-		var dir := (p2 - p1).normalized()
-		var perp := Vector2(-dir.y, dir.x)
-		var wp := rp + perp * rng.randf_range(-half * 0.58, half * 0.58)
-		var yv := get_surface_y(wp.x, wp.y) + 0.02                           # чуть над дорогой (выступает)
-		var yaw := atan2(dir.x, dir.y) + rng.randf_range(-0.12, 0.12)        # вдоль дороги ± дрожание
-		if rng.randf() < 0.18:
-			yaw += PI * 0.5                                                  # иногда поперёк
-		var sx: float
-		var sz: float
-		if rng.randf() < 0.5:
-			sx = rng.randf_range(1.3, 2.2)
-			sz = rng.randf_range(1.5, 2.6)                                   # квадратные
-		else:
-			sx = rng.randf_range(1.1, 1.9)
-			sz = rng.randf_range(2.6, 4.6)                                   # вытянутые
-		var b := Basis(Vector3.UP, yaw).scaled(Vector3(sx, 1.0, sz))
-		var xf := Transform3D(b, Vector3(wp.x, yv, wp.y))
-		var bucket := rng.randi() % DECAL_VARIANTS
-		if not _decal_batch_data.has(ck):
-			var bl: Array = []
-			for _bi in range(DECAL_VARIANTS):
-				bl.append([])
-			_decal_batch_data[ck] = {"parent": parent, "buckets": bl}
-		((_decal_batch_data[ck]["buckets"] as Array)[bucket] as Array).append(xf)
-		d += rng.randf_range(55.0, 130.0)   # редко (крупный шаг)
+	# Запись чанка держит и заплатки, и змейки (создаём один раз).
+	if not _decal_batch_data.has(ck):
+		var bl: Array = []
+		for _bi in range(DECAL_VARIANTS):
+			bl.append([])
+		var sl: Array = []
+		for _si in range(SNAKE_VARIANTS):
+			sl.append([])
+		_decal_batch_data[ck] = {"parent": parent, "buckets": bl, "snake_buckets": sl}
+	var patch_bk: Array = _decal_batch_data[ck]["buckets"]
+	var snake_bk: Array = _decal_batch_data[ck]["snake_buckets"]
+
+	# --- Заплатки (ямочный ремонт): ≈половина дорог без них, крупный шаг ---
+	if rng.randf() > 0.55:
+		var d: float = rng.randf_range(25.0, 70.0)
+		var seg := 0
+		while d < total - 2.0:
+			while seg < n - 2 and cum[seg + 1] < d:
+				seg += 1
+			var seg_len: float = cum[seg + 1] - cum[seg]
+			if seg_len < 0.001:
+				d += 14.0
+				continue
+			var t: float = (d - cum[seg]) / seg_len
+			var rp := pts[seg].lerp(pts[seg + 1], t)
+			var dir := (pts[seg + 1] - pts[seg]).normalized()
+			var perp := Vector2(-dir.y, dir.x)
+			var wpp := rp + perp * rng.randf_range(-half * 0.58, half * 0.58)
+			var yv := get_surface_y(wpp.x, wpp.y) + 0.02                     # чуть над дорогой (выступает)
+			var yaw := atan2(dir.x, dir.y) + rng.randf_range(-0.12, 0.12)    # вдоль дороги ± дрожание
+			if rng.randf() < 0.18:
+				yaw += PI * 0.5                                              # иногда поперёк
+			var sx: float
+			var sz: float
+			if rng.randf() < 0.5:
+				sx = rng.randf_range(1.3, 2.2)
+				sz = rng.randf_range(1.5, 2.6)                               # квадратные
+			else:
+				sx = rng.randf_range(1.1, 1.9)
+				sz = rng.randf_range(2.6, 4.6)                               # вытянутые
+			var b := Basis(Vector3.UP, yaw).scaled(Vector3(sx, 1.0, sz))
+			(patch_bk[rng.randi() % DECAL_VARIANTS] as Array).append(Transform3D(b, Vector3(wpp.x, yv, wpp.y)))
+			d += rng.randf_range(55.0, 130.0)
+
+	# --- Битумные змейки: тоже редко (≈половина дорог), петляют (произвольный поворот) ---
+	if rng.randf() > 0.5:
+		var sdd: float = rng.randf_range(15.0, 50.0)
+		var sseg := 0
+		while sdd < total - 2.0:
+			while sseg < n - 2 and cum[sseg + 1] < sdd:
+				sseg += 1
+			var slen: float = cum[sseg + 1] - cum[sseg]
+			if slen < 0.001:
+				sdd += 12.0
+				continue
+			var stt: float = (sdd - cum[sseg]) / slen
+			var srp := pts[sseg].lerp(pts[sseg + 1], stt)
+			var sdir := (pts[sseg + 1] - pts[sseg]).normalized()
+			var sperp := Vector2(-sdir.y, sdir.x)
+			var swp := srp + sperp * rng.randf_range(-half * 0.55, half * 0.55)
+			var syv := get_surface_y(swp.x, swp.y) + 0.022                   # чуть выше заплаток
+			# ориентируем по дороге → ленты идут вдоль/поперёк дороги (не случайно)
+			var syaw := atan2(sdir.x, sdir.y) + rng.randf_range(-0.08, 0.08)
+			var sb := Basis(Vector3.UP, syaw).scaled(Vector3(rng.randf_range(2.6, 4.2), 1.0, rng.randf_range(2.8, 4.6)))
+			(snake_bk[rng.randi() % SNAKE_VARIANTS] as Array).append(Transform3D(sb, Vector3(swp.x, syv, swp.y)))
+			sdd += rng.randf_range(15.0, 40.0)   # вдвое чаще
 
 
 func _finalize_road_decals_for_chunk(chunk_key: String) -> void:
@@ -22408,7 +22508,8 @@ func _finalize_road_decals_for_chunk(chunk_key: String) -> void:
 	if not is_instance_valid(parent):
 		return
 	var buckets: Array = batch.get("buckets", [])
-	if buckets.is_empty():
+	var snake_buckets: Array = batch.get("snake_buckets", [])
+	if buckets.is_empty() and snake_buckets.is_empty():
 		return
 	_ensure_road_decal_assets()
 	for bi in range(buckets.size()):
@@ -22427,6 +22528,23 @@ func _finalize_road_decals_for_chunk(chunk_key: String) -> void:
 		mmi.material_override = _decal_materials[bi]
 		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		_budgeted_add_child(parent, mmi)
+	# Битумные змейки
+	for si in range(snake_buckets.size()):
+		var sxf: Array = snake_buckets[si]
+		if sxf.is_empty():
+			continue
+		var smm := MultiMesh.new()
+		smm.transform_format = MultiMesh.TRANSFORM_3D
+		smm.mesh = _decal_quad_mesh
+		smm.instance_count = sxf.size()
+		for i in range(sxf.size()):
+			smm.set_instance_transform(i, sxf[i])
+		var smmi := MultiMeshInstance3D.new()
+		smmi.name = "RoadSnakes%d" % si
+		smmi.multimesh = smm
+		smmi.material_override = _snake_materials[si]
+		smmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_budgeted_add_child(parent, smmi)
 
 
 # ══ Procedural roadside billboards ══════════════════════════════════════════

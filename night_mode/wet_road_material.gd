@@ -196,11 +196,7 @@ static func apply_road_type_params(mat: ShaderMaterial, road_type: String, road_
 	mat.set_shader_parameter("base_uniformity", 0.58)  # чуть больше текстуры (~+20%)
 	mat.set_shader_parameter("normal_strength", 0.5)
 	mat.set_shader_parameter("asphalt_wear", 0.35)
-	# A3: прямоугольные заплатки ВЫКЛ (переделываем на декали). A3b: битумные змейки ВКЛ.
-	mat.set_shader_parameter("patch_strength", 0.0)
-	mat.set_shader_parameter("patch_cell_m", 3.0)
-	mat.set_shader_parameter("patch_coverage", 0.30)
-	mat.set_shader_parameter("snake_strength", 0.0)  # процедурные змейки убраны — делаем декалями
+	# Заплатки/змейки теперь ДЕКАЛИ (osm_terrain_generator), в шейдере дороги их нет.
 	if road_type in ["intersection", "crossing"]:
 		mat.set_shader_parameter("macro_roughness_dry", 0.05)
 		mat.set_shader_parameter("macro_albedo_dry", 0.02)
@@ -215,8 +211,6 @@ static func apply_road_type_params(mat: ShaderMaterial, road_type: String, road_
 		mat.set_shader_parameter("macro_roughness_dry", 0.02)
 		mat.set_shader_parameter("macro_albedo_dry", 0.005)
 		mat.set_shader_parameter("wheel_wear", 0.0)
-		mat.set_shader_parameter("patch_strength", 0.0)
-		mat.set_shader_parameter("snake_strength", 0.0)
 	elif road_type == "path":
 		mat.set_shader_parameter("macro_roughness_dry", 0.04)
 		mat.set_shader_parameter("micro_roughness_dry", 0.03)
@@ -224,5 +218,3 @@ static func apply_road_type_params(mat: ShaderMaterial, road_type: String, road_
 		mat.set_shader_parameter("albedo_tint", Vector3(1.0, 1.0, 1.0))  # тротуар — своя текстура (022)
 		mat.set_shader_parameter("base_uniformity", 0.0)  # тротуар оставляем натуральным
 		mat.set_shader_parameter("normal_strength", 0.8)
-		mat.set_shader_parameter("patch_strength", 0.0)  # на тротуарах заплаток нет
-		mat.set_shader_parameter("snake_strength", 0.0)  # и змеек нет

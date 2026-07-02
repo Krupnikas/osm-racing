@@ -66,19 +66,8 @@ uniform float asphalt_world_scale : hint_range(0.05, 4.0) = 0.8;
 uniform float macro_var_scale : hint_range(0.002, 0.1) = 0.010;   // ~100 м
 uniform float macro_var_strength : hint_range(0.0, 0.3) = 0.08;
 
-// A3: прямоугольные ремонтные заплатки (свежий тёмный битум), изредка. По типу
-// дороги/региону (в Дубае patch_strength=0). Заплатки — целыми ячейками world-space.
-uniform float patch_strength : hint_range(0.0, 1.0) = 0.0;
-uniform float patch_cell_m : hint_range(1.0, 8.0) = 3.0;
-uniform float patch_coverage : hint_range(0.0, 0.6) = 0.18;
-
-// A3b: битумные «змейки» — залитые гудроном трещины: тёмные глянцевые извилистые линии.
-// Domain-warped изолинии в world-space (непрерывны между чанками). В Дубае strength=0.
-uniform float snake_strength : hint_range(0.0, 1.0) = 0.0;
-uniform float snake_scale : hint_range(0.02, 0.5) = 0.12;
-uniform float snake_width : hint_range(0.01, 0.2) = 0.05;
-uniform float snake_warp : hint_range(0.0, 2.0) = 0.7;
-uniform float snake_coverage : hint_range(0.3, 0.95) = 0.60;
+// Заплатки ямочного ремонта и битумные змейки вынесены в ДЕКАЛИ
+// (shaders/road_patch.gdshader + расстановка в osm_terrain_generator.gd).
 
 // Интенсивности (dry)
 uniform float macro_roughness_dry : hint_range(0.0, 0.2) = 0.08;
@@ -106,35 +95,6 @@ uniform float wheel_wear : hint_range(0.0, 1.0) = 1.0;
 uniform float road_width_m : hint_range(1.0, 30.0) = 6.0;
 
 varying vec3 world_pos;
-
-// Хэш ячейки world-space (для прямоугольных заплаток A3).
-float hash21(vec2 p) {
-	p = fract(p * vec2(123.34, 345.45));
-	p += dot(p, p + 34.345);
-	return fract(p.x * p.y);
-}
-
-// Аналитический value-noise + fbm (для битумных змеек — не мипается, чёткие вдаль).
-float vnoise(vec2 p) {
-	vec2 i = floor(p);
-	vec2 f = fract(p);
-	f = f * f * (3.0 - 2.0 * f);
-	float a = hash21(i);
-	float b = hash21(i + vec2(1.0, 0.0));
-	float c = hash21(i + vec2(0.0, 1.0));
-	float d = hash21(i + vec2(1.0, 1.0));
-	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-float fbm2(vec2 p) {
-	float v = 0.0;
-	float amp = 0.5;
-	for (int i = 0; i < 4; i++) {
-		v += amp * vnoise(p);
-		p *= 2.0;
-		amp *= 0.5;
-	}
-	return v;
-}
 
 void vertex() {
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
@@ -190,25 +150,6 @@ void fragment() {
 		dry_rough = mix(dry_rough, dry_rough * mix(0.95, 1.08, patch), asphalt_wear);
 	}
 
-	// A3: ремонтные заплатки — в СИСТЕМЕ КООРДИНАТ ДОРОГИ (вдоль/поперёк), прямоугольниками
-	// вытянутыми вдоль дороги, изредка и дискретно (случайный inset внутри ячейки), разной темноты.
-	if (patch_strength > 0.0) {
-		float across_p = (UV2.y > 0.5) ? UV2.x : (UV.x - 0.5) * road_width_m;   // поперёк, м
-		float along_p = UV.y * 10.0;                                            // вдоль, м
-		vec2 pc = vec2(across_p / patch_cell_m, along_p / (patch_cell_m * 1.8)); // вытянуто вдоль
-		vec2 pcell = floor(pc);
-		vec2 pf = fract(pc);
-		float is_cell = step(1.0 - patch_coverage, hash21(pcell));
-		// случайный под-прямоугольник ячейки → дискретные заплатки с зазорами (не сетка)
-		vec2 lo = vec2(hash21(pcell + 3.1), hash21(pcell + 5.7)) * 0.22;
-		vec2 hi = 1.0 - vec2(hash21(pcell + 8.3), hash21(pcell + 9.9)) * 0.22;
-		float inside = step(lo.x, pf.x) * step(pf.x, hi.x) * step(lo.y, pf.y) * step(pf.y, hi.y);
-		float pdark = mix(0.62, 0.82, hash21(pcell + 7.3));                     // разной темноты
-		float amt = is_cell * inside * patch_strength;
-		dry_albedo *= mix(1.0, pdark, amt);
-		dry_rough = mix(dry_rough, dry_rough * 0.85, amt);                      // свежий битум глаже
-	}
-
 	// Полосы наката колёс: две тёмные полосы в каждой полосе движения (3.5 м),
 	// на расстоянии 1.4 м (колея авто ≈ ±0.7 м от центра полосы). ПОСТОЯННО в метрах.
 	// Только на достаточно широких дорогах (узкие проезды/дорожки — без колеи).
@@ -225,23 +166,6 @@ void fragment() {
 		dry_albedo *= mix(1.0, 0.83, band * wheel_wear);    // бледнее (раньше 0.72)
 		dry_rough = mix(dry_rough, dry_rough * 0.9, band * wheel_wear);
 	}
-
-	// A3b: битумные змейки — domain-warped изолинии на АНАЛИТИЧЕСКОМ шуме (не мипается →
-	// чёткие и видны вдаль, без «поп-ина» у машины). Ширина линии через fwidth = ~1px на экране.
-	if (snake_strength > 0.0) {
-		vec2 tp = world_pos.xz * snake_scale;
-		vec2 warp = vec2(fbm2(tp), fbm2(tp + vec2(3.7, 1.9)));
-		float field = fbm2(tp * 0.8 + warp * snake_warp);
-		float d = abs(field - 0.5);
-		float w = fwidth(d) + 0.0015;                         // минимум ~1px, антиалиасинг
-		float line = 1.0 - smoothstep(snake_width, snake_width + w, d);
-		float smask = smoothstep(snake_coverage, snake_coverage + 0.15,
-			fbm2(world_pos.xz * 0.02 + vec2(11.0, 7.0)));     // змейки лишь местами
-		float amt = line * smask * snake_strength;
-		dry_albedo = mix(dry_albedo, vec3(0.02, 0.02, 0.025), amt);          // чёрный битум
-		dry_rough = mix(dry_rough, 0.28, amt);                               // глянцевый
-	}
-
 
 	// === МОКРАЯ ДОРОГА ===
 	// Мокрый асфальт: сильное потемнение albedo (вода впитывается, свет поглощается)

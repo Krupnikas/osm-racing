@@ -11,6 +11,7 @@ uniform float asphalt_world_scale = 0.8;                          // как у �
 uniform vec3 patch_tint = vec3(0.70, 0.63, 0.52);                // как albedo_tint дороги (линейный)
 uniform float darken = 0.7;                                       // дополнительно темнее дороги
 uniform float rough : hint_range(0.0, 1.0) = 0.85;
+uniform float spec : hint_range(0.0, 1.0) = 0.15;                 // 0.15 матовая заплатка / выше — глянец битума
 
 varying vec3 wpos;
 
@@ -27,6 +28,6 @@ void fragment() {
 	ALBEDO = texture(asphalt_tex, auv).rgb * patch_tint * darken;
 	ROUGHNESS = rough;
 	METALLIC = 0.0;
-	SPECULAR = 0.15;                                              // почти без блика — матовый асфальт
+	SPECULAR = spec;                                              // заплатка матовая / битум глянцевый
 	NORMAL_MAP = texture(shape_normal, UV).rgb;                   // мягкая выпуклость
 }
