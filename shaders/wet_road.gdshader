@@ -19,6 +19,15 @@ uniform sampler2D noise_macro_tex : filter_linear_mipmap_anisotropic, repeat_ena
 
 // Параметры материала
 uniform vec4 base_color : source_color = vec4(0.25, 0.25, 0.25, 1.0);
+// Тинт базового альбедо (регион/износ): множитель поверх текстуры.
+// 1.0 = как есть; <1 темнее. Задаётся в apply_road_type_params (Россия темнее, Дубай светлее).
+uniform vec3 albedo_tint = vec3(1.0, 1.0, 1.0);
+// Полировка «под Россию»: подтянуть базу к равномерному тёмному асфальту (меньше текстурности).
+// base_uniformity = сколько блендить к плоскому base_road_color (0 = как есть, 1 = плоский цвет).
+// base_road_color задан в ЛИНЕЙНОМ пространстве (не source_color): ~0.09 = средне-тёмный асфальт.
+uniform float base_uniformity : hint_range(0.0, 1.0) = 0.0;
+// Тёплый taupe-асфальт (R заметно > B) — не «холодный». Линейное пространство.
+uniform vec3 base_road_color = vec3(0.085, 0.072, 0.055);
 uniform float normal_strength : hint_range(0.0, 2.0) = 0.8;
 uniform bool use_texture = true;
 
@@ -47,6 +56,10 @@ uniform float wet_specular : hint_range(0.0, 1.0) = 0.6;
 // Масштабы UV для noise
 uniform float micro_scale : hint_range(1.0, 50.0) = 12.0;
 uniform float macro_scale : hint_range(0.1, 5.0) = 0.8;
+
+// Тайлинг базы асфальта в WORLD-SPACE (плиток на метр). Больше = мельче зерно.
+// 0.8 ≈ одна плитка на 1.25 м. Заменяет растянутый UV.x=0..1 (плитка на всю ширину дороги).
+uniform float asphalt_world_scale : hint_range(0.05, 4.0) = 0.8;
 
 // Интенсивности (dry)
 uniform float macro_roughness_dry : hint_range(0.0, 0.2) = 0.08;
@@ -80,13 +93,21 @@ void vertex() {
 }
 
 void fragment() {
+	// База асфальта — WORLD-SPACE тайлинг (world_pos.xz), а не UV дороги:
+	// зерно равномерно и реалистично по размеру, независимо от ширины дороги
+	// (UV.x=0..1 растягивал плитку на всю ширину → зерно было в разы крупнее).
+	// Разметка и шум остаются на UV.
+	vec2 asph_uv = world_pos.xz * asphalt_world_scale;
+
 	// Albedo
 	vec3 albedo;
 	if (use_texture) {
-		albedo = texture(albedo_texture, UV).rgb;
+		albedo = texture(albedo_texture, asph_uv).rgb;
 	} else {
 		albedo = base_color.rgb;
 	}
+	albedo *= albedo_tint;   // регион/износ-тинт базы
+	albedo = mix(albedo, base_road_color, base_uniformity);   // «под Россию»: ровнее+темнее
 
 	// Наложение разметки поверх асфальта
 	if (use_marking) {
@@ -105,7 +126,7 @@ void fragment() {
 	// === СУХАЯ ДОРОГА (база) ===
 	float dry_rough;
 	if (use_roughness_texture) {
-		dry_rough = texture(roughness_texture, UV).r;
+		dry_rough = texture(roughness_texture, asph_uv).r;
 	} else {
 		dry_rough = dry_roughness;
 	}
@@ -146,7 +167,7 @@ void fragment() {
 
 	float wet_rough = wet_roughness;
 	if (use_roughness_texture) {
-		wet_rough = mix(wet_roughness, texture(roughness_texture, UV).r, 0.3);
+		wet_rough = mix(wet_roughness, texture(roughness_texture, asph_uv).r, 0.3);
 	}
 	wet_rough += (n_micro - 0.5) * micro_roughness_wet;
 	wet_rough += (n_macro - 0.5) * macro_roughness_wet;
@@ -190,6 +211,6 @@ void fragment() {
 	SPECULAR = specular;
 
 	// Normal map
-	NORMAL_MAP = texture(normal_texture, UV).rgb;
+	NORMAL_MAP = texture(normal_texture, asph_uv).rgb;
 	NORMAL_MAP_DEPTH = normal_strength;
 }

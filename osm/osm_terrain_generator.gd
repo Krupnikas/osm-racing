@@ -1136,8 +1136,9 @@ func _init_textures() -> void:
 	var start_time := Time.get_ticks_msec()
 
 	# Текстуры дорог — PBR текстуры из ambientCG (CC0)
-	# Asphalt026B — дороги, Asphalt022 — тротуары
-	var road_albedo_tex: Texture2D = load("res://textures/road/Asphalt026B_1K-JPG_Color.jpg")
+	# Asphalt014 — дороги (мелкое зерно, ровный), Asphalt022 — тротуары.
+	# 026B/031/013 сохранены на диске для будущего бленда/регионов (Tier2 A2/A5).
+	var road_albedo_tex: Texture2D = load("res://textures/road/Asphalt014_1K-JPG_Color.jpg")
 	var sidewalk_albedo_tex: Texture2D = load("res://textures/road/Asphalt022_1K-JPG_Color.jpg")
 
 	# Albedo — единая PBR текстура асфальта для всех типов дорог
@@ -1293,13 +1294,13 @@ func _init_textures() -> void:
 	_ground_textures["water"] = TextureGeneratorScript.create_water_texture(256)
 
 	# Normal maps — PBR normal из ambientCG
-	var road_normal_tex: Texture2D = load("res://textures/road/Asphalt026B_1K-JPG_NormalGL.jpg")
+	var road_normal_tex: Texture2D = load("res://textures/road/Asphalt014_1K-JPG_NormalGL.jpg")
 	_normal_textures["asphalt"] = road_normal_tex if road_normal_tex else TextureGeneratorScript.create_asphalt_normal(256)
 	var sidewalk_normal_tex: Texture2D = load("res://textures/road/Asphalt022_1K-JPG_NormalGL.jpg")
 	_normal_textures["sidewalk"] = sidewalk_normal_tex if sidewalk_normal_tex else _normal_textures["asphalt"]
 
 	# Roughness maps — PBR roughness из ambientCG
-	var road_rough_tex: Texture2D = load("res://textures/road/Asphalt026B_1K-JPG_Roughness.jpg")
+	var road_rough_tex: Texture2D = load("res://textures/road/Asphalt014_1K-JPG_Roughness.jpg")
 	_road_textures["road_roughness"] = road_rough_tex
 	var sidewalk_rough_tex: Texture2D = load("res://textures/road/Asphalt022_1K-JPG_Roughness.jpg")
 	_road_textures["sidewalk_roughness"] = sidewalk_rough_tex

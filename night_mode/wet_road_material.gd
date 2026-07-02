@@ -188,6 +188,14 @@ static func apply_road_type_params(mat: ShaderMaterial, road_type: String, road_
 	mat.set_shader_parameter("road_width_m", maxf(road_width, 1.0))
 	# Колея ВКЛ по умолчанию на проезжей части; выключаем на тротуарах/трамвае/перекрёстках.
 	mat.set_shader_parameter("wheel_wear", 1.0)
+	# Тинт базы — тёплый И затемняющий (R>B), чтобы 014 не был «холодным/ярким»
+	# под прохладным пасмурным грейдом. Позже станет региональным (Tier2 A5).
+	mat.set_shader_parameter("albedo_tint", Vector3(0.70, 0.63, 0.52))
+	# Полировка «под Россию»: база Asphalt014 светловата/зерниста → подтягиваем к
+	# равномерному тёплому тёмному асфальту, глушим нормаль и мозаичность износа.
+	mat.set_shader_parameter("base_uniformity", 0.58)  # чуть больше текстуры (~+20%)
+	mat.set_shader_parameter("normal_strength", 0.5)
+	mat.set_shader_parameter("asphalt_wear", 0.35)
 	if road_type in ["intersection", "crossing"]:
 		mat.set_shader_parameter("macro_roughness_dry", 0.05)
 		mat.set_shader_parameter("macro_albedo_dry", 0.02)
@@ -206,3 +214,6 @@ static func apply_road_type_params(mat: ShaderMaterial, road_type: String, road_
 		mat.set_shader_parameter("macro_roughness_dry", 0.04)
 		mat.set_shader_parameter("micro_roughness_dry", 0.03)
 		mat.set_shader_parameter("wheel_wear", 0.0)
+		mat.set_shader_parameter("albedo_tint", Vector3(1.0, 1.0, 1.0))  # тротуар — своя текстура (022)
+		mat.set_shader_parameter("base_uniformity", 0.0)  # тротуар оставляем натуральным
+		mat.set_shader_parameter("normal_strength", 0.8)
