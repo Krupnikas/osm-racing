@@ -8,6 +8,10 @@ class_name WetRoadMaterial
 static var _road_shader: Shader = null
 static var _shader_loaded := false
 
+# Регион текущей карты (A5): задаётся генератором из _facade_city. Определяет профиль асфальта
+# (Дубай — чистый/светлый; Россия/Череповец — тёплый/изношенный).
+static var current_region: String = ""
+
 # Параметры мокрой дороги ночью - умеренные отражения
 const WET_NIGHT_METALLIC := 0.2
 const WET_NIGHT_ROUGHNESS := 0.1
@@ -188,15 +192,19 @@ static func apply_road_type_params(mat: ShaderMaterial, road_type: String, road_
 	mat.set_shader_parameter("road_width_m", maxf(road_width, 1.0))
 	# Колея ВКЛ по умолчанию на проезжей части; выключаем на тротуарах/трамвае/перекрёстках.
 	mat.set_shader_parameter("wheel_wear", 1.0)
-	# Тинт базы — тёплый И затемняющий (R>B), чтобы 014 не был «холодным/ярким»
-	# под прохладным пасмурным грейдом. Позже станет региональным (Tier2 A5).
-	mat.set_shader_parameter("albedo_tint", Vector3(0.70, 0.63, 0.52))
-	# Полировка «под Россию»: база Asphalt014 светловата/зерниста → подтягиваем к
-	# равномерному тёплому тёмному асфальту, глушим нормаль и мозаичность износа.
-	mat.set_shader_parameter("base_uniformity", 0.58)  # чуть больше текстуры (~+20%)
 	mat.set_shader_parameter("normal_strength", 0.5)
-	mat.set_shader_parameter("asphalt_wear", 0.35)
-	# Заплатки/змейки теперь ДЕКАЛИ (osm_terrain_generator), в шейдере дороги их нет.
+	# A5: профиль асфальта ПО РЕГИОНУ. Дубай — чистый/светлый/нейтральный, почти без износа;
+	# Россия/Череповец (и дефолт) — тёплый затемнённый taupe, заметный износ.
+	if current_region == "dubai_creek_harbour":
+		mat.set_shader_parameter("albedo_tint", Vector3(1.0, 0.99, 0.97))          # почти нейтральный, светлый
+		mat.set_shader_parameter("base_uniformity", 0.22)                          # сохраняем чистую фактуру
+		mat.set_shader_parameter("base_road_color", Vector3(0.16, 0.155, 0.148))   # светло-серый
+		mat.set_shader_parameter("asphalt_wear", 0.08)                             # почти без износа
+	else:
+		mat.set_shader_parameter("albedo_tint", Vector3(0.70, 0.63, 0.52))         # тёплый затемняющий
+		mat.set_shader_parameter("base_uniformity", 0.58)
+		mat.set_shader_parameter("base_road_color", Vector3(0.085, 0.072, 0.055))  # тёплый taupe
+		mat.set_shader_parameter("asphalt_wear", 0.35)
 	if road_type in ["intersection", "crossing"]:
 		mat.set_shader_parameter("macro_roughness_dry", 0.05)
 		mat.set_shader_parameter("macro_albedo_dry", 0.02)

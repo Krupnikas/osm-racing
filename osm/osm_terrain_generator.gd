@@ -4033,6 +4033,7 @@ func _generate_terrain(osm_data: Dictionary, parent: Node3D, chunk_key: String =
 	_register_landmark_zones(osm_data)
 	if _facade_city == "":
 		_facade_city = _detect_facade_city(float(osm_data.get("center_lat", 0.0)), float(osm_data.get("center_lon", 0.0)))
+		WetRoadMaterial.current_region = _facade_city   # A5: профиль асфальта по региону
 
 	# Pre-scan: register every node touched by a highway+bridge=yes way so
 	# road meshes downstream can detect shared bridge endpoints. Main thread,
