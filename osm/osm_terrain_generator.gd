@@ -438,6 +438,15 @@ var _lamp_batch_data: Dictionary = {}  # key: chunk_key -> batch data
 #   light_data: Array[Dictionary]  # {position: Vector3, broken: bool}
 #   parent: Node3D
 var _lamp_batches_to_finalize: Array[String] = []  # Chunk keys ready for finalization
+
+# Road repair-patch decals (Soviet wear) — mesh-decal quads batched per-chunk (MultiMesh),
+# accumulated at road-apply, finalized at road-finalize, auto-freed with the chunk node.
+var enable_road_decals := true
+const DECAL_VARIANTS := 3                 # свежая-тёмная / средняя / старая-серая
+var _decal_batch_data: Dictionary = {}   # chunk_key -> {parent, buckets:Array[Array[Transform3D]]}
+var _decal_quad_mesh: Mesh = null
+var _decal_materials: Array = []          # по одному материалу на вариант
+var _asphalt_src_img: Image = null        # исходник асфальта (014) для зерна заплаток
 # TEMP streaming-lamp diagnosis (remove after fix)
 var lamp_debug := false   # debug logging for lamp/wire streaming (LAMP-FIN/UNLOAD/WIRE-ENQ/LAMP-DBG) — off in shipped builds
 var _lamp_dbg_skip_road := 0
@@ -2420,6 +2429,7 @@ func start_loading() -> void:
 	_pending_parking_signs.clear()  # Очищаем отложенные знаки парковки
 	_deferred_lamp_queue.clear()
 	_deferred_manhole_queue.clear()
+	_decal_batch_data.clear()
 	_deferred_traffic_queue.clear()
 	_deferred_tram_queue.clear()
 	_dispatched_tram_network.clear()
@@ -3614,6 +3624,7 @@ func _unload_chunk(chunk_key: String) -> void:
 				print("LAMP-DBG QUEUE-DROP chunk=%s jobs=%d (walker never ran before unload)" % [chunk_key, (_deferred_lamp_queue[chunk_key] as Array).size()])
 		_deferred_lamp_queue.erase(chunk_key)
 		_deferred_manhole_queue.erase(chunk_key)
+		_decal_batch_data.erase(chunk_key)
 		_deferred_add_child_queue = _deferred_add_child_queue.filter(
 			func(item): return is_instance_valid(item.get("parent")) and is_instance_valid(item.get("child")))
 
@@ -3817,6 +3828,7 @@ func reset_terrain() -> void:
 	_chunk_intersection_hashes.clear()
 	_deferred_lamp_queue.clear()
 	_deferred_manhole_queue.clear()
+	_decal_batch_data.clear()
 	_deferred_traffic_queue.clear()
 	_deferred_tram_queue.clear()
 	_dispatched_tram_network.clear()
@@ -5975,6 +5987,10 @@ func _apply_road_result(result: Dictionary) -> void:
 		var lamp_pts := _clip_polyline_to_rect(smoothed_points, lamp_rect.position.x, lamp_rect.end.x, lamp_rect.position.y, lamp_rect.end.y)
 		if lamp_pts.size() >= 2:
 			_deferred_append(_deferred_lamp_queue, lamp_ck, {"points": lamp_pts, "width": width, "parent": parent})
+
+	# Ремонтные заплатки-декали (советский износ) — все проезжие дороги, гейт по региону внутри.
+	if enable_road_decals and highway_type in ["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "unclassified"]:
+		_accumulate_road_decals(smoothed_points, width, parent)
 
 	# Overhead wires — SAME clipped points as lamps (so anchors == real lamps).
 	# Excludes motorway / bridges / tunnels; per-class density handled in the walk.
@@ -9363,6 +9379,9 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 		return
 
 	var chunk_batches: Dictionary = _road_batch_data[chunk_key]
+
+	# Ремонтные заплатки-декали — сбрасываем накопленное в MultiMesh (аддитивно, привязка к чанку).
+	_finalize_road_decals_for_chunk(chunk_key)
 
 	# Финализируем ОДИН тип дороги за вызов (round-robin через очередь)
 	var keys: Array = chunk_batches.keys()
@@ -22237,6 +22256,179 @@ func _generate_street_lamps_incremental(local_points: PackedVector2Array, road_w
 	return n_pts  # Fully processed
 
 
+# ══ Road repair-patch decals (Soviet wear) ═════════════════════════════════
+# Mesh-decal quads laid slightly above the road, batched per-chunk via MultiMesh
+# (same pattern as lamps/trees → auto-free on chunk unload). Region-gated to
+# Cherepovets (Dubai keeps pristine asphalt). Patch look = darker + smoother than
+# the base + неровно-прямоугольная форма + чуть приподнятый край (generated below).
+func _ensure_road_decal_assets() -> void:
+	if not _decal_materials.is_empty():
+		return
+	# Асфальт заплатки сэмплится в шейдере из ОБЩЕГО 014 в world-space (== дорога) → щебёнка того же
+	# размера и та же температура; darken делает темнее. 3 варианта: свежий/средний/старый.
+	var shader: Shader = load("res://shaders/road_patch.gdshader")
+	var asph: Texture2D = load("res://textures/road/Asphalt014_1K-JPG_Color.jpg")
+	_decal_materials = [
+		_make_patch_material(shader, asph, 11, 0.52, 0.016, 0.32, 0.84),   # свежая тёмная
+		_make_patch_material(shader, asph, 37, 0.70, 0.022, 0.26, 0.86),   # средняя
+		_make_patch_material(shader, asph, 73, 0.92, 0.018, 0.18, 0.88),   # старая серая (почти как дорога)
+	]
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(1.0, 1.0)   # XZ, нормаль +Y; масштаб по X (поперёк) и Z (вдоль); материал — per-variant override
+	_decal_quad_mesh = plane
+
+
+# Генерирует один материал заплатки: прямоугольная форма с лёгкой неровностью края + крошка-осыпь
+# по периметру + приподнятый край (нормаль). Тон/roughness задают «свежесть».
+func _make_patch_material(shader: Shader, asph: Texture2D, seed_v: int, darken: float, edge_rag: float, crumb_density: float, roughness: float) -> Material:
+	var S := 128
+	var en := FastNoiseLite.new()
+	en.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	en.frequency = 0.05
+	en.seed = seed_v
+	var cn := FastNoiseLite.new()
+	cn.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	cn.frequency = 0.45
+	cn.seed = seed_v + 5
+	# Форма: чёткий прямоугольник с лёгкой неровностью края + крошка-осыпь по периметру (R8 маска).
+	var shp := Image.create(S, S, false, Image.FORMAT_R8)
+	for y in S:
+		for x in S:
+			var u := float(x) / float(S - 1)
+			var v := float(y) / float(S - 1)
+			var dborder: float = min(min(u, 1.0 - u), min(v, 1.0 - v))
+			var rag := en.get_noise_2d(float(x), float(y)) * edge_rag
+			var m: float = clamp((dborder - 0.055 + rag) / 0.018, 0.0, 1.0)
+			if dborder < 0.13 and cn.get_noise_2d(float(x), float(y)) > (1.0 - crumb_density * 0.45):
+				m = max(m, 0.9)
+			shp.set_pixel(x, y, Color(m, 0.0, 0.0))
+	# Нормаль — ПЛАВНЫЙ купол (мягкая выпуклость), без резкого края → без тёмного ободка.
+	var hgt := PackedFloat32Array()
+	hgt.resize(S * S)
+	for y in S:
+		for x in S:
+			var u := float(x) / float(S - 1)
+			var v := float(y) / float(S - 1)
+			var dr := Vector2(u - 0.5, v - 0.5).length() / 0.72
+			hgt[y * S + x] = clamp(1.0 - dr * dr, 0.0, 1.0)
+	var nrm := Image.create(S, S, false, Image.FORMAT_RGB8)
+	for y in S:
+		for x in S:
+			var hl := hgt[y * S + max(x - 1, 0)]
+			var hr := hgt[y * S + min(x + 1, S - 1)]
+			var hd := hgt[max(y - 1, 0) * S + x]
+			var hu := hgt[min(y + 1, S - 1) * S + x]
+			var nv := Vector3(-(hr - hl) * 2.2, -(hu - hd) * 2.2, 1.0).normalized()
+			nrm.set_pixel(x, y, Color(nv.x * 0.5 + 0.5, nv.y * 0.5 + 0.5, nv.z * 0.5 + 0.5))
+	shp.generate_mipmaps()
+	nrm.generate_mipmaps()
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	mat.set_shader_parameter("asphalt_tex", asph)
+	mat.set_shader_parameter("shape_tex", ImageTexture.create_from_image(shp))
+	mat.set_shader_parameter("shape_normal", ImageTexture.create_from_image(nrm))
+	mat.set_shader_parameter("asphalt_world_scale", 0.8)               # == дорога
+	mat.set_shader_parameter("patch_tint", Vector3(0.70, 0.63, 0.52))  # == albedo_tint дороги
+	mat.set_shader_parameter("darken", darken)
+	mat.set_shader_parameter("rough", roughness)
+	mat.render_priority = 1
+	return mat
+
+
+func _accumulate_road_decals(road_points: PackedVector2Array, width: float, parent: Node3D) -> void:
+	if not enable_road_decals or _facade_city != "cherepovets":
+		return  # регион-гейт: заплатки только в Череповце (Дубай — идеальный асфальт)
+	if road_points.size() < 2 or width < 4.0 or not is_instance_valid(parent):
+		return
+	var ck := _get_chunk_key_from_node(parent)
+	var rect := _get_chunk_rect_from_key(ck)
+	var pts := _clip_polyline_to_rect(road_points, rect.position.x, rect.end.x, rect.position.y, rect.end.y)
+	var n := pts.size()
+	if n < 2:
+		return
+	var cum := PackedFloat64Array()
+	cum.resize(n)
+	cum[0] = 0.0
+	for i in range(1, n):
+		cum[i] = cum[i - 1] + pts[i - 1].distance_to(pts[i])
+	var total: float = cum[n - 1]
+	if total < 8.0:
+		return
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(ck) + int(abs(pts[0].x) * 13.0) + int(abs(pts[0].y) * 7.0)  # детерминировано по чанку
+	if rng.randf() < 0.55:
+		return  # большинство дорог — вообще без заплаток (резко реже)
+	var half := width * 0.5
+	var d: float = rng.randf_range(25.0, 70.0)
+	var seg := 0
+	while d < total - 2.0:
+		while seg < n - 2 and cum[seg + 1] < d:
+			seg += 1
+		var seg_len: float = cum[seg + 1] - cum[seg]
+		if seg_len < 0.001:
+			d += 14.0
+			continue
+		var t: float = (d - cum[seg]) / seg_len
+		var p1 := pts[seg]
+		var p2 := pts[seg + 1]
+		var rp := p1.lerp(p2, t)
+		var dir := (p2 - p1).normalized()
+		var perp := Vector2(-dir.y, dir.x)
+		var wp := rp + perp * rng.randf_range(-half * 0.58, half * 0.58)
+		var yv := get_surface_y(wp.x, wp.y) + 0.02                           # чуть над дорогой (выступает)
+		var yaw := atan2(dir.x, dir.y) + rng.randf_range(-0.12, 0.12)        # вдоль дороги ± дрожание
+		if rng.randf() < 0.18:
+			yaw += PI * 0.5                                                  # иногда поперёк
+		var sx: float
+		var sz: float
+		if rng.randf() < 0.5:
+			sx = rng.randf_range(1.3, 2.2)
+			sz = rng.randf_range(1.5, 2.6)                                   # квадратные
+		else:
+			sx = rng.randf_range(1.1, 1.9)
+			sz = rng.randf_range(2.6, 4.6)                                   # вытянутые
+		var b := Basis(Vector3.UP, yaw).scaled(Vector3(sx, 1.0, sz))
+		var xf := Transform3D(b, Vector3(wp.x, yv, wp.y))
+		var bucket := rng.randi() % DECAL_VARIANTS
+		if not _decal_batch_data.has(ck):
+			var bl: Array = []
+			for _bi in range(DECAL_VARIANTS):
+				bl.append([])
+			_decal_batch_data[ck] = {"parent": parent, "buckets": bl}
+		((_decal_batch_data[ck]["buckets"] as Array)[bucket] as Array).append(xf)
+		d += rng.randf_range(55.0, 130.0)   # редко (крупный шаг)
+
+
+func _finalize_road_decals_for_chunk(chunk_key: String) -> void:
+	if not _decal_batch_data.has(chunk_key):
+		return
+	var batch: Dictionary = _decal_batch_data[chunk_key]
+	_decal_batch_data.erase(chunk_key)
+	var parent = batch.get("parent")
+	if not is_instance_valid(parent):
+		return
+	var buckets: Array = batch.get("buckets", [])
+	if buckets.is_empty():
+		return
+	_ensure_road_decal_assets()
+	for bi in range(buckets.size()):
+		var xforms: Array = buckets[bi]
+		if xforms.is_empty():
+			continue
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = _decal_quad_mesh
+		mm.instance_count = xforms.size()
+		for i in range(xforms.size()):
+			mm.set_instance_transform(i, xforms[i])
+		var mmi := MultiMeshInstance3D.new()
+		mmi.name = "RoadDecals%d" % bi
+		mmi.multimesh = mm
+		mmi.material_override = _decal_materials[bi]
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		_budgeted_add_child(parent, mmi)
+
+
 # ══ Procedural roadside billboards ══════════════════════════════════════════
 
 static func _is_residential_building_tags(tags: Dictionary) -> bool:
@@ -29816,6 +30008,7 @@ func _purge_chunk_queues(chunk_key: String) -> void:
 	_road_queue.erase(chunk_key)
 	_deferred_lamp_queue.erase(chunk_key)
 	_deferred_manhole_queue.erase(chunk_key)
+	_decal_batch_data.erase(chunk_key)
 	_deferred_footway_queue.erase(chunk_key)
 	_deferred_billboard_queue.erase(chunk_key)
 	_deferred_building_collisions.erase(chunk_key)
