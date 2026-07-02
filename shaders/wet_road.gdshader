@@ -61,6 +61,11 @@ uniform float macro_scale : hint_range(0.1, 5.0) = 0.8;
 // 0.8 ≈ одна плитка на 1.25 м. Заменяет растянутый UV.x=0..1 (плитка на всю ширину дороги).
 uniform float asphalt_world_scale : hint_range(0.05, 4.0) = 0.8;
 
+// A1: макро-вариация базы — медленный дрейф яркости (перекладки/выцветание),
+// ломает восприятие повтора 1K-текстуры на длинных прямых. Период ~1/scale метров.
+uniform float macro_var_scale : hint_range(0.002, 0.1) = 0.010;   // ~100 м
+uniform float macro_var_strength : hint_range(0.0, 0.3) = 0.08;
+
 // Интенсивности (dry)
 uniform float macro_roughness_dry : hint_range(0.0, 0.2) = 0.08;
 uniform float macro_albedo_dry : hint_range(0.0, 0.1) = 0.03;
@@ -108,6 +113,9 @@ void fragment() {
 	}
 	albedo *= albedo_tint;   // регион/износ-тинт базы
 	albedo = mix(albedo, base_road_color, base_uniformity);   // «под Россию»: ровнее+темнее
+	// A1: медленный world-space дрейф яркости (tiling-break на длинных прямых)
+	float macro_var = texture(noise_macro_tex, world_pos.xz * macro_var_scale).r;
+	albedo *= mix(1.0 - macro_var_strength, 1.0 + macro_var_strength, macro_var);
 
 	// Наложение разметки поверх асфальта
 	if (use_marking) {
