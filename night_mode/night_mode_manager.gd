@@ -575,6 +575,7 @@ func enable_night_mode() -> void:
 		_environment.volumetric_fog_temporal_reprojection_enabled = true
 		_environment.volumetric_fog_temporal_reprojection_amount = 0.95
 
+	_update_wet_ssr()   # E3: включить SSR, если уже идёт дождь
 	night_mode_changed.emit(true)
 	print("Night mode enabled")
 
@@ -647,6 +648,7 @@ func disable_night_mode() -> void:
 		_environment.volumetric_fog_length = _day_vfog_length
 		_environment.volumetric_fog_enabled = _day_vfog_enabled
 
+	_update_wet_ssr()   # E3: выключить SSR при выходе из ночи
 	night_mode_changed.emit(false)
 	print("Night mode disabled")
 
@@ -667,6 +669,8 @@ func toggle_rain() -> void:
 	# Мокрая машина (плавно за 3 секунды)
 	_apply_car_wetness(is_raining)
 
+	_update_wet_ssr()   # E3: SSR только ночью+дождь
+
 	rain_changed.emit(is_raining)
 	print("Rain: ", "enabled" if is_raining else "disabled")
 
@@ -674,6 +678,20 @@ func toggle_rain() -> void:
 func set_rain(enabled: bool) -> void:
 	if enabled != is_raining:
 		toggle_rain()
+
+
+# E3: Screen-Space Reflections на мокрой дороге — ТОЛЬКО ночью+дождь (чёткие отражения
+# фонарей/неона на мокром асфальте). Днём/сухо выключен — без затрат и без SSR-артефактов.
+func _update_wet_ssr() -> void:
+	if _environment == null:
+		return
+	var on := is_night and is_raining
+	_environment.ssr_enabled = on
+	if on:
+		_environment.ssr_max_steps = 64
+		_environment.ssr_fade_in = 0.2
+		_environment.ssr_fade_out = 3.0
+		_environment.ssr_depth_tolerance = 0.2
 
 
 func _apply_rain_lighting(raining: bool) -> void:
