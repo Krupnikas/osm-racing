@@ -22,12 +22,19 @@ var target_speed: float = 50.0  # Целевая скорость в км/ч
 @export var aggression: float = 0.5       # 0.0-1.0, влияет на скорость в поворотах
 @export var racer_name: String = "AI"     # Имя для UI
 
-# Константы Pure Pursuit
-const LOOKAHEAD_MIN := 12.0
-const LOOKAHEAD_MAX := 35.0
+# Константы Pure Pursuit (v1.1: геометрически корректная велосипедная модель)
+const LOOKAHEAD_MIN := 18.0  # v1.1: поднят с 12 — короткий lookahead провоцировал рысканье
+const LOOKAHEAD_MAX := 38.0  # v1.1: поднят с 35
 const BRAKE_DISTANCE := 35.0  # Увеличено для раннего обнаружения
 const UPDATE_INTERVAL := 0.05  # 50ms - более частое обновление
 const CORRIDOR_WIDTH := 7.0  # Ширина коридора (совпадает с RaceBarriers.BARRIER_OFFSET)
+
+# v1.1 pure-pursuit / rate-limit / телеметрия
+const MIN_TURN_L := 6.0           # м — нижний предел евклидова расстояния до цели (защита от 1/L→∞)
+const MAX_STEER_RATE := 6.0       # ед/с — мягкое ограничение скорости изменения команды руля
+const WHEELBASE_FALLBACK := 2.5   # м — если колёса не собрались
+const LOOKAHEAD_MAX_RATE := 4.0   # м/тик — плавное изменение lookahead (убирает скачки цели)
+const DEBUG_SAMPLES_CAP := 1200   # ~60 с при 20 Гц
 
 # Восстановление после застревания
 var stuck_timer: float = 0.0
@@ -43,6 +50,21 @@ var obstacle_check_ray: RayCast3D
 
 # Внутренние переменные
 var update_timer := 0.0
+
+# v1.1 pure-pursuit состояние
+var wheelbase := 2.5              # измеряется в _ready из локальных Z позиций колёс
+var _lookahead_dist := 18.0       # текущий (сглаженный между тиками) lookahead, м
+var _cur_lateral_offset := 0.0    # боковое смещение от осевой (проекция текущего тика)
+var _cur_proj_distance := 0.0     # арк-дистанция проекции текущего тика (для edge-guard)
+var _last_obstacle_active := false  # сработал ли луч объезда в этом тике (для телеметрии)
+
+# Телеметрия (off by default — нулевая стоимость в обычной игре; включает тест-сцена)
+var ai_debug := false
+var debug_target_point: Vector3 = Vector3.ZERO
+var _debug_samples: Array = []
+var _debug_sections: Array = []   # [{name, start_m, end_m}]
+var _debug_t := 0.0               # аккумулятор времени (детерминированно, без Time/Date)
+var _recovery_count := 0
 # Цвета для рандомизации
 const RACER_COLORS := [
 	Color(0.9, 0.1, 0.1),   # Красный
@@ -64,6 +86,19 @@ func _ready() -> void:
 		wheel.use_as_traction = true
 	for wheel in wheels_rear:
 		wheel.use_as_traction = true
+
+	# Колёсная база из локальных Z-позиций колёс (велосипедная модель pure pursuit)
+	wheelbase = WHEELBASE_FALLBACK
+	if not wheels_front.is_empty() and not wheels_rear.is_empty():
+		var fz := 0.0
+		for w in wheels_front:
+			fz += w.position.z
+		fz /= wheels_front.size()
+		var rz := 0.0
+		for w in wheels_rear:
+			rz += w.position.z
+		rz /= wheels_rear.size()
+		wheelbase = maxf(0.5, absf(fz - rz))
 
 	# Создаём raycast для obstacle detection
 	# Layer 1 = Player (bit 0 = 1)
@@ -160,6 +195,124 @@ func get_race_progress() -> float:
 	return race_progress
 
 
+# ===== ТЕЛЕМЕТРИЯ (off by default; включается тест-сценой ai_test_scene.gd) =====
+
+func set_debug_sections(sections: Array) -> void:
+	"""Секции для побиновой статистики: [{name, start_m, end_m}]."""
+	_debug_sections = sections
+
+
+func clear_debug_samples() -> void:
+	"""Сбрасывает кольцевой буфер телеметрии перед новым прогоном."""
+	_debug_samples.clear()
+	_debug_t = 0.0
+	_recovery_count = 0
+
+
+func get_debug_samples() -> Array:
+	"""Сырые сэмплы (для построения графиков)."""
+	return _debug_samples
+
+
+func _record_debug_sample(heading_error: float, steer_raw: float, corridor_active: bool) -> void:
+	_debug_t += UPDATE_INTERVAL
+	_debug_samples.append({
+		"t": _debug_t,
+		"pos": global_position,
+		"race_progress": race_progress,
+		"segment_idx": current_segment_idx,
+		"lateral_offset": _cur_lateral_offset,
+		"lookahead_dist": _lookahead_dist,
+		"target_point": debug_target_point,
+		"heading_error_rad": heading_error,
+		"steer_raw": steer_raw,
+		"steer_cmd": steering_input,
+		"speed_kmh": current_speed_kmh,
+		"throttle": throttle_input,
+		"brake": brake_input,
+		"corridor_active": corridor_active,
+		"obstacle_active": _last_obstacle_active,
+		"recovery_active": ai_state == AIState.RECOVERING,
+	})
+	if _debug_samples.size() > DEBUG_SAMPLES_CAP:
+		_debug_samples.pop_front()
+
+
+func _metric_block(samples: Array) -> Dictionary:
+	"""Единый блок метрик по подмножеству сэмплов (глобально и по секциям)."""
+	var n := samples.size()
+	if n == 0:
+		return {"sample_count": 0}
+	var lat_min := INF
+	var lat_max := -INF
+	var steer_min := INF
+	var steer_max := -INF
+	var speed_sum := 0.0
+	var speed_min := INF
+	var sign_changes := 0
+	var saturations := 0
+	var corridor_hits := 0
+	var obstacle_hits := 0
+	var last_sign := 0
+	for s in samples:
+		var lat: float = s["lateral_offset"]
+		lat_min = minf(lat_min, lat)
+		lat_max = maxf(lat_max, lat)
+		var st: float = s["steer_cmd"]
+		steer_min = minf(steer_min, st)
+		steer_max = maxf(steer_max, st)
+		if absf(st) >= 0.98:
+			saturations += 1
+		if absf(st) > 0.02:
+			var sg := 1 if st > 0.0 else -1
+			if last_sign != 0 and sg != last_sign:
+				sign_changes += 1
+			last_sign = sg
+		var sp: float = s["speed_kmh"]
+		speed_sum += sp
+		speed_min = minf(speed_min, sp)
+		if bool(s["corridor_active"]):
+			corridor_hits += 1
+		if bool(s.get("obstacle_active", false)):
+			obstacle_hits += 1
+	var first_prog: float = samples[0]["race_progress"]
+	var last_prog: float = samples[n - 1]["race_progress"]
+	return {
+		"sample_count": n,
+		"lateral_p2p": lat_max - lat_min,
+		"lateral_abs_max": maxf(absf(lat_min), absf(lat_max)),
+		"steer_p2p": steer_max - steer_min,
+		"steer_sign_changes": sign_changes,
+		"steer_saturations": saturations,
+		"avg_speed_kmh": speed_sum / float(n),
+		"min_speed_kmh": speed_min,
+		"distance_covered": last_prog - first_prog,
+		"corridor_active_frac": float(corridor_hits) / float(n),
+		"obstacle_active_frac": float(obstacle_hits) / float(n),
+	}
+
+
+func get_debug_summary() -> Dictionary:
+	"""Глобальный блок метрик + прогресс/восстановления/длительность + блок на каждую секцию."""
+	var g := _metric_block(_debug_samples)
+	var total: float = race_route.total_length if race_route else 0.0
+	g["progress_percent"] = (100.0 * race_progress / total) if total > 0.0 else 0.0
+	g["recovery_count"] = _recovery_count
+	g["duration_s"] = _debug_t
+	var sec_out := {}
+	for sec in _debug_sections:
+		var sec_name: String = sec["name"]
+		var sm: float = sec["start_m"]
+		var em: float = sec["end_m"]
+		var subset: Array = []
+		for s in _debug_samples:
+			var rp: float = s["race_progress"]
+			if rp >= sm and rp < em:
+				subset.append(s)
+		sec_out[sec_name] = _metric_block(subset)
+	return {"global": g, "sections": sec_out}
+
+
 # ===== РЕАЛИЗАЦИЯ АБСТРАКТНЫХ МЕТОДОВ VehicleBase =====
 
 func _get_steering_input() -> float:
@@ -177,14 +330,16 @@ func _get_brake_input() -> float:
 # ===== AI ЛОГИКА =====
 
 func _update_ai_driver() -> void:
-	"""Основная логика AI водителя"""
+	"""Основная логика AI водителя (v1.1: геометрически корректный pure pursuit).
+	Заменяет старый P-регулятор с фиксированным усилением 2.5, который слэмил руль в
+	упор и давал предельный цикл (видимую синусоиду). См. docs/RACER_AI_V1_1_PLAN.md."""
 	if not race_route or race_route.points.is_empty():
 		throttle_input = 0.0
 		brake_input = 1.0
 		steering_input = 0.0
 		return
 
-	# Обновляем прогресс по маршруту (только вперёд!)
+	# Обновляем прогресс по маршруту (только вперёд!) + кэшируем проекцию этого тика
 	_update_race_progress()
 
 	# Проверяем финиш
@@ -192,30 +347,47 @@ func _update_ai_driver() -> void:
 		finish_race()
 		return
 
-	# Pure Pursuit steering с адаптивным lookahead
+	# Крутизна поворота впереди — считаем один раз, используем и для lookahead, и для скорости
+	var turn_sharpness := _get_turn_sharpness_ahead()
+
+	# Адаптивный lookahead: растёт со скоростью, но КОРОЧЕ в крутых поворотах (иначе длинный
+	# lookahead срезает угол и уводит широко — ключевой второй шаг из §R). Плавно, без скачков.
 	var speed_factor: float = clamp(current_speed_kmh / 80.0, 0.0, 1.0)
-	var lookahead_dist: float = lerp(LOOKAHEAD_MIN, LOOKAHEAD_MAX, speed_factor)
+	var lookahead_target: float = lerp(LOOKAHEAD_MIN, LOOKAHEAD_MAX, speed_factor) * lerp(1.0, 0.55, turn_sharpness)
+	_lookahead_dist = move_toward(_lookahead_dist, lookahead_target, LOOKAHEAD_MAX_RATE)
 
-	var lookahead_point: Vector3 = race_route.get_lookahead_point(race_progress, lookahead_dist)
+	var lookahead_point: Vector3 = race_route.get_lookahead_point(race_progress, _lookahead_dist)
 
+	# --- Pure pursuit (велосипедная модель) ---
+	var steer_raw := 0.0
+	var heading_error := 0.0
 	if lookahead_point != Vector3.ZERO:
 		var to_target := lookahead_point - global_position
 		var to_target_flat := Vector3(to_target.x, 0, to_target.z).normalized()
 		var forward := -global_transform.basis.z
 		var forward_flat := Vector3(forward.x, 0, forward.z).normalized()
 
-		# Lateral error через cross product
-		var lateral_error := to_target_flat.cross(forward_flat).y
+		# sin(угла курс→цель); знак совпадает со старым lateral_error (проверяем визуально)
+		var sin_alpha: float = to_target_flat.cross(forward_flat).y
+		var cos_alpha: float = clampf(forward_flat.dot(to_target_flat), -1.0, 1.0)
+		heading_error = atan2(sin_alpha, cos_alpha)
 
-		# Steering пропорционален lateral error
-		# skill_level влияет на точность реакции
-		# Множитель 2.5 для более агрессивных поворотов
-		steering_input = clamp(lateral_error * 2.5 * skill_level, -1.0, 1.0)
-	else:
-		steering_input = 0.0
+		# Евклидово расстояние до цели: само гасит завышение усиления при сходе с линии
+		var l_dist: float = maxf(MIN_TURN_L, Vector3(to_target.x, 0, to_target.z).length())
+		# Кривизна pure pursuit → требуемый угол колёс (велосипедная модель) → нормировка в [-1,1]
+		var kappa: float = 2.0 * sin_alpha / l_dist
+		var delta_angle: float = atan(wheelbase * kappa)
+		steer_raw = clampf(delta_angle / deg_to_rad(max_steering_angle), -1.0, 1.0)
 
-	# Проверка препятствий и расчёт объезда (Craig Reynolds steering behaviors)
+	if ai_debug:
+		debug_target_point = lookahead_point
+
+	# Мягкое ограничение скорости команды руля (НЕ низкочастотный фильтр — актуатор уже даёт лаг)
+	steering_input = move_toward(steering_input, steer_raw, MAX_STEER_RATE * UPDATE_INTERVAL)
+
+	# Проверка препятствий и расчёт объезда (Craig Reynolds) — без изменений
 	var obstacle_data := _check_obstacle_ahead()
+	_last_obstacle_active = obstacle_data.detected
 
 	if obstacle_data.detected:
 		if obstacle_data.urgency > 0.6:
@@ -234,15 +406,13 @@ func _update_ai_driver() -> void:
 				throttle_input = lerp(0.7, 0.3, obstacle_data.urgency)
 				brake_input = lerp(0.05, 0.3, obstacle_data.urgency)
 
-	# Коррекция для удержания в коридоре маршрута
-	# НЕ применяем если obstacle avoidance активен — приоритет безопасности
-	var corridor_correction := 0.0
+	# Коридор — теперь ТОЛЬКО edge-guard у самого барьера (не второй регулятор на осевой)
+	var corridor_active := false
 	if not obstacle_data.detected:
-		corridor_correction = _calculate_corridor_correction()
+		var corridor_correction := _calculate_corridor_correction()
+		if absf(corridor_correction) > 0.0001:
+			corridor_active = true
 		steering_input = clamp(steering_input + corridor_correction, -1.0, 1.0)
-
-	# Контроль скорости (всегда, с учётом поворотов)
-	var turn_sharpness := _get_turn_sharpness_ahead()
 
 	# Безопасная скорость для поворота
 	# aggression влияет на то, как сильно замедляемся (выше = меньше торможение)
@@ -271,14 +441,22 @@ func _update_ai_driver() -> void:
 			throttle_input = clamp(speed_error / 8.0, 0.3, 1.0)
 			brake_input = 0.0
 
+	# Телеметрия (только когда включена тест-сценой)
+	if ai_debug:
+		_record_debug_sample(heading_error, steer_raw, corridor_active)
+
 
 func _update_race_progress() -> void:
-	"""Обновляет прогресс по маршруту (только вперёд!)"""
+	"""Обновляет прогресс по маршруту (только вперёд!) и кэширует проекцию тика."""
 	if not race_route:
 		return
 
-	# Проецируем позицию на маршрут, начиная от текущего сегмента
+	# Проецируем позицию на маршрут, начиная от текущего сегмента (ОДНА проекция на тик)
 	var projection := race_route.project_position(global_position, current_segment_idx)
+
+	# Кэшируем боковое смещение и арк-дистанцию для edge-guard + телеметрии
+	_cur_lateral_offset = projection.lateral_offset
+	_cur_proj_distance = projection.distance
 
 	# Обновляем только если прогресс увеличился (НЕ возвращаемся)
 	if projection.distance > race_progress:
@@ -311,34 +489,30 @@ func _get_turn_sharpness_ahead() -> float:
 
 
 func _calculate_corridor_correction() -> float:
-	"""Коррекция руления для удержания в коридоре маршрута.
-	Определяет с какой стороны от маршрута AI и толкает к центру."""
+	"""v1.1 EDGE-GUARD: молчит в середине дороги (pure pursuit уже целится в осевую),
+	включается лишь у самого барьера (>0.7·ширины). Переиспользует проекцию текущего
+	тика (без второго project_position). Слабый вклад (≤0.25), чтобы не искажать линию."""
 	if not race_route:
 		return 0.0
 
-	# Проецируем позицию на маршрут
-	var projection := race_route.project_position(global_position, current_segment_idx)
-	var lateral_dist: float = projection.lateral_offset  # Всегда положительное расстояние
+	var lateral_dist: float = _cur_lateral_offset  # из проекции этого тика (всегда ≥ 0)
+	var threshold := CORRIDOR_WIDTH * 0.7          # ~4.9 м из ±7 м
+	if lateral_dist <= threshold:
+		return 0.0
 
 	# Определяем СТОРОНУ: cross product направления маршрута и вектора к AI
-	var route_data: Dictionary = race_route.get_point_at_distance(projection.distance)
+	var route_data: Dictionary = race_route.get_point_at_distance(_cur_proj_distance)
 	var route_pos: Vector3 = route_data.position
 	var route_dir: Vector3 = route_data.direction
 	var to_ai := global_position - route_pos
 	# cross.y > 0 → AI справа от маршрута, < 0 → слева
 	var side_sign: float = sign(route_dir.cross(to_ai).y)
 
-	# Порог - 40% от ширины коридора
-	var threshold := CORRIDOR_WIDTH * 0.4
-
-	if lateral_dist > threshold:
-		var excess: float = lateral_dist - threshold
-		var max_excess: float = CORRIDOR_WIDTH * 0.6
-		var correction_strength: float = clamp(excess / max_excess, 0.0, 1.0) * 0.6
-		# Рулим В СТОРОНУ маршрута (противоположно стороне AI)
-		return -side_sign * correction_strength
-
-	return 0.0
+	var excess: float = lateral_dist - threshold
+	var max_excess: float = CORRIDOR_WIDTH * 0.3   # от 0.7·W до ~1.0·W
+	var correction_strength: float = clamp(excess / max_excess, 0.0, 1.0) * 0.25
+	# Рулим В СТОРОНУ маршрута (противоположно стороне AI)
+	return -side_sign * correction_strength
 
 
 func _check_obstacle_ahead() -> Dictionary:
@@ -424,6 +598,7 @@ func _check_stuck(delta: float) -> void:
 func _start_recovery() -> void:
 	"""Начинает процедуру восстановления"""
 	recovery_attempts += 1
+	_recovery_count += 1  # телеметрия: общее число входов в recovery за прогон
 
 	if recovery_attempts > MAX_RECOVERY_ATTEMPTS:
 		# Слишком много попыток - респавн на трассу
