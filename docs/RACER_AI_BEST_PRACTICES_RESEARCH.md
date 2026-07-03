@@ -1,0 +1,1956 @@
+# Racing-Opponent AI — External Best-Practices Survey
+
+> Deep-research report (deep-research workflow, 104 agents, adversarially verified). External survey only — NOT tied to our code; application plan is separate. Generated 2026-07-03.
+
+## Executive summary
+
+Racing-game AI splits into two philosophies that this survey confirms with primary sources. (1) Behavior/pacing is dominated by dynamic difficulty adjustment, of which rubber-banding is the canonical named racing-genre technique; but shipped titles like Black Rock's Pure explicitly rejected classic rubber-banding as unfair/detectable and replaced it with a per-AI "target point" that scales each rival's skill attributes by distance to that point rather than to the player, while Gran Turismo's Sophy shows the honest-skill extreme — model-free deep RL (QR-SAC, a distributional actor-critic) that learned genuine racecraft (slipstream slingshot passes, crowded starts, defensive blocking, driving at the traction limit) and encoded sportsmanship in a hand-designed reward rather than if-then rules. (2) The technical backbone is control theory and trajectory optimization: geometric path trackers (pure pursuit as a proportional controller with gain 2/ℓd², Stanley as front-axle heading+cross-track feedback), racing-line optimization (minimum-curvature heuristic, spline-control-point QP reductions taking solves from seconds to milliseconds), and friction-limited speed profiling (v=√(a_lat·R) with forward-backward integration and quasi-steady-state bottlenecks). For avoidance without derailing the line, the survey confirms context steering (Andrew Fray), shipped on F1 2011, as the fix for the classic Reynolds-style vector-cancellation failure where opposing "chase" and "avoid" vectors sum to near-zero. Coverage is strong on themes A (racecraft), B (difficulty), C (control math), and D (avoidance), but crash/stuck recovery (theme E) produced no surviving claims.
+
+## Verified findings
+
+### 1. Gran Turismo Sophy is built on model-free deep reinforcement learning using a purpose-built distributional algorithm, QR-SAC (Quantile-Regression Soft Actor-Critic), that reasons over the distribution of outcomes of high-speed actions rather than a single expected value — not hand-scripted racing lines or supervised imitation.
+**confidence:** high · **verify:** 3-0 (Theme B/F: honest-skill RL AI)
+
+Nature paper (Wurman et al. 2022): 'We combine state-of-the-art, model-free, deep reinforcement learning algorithms with mixed-scenario training.' GT official tech page: QR-SAC 'explicitly reasoned about the various possible outcomes of GT Sophy's high-speed actions,' extending soft actor-critic by replacing expected future reward with probability distributions (standard distributional RL). Sony AI/GT confirm Sophy has no hardcoded braking-point knowledge and did not learn from human demonstrations, ruling out both scripting and imitation. Merges claims 0 and 3.
+- https://www.nature.com/articles/s41586-021-04357-7
+- https://www.gran-turismo.com/us/gran-turismo-sophy/technology/
+
+### 2. Sophy learned genuine racecraft — passing and blocking opponents while at the traction limit — including crowded race starts, slipstream slingshot passes, and defensive maneuvers, acquired via mixed-scenario training on hand-crafted pivotal race situations plus specialized sparring opponents.
+**confidence:** high · **verify:** 3-0 (Theme A: real competition, not line-following)
+
+Nature abstract describes 'complex tactical manoeuvres to pass or block opponents while operating their vehicles at their traction limits'; documented emergent tactics include slipstream/slingshot passes and a crossover inside pass (feign outside, cross to inside when the opponent leaves a gap). GT tech page: training used 'mixed-scenario training using hand-crafted race situations likely to be pivotal on each track, as well as specialized sparring opponents,' yielding 'crowded starts, making slingshot passes out of the slipstream, and even defensive maneuvers.' This is the clearest confirmed example of AI that competes tactically rather than tracking a fixed line. Merges claims 1 and 5.
+- https://www.nature.com/articles/s41586-021-04357-7
+- https://www.gran-turismo.com/us/gran-turismo-sophy/technology/
+
+### 3. Competitive-yet-clean wheel-to-wheel behavior in Sophy was achieved by encoding racing's written and unwritten (under-specified) sportsmanship rules into a carefully engineered reward function — producing behaviors like leaving enough space during overtakes — rather than through explicit rule-based logic.
+**confidence:** high · **verify:** 3-0 (Theme A/B: reward-shaped etiquette vs scripted rules)
+
+Nature: the team 'construct[ed] a reward function that enables the agent to be competitive while adhering to racing's important, but under-specified, sportsmanship rules,' rewarding progress/passing while penalizing collisions, corner-cutting and skidding. GT tech page: researchers 'encode the written and unwritten rules of racing into a complex reward function' and 'balance the population of opponents' to avoid excessive aggression or timidity; Sophy overtakes 'without blocking their driving line but instead leaves them enough space to maneuver.' Etiquette emerges from the training signal, not if-then rules (reward is human-designed, which is standard reward shaping, not behavioral scripting). Merges claims 2 and 4.
+- https://www.nature.com/articles/s41586-021-04357-7
+- https://www.gran-turismo.com/us/gran-turismo-sophy/technology/
+
+### 4. Rubber-banding is a specific, named subtype of dynamic difficulty adjustment (DDA) that is extensively used in racing games, and can be systematized (e.g., an Adaptive Rubber-Banding System built from a relationship curve, a modular mechanism, and detail-processing schemes).
+**confidence:** high · **verify:** 3-0 (Theme B: DDA taxonomy)
+
+Peer-reviewed paper (Mi & Gao 2022, ICGA Journal, titled 'Adaptive rubber-banding system of dynamic difficulty adjustment in racing games'): 'Rubber-banding is one of the DDA techniques extensively used in racing games.' The same paper proposes an ARBS 'based on ARBS relationship curve, modular mechanism, as well as detail processing schemes... implemented in Unreal Engine 4.' Positions rubber-banding as a core, formalizable DDA technique for the genre. Merges claims 8 and 9.
+- https://journals.sagepub.com/doi/10.3233/ICG-220207
+
+### 5. The shipped racer Pure (Black Rock Studios) deliberately rejected classic rubber-banding as unfair and easy to detect, and replaced it with a per-AI moving 'target point' a set distance ahead of/behind the player, scaling each AI's per-attribute skills by distance to that target point rather than distance to the player.
+**confidence:** high · **verify:** 3-0 (Theme B: honest DDA alternative from a shipped title)
+
+Developer postmortem (Eduardo Jimenez, Senior Programmer, Black Rock): 'Given all this we rejected using rubber band'; it 'is not fair, and that unfairness is easy to spot,' because 'it's obvious when AI riders are going superhumanly fast or brain dead slow,' collapsing the race so 'everything is decided by how they perform at the end.' Replacement: 'every AI character aiming for a point a number of meters ahead or behind the human player' (positive=ahead, negative=behind), and 'each AI character's skills were set up to change dynamically depending on the AI character's distance to their assigned point, not in relation to the player.' Skill increase is proportional to distance-to-target with a cap (~150 m). Concrete design lever for keeping races close without overt cheating. Merges claims 6 and 7.
+- https://www.gamedeveloper.com/design/the-pure-advantage-advanced-racing-game-ai
+
+### 6. Pure pursuit is mathematically a proportional controller acting on cross-track error at a look-ahead point with gain 2/ℓd², and its Ackermann-adjusted steering law is δ = atan(2·L·sin(α)/ℓd) (arc curvature κ = 2·sin(α)/ℓd); the look-ahead distance therefore functions as the tuning gain and is commonly scheduled as a function of vehicle speed.
+**confidence:** high · **verify:** 3-0 (Theme C: path-following math)
+
+CMU report (Snider 2009): 'pure pursuit is a proportional controller of the steering angle operating on a cross track error some look-ahead distance in front of the vehicle and having a gain of 2/ℓd²... ℓd being assigned as a function of vehicle speed.' The steering-law form δ = tan⁻¹(2L·sin(α)/ℓd) with κ = 2·sin(α)/ℓd is verbatim in the adaptive-lookahead racing paper (Sukhil & Behl 2021) and is the canonical Coulter-1992 bicycle-model law (L=wheelbase, α=angle to look-ahead point, ℓd=look-ahead distance). Since κ = 2·e/ℓd² is an exact geometric identity, 'ℓd is the gain' is correct shorthand (true gain 2/ℓd²). Merges claims 10 and 15.
+- https://www.ri.cmu.edu/pub_files/2009/2/Automatic_Steering_Methods_for_Autonomous_Automobile_Path_Tracking.pdf
+- https://arxiv.org/pdf/2111.08873
+
+### 7. Look-ahead length governs a stability/accuracy trade-off: too short a look-ahead causes oscillation/weaving around the reference path (and eventually instability), while too long a look-ahead gives smoother but less accurate tracking that cuts corners on turns.
+**confidence:** high · **verify:** 3-0 (Theme C: why lookahead matters / weaving failure mode)
+
+CMU report (Snider 2009): 'Decreasing the look-ahead distance results in higher precision tracking and eventually oscillation, and increasing the look-ahead distance results in lower precision tracking and eventually stability,' and 'a sufficient look-ahead distance will result in cutting corners while executing turns.' Independently, the adaptive-lookahead racing paper (arXiv 2111.08873): 'if the distance is low, it can lead to oscillations around the reference path, and if it is too high, it can cause large deviations and lead to corner-cutting.' Corroborated by MathWorks Pure Pursuit docs. This is the canonical limit-cycle/weaving explanation. Merges claims 11 and 14.
+- https://www.ri.cmu.edu/pub_files/2009/2/Automatic_Steering_Methods_for_Autonomous_Automobile_Path_Tracking.pdf
+- https://arxiv.org/pdf/2111.08873
+
+### 8. Assigning an optimal per-waypoint (adaptive) look-ahead via a convex-combination objective outperforms a single fixed-lookahead Ackermann pure-pursuit baseline by roughly 20% in lap time and average lap speed on a real F1/10 (F1TENTH) autonomous-racing testbed.
+**confidence:** high · **verify:** 3-0 (Theme C: adaptive lookahead payoff)
+
+Sukhil & Behl 2021 (arXiv 2111.08873): 'The convex combination label assignment has better performance in both lap time and average lap speed on the F1/10 testbed with 20% improvement over the baseline implementation.' Method = greedy per-waypoint optimal-lookahead labels under a β-weighted convex blend of max-velocity and min-deviation (best near β≈0.5). The paper's own real-testbed table (lap time 12.26→9.44 s, ~23%; avg speed 1.582→2.042 m/s, ~29%) makes 'about 20%' conservative. Scope caveat: single small indoor track, single-agent. Claim 16.
+- https://arxiv.org/pdf/2111.08873
+
+### 9. The Stanley controller (Stanford's DARPA Grand Challenge winner) is a nonlinear feedback law on FRONT-axle cross-track error, δ(t) = θe(t) + tan⁻¹(k·efa/vx), combining heading error with a speed-scaled cross-track term (provable exponential convergence); it generally outperforms pure pursuit but, lacking a look-ahead, overshoots turns instead of cutting corners and is less robust to large errors and non-smooth/discontinuous paths.
+**confidence:** high · **verify:** 3-0 (Theme C: Stanley vs pure pursuit)
+
+CMU report (Snider 2009): Stanley is 'a nonlinear feedback function of the cross track error efa, measured from the center of the front axle... for which exponential convergence can be shown' (ref = Thrun et al. 2006). First term sets steering to heading error; the arctan cross-track term diminishes with speed (vx in denominator). Comparison verbatim: 'In general, this method outperforms Pure Pursuit in most scenarios. However, the Stanley method is not as robust to large errors and non-smooth paths,' and 'a well tuned Stanley tracker will not cut corners but rather overshoot turns... attributed to not having a look-ahead.' Corroborated by MDPI Sensors 2025 and arXiv 2504.18439. Merges claims 12 and 13.
+- https://www.ri.cmu.edu/pub_files/2009/2/Automatic_Steering_Methods_for_Autonomous_Automobile_Path_Tracking.pdf
+
+### 10. The optimal/minimum-time racing line is commonly approximated with the 'minimum-curvature' heuristic — the trajectory that minimizes summed curvature around the track — which is foundational to racing-line computation used as the AI's technical backbone.
+**confidence:** high · **verify:** 3-0 (Theme A/C: optimal line vs geometric line)
+
+Survey (arXiv 2309.09186, CMU): 'The optimization of the trajectory geometry in autonomous racing has been studied in Braghin et al. and Kapania et al. with the minimum curvature heuristic, which states that an optimal racing trajectory minimizes the sum of curvatures around the track to minimize lap time.' The claim's hedge ('approximates') is correct — the literature (Heilmeier et al. 2019) treats minimum-curvature QP as an approximation to true minimum-time. Distinguishes the geometric/centerline line from the optimal line. Note: usually formulated as summed squared curvature (∫κ²); domain is autonomous racing (technical backbone), not games per se. Claim 17.
+- https://arxiv.org/pdf/2309.09186
+
+### 11. Representing the racing line as a B-spline and optimizing only the spline control points (rather than every discretized sample) cuts decision-variable dimension ~90% with near-equal optimality (Monza: 1932→204) and drops QP solve time from seconds to milliseconds (8.225 s → 3.8 ms), making online/real-time raceline computation feasible.
+**confidence:** high · **verify:** 3-0 (Theme C: efficient raceline computation)
+
+Xue, Yue & Dolan (arXiv 2309.09186, ICRA 2024): abstract states the method uses 'only spline control points as variables, achieving comparable optimality... while reducing decision variables by 90%'; Monza example gives '204 decision variables (102 control points), down from 1932... a similar level of optimality with a 90% reduction,' and 'QP computation time is 3.8 ms, down from 8.225 s using [Heilmeier et al.]' — 'seconds to milliseconds... enabling future online adaptation.' Arithmetic checks: (1932−204)/1932≈89.4%; 102×2=204; ~5.8 km/3 m≈1931 samples. Single-track self-reported benchmark. Merges claims 18 and 19.
+- https://arxiv.org/pdf/2309.09186
+
+### 12. Friction-limited cornering speed is v = √(a_lat/κ) = √(a_lat·R), and a quasi-steady-state (QSS) speed profiler maximizes velocity by driving longitudinal acceleration to zero at the curvature bottleneck to free up lateral acceleration (traction-ellipse / friction-circle physics).
+**confidence:** high · **verify:** 3-0 (Theme C: speed profiling & braking points)
+
+Xue/Yue/Dolan (arXiv 2309.09186): Eq. (9) 'v = sqrt(a_lat / k)' (with k=1/R, algebraically v=√(a_lat·R)); and 'to maximize vehicle velocity through the bottleneck, the vehicle should have zero longitudinal acceleration to maximize lateral acceleration according to the traction ellipse,' via a 'Quasi-steady state (QSS)' velocity profile whose bottlenecks are peak-curvature segments. Underlying friction-circle physics (a_total=√(a_lat²+a_lon²)≤μg; max lateral grip at a_lon=0) is universal. This is the exact v=√(a_lat·R) braking/speed-limit logic the reader flagged as arcade-relevant. Claim 20.
+- https://arxiv.org/pdf/2309.09186
+
+### 13. A widely-cited method for fast racing-trajectory generation alternates two steps: (1) a forward-backward integration that computes the minimum-time longitudinal speed profile subject to tire-friction constraints, and (2) a convex optimization that updates the path to minimize curvature within track boundaries — matching the v=√(a_lat·R)-style corner-speed caps and braking-point placement.
+**confidence:** high · **verify:** 3-0 (Theme C: minimum-time line + speed profile)
+
+Kapania, Subosits & Gerdes (arXiv 1902.00606, Stanford, 'A Sequential Two-Step Algorithm for Fast Generation of Vehicle Racing Trajectories'): '...a forward-backward integration scheme to determine the minimum-time longitudinal speed profile, subject to tire friction constraints' and 'updates the vehicle's path by solving a convex optimization problem that minimizes the resulting path curvature while staying within track boundaries.' Iterates ~4–5 times until lap-time gains plateau; experimentally validated on an Audi TTS at Thunderhill. The forward-backward pass seeds corner-speed caps from friction-limited lateral acceleration (v_max=√(a_y_max/κ)) and sets braking points along the line. Merges claims 21 and 22.
+- https://arxiv.org/pdf/1902.00606
+
+### 14. Classic Reynolds-style steering fails at obstacle avoidance because it blends each behavior's desired-velocity vector by averaging/summing: when a 'chase' vector and an opposing 'avoid' vector cancel, the combined vector collapses to near-zero and the agent barely moves — the canonical reason a reactive avoidance controller 'fights' the path-follower and stalls/oscillates.
+**confidence:** high · **verify:** 3-0 (Theme D: the avoidance-vs-path-follower failure mode)
+
+Game AI Pro 2, Ch. 18 (Andrew Fray, 'Context Steering'): starting from 'chase' and 'avoid' behaviors, 'The behavior system combines these behaviors. Let's assume they're just averaged for now... The final vector is very close to 0, and the entity hardly moves. Players are not going to think this is an intelligent entity!' Fray notes that adding per-behavior weighting only 'moves the problem' to a new equilibrium. Universally acknowledged (Millington, Buckland). Claim 24.
+- https://www.gameaipro.com/GameAIPro2/GameAIPro2_Chapter18_Context_Steering_Behavior-Driven_Steering_at_the_Macro_Scale.pdf
+
+### 15. Context steering (Andrew Fray) is a production-proven alternative to blended steering behaviors: it was shipped as a replacement on the racing game F1 2011, shrinking the codebase ~4000 lines while improving the AI's collision avoidance and overtaking — a real shipped outcome, not a toy demo.
+**confidence:** high · **verify:** 3-0 (Theme D/F: shipped racing-AI avoidance)
+
+Game AI Pro 2, Ch. 18 abstract (Fray, AI programmer on F1 2011, Codemasters): 'When used to replace steering behaviors on the game F1 2011, the codebase shrunk by 4000 lines, yet the AI were better at avoiding collisions, overtaking, and performing other interesting behaviors.' The chapter includes a 'Racing with Context' section. Context steering evaluates directions on interest/danger maps rather than summing opposing vectors, which is why it avoids the cancellation stall above. Figures are self-reported (appropriate for a shipped-game postmortem). Claim 23.
+- https://www.gameaipro.com/GameAIPro2/GameAIPro2_Chapter18_Context_Steering_Behavior-Driven_Steering_at_the_Macro_Scale.pdf
+
+## Caveats
+- C
+- o
+- v
+- e
+- r
+- a
+- g
+- e
+-  
+- i
+- s
+-  
+- u
+- n
+- e
+- v
+- e
+- n
+-  
+- a
+- c
+- r
+- o
+- s
+- s
+-  
+- t
+- h
+- e
+-  
+- r
+- e
+- q
+- u
+- e
+- s
+- t
+- e
+- d
+-  
+- t
+- h
+- e
+- m
+- e
+- s
+- .
+-  
+- T
+- h
+- e
+- m
+- e
+-  
+- E
+-  
+- (
+- c
+- r
+- a
+- s
+- h
+- /
+- s
+- t
+- u
+- c
+- k
+-  
+- r
+- e
+- c
+- o
+- v
+- e
+- r
+- y
+-  
+- —
+-  
+- r
+- e
+- v
+- e
+- r
+- s
+- e
+- -
+- a
+- n
+- d
+- -
+- r
+- e
+- t
+- r
+- y
+- ,
+-  
+- u
+- n
+- s
+- t
+- u
+- c
+- k
+-  
+- t
+- i
+- m
+- e
+- r
+- s
+- ,
+-  
+- t
+- e
+- l
+- e
+- p
+- o
+- r
+- t
+- /
+- r
+- e
+- s
+- p
+- a
+- w
+- n
+- ,
+-  
+- c
+- a
+- t
+- c
+- h
+- -
+- u
+- p
+-  
+- w
+- a
+- r
+- p
+- ,
+-  
+- r
+- e
+- w
+- i
+- n
+- d
+- ,
+-  
+- a
+- n
+- d
+-  
+- h
+- o
+- w
+-  
+- o
+- p
+- e
+- n
+- -
+- w
+- o
+- r
+- l
+- d
+-  
+- r
+- a
+- c
+- e
+- r
+- s
+-  
+- l
+- i
+- k
+- e
+-  
+- N
+- F
+- S
+- /
+- F
+- o
+- r
+- z
+- a
+-  
+- H
+- o
+- r
+- i
+- z
+- o
+- n
+- /
+- M
+- i
+- d
+- n
+- i
+- g
+- h
+- t
+-  
+- C
+- l
+- u
+- b
+- /
+- T
+- h
+- e
+-  
+- C
+- r
+- e
+- w
+-  
+- m
+- a
+- s
+- k
+-  
+- a
+-  
+- c
+- r
+- a
+- s
+- h
+- e
+- d
+-  
+- r
+- i
+- v
+- a
+- l
+- '
+- s
+-  
+- r
+- e
+- c
+- o
+- v
+- e
+- r
+- y
+- )
+-  
+- p
+- r
+- o
+- d
+- u
+- c
+- e
+- d
+-  
+- Z
+- E
+- R
+- O
+-  
+- s
+- u
+- r
+- v
+- i
+- v
+- i
+- n
+- g
+-  
+- c
+- l
+- a
+- i
+- m
+- s
+-  
+- a
+- n
+- d
+-  
+- i
+- s
+-  
+- n
+- o
+- t
+-  
+- e
+- v
+- i
+- d
+- e
+- n
+- c
+- e
+- d
+-  
+- h
+- e
+- r
+- e
+-  
+- a
+- t
+-  
+- a
+- l
+- l
+- .
+-  
+- T
+- h
+- e
+- m
+- e
+-  
+- A
+-  
+- (
+- r
+- a
+- c
+- e
+- c
+- r
+- a
+- f
+- t
+- :
+-  
+- o
+- v
+- e
+- r
+- t
+- a
+- k
+- i
+- n
+- g
+-  
+- s
+- i
+- d
+- e
+- -
+- s
+- e
+- l
+- e
+- c
+- t
+- i
+- o
+- n
+- ,
+-  
+- b
+- l
+- o
+- c
+- k
+- i
+- n
+- g
+- ,
+-  
+- d
+- r
+- a
+- f
+- t
+- i
+- n
+- g
+- ,
+-  
+- l
+- a
+- n
+- e
+- /
+- l
+- a
+- t
+- e
+- r
+- a
+- l
+- -
+- o
+- f
+- f
+- s
+- e
+- t
+-  
+- a
+- s
+- s
+- i
+- g
+- n
+- m
+- e
+- n
+- t
+- ,
+-  
+- a
+- t
+- t
+- a
+- c
+- k
+- -
+- v
+- s
+- -
+- h
+- o
+- l
+- d
+-  
+- d
+- e
+- c
+- i
+- s
+- i
+- o
+- n
+- s
+- )
+-  
+- i
+- s
+-  
+- c
+- o
+- n
+- f
+- i
+- r
+- m
+- e
+- d
+-  
+- o
+- n
+- l
+- y
+-  
+- t
+- h
+- r
+- o
+- u
+- g
+- h
+-  
+- G
+- r
+- a
+- n
+-  
+- T
+- u
+- r
+- i
+- s
+- m
+- o
+-  
+- S
+- o
+- p
+- h
+- y
+-  
+- —
+-  
+- a
+-  
+- r
+- e
+- s
+- e
+- a
+- r
+- c
+- h
+- /
+- R
+- L
+-  
+- s
+- y
+- s
+- t
+- e
+- m
+- ,
+-  
+- n
+- o
+- t
+-  
+- r
+- e
+- p
+- r
+- e
+- s
+- e
+- n
+- t
+- a
+- t
+- i
+- v
+- e
+-  
+- o
+- f
+-  
+- h
+- o
+- w
+-  
+- m
+- o
+- s
+- t
+-  
+- s
+- h
+- i
+- p
+- p
+- e
+- d
+-  
+- a
+- r
+- c
+- a
+- d
+- e
+-  
+- r
+- a
+- c
+- e
+- r
+- s
+-  
+- s
+- c
+- r
+- i
+- p
+- t
+-  
+- o
+- v
+- e
+- r
+- t
+- a
+- k
+- i
+- n
+- g
+-  
+- o
+- r
+-  
+- s
+- p
+- r
+- e
+- a
+- d
+-  
+- c
+- a
+- r
+- s
+-  
+- o
+- f
+- f
+-  
+- t
+- h
+- e
+-  
+- c
+- e
+- n
+- t
+- e
+- r
+- l
+- i
+- n
+- e
+- ;
+-  
+- t
+- h
+- e
+-  
+- g
+- e
+- n
+- e
+- r
+- a
+- l
+-  
+- d
+- e
+- s
+- i
+- g
+- n
+-  
+- p
+- a
+- t
+- t
+- e
+- r
+- n
+- s
+-  
+- f
+- o
+- r
+-  
+- l
+- a
+- t
+- e
+- r
+- a
+- l
+- -
+- o
+- f
+- f
+- s
+- e
+- t
+- /
+- l
+- a
+- n
+- e
+-  
+- a
+- s
+- s
+- i
+- g
+- n
+- m
+- e
+- n
+- t
+-  
+- w
+- e
+- r
+- e
+-  
+- n
+- o
+- t
+-  
+- c
+- o
+- n
+- f
+- i
+- r
+- m
+- e
+- d
+- .
+-  
+- O
+- n
+-  
+- T
+- h
+- e
+- m
+- e
+-  
+- C
+- ,
+-  
+- M
+- P
+- C
+-  
+- (
+- m
+- o
+- d
+- e
+- l
+-  
+- p
+- r
+- e
+- d
+- i
+- c
+- t
+- i
+- v
+- e
+-  
+- c
+- o
+- n
+- t
+- r
+- o
+- l
+- )
+-  
+- i
+- s
+-  
+- n
+- a
+- m
+- e
+- d
+-  
+- i
+- n
+-  
+- t
+- h
+- e
+-  
+- q
+- u
+- e
+- s
+- t
+- i
+- o
+- n
+-  
+- b
+- u
+- t
+-  
+- n
+- o
+-  
+- s
+- u
+- r
+- v
+- i
+- v
+- i
+- n
+- g
+-  
+- c
+- l
+- a
+- i
+- m
+-  
+- c
+- o
+- v
+- e
+- r
+- s
+-  
+- i
+- t
+-  
+- d
+- i
+- r
+- e
+- c
+- t
+- l
+- y
+- ;
+-  
+- t
+- h
+- e
+-  
+- c
+- o
+- n
+- f
+- i
+- r
+- m
+- e
+- d
+-  
+- c
+- o
+- n
+- t
+- r
+- o
+- l
+-  
+- m
+- a
+- t
+- h
+-  
+- i
+- s
+-  
+- p
+- u
+- r
+- e
+-  
+- p
+- u
+- r
+- s
+- u
+- i
+- t
+- ,
+-  
+- S
+- t
+- a
+- n
+- l
+- e
+- y
+- ,
+-  
+- m
+- i
+- n
+- i
+- m
+- u
+- m
+- -
+- c
+- u
+- r
+- v
+- a
+- t
+- u
+- r
+- e
+- /
+- s
+- p
+- l
+- i
+- n
+- e
+-  
+- r
+- a
+- c
+- e
+- l
+- i
+- n
+- e
+-  
+- o
+- p
+- t
+- i
+- m
+- i
+- z
+- a
+- t
+- i
+- o
+- n
+- ,
+-  
+- a
+- n
+- d
+-  
+- f
+- r
+- i
+- c
+- t
+- i
+- o
+- n
+- -
+- l
+- i
+- m
+- i
+- t
+- e
+- d
+-  
+- s
+- p
+- e
+- e
+- d
+-  
+- p
+- r
+- o
+- f
+- i
+- l
+- i
+- n
+- g
+- .
+-  
+- F
+- o
+- r
+- z
+- a
+- '
+- s
+-  
+- D
+- r
+- i
+- v
+- a
+- t
+- a
+- r
+-  
+- (
+- r
+- e
+- c
+- o
+- r
+- d
+- e
+- d
+- /
+- M
+- L
+-  
+- d
+- r
+- i
+- v
+- e
+- r
+-  
+- p
+- r
+- o
+- f
+- i
+- l
+- e
+- s
+- )
+-  
+- a
+- n
+- d
+-  
+- d
+- e
+- t
+- a
+- i
+- l
+- e
+- d
+-  
+- r
+- u
+- b
+- b
+- e
+- r
+- -
+- b
+- a
+- n
+- d
+- i
+- n
+- g
+-  
+- p
+- o
+- s
+- t
+- m
+- o
+- r
+- t
+- e
+- m
+- s
+-  
+- f
+- o
+- r
+-  
+- M
+- a
+- r
+- i
+- o
+-  
+- K
+- a
+- r
+- t
+- /
+- B
+- u
+- r
+- n
+- o
+- u
+- t
+- /
+- N
+- F
+- S
+- /
+- F
+- 1
+-  
+- g
+- a
+- m
+- e
+- s
+-  
+- w
+- e
+- r
+- e
+-  
+- r
+- e
+- q
+- u
+- e
+- s
+- t
+- e
+- d
+-  
+- b
+- u
+- t
+-  
+- d
+- i
+- d
+-  
+- n
+- o
+- t
+-  
+- s
+- u
+- r
+- v
+- i
+- v
+- e
+-  
+- v
+- e
+- r
+- i
+- f
+- i
+- c
+- a
+- t
+- i
+- o
+- n
+- ;
+-  
+- t
+- h
+- e
+-  
+- o
+- n
+- l
+- y
+-  
+- s
+- h
+- i
+- p
+- p
+- e
+- d
+- -
+- g
+- a
+- m
+- e
+-  
+- D
+- D
+- A
+-  
+- a
+- c
+- c
+- o
+- u
+- n
+- t
+-  
+- c
+- o
+- n
+- f
+- i
+- r
+- m
+- e
+- d
+-  
+- i
+- s
+-  
+- P
+- u
+- r
+- e
+- .
+-  
+- S
+- o
+- u
+- r
+- c
+- e
+- -
+- t
+- y
+- p
+- e
+-  
+- n
+- o
+- t
+- e
+- :
+-  
+- m
+- u
+- c
+- h
+-  
+- o
+- f
+-  
+- t
+- h
+- e
+-  
+- c
+- o
+- n
+- t
+- r
+- o
+- l
+- -
+- t
+- h
+- e
+- o
+- r
+- y
+-  
+- b
+- a
+- c
+- k
+- b
+- o
+- n
+- e
+-  
+- (
+- p
+- u
+- r
+- e
+-  
+- p
+- u
+- r
+- s
+- u
+- i
+- t
+- ,
+-  
+- S
+- t
+- a
+- n
+- l
+- e
+- y
+- ,
+-  
+- m
+- i
+- n
+- i
+- m
+- u
+- m
+- -
+- c
+- u
+- r
+- v
+- a
+- t
+- u
+- r
+- e
+- ,
+-  
+- s
+- p
+- l
+- i
+- n
+- e
+-  
+- Q
+- P
+- ,
+-  
+- f
+- o
+- r
+- w
+- a
+- r
+- d
+- -
+- b
+- a
+- c
+- k
+- w
+- a
+- r
+- d
+-  
+- s
+- p
+- e
+- e
+- d
+-  
+- p
+- r
+- o
+- f
+- i
+- l
+- e
+- s
+- )
+-  
+- c
+- o
+- m
+- e
+- s
+-  
+- f
+- r
+- o
+- m
+-  
+- r
+- o
+- b
+- o
+- t
+- i
+- c
+- s
+- /
+- a
+- u
+- t
+- o
+- n
+- o
+- m
+- o
+- u
+- s
+- -
+- r
+- a
+- c
+- i
+- n
+- g
+-  
+- l
+- i
+- t
+- e
+- r
+- a
+- t
+- u
+- r
+- e
+-  
+- (
+- C
+- M
+- U
+- ,
+-  
+- S
+- t
+- a
+- n
+- f
+- o
+- r
+- d
+- ,
+-  
+- F
+- 1
+- T
+- E
+- N
+- T
+- H
+- )
+- ,
+-  
+- n
+- o
+- t
+-  
+- f
+- r
+- o
+- m
+-  
+- g
+- a
+- m
+- e
+-  
+- e
+- n
+- g
+- i
+- n
+- e
+- s
+-  
+- —
+-  
+- i
+- t
+-  
+- i
+- s
+-  
+- t
+- h
+- e
+-  
+- t
+- e
+- c
+- h
+- n
+- i
+- c
+- a
+- l
+-  
+- b
+- a
+- c
+- k
+- b
+- o
+- n
+- e
+- ,
+-  
+- n
+- o
+- t
+-  
+- d
+- i
+- r
+- e
+- c
+- t
+-  
+- e
+- v
+- i
+- d
+- e
+- n
+- c
+- e
+-  
+- o
+- f
+-  
+- h
+- o
+- w
+-  
+- a
+- n
+- y
+-  
+- g
+- i
+- v
+- e
+- n
+-  
+- g
+- a
+- m
+- e
+-  
+- c
+- o
+- m
+- p
+- u
+- t
+- e
+- s
+-  
+- s
+- t
+- e
+- e
+- r
+- i
+- n
+- g
+- .
+-  
+- T
+- h
+- e
+-  
+- G
+- T
+- -
+- S
+- o
+- p
+- h
+- y
+-  
+- '
+- t
+- e
+- c
+- h
+- n
+- o
+- l
+- o
+- g
+- y
+- '
+-  
+- p
+- a
+- g
+- e
+-  
+- i
+- s
+-  
+- m
+- a
+- r
+- k
+- e
+- t
+- i
+- n
+- g
+- -
+- t
+- o
+- n
+- e
+- d
+-  
+- b
+- u
+- t
+-  
+- i
+- s
+-  
+- c
+- o
+- r
+- r
+- o
+- b
+- o
+- r
+- a
+- t
+- e
+- d
+-  
+- t
+- h
+- r
+- o
+- u
+- g
+- h
+- o
+- u
+- t
+-  
+- b
+- y
+-  
+- t
+- h
+- e
+-  
+- p
+- e
+- e
+- r
+- -
+- r
+- e
+- v
+- i
+- e
+- w
+- e
+- d
+-  
+- N
+- a
+- t
+- u
+- r
+- e
+-  
+- p
+- a
+- p
+- e
+- r
+- .
+-  
+- A
+- l
+- l
+-  
+- 1
+- 5
+-  
+- f
+- i
+- n
+- d
+- i
+- n
+- g
+- s
+-  
+- r
+- e
+- s
+- t
+-  
+- o
+- n
+-  
+- u
+- n
+- a
+- n
+- i
+- m
+- o
+- u
+- s
+-  
+- 3
+- -
+- 0
+-  
+- v
+- e
+- r
+- i
+- f
+- i
+- c
+- a
+- t
+- i
+- o
+- n
+-  
+- a
+- g
+- a
+- i
+- n
+- s
+- t
+-  
+- p
+- r
+- i
+- m
+- a
+- r
+- y
+-  
+- s
+- o
+- u
+- r
+- c
+- e
+- s
+- ,
+-  
+- s
+- o
+-  
+- c
+- o
+- n
+- f
+- i
+- d
+- e
+- n
+- c
+- e
+-  
+- i
+- s
+-  
+- u
+- n
+- i
+- f
+- o
+- r
+- m
+- l
+- y
+-  
+- h
+- i
+- g
+- h
+- ;
+-  
+- t
+- h
+- e
+-  
+- r
+- i
+- s
+- k
+-  
+- i
+- s
+-  
+- n
+- o
+- t
+-  
+- p
+- e
+- r
+- -
+- c
+- l
+- a
+- i
+- m
+-  
+- a
+- c
+- c
+- u
+- r
+- a
+- c
+- y
+-  
+- b
+- u
+- t
+-  
+- t
+- h
+- e
+-  
+- t
+- h
+- e
+- m
+- a
+- t
+- i
+- c
+-  
+- g
+- a
+- p
+- s
+-  
+- a
+- b
+- o
+- v
+- e
+- .
+
+## Open questions / gaps
+- Theme E is unanswered: what concrete crash/stuck-recovery mechanisms do open-world street racers (Need for Speed, Midnight Club, Burnout, Test Drive Unlimited, The Crew, Forza Horizon) use when a rival hits a wall/pole/car — reverse-and-retry vs unstuck timers vs offscreen teleport/respawn vs catch-up warp/rewind — and how is the recovery hidden from the player (e.g., only warping when out of view)?
+- How do shipping racing games assign lateral offsets / lanes / distinct racing lines so rivals don't all track the same centerline, and how does an AI choose which side to attack, when to hold, and when to block a position — outside the RL-emergent case of Sophy?
+- Where does MPC (model predictive control) fit relative to pure pursuit and Stanley in shipped sims (iRacing, rFactor/Assetto Corsa, Forza, Gran Turismo), and do any commercial racing games actually run MPC-class controllers for AI steering/speed rather than geometric trackers?
+- How does Forza's Drivatar system technically capture and reproduce recorded/ML human driver profiles, and how does that compare on the honest-skill vs elastic-cheating spectrum to Pure's target-point skill scaling and to Sophy's RL policy?
+
+## Sources
+-  — https://www.nature.com/articles/s41586-021-04357-7
+-  — https://www.gran-turismo.com/us/gran-turismo-sophy/technology/
+-  — https://www.aiandgames.com/p/how-forza-rebuilt-their-drivatar
+-  — https://www.gamedeveloper.com/design/how-forza-s-drivatar-actually-works
+-  — https://www.gamedeveloper.com/design/the-pure-advantage-advanced-racing-game-ai
+-  — https://journals.sagepub.com/doi/10.3233/ICG-220207
+-  — https://www.giantbomb.com/rubber-band-ai/3015-35/
+-  — https://dingyan89.medium.com/three-methods-of-vehicle-lateral-control-pure-pursuit-stanley-and-mpc-db8cc1d32081
+-  — https://www.ri.cmu.edu/pub_files/2009/2/Automatic_Steering_Methods_for_Autonomous_Automobile_Path_Tracking.pdf
+-  — https://arxiv.org/pdf/2111.08873
+-  — https://arxiv.org/pdf/2309.09186
+-  — https://arxiv.org/pdf/1902.00606
+-  — https://deepwiki.com/ShisatoYano/AutonomousVehicleControlBeginnersGuide/5.2-stanley-controller
+-  — https://www.gameaipro.com/GameAIPro2/GameAIPro2_Chapter18_Context_Steering_Behavior-Driven_Steering_at_the_Macro_Scale.pdf
+-  — https://andrewfray.wordpress.com/2013/02/20/steering-behaviours-are-doing-it-wrong/
+-  — https://www.youtube.com/watch?v=2fg-th5cTpg
+-  — https://andrewfray.wordpress.com/2013/03/26/context-behaviours-know-how-to-share/
+-  — https://kidscancode.org/godot_recipes/3.x/ai/context_map/index.html
+-  — https://www.rorydriscoll.com/2016/10/14/ai-steering/
+-  — https://www.sbgames.org/sbgames2015/anaispdf/computacao-full/147281.pdf
+-  — https://gamerant.com/forza-horizon-5-how-to-respawn/
+-  — https://giantbomb.com/wiki/Concepts/Rubber_Band_AI
+
+## Stats
+```
+{
+  "angles": 5,
+  "sourcesFetched": 22,
+  "claimsExtracted": 95,
+  "claimsVerified": 25,
+  "confirmed": 25,
+  "killed": 0,
+  "unverified": 0,
+  "afterSynthesis": 15,
+  "urlDupes": 0,
+  "budgetDropped": 8,
+  "agentCalls": 104
+}
+```
