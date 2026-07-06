@@ -231,6 +231,13 @@ func _on_race_ready() -> void:
 	# Строим маршрут и спавним AI соперников (только в Sprint mode)
 	if not is_checkpoint_mode():
 		_build_race_route()
+		# ЗАРАНЕЕ грузим elevation всего маршрута (лёгкие данные), чтобы дальний террейн не рождался
+		# плоским и соперник впереди не сваливался с elevation-обрыва под поднимающийся террейн.
+		if _terrain_generator and _terrain_generator.has_method("preload_route_elevation") and _race_route:
+			var epts: Array = []
+			for rp in _race_route.points:
+				epts.append(rp.position)
+			_terrain_generator.preload_route_elevation(epts)
 		_spawn_opponents()
 
 	# Отправляем маршрут на мини-карту для визуализации (после _build_race_route)

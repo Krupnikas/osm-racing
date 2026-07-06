@@ -3304,6 +3304,30 @@ func _request_elevation(chunk_key: String, cx: int, cz: int) -> void:
 	loader.load_elevation(chunk_key, cx + _world_offset_chunks.x, cz + _world_offset_chunks.y, chunk_size, start_lat, start_lon)
 
 
+func preload_route_elevation(world_points: Array) -> void:
+	"""Гонка: ЗАРАНЕЕ запрашиваем elevation для всех чанков маршрута (данные лёгкие — только высоты).
+	Тогда каждый чанк генерит террейн СРАЗУ на верной высоте, а не «плоским → поднимается позже», из-за
+	чего соперник впереди сваливается с elevation-обрыва и потом оказывается под поднявшимся террейном.
+	Меши чанков НЕ держим загруженными (в отличие от chunk-preload) → без просадки FPS."""
+	if not enable_elevation:
+		return
+	var seen := {}
+	for p in world_points:
+		var wp: Vector3 = p
+		var cx := int(floor(wp.x / chunk_size))
+		var cz := int(floor(wp.z / chunk_size))
+		for dx in range(-1, 2):
+			for dz in range(-1, 2):
+				var kx := cx + dx
+				var kz := cz + dz
+				var key := "%d,%d" % [kx, kz]
+				if seen.has(key):
+					continue
+				seen[key] = true
+				_request_elevation(key, kx, kz)
+	print("OSMTerrain: preloaded elevation for %d route chunks" % seen.size())
+
+
 func _on_elevation_loaded(chunk_key: String, grid_data: Dictionary, gen: int, loader: Node) -> void:
 	if is_instance_valid(loader):
 		loader.queue_free()

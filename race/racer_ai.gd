@@ -52,6 +52,11 @@ const SP_A_BRAKE := 8.0           # м/с² — тормозное замедл�
 const SP_A_ACCEL := 6.0           # м/с² — продольный разгон (forward pass)
 const SP_TOP := 33.0              # м/с (~120 км/ч) — общий потолок профиля; per-car cap отдельно
 const SP_CURV_EPS := 1.0e-4       # 1/м — защита от деления на нулевую кривизну
+const RACER_SPEED_SCALE := 0.72   # общий множитель темпа соперников (конкурентно, но не быстрее игрока;
+                                  # профиль давал ~90 км/ч ср. — слишком быстро; крутить ТУТ вверх/вниз)
+const KINEMATIC_SAFE_RADIUS := 200.0  # м — радиус вокруг камеры, где террейн НАДЁЖЕН (загружен + elevation
+                                      # применён). Дальше edem кинематически по линии (физика свалилась бы
+                                      # с elevation-обрыва). Физика/гонка колесо-в-колесо — только вблизи игрока.
 
 # [C] Pure pursuit по K1999-линии (Snider/Coulter): ld = clamp(LD_K·v, LD_MIN, LD_MAX);
 # δ = atan(2·L·sin α / chord). Короткий ld → осцилляции, длинный → срез угла (находка 7).
@@ -62,6 +67,16 @@ const SPEED_PREVIEW := 6.0        # м — упреждение при чтен�
 const RL_LINE_BIAS_MAX := 0.9     # м — персональный постоянный боковой сдвиг линии (racecraft-разброс:
                                   # соперники не едут гуськом по одной осевой). Плавный, не per-frame
                                   # → не возвращает синусоиду (в отличие от старого lane_offset+separation)
+# РАЗНЫЕ ХАРАКТЕРЫ ВОДИТЕЛЕЙ (как Forza Drivatars): каждый быстр на прямой ИЛИ в повороте
+# (_pace/_corner антикоррелированы) → они МЕНЯЮТСЯ местами (один уходит на прямой, другой отыгрывает
+# в поворотах) = живая борьба, а не одинаковый блоб. Плюс:
+#  • catch-up ТОЛЬКО для отстающих (лидер не придерживается → пелетон не склеивается);
+#  • слипстрим/драфт: машина прямо впереди → буст (закрываемся и идём на ОБГОН — «попытка что-то сделать»).
+const PACK_SPAN := 90.0           # м — отставание от центра пелетона, на котором catch-up максимален
+const PACK_CATCHUP := 1.12        # макс. множитель для отстающего (лидера НЕ трогаем → без склейки)
+const DRAFT_RANGE := 15.0         # м — дальность слипстрима за машиной впереди
+const DRAFT_CONE_COS := 0.8       # ±37° — «прямо по курсу» для драфта
+const DRAFT_MAX := 0.16           # макс. буст скорости в слипстриме (сетап обгона)
 
 # [D] Context steering (A. Fray, Game AI Pro 2 ch.18; шипнут в F1 2011) — фильтр НАПРАВЛЕНИЯ,
 # НЕ сумма «беги/догоняй» векторов (та схлопывается в 0 → находка 14). N слотов в переднем секторе;
@@ -87,26 +102,36 @@ const CTX_STATIC_SLOW := 0.2      # danger статики по курсу выш
 var recovery_timer: float = 0.0     # таймер текущего реверс-манёвра
 var _flip_timer: float = 0.0        # сколько секунд машина перевёрнута
 var _last_respawn_progress: float = -1.0  # где респавнились в прошлый раз (детект loop)
-var _stuck_anchor: Vector3 = Vector3.ZERO  # позиция начала окна «застревания» (нетто-смещение от неё)
-var _stuck_win_timer: float = 0.0   # длительность текущего окна проверки застревания, с
-var _slow_timer: float = 0.0        # сколько едем медленно подряд (триггер реверс-нюджа)
+var _stuck_prog_anchor: float = 0.0  # race_progress в начале длинного окна (респавн — крайняя мера)
+var _stuck_win_timer: float = 0.0    # длительность длинного окна, с
+var _rev_prog_anchor: float = 0.0    # race_progress в начале короткого окна (реверс-нюдж)
+var _rev_win_timer: float = 0.0      # длительность короткого окна, с
+var _reverse_streak: int = 0         # подряд неудачных реверсов без прогресса (→ респавн)
+const MAX_REVERSE_STREAK := 3        # столько реверсов не помогло → препятствие непроходимо → респавн
+var _recovery_start_pos: Vector3 = Vector3.ZERO  # позиция в начале реверс-манёвра (для лога «сдвинулись?»)
 # Диагностика (для честного трейса в main.gd RACE_AUTOTEST)
 var dbg_urgency := 0.0
 var dbg_safe := 0.0
 var dbg_blocked := false
 var _respawn_defers: int = 0        # сколько раз подряд отложили телепорт (игрок рядом)
 const RESPAWN_MAX_DEFERS := 2       # после стольких отсрочек телепортируем даже рядом с игроком
-const STUCK_SPEED := 6.0            # км/ч — ниже считаем «почти стоим» (триггер попытки реверса)
-const STUCK_MOVE_MIN := 1.0        # м — нетто-смещение за окно, ниже которого = застряли (спек юзера)
-const STUCK_WINDOW := 5.5           # с — окно: если за него сместились <MOVE_MIN → респавн (крайняя мера)
-const REVERSE_AFTER := 1.5          # с непрерывно-медленно → пробуем сдать назад и довернуть нос
+const STUCK_MOVE_MIN := 1.0         # м — прирост race_progress за окно ниже которого = застряли → респавн
+const STUCK_WINDOW := 5.5           # с — окно респавна (крайняя мера, спек юзера: <1 м за 5-7 с)
+const REVERSE_AFTER := 1.5          # с окно проверки продвижения → реверс-нюдж (пробуем выехать сами)
+const REVERSE_PROG_MIN := 0.6       # м — прирост race_progress за REVERSE_AFTER ниже которого = не растём
+const STUCK_SPEED_MAX := 12.0       # км/ч — «застрял» = НЕ растёт прогресс И скорость ниже этого. КЛЮЧ:
+                                    # прогресс замирает и когда машина УЕХАЛА С МАРШРУТА на скорости
+                                    # (проекция не продвигается) — там реверс НЕ нужен (pursuit сам вернёт),
+                                    # поэтому реверс/респавн только если машина РЕАЛЬНО почти стоит.
 const RECOVERY_REVERSE_TIME := 1.2  # с длительность одного реверс-манёвра
 const FLIP_UP_Y := 0.2              # up-вектор ниже → считаем перевёрнутой
 const FLIP_TIMEOUT := 1.5           # с перевёрнутой → сразу респавн (реверсом не встать)
 const RESPAWN_HIDE_DIST := 60.0     # м — ближе к игроку жёсткий телепорт не делаем (маскируем)
 
-# Raycast для obstacle detection
-var obstacle_check_ray: RayCast3D
+# ShapeCast (толстый «луч»-сфера) для обнаружения помех: тонкие объекты (столбы, узкие стены)
+# проскакивают МЕЖДУ обычными лучами; сфера радиуса CTX_FEELER_RADIUS их ловит.
+var obstacle_check_ray: ShapeCast3D
+const CTX_FEELER_RADIUS := 0.7    # м — радиус сферы feeler'а (толщина коридора ≈ ширина машины)
 
 # Внутренние переменные
 var update_timer := 0.0
@@ -127,6 +152,9 @@ var _line_seg := 0                # монотонный индекс сегме
 var _line_lateral := 0.0          # боковое смещение машины от линии (м; телеметрия/edge cases)
 var _ctx_last_dir := Vector3.ZERO  # прошлое выбранное направление (гистерезис против флип-флопа)
 var _line_bias := 0.0             # м — персональный постоянный боковой сдвиг линии (racecraft)
+var _kinematic := false           # едем кинематически по линии (чанк под нами не загружен — LOD)
+var _pace := 1.0                  # множитель прямолинейной скорости (быстр на прямой)
+var _corner := 1.0                # множитель поворотной скорости (антикоррелирован с _pace → трейды)
 
 # Телеметрия (off by default — нулевая стоимость в обычной игре; включает тест-сцена)
 var ai_debug := false
@@ -179,10 +207,13 @@ func _ready() -> void:
 	# v2: видим и СОПЕРНИКОВ (128), и ИГРОКА (1) — иначе таранили друг друга и игрока
 	# (бэклог S1). Обгон эмерджентен: медленная машина впереди = помеха в коридоре →
 	# line-shift обводит её дугой. Терраин (4) НЕ в маске — горки не пугают сенсор.
-	obstacle_check_ray = RayCast3D.new()
-	obstacle_check_ray.enabled = true
+	obstacle_check_ray = ShapeCast3D.new()
+	obstacle_check_ray.enabled = false  # не тикает каждый кадр сам — форсим вручную по слотам
+	var feeler_shape := SphereShape3D.new()
+	feeler_shape.radius = CTX_FEELER_RADIUS
+	obstacle_check_ray.shape = feeler_shape
 	obstacle_check_ray.collision_mask = 2 | 8 | 128 | 1
-	obstacle_check_ray.hit_from_inside = false
+	obstacle_check_ray.max_results = 6
 	add_child(obstacle_check_ray)
 	obstacle_check_ray.add_exception(self)  # feeler'ы не должны ловить собственный кузов (слой 128)
 
@@ -198,9 +229,28 @@ func _ready() -> void:
 	# (тот сдвигал pursuit-цель и давал синусоиду — удалён, см. RACER_AI_REDESIGN_PLAN §4).
 	target_speed = randf_range(46.0, 62.0)
 	_line_bias = randf_range(-RL_LINE_BIAS_MAX, RL_LINE_BIAS_MAX)  # персональная полоса (racecraft-разброс)
+	# Разный характер: быстр на прямой ИЛИ в повороте (антикорреляция) → меняются местами
+	_pace = randf_range(0.92, 1.08)
+	_corner = 2.0 - _pace
 
 
 func _physics_process(delta: float) -> void:
+	# TERRAIN LOD (как в NFS/Forza): если чанк под машиной не загружен (уехала вперёд игрока в
+	# невыгруженный террейн) — НЕ симулируем физику (иначе проваливается под карту), а едем
+	# кинематически по гоночной линии. Когда террейн снова под нами — приземляемся и возвращаем физику.
+	if ai_state == AIState.RACING and _line.size() >= 2:
+		var loaded := _terrain_reliable_here()
+		if _kinematic:
+			if loaded:
+				_exit_kinematic()  # террейн вернулся → физика (проваливаемся дальше в match)
+			else:
+				_kinematic_step(delta)
+				return
+		elif not loaded:
+			_enter_kinematic()
+			_kinematic_step(delta)
+			return
+
 	match ai_state:
 		AIState.FROZEN:
 			# Заморожены до старта - ничего не делаем
@@ -575,14 +625,18 @@ func start_racing() -> void:
 		var projection := race_route.project_position(global_position, 0)
 		current_segment_idx = projection.segment_idx
 		race_progress = projection.distance
-	_stuck_anchor = global_position
+	_stuck_prog_anchor = race_progress
 	_stuck_win_timer = 0.0
-	_slow_timer = 0.0
+	_rev_prog_anchor = race_progress
+	_rev_win_timer = 0.0
 	_reset_line_projection()  # синхронизируем арк-дистанцию проекции на K1999-линию
 
 
 func finish_race() -> void:
 	"""Завершает гонку для этого AI"""
+	if _kinematic:  # финишировал на кинематике (оффскрин) → вернуть физику, чтобы осел на землю
+		_kinematic = false
+		freeze = false
 	ai_state = AIState.FINISHED
 
 
@@ -793,11 +847,15 @@ func _update_ai_driver() -> void:
 	# Мягкое ограничение скорости КОМАНДЫ руля (не фильтр — актуатор уже даёт лаг)
 	steering_input = move_toward(steering_input, steer_raw, MAX_STEER_RATE * UPDATE_INTERVAL)
 
-	# [B] Скорость из фрикционного профиля (тормозные точки уже впечены backward-проходом) +
-	# лёгкое упреждение; aggression чуть двигает предел; per-car target_speed — верхний потолок.
-	# ctx.speed_scale притормаживает, когда чистое направление уводит вбок от pursuit (объезд).
+	# [B] Скорость ГОВОРИТ фрикционный профиль (честный предел: быстро на прямой, безопасно в апексе) —
+	# НЕ искусственный потолок target_speed (тот throttl'ил соперников до ~55 км/ч вдвое медленнее игрока).
+	# Профиль дифференцируем характером (быстр на прямой _pace vs в повороте _corner), а catch-up/слипстрим
+	# бустят в основном на ПРЯМЫХ (в апексе буст = вылет). ctx.speed_scale тормозит при объезде статики.
 	var v_prof_ms: float = _line_sample(_line_arc + SPEED_PREVIEW).vmax
-	var v_want_kmh: float = minf(target_speed, v_prof_ms * 3.6 * lerpf(0.9, 1.06, aggression)) * float(ctx["speed_scale"])
+	var curviness: float = clampf(1.0 - v_prof_ms / SP_TOP, 0.0, 1.0)         # 0 прямая … 1 крутой поворот
+	var v_base_kmh: float = v_prof_ms * 3.6 * lerpf(0.95, 1.08, aggression) * lerpf(_pace, _corner, curviness)
+	var boost: float = 1.0 + (_catchup_factor() - 1.0 + _draft_boost() - 1.0) * (1.0 - curviness)
+	var v_want_kmh: float = v_base_kmh * boost * float(ctx["speed_scale"]) * RACER_SPEED_SCALE
 	var speed_error: float = v_want_kmh - current_speed_kmh
 	if speed_error < -8.0:
 		throttle_input = 0.0
@@ -816,6 +874,41 @@ func _update_ai_driver() -> void:
 
 	if ai_debug:
 		_record_debug_sample(heading_error, steer_raw, bool(ctx["active"]))
+
+
+func _catchup_factor() -> float:
+	"""Мягкий catch-up ТОЛЬКО для отстающих (лидера не трогаем → пелетон не склеивается в блоб).
+	Чем дальше позади среднего прогресса СОПЕРНИКОВ (не игрока) — тем больше буст, до PACK_CATCHUP."""
+	var sum := 0.0
+	var cnt := 0
+	for o in get_tree().get_nodes_in_group("race_opponent"):
+		if is_instance_valid(o):
+			sum += float(o.race_progress)
+			cnt += 1
+	if cnt < 2:
+		return 1.0
+	var behind: float = maxf(0.0, sum / float(cnt) - race_progress)  # насколько ПОЗАДИ центра
+	return lerpf(1.0, PACK_CATCHUP, clampf(behind / PACK_SPAN, 0.0, 1.0))
+
+
+func _draft_boost() -> float:
+	"""Слипстрим: если прямо по курсу в DRAFT_RANGE идёт соперник — буст скорости (закрываемся и
+	готовим обгон). Даёт «попытку что-то сделать»: догнал в аэродинамической тени → вышел и обошёл."""
+	var fwd := -global_transform.basis.z
+	fwd.y = 0.0
+	fwd = fwd.normalized()
+	var best := 0.0
+	for o in get_tree().get_nodes_in_group("race_opponent"):
+		if o == self or not is_instance_valid(o):
+			continue
+		var to: Vector3 = (o as Node3D).global_position - global_position
+		to.y = 0.0
+		var d := to.length()
+		if d < 1.0 or d > DRAFT_RANGE:
+			continue
+		if to.normalized().dot(fwd) > DRAFT_CONE_COS:
+			best = maxf(best, 1.0 - d / DRAFT_RANGE)  # ближе → сильнее
+	return 1.0 + best * DRAFT_MAX
 
 
 func _steer_towards(target: Vector3) -> void:
@@ -877,29 +970,36 @@ func _context_steer(desired_dir: Vector3, forward_flat: Vector3) -> Dictionary:
 		danger[i] = 0.0
 		stat[i] = false
 
-	# Feeler'ы: один RayCast, глобальный basis прибит к identity (target_position — ЛОКАЛЬНА)
+	# Feeler'ы: толстый ShapeCast-сфера на слот (тонкие столбы/стены не проскакивают между лучами).
+	# Глобальный basis прибит к identity (target_position — ЛОКАЛЬНА).
 	var from: Vector3 = global_position + Vector3(0.0, CTX_FEELER_Y, 0.0)
 	for i in CTX_SLOTS:
 		obstacle_check_ray.global_transform = Transform3D(Basis.IDENTITY, from)
 		obstacle_check_ray.target_position = (dirs[i] as Vector3) * reach
-		obstacle_check_ray.force_raycast_update()
+		obstacle_check_ray.force_shapecast_update()
 		if not obstacle_check_ray.is_colliding():
 			continue
-		var hp: Vector3 = obstacle_check_ray.get_collision_point()
-		var kind := _classify_hit(obstacle_check_ray.get_collider(), hp, forward_flat)
+		# Классифицируем ВСЕ хиты слота (сфера ловит несколько): игнор земли/машины-сбоку,
+		# приоритет статике/машине-впереди. prox — по ближайшему контакту (safe fraction).
+		var kind := 0
+		for r in obstacle_check_ray.get_collision_count():
+			var k := _classify_hit(obstacle_check_ray.get_collider(r), obstacle_check_ray.get_collision_point(r), forward_flat)
+			if k > kind:
+				kind = k
 		if kind == 0:
-			continue  # земля/дорога/машина сбоку — игнор
-		var prox: float = clampf(1.0 - from.distance_to(hp) / reach, 0.0, 1.0)
+			continue  # только земля/дорога/машина сбоку — игнор
+		var prox: float = clampf(1.0 - obstacle_check_ray.get_closest_collision_safe_fraction(), 0.0, 1.0)
+		var is_static := kind == 1
 		danger[i] = maxf(float(danger[i]), prox)
-		if kind == 1:
+		if is_static:
 			stat[i] = true
 		if i > 0:
 			danger[i - 1] = maxf(float(danger[i - 1]), prox * CTX_SPILL)
-			if kind == 1:
+			if is_static:
 				stat[i - 1] = true
 		if i < CTX_SLOTS - 1:
 			danger[i + 1] = maxf(float(danger[i + 1]), prox * CTX_SPILL)
-			if kind == 1:
+			if is_static:
 				stat[i + 1] = true
 
 	# Слот, наиболее совпадающий с pursuit-направлением (куда мы и так хотим)
@@ -1076,37 +1176,55 @@ func _check_stuck(delta: float) -> void:
 	else:
 		_flip_timer = 0.0
 
+	# «Застрял» = прогресс НЕ растёт И машина почти стоит. Если прогресс замер, но скорость высокая —
+	# это НЕ застревание, а вылет с маршрута на скорости: реверс/респавн НЕ трогаем, pursuit сам вернёт
+	# на линию (иначе ложный реверс мешает возврату и держит машину вне трассы — корень проблемы).
+	var almost_stopped: bool = current_speed_kmh < STUCK_SPEED_MAX
+
+	# Длинное окно (респавн — крайняя мера): почти стоим И прогресс < 1 м за STUCK_WINDOW → релокация.
 	_stuck_win_timer += delta
 	if _stuck_win_timer >= STUCK_WINDOW:
-		# Окно истекло: сместились ли мы за него хотя бы на метр?
-		var net: float = global_position.distance_to(_stuck_anchor)
-		if net < STUCK_MOVE_MIN:
-			# Нет — застряли всерьёз (сами не выехали) → респавн на трассу (крайняя мера)
+		if almost_stopped and race_progress - _stuck_prog_anchor < STUCK_MOVE_MIN:
 			_recovery_count += 1
-			_respawn_on_track()  # он сам переустановит якорь/окно
+			_respawn_on_track()  # сам переустановит якорь/окно
 			return
-		# Едем нормально — открываем новое окно от текущей позиции
-		_stuck_anchor = global_position
+		_stuck_prog_anchor = race_progress  # едем (или уехали с трассы) — новое окно
 		_stuck_win_timer = 0.0
-		_slow_timer = 0.0
+		_rev_prog_anchor = race_progress
+		_rev_win_timer = 0.0
 		return
 
-	# Внутри окна: медленно И не сдвинулись от якоря (не путать со стартовым разгоном от 0, где
-	# машина уже едет вперёд) → пробуем реверс-нюдж (шанс выехать самому)
-	if current_speed_kmh < STUCK_SPEED and global_position.distance_to(_stuck_anchor) < STUCK_MOVE_MIN:
-		_slow_timer += delta
-		if _slow_timer >= REVERSE_AFTER:
-			_slow_timer = 0.0
-			_start_recovery()
-	else:
-		_slow_timer = 0.0
+	# Реверс-нюдж: почти стоим И прогресс не растёт за REVERSE_AFTER = упёрлись в столб/стену → назад.
+	# Если N реверсов подряд не помогли (препятствие прямо на линии, объехать не выходит) → респавн.
+	_rev_win_timer += delta
+	if _rev_win_timer >= REVERSE_AFTER:
+		var gained: float = race_progress - _rev_prog_anchor
+		_rev_prog_anchor = race_progress
+		_rev_win_timer = 0.0
+		if almost_stopped and gained < REVERSE_PROG_MIN:
+			_reverse_streak += 1
+			if _reverse_streak >= MAX_REVERSE_STREAK:
+				_reverse_streak = 0
+				_recovery_count += 1
+				_respawn_on_track()
+			else:
+				_start_recovery()
+			return
+		_reverse_streak = 0  # продвигаемся — серия сброшена
 
 
 func _start_recovery() -> void:
 	"""Реверс-манёвр: сдать назад, доворачивая нос к касательной маршрута (не респавн — сначала
-	даём выехать самому; окно застревания НЕ сбрасываем, чтобы поймать «отъехал-въехал»-цикл)."""
+	даём выехать самому). Короткое окно реверса сбрасываем (после манёвра меряем прогресс заново);
+	ДЛИННОЕ окно респавна НЕ трогаем — чтобы поймать «отъехал-въехал»-цикл и всё же респавнить."""
 	ai_state = AIState.RECOVERING
 	recovery_timer = RECOVERY_REVERSE_TIME
+	_rev_prog_anchor = race_progress
+	_rev_win_timer = 0.0
+	_recovery_start_pos = global_position
+	if ai_debug:
+		print("[RECOV] %s REVERSE start pos=(%.0f,%.0f) prog=%.0f v=%.0f" % [
+			racer_name, global_position.x, global_position.z, race_progress, current_speed_kmh])
 
 
 func _execute_recovery(delta: float) -> void:
@@ -1116,10 +1234,14 @@ func _execute_recovery(delta: float) -> void:
 	_stuck_win_timer += delta  # окно идёт и во время реверса (чтобы респавн не откладывался вечно)
 
 	if recovery_timer > 0.0:
-		throttle_input = 0.0
+		# ЗАДНИЙ ХОД ЧЕРЕЗ КОЛЁСА: отрицательный throttle в передней передаче → отрицательный
+		# engine_force → колёса крутятся назад и СЦЕПЛЕНИЕМ тянут машину (в отличие от заданной
+		# скорости, которую не-крутящиеся колёса гасят трением, и от слабой central_force). Коробка
+		# сама держит переднюю передачу (из R она выкидывает на <2 км/ч), поэтому реверсим тягой.
+		throttle_input = -0.9
 		brake_input = 0.0
 
-		# Ошибка курса к касательной маршрута в точке текущего прогресса
+		# Ошибка курса к касательной маршрута; при заднем ходе знак руля инвертируется
 		var steer_cmd := 0.0
 		if race_route:
 			var pd: Dictionary = race_route.get_point_at_distance(race_progress)
@@ -1128,16 +1250,92 @@ func _execute_recovery(delta: float) -> void:
 			var forward := -global_transform.basis.z
 			var fflat := Vector3(forward.x, 0, forward.z).normalized()
 			var herr: float = atan2(tflat.cross(fflat).y, fflat.dot(tflat))
-			# При заднем ходе знак руля инвертируется относительно желаемого поворота носа
 			steer_cmd = clampf(-herr * 1.2, -0.7, 0.7)
 		steering_input = steer_cmd
-
-		# Применяем силу назад
-		var backward := global_transform.basis.z
-		apply_central_force(backward * 3000.0)
 	else:
 		# Реверс завершён — назад в гонку (окно/якорь решат, помогло ли; иначе респавн позже)
+		if ai_debug:
+			print("[RECOV] %s REVERSE end moved=%.1fm v=%.0f" % [
+				racer_name, global_position.distance_to(_recovery_start_pos), current_speed_kmh])
 		ai_state = AIState.RACING
+
+
+func _kin_ground_y(x: float, z: float, fallback_y: float) -> float:
+	"""Высота РЕАЛЬНОГО террейна в точке (луч вниз, слой 1) — для кинематики, чтобы отслеживать
+	elevation по мере загрузки. Диапазон Y 500..−300 покрывает и SRTM-высоту, и плоский base. Нет
+	попадания (чанк совсем не загружен) → высота линии (оффскрин-плейсхолдер)."""
+	var space := get_world_3d().direct_space_state
+	if space == null:
+		return fallback_y
+	var q := PhysicsRayQueryParameters3D.create(Vector3(x, 500.0, z), Vector3(x, -300.0, z))
+	q.collision_mask = 1
+	q.exclude = [get_rid()]
+	var hit: Dictionary = space.intersect_ray(q)
+	return float(hit.position.y) if not hit.is_empty() else fallback_y
+
+
+func _terrain_reliable_here() -> bool:
+	"""Надёжен ли террейн под машиной? Ключевой факт (из замеров): elevation грузится ПО-ЧАНКОВО
+	асинхронно — рядом с камерой террейн на реальной высоте (SRTM), а ДАЛЬШЕ мешь может отрендериться
+	ПЛОСКИМ (Y=0) до прихода elevation → соперник сваливается с «обрыва» и потом оказывается ПОД
+	поднявшимся террейном. Луч «есть ли земля» тут ВРЁТ (земля есть, но на неверной высоте). Надёжный
+	признак — БЛИЗОСТЬ К КАМЕРЕ: только там террейн гарантированно загружен и с elevation."""
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return true
+	return global_position.distance_to(cam.global_position) < KINEMATIC_SAFE_RADIUS
+
+
+func _enter_kinematic() -> void:
+	"""Переход на кинематику: замораживаем физику (не падаем), синхронизируем арк на линии."""
+	_kinematic = true
+	freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	freeze = true
+	_project_onto_line(global_position)
+	if ai_debug:
+		print("[LOD] %s → KINEMATIC (chunk not loaded) prog=%.0f pos=(%.0f,%.0f)" % [
+			racer_name, race_progress, global_position.x, global_position.z])
+
+
+func _exit_kinematic() -> void:
+	"""Возврат физики: приземляемся на теперь-загруженный террейн (луч вниз), скорость по касательной."""
+	_kinematic = false
+	freeze = false
+	var gy: float = _ground_y_at(global_position.x, global_position.z, global_position.y)
+	global_position = Vector3(global_position.x, gy + 1.0, global_position.z)
+	var s := _line_sample(_line_arc)
+	angular_velocity = Vector3.ZERO
+	linear_velocity = (s["tangent"] as Vector3) * maxf(8.0, current_speed_kmh / 3.6)
+	_reset_line_projection()
+	_stuck_prog_anchor = race_progress
+	_stuck_win_timer = 0.0
+	_rev_prog_anchor = race_progress
+	_rev_win_timer = 0.0
+	if ai_debug:
+		print("[LOD] %s → PHYSICS (terrain back) prog=%.0f" % [racer_name, race_progress])
+
+
+func _kinematic_step(delta: float) -> void:
+	"""Кинематический шаг: продвигаемся по гоночной линии со скоростью профиля (масштаб RACER_SPEED_SCALE),
+	позиция = точка линии, ориентация — вдоль линии. Y берём с линии (оффскрин; при возврате — приземлим)."""
+	var s := _line_sample(_line_arc)
+	var pace_ms: float = maxf(6.0, float(s["vmax"]) * RACER_SPEED_SCALE)
+	var adv := pace_ms * delta
+	_line_arc += adv
+	race_progress = minf(race_route.total_length, race_progress + adv)
+	var s2 := _line_sample(_line_arc)
+	var pos: Vector3 = s2["pos"]
+	# Y: сажаем на РЕАЛЬНЫЙ террейн (raycast каждый кадр). Так машина ОТСЛЕЖИВАЕТ elevation по мере
+	# его подгрузки (террейн поднимается — машина поднимается) → нет «попа» при возврате физики. Верно
+	# и на холмах (реальный луч, не запомненная высота). Нет земли (совсем не загружен) → высота линии.
+	var gy: float = _kin_ground_y(pos.x, pos.z, pos.y)
+	global_position = Vector3(pos.x, gy + 0.5, pos.z)
+	var ahead: Vector3 = _line_sample(_line_arc + 4.0)["pos"]
+	var look := Vector3(ahead.x, global_position.y, ahead.z)
+	if look.distance_to(global_position) > 0.1:
+		look_at(look, Vector3.UP)  # forward(-Z) вдоль линии
+	if race_route.is_finished(race_progress):
+		finish_race()
 
 
 func _ground_y_at(x: float, z: float, anchor_y: float) -> float:
@@ -1215,9 +1413,10 @@ func _respawn_on_track() -> void:
 
 	# Возвращаемся к гонке; открываем свежее окно застревания от новой позиции
 	ai_state = AIState.RACING
-	_stuck_anchor = global_position
+	_stuck_prog_anchor = race_progress
 	_stuck_win_timer = 0.0
-	_slow_timer = 0.0
+	_rev_prog_anchor = race_progress
+	_rev_win_timer = 0.0
 
 
 # ===== ВИЗУАЛЬНЫЕ НАСТРОЙКИ =====
