@@ -18,7 +18,7 @@ script = ExtResource("1_racer_ai")
 racer_name = "VAZ 2107"
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.45, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.6, 0)
 shape = SubResource("BoxShape3D_racer")
 
 [node name="VAZ2107Model" parent="." instance=ExtResource("2_vaz2107_model")]
