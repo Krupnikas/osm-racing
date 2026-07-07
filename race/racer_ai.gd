@@ -153,6 +153,8 @@ var _line_lateral := 0.0          # боковое смещение машины
 var _ctx_last_dir := Vector3.ZERO  # прошлое выбранное направление (гистерезис против флип-флопа)
 var _line_bias := 0.0             # м — персональный постоянный боковой сдвиг линии (racecraft)
 var _kinematic := false           # едем кинематически по линии (чанк под нами не загружен — LOD)
+var lod_disabled := false         # BENCH-only: отключает terrain kinematic-LOD (ai_bench смотрит сверху
+                                  # >200м → иначе форсит кинематику). В проде всегда false, нулевая стоимость.
 var _pace := 1.0                  # множитель прямолинейной скорости (быстр на прямой)
 var _corner := 1.0                # множитель поворотной скорости (антикоррелирован с _pace → трейды)
 
@@ -293,6 +295,15 @@ func set_race_route(route: RaceRoute) -> void:
 	_build_racing_line()        # K1999 линия + профиль скорости (Phase 2: подключена к рулю)
 	_line_arc = 0.0
 	_line_seg = 0
+
+
+func set_persona(pace: float, aggr: float, bias: float) -> void:
+	"""BENCH-only: детерминированно задать характер водителя (иначе _ready рандомит).
+	pace = множитель прямолинейной скорости (быстр на прямой ⇄ в повороте, антикоррелирован)."""
+	_pace = pace
+	_corner = 2.0 - pace
+	aggression = clampf(aggr, 0.0, 1.0)
+	_line_bias = clampf(bias, -RL_LINE_BIAS_MAX, RL_LINE_BIAS_MAX)
 
 
 # ================= REDESIGN v3 — K1999 racing line (Phase 1) =================
@@ -1280,6 +1291,8 @@ func _terrain_reliable_here() -> bool:
 	ПЛОСКИМ (Y=0) до прихода elevation → соперник сваливается с «обрыва» и потом оказывается ПОД
 	поднявшимся террейном. Луч «есть ли земля» тут ВРЁТ (земля есть, но на неверной высоте). Надёжный
 	признак — БЛИЗОСТЬ К КАМЕРЕ: только там террейн гарантированно загружен и с elevation."""
+	if lod_disabled:
+		return true  # BENCH-only: плоский стенд без стриминга, физика всегда надёжна
 	var cam := get_viewport().get_camera_3d()
 	if cam == null:
 		return true
