@@ -190,6 +190,17 @@ var _bb_rear_threat: Dictionary = {}
 var _bb_side_car: Dictionary = {}
 var _bb_gap_to_player := 0.0           # знак: + = я впереди игрока (rubber-band в P6)
 
+# Mode FSM (P2 skeleton — только RACE; переходы OVERTAKE/DEFEND/DRAFT добавит P3)
+enum Mode { RACE, OVERTAKE, DEFEND, DRAFT }
+var _mode := Mode.RACE
+var _myoffset := 0.0               # текущее боковое смещение ЦЕЛИ (плавное, rate-limited → не синусоида)
+const OFFSET_RATE := 3.0           # м/с — темп изменения _myoffset (стратегический, медленный)
+# Персона (Ch.38): биоритм медленно модулирует темп → окна уязвимости → поле МЕНЯЕТСЯ местами
+var _race_time := 0.0              # детерминированный аккумулятор времени гонки (без Time/Date)
+var _bio_phase := 0.0              # персональная фаза биоритма
+const BIO_PERIOD := 45.0           # с — период биоритма
+const BIO_DEPTH := 0.07            # ±7% модуляция темпа (короткие окна уязвимости)
+
 # Телеметрия (off by default — нулевая стоимость в обычной игре; включает тест-сцена)
 var ai_debug := false
 var debug_target_point: Vector3 = Vector3.ZERO
@@ -266,6 +277,7 @@ func _ready() -> void:
 	# Разный характер: быстр на прямой ИЛИ в повороте (антикорреляция) → меняются местами
 	_pace = randf_range(0.92, 1.08)
 	_corner = 2.0 - _pace
+	_bio_phase = randf() * TAU  # персональная фаза биоритма (окна уязвимости в разное время)
 
 
 func _physics_process(delta: float) -> void:
@@ -329,13 +341,14 @@ func set_race_route(route: RaceRoute) -> void:
 	_line_seg = 0
 
 
-func set_persona(pace: float, aggr: float, bias: float) -> void:
+func set_persona(pace: float, aggr: float, bias: float, bio_phase: float = 0.0) -> void:
 	"""BENCH-only: детерминированно задать характер водителя (иначе _ready рандомит).
 	pace = множитель прямолинейной скорости (быстр на прямой ⇄ в повороте, антикоррелирован)."""
 	_pace = pace
 	_corner = 2.0 - pace
 	aggression = clampf(aggr, 0.0, 1.0)
 	_line_bias = clampf(bias, -RL_LINE_BIAS_MAX, RL_LINE_BIAS_MAX)
+	_bio_phase = bio_phase
 
 
 # ================= REDESIGN v3 — K1999 racing line (Phase 1) =================
@@ -849,16 +862,21 @@ func _update_ai_driver() -> void:
 
 	# [C] Проекция на линию → текущая арк-дистанция; цель — одна точка впереди на ld
 	_project_onto_line(global_position)
-	_perception_update()  # P1: заполняем Blackboard (пока НЕ потребляется рулёжкой/скоростью)
+	_perception_update()  # P1: Blackboard
+	_race_time += UPDATE_INTERVAL
 	var speed_ms: float = current_speed_kmh / 3.6
 	var ld: float = clampf(LD_K * speed_ms, LD_MIN, LD_MAX)
 	_lookahead_dist = ld  # для телеметрии
-	# Цель — на K1999-линии, сдвинутая на персональный _line_bias по нормали линии (racecraft-полоса)
+	# [P2] Mode FSM (пока только RACE) → целевое боковое смещение → ПЛАВНЫЙ _myoffset (заменил
+	# статический _line_bias-сдвиг). Rate-limited → не per-frame jitter → не возвращает синусоиду.
+	_mode = _fsm_update()
+	var offset_target: float = _mode_offset(_mode)
+	_myoffset = move_toward(_myoffset, offset_target, OFFSET_RATE * UPDATE_INTERVAL)
 	var aim_s := _line_sample(_line_arc + ld)
 	var aim: Vector3 = aim_s["pos"]
-	if _line_bias != 0.0:
+	if absf(_myoffset) > 0.001:
 		var atang: Vector3 = aim_s["tangent"]
-		aim += Vector3(-atang.z, 0.0, atang.x) * _line_bias
+		aim += Vector3(-atang.z, 0.0, atang.x) * _myoffset
 
 	var to_aim := aim - global_position
 	to_aim.y = 0.0
@@ -897,7 +915,7 @@ func _update_ai_driver() -> void:
 	# бустят в основном на ПРЯМЫХ (в апексе буст = вылет). ctx.speed_scale тормозит при объезде статики.
 	var v_prof_ms: float = _line_sample(_line_arc + SPEED_PREVIEW).vmax
 	var curviness: float = clampf(1.0 - v_prof_ms / SP_TOP, 0.0, 1.0)         # 0 прямая … 1 крутой поворот
-	var v_base_kmh: float = v_prof_ms * 3.6 * lerpf(0.95, 1.08, aggression) * lerpf(_pace, _corner, curviness)
+	var v_base_kmh: float = v_prof_ms * 3.6 * lerpf(0.95, 1.08, aggression) * lerpf(_pace, _corner, curviness) * _biorhythm()
 	var boost: float = 1.0 + (_catchup_factor() - 1.0 + _draft_boost() - 1.0) * (1.0 - curviness)
 	var v_want_kmh: float = v_base_kmh * boost * float(ctx["speed_scale"]) * RACER_SPEED_SCALE
 	var speed_error: float = v_want_kmh - current_speed_kmh
@@ -1027,6 +1045,30 @@ func get_perception_debug() -> String:
 		"y" if not _bb_rear_threat.is_empty() else "n",
 		"y" if not _bb_side_car.is_empty() else "n",
 		_bb_gap_to_player, _bb_curv_ahead, _bb_half_ahead, str(_bb_lost)]
+
+
+func _fsm_update() -> int:
+	"""Mode FSM. P2: только RACE (переходы OVERTAKE/DEFEND/DRAFT добавит P3)."""
+	return Mode.RACE
+
+
+func _mode_offset(mode: int) -> float:
+	"""Целевое боковое смещение цели по режиму (в perp-базисе линии; + = как offset/steer/curv).
+	P2: RACE = персональная полоса (_line_bias) → поле разведено, но обгонов ещё нет."""
+	match mode:
+		Mode.RACE:
+			return _line_bias
+		_:
+			return _line_bias  # P2 stub
+
+
+func _biorhythm() -> float:
+	"""Медленная модуляция темпа (Ch.38): ±BIO_DEPTH синусоида → окна уязвимости → трейды позициями."""
+	return 1.0 + BIO_DEPTH * sin(TAU * _race_time / BIO_PERIOD + _bio_phase)
+
+
+func get_mode() -> int:
+	return _mode
 
 
 func _catchup_factor() -> float:

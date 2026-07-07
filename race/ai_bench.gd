@@ -17,11 +17,11 @@ const OPP_SCENES := [
 	"res://race/racer_vaz2107.tscn",
 	"res://race/racer_logan.tscn",
 ]
-# Deterministic personas: [pace, aggression, line_bias]  (pace>1 = fast on straights, slow in corners)
+# Deterministic personas: [pace, aggression, line_bias, bio_phase]  (pace>1 = fast on straights)
 const PERSONAS := [
-	[1.06, 0.85, 0.7],
-	[0.94, 0.60, -0.7],
-	[1.00, 0.75, 0.0],
+	[1.06, 0.85, 0.7, 0.0],
+	[0.94, 0.60, -0.7, 2.1],
+	[1.00, 0.75, 0.0, 4.2],
 ]
 const CAR_HALF := 1.0        # m — coarse half-width for overlap/hit tests
 const POLE_R := 0.14
@@ -356,7 +356,7 @@ func _spawn_opponent(idx: int, arc: float, lane: float) -> void:
 	opp.lod_disabled = true              # bench: flat, no streaming → keep physics
 	opp.set_race_route(_route)           # builds K1999 line (falls back to RL_DEFAULT_HALF, no OSMTerrain)
 	var p: Array = PERSONAS[idx % PERSONAS.size()]
-	opp.set_persona(p[0], p[1], p[2])    # deterministic override
+	opp.set_persona(p[0], p[1], p[2], p[3])   # deterministic override (pace, aggr, bias, bio_phase)
 	opp.racer_name = "OPP%d" % idx
 	var pose := _pose_at(arc)
 	opp.global_position = pose.pos + pose.perp * lane + Vector3(0, 0.6, 0)
