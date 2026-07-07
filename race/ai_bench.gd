@@ -555,6 +555,8 @@ func _print_tick() -> void:
 		print("=>DBG pos=(%.1f,%.1f) y=%.2f spd=%.1f fwd=(%.2f,%.2f) thr=%.2f brk=%.2f str=%.2f line=%d state=%d" % [
 			o.global_position.x, o.global_position.z, o.global_position.y, vel.length(),
 			fwd.x, fwd.z, o.throttle_input, o.brake_input, o.steering_input, o._line.size(), int(o.ai_state)])
+		if o.has_method("get_perception_debug"):
+			print("=>PERC ", o.get_perception_debug())
 
 
 func _finish() -> void:

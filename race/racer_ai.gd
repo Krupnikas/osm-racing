@@ -97,6 +97,25 @@ const CTX_FEELER_Y := 0.7         # м — высота feeler'ов (выше б
 const CTX_CAR_AHEAD_COS := 0.5    # машина в ±60° от курса = ВПЕРЕДИ (объезд/обгон); дальше = СБОКУ (держим линию)
 const CTX_STATIC_SLOW := 0.2      # danger статики по курсу выше этого → замедляемся (стена/столб); машины — темп
 
+# ================= REDESIGN v4 — Blackboard + Perception (Phase 1) =================
+# Типизированная классификация соперников (TORCS opponent.cpp) — заполняется раз в тик,
+# потребляется FSM/offset/speed в P2+. В P1 НЕ меняет поведение: только собирает данные + верификация.
+# docs/RACER_AI_CONTROL_ARCHITECTURE.md §2 (Blackboard), §5 M1/M2.
+const OPP_FRONT := 1
+const OPP_FRONT_FAST := 2
+const OPP_BACK := 4
+const OPP_SIDE := 8
+const OPP_COLL := 16
+const OPP_LETPASS := 32
+const PERC_FRONT_DIST := 90.0     # м — сектор внимания впереди (TORCS 200 на длинных; у нас трассы короче)
+const PERC_BACK_DIST := 45.0      # м — сектор сзади (угроза защиты)
+const PERC_CAR_LEN := 4.3         # м — «впереди/сзади» дальше этого (длина машины)
+const PERC_SPEED_MARGIN := 1.5    # м/с — «быстрее меня» для угрозы сзади (OPP_BACK)
+const PERC_SIDE_GAP := 4.5        # м — |gap| меньше → колесо-в-колесо (overlap lockout в P3)
+const PERC_COLL_LAT := 1.6        # м — боковой зазор для OPP_COLL
+const PERC_COLL_TTC := 2.0        # с — time-to-collision для OPP_COLL
+const REACQUIRE_RADIUS := 15.0    # м — дальше от линии → _bb_lost (переску с heading tie-break, Nav2 #3367)
+
 # Восстановление после застревания (NFS-подход, Game AI Pro ch.38: не респавнить по одному кадру,
 # интегрировать неподвижность по времени, дать шанс выехать самому, респавн — крайняя мера).
 var recovery_timer: float = 0.0     # таймер текущего реверс-манёвра
@@ -157,6 +176,19 @@ var lod_disabled := false         # BENCH-only: отключает terrain kinem
                                   # >200м → иначе форсит кинематику). В проде всегда false, нулевая стоимость.
 var _pace := 1.0                  # множитель прямолинейной скорости (быстр на прямой)
 var _corner := 1.0                # множитель поворотной скорости (антикоррелирован с _pace → трейды)
+
+# Blackboard (P1) — заполняется _perception_update, потребляется FSM/offset/speed в P2+
+var _bb_speed_ms := 0.0
+var _bb_forward := Vector3.FORWARD     # плоский курс (-Z)
+var _bb_perp := Vector3.RIGHT          # правый вектор линии (+ = как offset/steer/curv; Reality Check §A)
+var _bb_curv_ahead := 0.0              # знаковая кривизна впереди (знак = сторона; inside-of-corner в P3)
+var _bb_half_ahead := RL_DEFAULT_HALF  # запечённая полуширина коридора (кламп offset в P3)
+var _bb_lost := false                  # машина далеко от линии (переску не нашёл близко)
+var _bb_opp: Array = []                # [{node,is_rival,is_traffic,is_player,gap,lat,vel,speed,catchdist,flags}]
+var _bb_nearest_front: Dictionary = {}
+var _bb_rear_threat: Dictionary = {}
+var _bb_side_car: Dictionary = {}
+var _bb_gap_to_player := 0.0           # знак: + = я впереди игрока (rubber-band в P6)
 
 # Телеметрия (off by default — нулевая стоимость в обычной игре; включает тест-сцена)
 var ai_debug := false
@@ -817,6 +849,7 @@ func _update_ai_driver() -> void:
 
 	# [C] Проекция на линию → текущая арк-дистанция; цель — одна точка впереди на ld
 	_project_onto_line(global_position)
+	_perception_update()  # P1: заполняем Blackboard (пока НЕ потребляется рулёжкой/скоростью)
 	var speed_ms: float = current_speed_kmh / 3.6
 	var ld: float = clampf(LD_K * speed_ms, LD_MIN, LD_MAX)
 	_lookahead_dist = ld  # для телеметрии
@@ -885,6 +918,115 @@ func _update_ai_driver() -> void:
 
 	if ai_debug:
 		_record_debug_sample(heading_error, steer_raw, bool(ctx["active"]))
+
+
+func _curv_ahead_signed(arc: float) -> float:
+	"""Знаковая кривизна линии на арк-дистанции (знак = сторона поворота; + = к +perp)."""
+	if _line.size() < 2:
+		return 0.0
+	var top: float = float(_line[_line.size() - 1]["arc"])
+	return float(_line[_line_index_for_arc(clampf(arc, 0.0, top))]["curv"])
+
+
+func _line_half_at(arc: float) -> float:
+	"""Запечённая полуширина коридора линии на арк-дистанции (для клампа offset)."""
+	if _line.size() < 2:
+		return RL_DEFAULT_HALF
+	var top: float = float(_line[_line.size() - 1]["arc"])
+	return float(_line[_line_index_for_arc(clampf(arc, 0.0, top))]["half"])
+
+
+func _perception_update() -> void:
+	"""P1 — заполняет Blackboard: self + типизированные соперники (TORCS opponent.cpp) + gap до игрока.
+	NO behaviour change: данные НЕ потребляются рулёжкой/скоростью до P2+. Классификация по флагам
+	OPP_FRONT/FRONT_FAST/BACK/SIDE/COLL. Скорость соперников читается (rivals/traffic/player — все RigidBody3D)."""
+	_bb_speed_ms = current_speed_kmh / 3.6
+	var s := _line_sample(_line_arc)
+	var tang: Vector3 = s["tangent"]
+	# forward для перцепции = КАСАТЕЛЬНАЯ ЛИНИИ (направление РОСТА арк = движение), НЕ facing (-basis.z):
+	# соперники развёрнуты (facing ≠ travel — flip 180° при спавне), иначе front/back инвертируются.
+	_bb_forward = Vector3(tang.x, 0.0, tang.z).normalized()
+	_bb_perp = Vector3(-tang.z, 0.0, tang.x)
+	_bb_curv_ahead = _curv_ahead_signed(_line_arc + 12.0)
+	_bb_half_ahead = _line_half_at(_line_arc)
+	_bb_lost = _line_lateral > REACQUIRE_RADIUS
+
+	_bb_opp.clear()
+	_bb_nearest_front = {}
+	_bb_rear_threat = {}
+	_bb_side_car = {}
+	var best_front := INF
+	var best_back := INF
+	var fwd2 := Vector2(_bb_forward.x, _bb_forward.z)
+	var perp2 := Vector2(_bb_perp.x, _bb_perp.z)
+
+	for group_name in ["race_opponent", "traffic", "player"]:
+		for o in get_tree().get_nodes_in_group(group_name):
+			if o == self or not is_instance_valid(o):
+				continue
+			var other := o as Node3D
+			if other == null:
+				continue
+			var rel := other.global_position - global_position
+			var rel2 := Vector2(rel.x, rel.z)
+			if rel2.length() > PERC_FRONT_DIST:
+				continue
+			var gap := rel2.dot(fwd2)          # + = впереди меня по курсу (along-track аппрокс)
+			var lat := rel2.dot(perp2)         # + = справа (perp basis, как offset/steer/curv)
+			var ovel: Vector3 = (o as RigidBody3D).linear_velocity if o is RigidBody3D else Vector3.ZERO
+			var ospeed := ovel.length()
+			var closing := _bb_speed_ms - ospeed
+			var flags := 0
+			var catchdist := 0.0
+			if gap > PERC_CAR_LEN:
+				if ospeed < _bb_speed_ms - 0.2:
+					flags |= OPP_FRONT
+					catchdist = _bb_speed_ms * gap / maxf(0.3, closing)
+				else:
+					flags |= OPP_FRONT_FAST
+			elif gap < -PERC_CAR_LEN:
+				if ospeed > _bb_speed_ms - PERC_SPEED_MARGIN and rel2.length() < PERC_BACK_DIST:
+					flags |= OPP_BACK
+			if absf(gap) < PERC_SIDE_GAP:
+				flags |= OPP_SIDE
+			if (flags & OPP_FRONT) != 0 and absf(lat) < PERC_COLL_LAT and closing > 0.2 \
+					and (gap / maxf(0.3, closing)) < PERC_COLL_TTC:
+				flags |= OPP_COLL
+			var rec := {
+				"node": o, "is_rival": group_name == "race_opponent",
+				"is_traffic": group_name == "traffic", "is_player": group_name == "player",
+				"gap": gap, "lat": lat, "vel": ovel, "speed": ospeed,
+				"catchdist": catchdist, "flags": flags,
+			}
+			_bb_opp.append(rec)
+			if (flags & OPP_FRONT) != 0 and gap < best_front:
+				best_front = gap
+				_bb_nearest_front = rec
+			if (flags & OPP_BACK) != 0 and (-gap) < best_back:
+				best_back = -gap
+				_bb_rear_threat = rec
+			if (flags & OPP_SIDE) != 0:
+				_bb_side_car = rec
+
+	# gap до игрока по ДУГЕ маршрута (для rubber-band P6; проекция игрока на маршрут)
+	var pl := get_tree().get_first_node_in_group("player")
+	if pl != null and is_instance_valid(pl) and race_route != null and race_route.points.size() >= 2:
+		var pp := race_route.project_position((pl as Node3D).global_position, 0)
+		_bb_gap_to_player = race_progress - float(pp["distance"])
+
+
+func get_perception_debug() -> String:
+	"""BENCH/тест: краткая сводка Blackboard для верификации P1."""
+	var nf := "none"
+	if not _bb_nearest_front.is_empty():
+		nf = "gap=%.0f lat=%.1f spd=%.0f cd=%.0f" % [
+			_bb_nearest_front["gap"], _bb_nearest_front["lat"],
+			float(_bb_nearest_front["speed"]) * 3.6, _bb_nearest_front["catchdist"]]
+	return "opp=%d front[%s] rear=%s side=%s gapPl=%.0f curv=%.3f half=%.1f lost=%s" % [
+		_bb_opp.size(), nf,
+		"y" if not _bb_rear_threat.is_empty() else "n",
+		"y" if not _bb_side_car.is_empty() else "n",
+		_bb_gap_to_player, _bb_curv_ahead, _bb_half_ahead, str(_bb_lost)]
 
 
 func _catchup_factor() -> float:
@@ -1103,13 +1245,27 @@ func _project_onto_line(pos: Vector3) -> void:
 			best_d = d["d2"]
 			best_arc = d["arc"]
 			best_seg = i
-	# Сбит/респавн: окно не нашло близкой точки → полный переску
+	# Сбит/респавн: окно не нашло близкой точки → полный переску с HEADING tie-break (Nav2 #3367):
+	# среди кандидатов предпочитаем сегмент, чья касательная совпадает с курсом машины — иначе
+	# глобальный ближайший может прицепиться к встречной/параллельной дороге.
 	if best_d > 225.0:  # >15 м
+		# travel-направление = ВЕЛОСИТИ (facing у соперников развёрнут; velocity — куда реально едем)
+		var vel := linear_velocity
+		var moving := (vel.x * vel.x + vel.z * vel.z) > 4.0  # >2 м/с
+		var fx := vel.x
+		var fz := vel.z
+		var best_score := best_d  # без бонуса выравнивания (окно — как есть)
 		for i in range(0, n - 1):
 			var d := _seg_project(pos, i)
-			if d["d2"] < best_d:
-				best_d = d["d2"]
-				best_arc = d["arc"]
+			var pa: Vector3 = _line[i]["pos"]
+			var pb: Vector3 = _line[i + 1]["pos"]
+			var score: float = float(d["d2"])
+			if moving and (pb.x - pa.x) * fx + (pb.z - pa.z) * fz < 0.0:
+				score += 1.0e6  # встречный сегмент — сильный штраф
+			if score < best_score:
+				best_score = score
+				best_d = float(d["d2"])
+				best_arc = float(d["arc"])
 				best_seg = i
 	_line_lateral = sqrt(best_d)
 	# forward-biased: продвигаемся вперёд, назад — только при явном сбросе (переску выше)
