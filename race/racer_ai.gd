@@ -276,7 +276,7 @@ func _ready() -> void:
 	var feeler_shape := SphereShape3D.new()
 	feeler_shape.radius = CTX_FEELER_RADIUS
 	obstacle_check_ray.shape = feeler_shape
-	obstacle_check_ray.collision_mask = 2 | 8 | 128 | 1
+	obstacle_check_ray.collision_mask = 2 | 8 | 128 | 1 | 4  # +4: NPC-трафик (P5) — раньше проезжали насквозь
 	obstacle_check_ray.max_results = 6
 	add_child(obstacle_check_ray)
 	obstacle_check_ray.add_exception(self)  # feeler'ы не должны ловить собственный кузов (слой 128)
@@ -1238,13 +1238,14 @@ func _classify_hit(col: Object, hitpoint: Vector3, forward_flat: Vector3) -> int
 		return 0
 	if col.is_in_group("Road") or col.is_in_group("Grass"):
 		return 0  # едем по этому — не помеха
-	if col.is_in_group("race_opponent") or col.is_in_group("player") or col.is_in_group("car"):
+	if col.is_in_group("race_opponent") or col.is_in_group("player") or col.is_in_group("car") \
+			or col.is_in_group("traffic"):
 		var to_hit := Vector3(hitpoint.x - global_position.x, 0.0, hitpoint.z - global_position.z)
 		if to_hit.length() < 0.01:
 			return 0
 		if to_hit.normalized().dot(forward_flat) < CTX_CAR_AHEAD_COS:
-			return 0  # машина сбоку/сзади — НЕ помеха (обгоняемый держит линию)
-		return 2  # машина впереди — динамическая помеха (обгон)
+			return 0  # машина сбоку/сзади — НЕ помеха (обгоняемый/обгоняемый трафик держит линию)
+		return 2  # машина/трафик ВПЕРЕДИ — динамическая помеха (объезд/обгон)
 	return 1  # столб/здание/дерево/прочая статика
 
 
