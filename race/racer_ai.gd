@@ -212,6 +212,14 @@ const OFFSET_STEP := 2.2           # м — боковой уход на обг�
 const CAR_HALF_W := 0.95           # м — полуширина машины (кламп offset к коридору)
 const SIDECOLL_MARGIN := 2.6       # м — боковой зазор filterSColl (не въезжаем в машину сбоку)
 
+# Recovery hardening (P4): STK collision-count (грайндинг о стену) + sign-product guard (нет ложных реверсов)
+var _collision_times: Array = []   # времена (_race_time) столкновений со СТАТИКОЙ (не с машинами)
+const COLL_COUNT_N := 3            # столько столкновений за окно = трёмся о стену → реверс
+const COLL_COUNT_WINDOW := 1.2     # с — окно накопления (быстрее ловим грайндинг о стену)
+const COLL_DEBOUNCE := 0.2         # с — дедуп (Bullet шлёт контакт много раз)
+const COLL_AGE := 4.0              # с — старше этого выбрасываем
+const LOST_SPEED_CAP := 45.0       # км/ч — потолок скорости пока машина далеко от линии (re-acquire)
+
 # Телеметрия (off by default — нулевая стоимость в обычной игре; включает тест-сцена)
 var ai_debug := false
 var debug_target_point: Vector3 = Vector3.ZERO
@@ -275,6 +283,12 @@ func _ready() -> void:
 
 	# Добавляем в группу для идентификации
 	add_to_group("race_opponent")
+
+	# P4: включаем контакт-монитор для STK collision-count детектора (грайндинг о стену)
+	contact_monitor = true
+	max_contacts_reported = 4
+	if not body_entered.is_connected(_on_body_entered):
+		body_entered.connect(_on_body_entered)
 
 	# Рандомизируем параметры AI для вариативности
 	skill_level = randf_range(0.85, 1.0)
@@ -935,6 +949,8 @@ func _update_ai_driver() -> void:
 	var v_base_kmh: float = v_prof_ms * 3.6 * lerpf(0.95, 1.08, aggression) * lerpf(_pace, _corner, curviness) * _biorhythm()
 	var boost: float = 1.0 + (_catchup_factor() - 1.0 + _draft_boost() - 1.0) * (1.0 - curviness)
 	var v_want_kmh: float = v_base_kmh * boost * float(ctx["speed_scale"]) * RACER_SPEED_SCALE
+	if _bb_lost:
+		v_want_kmh = minf(v_want_kmh, LOST_SPEED_CAP)  # P4: далеко от линии → снижаем скорость, целимся к ближней точке
 	var speed_error: float = v_want_kmh - current_speed_kmh
 	if speed_error < -8.0:
 		throttle_input = 0.0
@@ -1460,6 +1476,43 @@ func _update_race_progress() -> void:
 
 # ===== СИСТЕМА ВОССТАНОВЛЕНИЯ =====
 
+func _on_body_entered(body: Node) -> void:
+	"""STK collision-count: считаем столкновения СО СТАТИКОЙ (столбы/стены/здания), НЕ с машинами
+	(иначе гонка колесо-в-колесо ложно триггерит) и НЕ с землёй. Дедуп (0.2с) + старение (4с)."""
+	if body == null:
+		return
+	if body.is_in_group("Road") or body.is_in_group("Grass"):
+		return
+	if body.is_in_group("race_opponent") or body.is_in_group("player") \
+			or body.is_in_group("car") or body.is_in_group("traffic"):
+		return  # контакт с машиной — не грайндинг
+	if _collision_times.size() > 0 and _race_time - float(_collision_times[-1]) < COLL_DEBOUNCE:
+		return
+	while _collision_times.size() > 0 and _race_time - float(_collision_times[0]) > COLL_AGE:
+		_collision_times.pop_front()
+	_collision_times.append(_race_time)
+
+
+func _wedged_against_obstacle() -> bool:
+	"""TORCS sign-product guard: реверс НУЖЕН, только если машина НЕ возвращается на линию сама.
+	Если латеральная скорость уменьшает |offset| (едем К линии) → pursuit вернёт, реверс НЕ нужен
+	(иначе ложный реверс мешает возврату). Почти стоим → заклинены → реверс уместен."""
+	if _line.size() < 2:
+		return true
+	var lp := _line_sample(_line_arc)
+	var line_pos: Vector3 = lp["pos"]
+	var tang: Vector3 = lp["tangent"]
+	var perp := Vector2(-tang.z, tang.x)
+	var signed_lat: float = Vector2(global_position.x - line_pos.x, global_position.z - line_pos.z).dot(perp)
+	var vel2 := Vector2(linear_velocity.x, linear_velocity.z)
+	if vel2.length() < 0.8:
+		return true  # реально стоим → реверс уместен
+	var lat_vel: float = vel2.dot(perp)
+	if signed_lat * lat_vel < -0.2:
+		return false  # движемся К линии → не заклинены, pursuit вернёт
+	return true
+
+
 func _check_stuck(delta: float) -> void:
 	"""NFS-подход (Game AI Pro ch.38): даём машине выехать самой; респавн — крайняя мера.
 	Окно STUCK_WINDOW: если НЕТТО-смещение от якоря < STUCK_MOVE_MIN (1 м) за окно → респавн.
@@ -1475,6 +1528,21 @@ func _check_stuck(delta: float) -> void:
 			return
 	else:
 		_flip_timer = 0.0
+
+	# P4: STK collision-count — N+ столкновений СО СТАТИКОЙ за окно = трёмся о стену → реверс СРАЗУ
+	# (быстрее, чем 5.5с длинного окна; ловит «долбит стену, но чуть шевелится»).
+	if _collision_times.size() >= COLL_COUNT_N \
+			and _race_time - float(_collision_times[0]) > COLL_COUNT_WINDOW \
+			and current_speed_kmh < STUCK_SPEED_MAX and _wedged_against_obstacle():
+		_collision_times.clear()
+		_reverse_streak += 1  # ЭСКАЛАЦИЯ: N реверсов не помогли (стена по всей ширине) → респавн-варп вперёд
+		if _reverse_streak >= MAX_REVERSE_STREAK:
+			_reverse_streak = 0
+			_recovery_count += 1
+			_respawn_on_track()
+		else:
+			_start_recovery()
+		return
 
 	# «Застрял» = прогресс НЕ растёт И машина почти стоит. Если прогресс замер, но скорость высокая —
 	# это НЕ застревание, а вылет с маршрута на скорости: реверс/респавн НЕ трогаем, pursuit сам вернёт
@@ -1502,6 +1570,10 @@ func _check_stuck(delta: float) -> void:
 		_rev_prog_anchor = race_progress
 		_rev_win_timer = 0.0
 		if almost_stopped and gained < REVERSE_PROG_MIN:
+			# P4 sign-product guard: если машина возвращается на линию сама — НЕ реверсим (ложный реверс)
+			if not _wedged_against_obstacle():
+				_reverse_streak = 0
+				return
 			_reverse_streak += 1
 			if _reverse_streak >= MAX_REVERSE_STREAK:
 				_reverse_streak = 0
@@ -1685,7 +1757,9 @@ func _respawn_on_track() -> void:
 		respawn_distance = minf(race_route.total_length - 5.0, race_progress + 35.0)
 		print("RacerAI: ", racer_name, " respawn-LOOP → warp forward to ", respawn_distance)
 	else:
-		respawn_distance = clampf(race_progress, 0.0, race_route.total_length - 5.0)
+		# респавн ЧУТЬ ВПЕРЁД (за точечное препятствие на линии: столб/узкая стена) — маскирует
+		# восстановление и не кладёт обратно в то же заклиненное место
+		respawn_distance = clampf(race_progress + 10.0, 0.0, race_route.total_length - 5.0)
 		print("RacerAI: ", racer_name, " respawning on line at progress ", respawn_distance)
 	_last_respawn_progress = respawn_distance
 	var point_data: Dictionary = race_route.get_point_at_distance(respawn_distance)

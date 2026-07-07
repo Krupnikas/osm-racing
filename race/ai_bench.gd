@@ -371,6 +371,7 @@ func _spawn_opponent(idx: int, arc: float, lane: float) -> void:
 	_opp_stats.append({
 		"prev_steer_sign": 0, "weave_flips": 0, "under_ticks": 0, "moving_ticks": 0,
 		"total_ticks": 0, "max_prog": 0.0, "recover_ticks": 0,
+		"was_recovering": false, "reverse_events": 0,
 	})
 
 
@@ -470,9 +471,13 @@ func _update_metrics() -> void:
 				st.weave_flips += 1
 			if sign_now != 0:
 				st.prev_steer_sign = sign_now
-		# recovering state
-		if int(opp.ai_state) == 2:   # AIState.RECOVERING
+		# recovering state + reverse-event transitions (for false-reverse measurement)
+		var recovering: bool = int(opp.ai_state) == 2   # AIState.RECOVERING
+		if recovering:
 			st.recover_ticks += 1
+		if recovering and not bool(st.was_recovering):
+			st.reverse_events += 1
+		st.was_recovering = recovering
 
 	_update_events()
 	_update_swaps()
@@ -582,9 +587,9 @@ func _finish() -> void:
 	for i in range(_opponents.size()):
 		var st: Dictionary = _opp_stats[i]
 		var tot: float = maxf(1.0, float(st.total_ticks))
-		print("=>OPP%d prog=%.0f/%.0f onroad_moving=%.0f%% under_map=%.0f%% weave=%d recover_ticks=%d" % [
+		print("=>OPP%d prog=%.0f/%.0f onroad_moving=%.0f%% under_map=%.0f%% weave=%d recover_ticks=%d reverse_events=%d" % [
 			i, st.max_prog, _route.total_length, 100.0 * st.moving_ticks / tot,
-			100.0 * st.under_ticks / tot, st.weave_flips, st.recover_ticks])
+			100.0 * st.under_ticks / tot, st.weave_flips, st.recover_ticks, st.reverse_events])
 	print("=>EVENTS pole_hits=%d building_hits=%d npc_passthroughs=%d npc_contacts=%d player_punts=%d position_swaps=%d ghost_passes=%d" % [
 		_pole_hits, _building_hits, _npc_passthroughs, _npc_contacts, _player_punts, _position_swaps, _ghost_passes])
 	print("=>DONE")
