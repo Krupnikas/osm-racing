@@ -112,8 +112,8 @@ const PERC_BACK_DIST := 45.0      # м — сектор сзади (угроза
 const PERC_CAR_LEN := 4.3         # м — «впереди/сзади» дальше этого (длина машины)
 const PERC_SPEED_MARGIN := 1.5    # м/с — «быстрее меня» для угрозы сзади (OPP_BACK)
 const PERC_SIDE_GAP := 4.5        # м — |gap| меньше → колесо-в-колесо (overlap lockout в P3)
-const PERC_COLL_LAT := 1.6        # м — боковой зазор для OPP_COLL
-const PERC_COLL_TTC := 2.0        # с — time-to-collision для OPP_COLL
+const PERC_COLL_LAT := 2.1        # м — боковой зазор для OPP_COLL (тормозим, пока не ушли вбок)
+const PERC_COLL_TTC := 2.6        # с — time-to-collision для OPP_COLL (раньше начинаем осторожничать)
 const REACQUIRE_RADIUS := 15.0    # м — дальше от линии → _bb_lost (переску с heading tie-break, Nav2 #3367)
 
 # Восстановление после застревания (NFS-подход, Game AI Pro ch.38: не респавнить по одному кадру,
@@ -194,12 +194,23 @@ var _bb_gap_to_player := 0.0           # знак: + = я впереди игр�
 enum Mode { RACE, OVERTAKE, DEFEND, DRAFT }
 var _mode := Mode.RACE
 var _myoffset := 0.0               # текущее боковое смещение ЦЕЛИ (плавное, rate-limited → не синусоида)
-const OFFSET_RATE := 3.0           # м/с — темп изменения _myoffset (стратегический, медленный)
+const OFFSET_RATE := 4.5           # м/с — темп изменения _myoffset (успеть уйти на полосу ДО контакта)
 # Персона (Ch.38): биоритм медленно модулирует темп → окна уязвимости → поле МЕНЯЕТСЯ местами
 var _race_time := 0.0              # детерминированный аккумулятор времени гонки (без Time/Date)
 var _bio_phase := 0.0              # персональная фаза биоритма
 const BIO_PERIOD := 45.0           # с — период биоритма
 const BIO_DEPTH := 0.07            # ±7% модуляция темпа (короткие окна уязвимости)
+
+# Racecraft (P3): OVERTAKE (TORCS getOffset pass-side) + DEFEND (Ch.38 one-move) + фильтры (filterSColl/BColl)
+var _overtake_lockout := 0.0       # с — блок повторного входа в OVERTAKE после аборта (антиосцилляция)
+var _defend_side := 0.0            # закоммиченная сторона прикрытия (одно движение)
+var _defend_timer := 0.0           # длительность текущей защиты
+const OVERTAKE_TIME := 2.5         # с — гейт коммита: time_to_overtake = catchdist/speed < этого
+const OVERTAKE_ABORT_LOCK := 2.5   # с — после выхода из OVERTAKE не входим снова (антифлип)
+const DEFEND_MAX_T := 3.0          # с — макс длительность защиты (потом отпускаем)
+const OFFSET_STEP := 2.2           # м — боковой уход на обгон/защиту (в пределах коридора)
+const CAR_HALF_W := 0.95           # м — полуширина машины (кламп offset к коридору)
+const SIDECOLL_MARGIN := 2.6       # м — боковой зазор filterSColl (не въезжаем в машину сбоку)
 
 # Телеметрия (off by default — нулевая стоимость в обычной игре; включает тест-сцена)
 var ai_debug := false
@@ -871,6 +882,11 @@ func _update_ai_driver() -> void:
 	# статический _line_bias-сдвиг). Rate-limited → не per-frame jitter → не возвращает синусоиду.
 	_mode = _fsm_update()
 	var offset_target: float = _mode_offset(_mode)
+	# overlap lockout (TORCS): не двигаем offset В СТОРОНУ машины сбоку — держим полосу
+	if not _bb_side_car.is_empty():
+		var sl: float = float(_bb_side_car["lat"])
+		if absf(sl) < SIDECOLL_MARGIN and signf(offset_target - _myoffset) == signf(sl):
+			offset_target = _myoffset
 	_myoffset = move_toward(_myoffset, offset_target, OFFSET_RATE * UPDATE_INTERVAL)
 	var aim_s := _line_sample(_line_arc + ld)
 	var aim: Vector3 = aim_s["pos"]
@@ -908,6 +924,7 @@ func _update_ai_driver() -> void:
 
 	# Мягкое ограничение скорости КОМАНДЫ руля (не фильтр — актуатор уже даёт лаг)
 	steering_input = move_toward(steering_input, steer_raw, MAX_STEER_RATE * UPDATE_INTERVAL)
+	steering_input = _filter_scoll(steering_input)  # P3: корректирующий руль прочь от машины сбоку
 
 	# [B] Скорость ГОВОРИТ фрикционный профиль (честный предел: быстро на прямой, безопасно в апексе) —
 	# НЕ искусственный потолок target_speed (тот throttl'ил соперников до ~55 км/ч вдвое медленнее игрока).
@@ -928,6 +945,7 @@ func _update_ai_driver() -> void:
 	else:
 		throttle_input = clampf(speed_error / 8.0, 0.3, 1.0)
 		brake_input = 0.0
+	brake_input = _filter_bcoll(brake_input)  # P3: тормоз при неминуемом догоне машины прямо впереди
 
 	# Диагностика
 	dbg_urgency = 1.0 - float(ctx["speed_scale"])
@@ -1048,18 +1066,91 @@ func get_perception_debug() -> String:
 
 
 func _fsm_update() -> int:
-	"""Mode FSM. P2: только RACE (переходы OVERTAKE/DEFEND/DRAFT добавит P3)."""
-	return Mode.RACE
+	"""Mode FSM (Ch.38 §38.5): один активный режим, с гистерезисом (держим текущий до условия выхода)
+	+ abort-lockout. Приоритет: OVERTAKE (атака) > DEFEND (сзади угроза) > RACE. RECOVER — отдельно (P4)."""
+	if _overtake_lockout > 0.0:
+		_overtake_lockout -= UPDATE_INTERVAL
+
+	var can_overtake := false
+	if _overtake_lockout <= 0.0 and not _bb_nearest_front.is_empty():
+		var cd: float = float(_bb_nearest_front["catchdist"])
+		if cd > 0.0 and cd / maxf(3.0, _bb_speed_ms) < OVERTAKE_TIME:
+			can_overtake = true
+
+	match _mode:
+		Mode.OVERTAKE:
+			# держим, пока есть догоняемая машина впереди; ушла/поравнялись → RACE + lockout
+			if _bb_nearest_front.is_empty() or float(_bb_nearest_front["gap"]) < PERC_CAR_LEN:
+				_overtake_lockout = OVERTAKE_ABORT_LOCK
+				return Mode.RACE
+			return Mode.OVERTAKE
+		Mode.DEFEND:
+			_defend_timer += UPDATE_INTERVAL
+			# одно движение: отпускаем, если угроза ушла / поравнялись / вышло время (F1 rule)
+			if _bb_rear_threat.is_empty() or _defend_timer > DEFEND_MAX_T or not _bb_side_car.is_empty():
+				return Mode.RACE
+			return Mode.DEFEND
+		_:  # RACE
+			if can_overtake:
+				return Mode.OVERTAKE
+			if not _bb_rear_threat.is_empty():
+				_defend_timer = 0.0
+				_defend_side = signf(float(_bb_rear_threat["lat"]))  # прикрываем сторону преследователя
+				if _defend_side == 0.0:
+					_defend_side = 1.0
+				return Mode.DEFEND
+			return Mode.RACE
 
 
 func _mode_offset(mode: int) -> float:
-	"""Целевое боковое смещение цели по режиму (в perp-базисе линии; + = как offset/steer/curv).
-	P2: RACE = персональная полоса (_line_bias) → поле разведено, но обгонов ещё нет."""
+	"""Целевое боковое смещение цели по режиму (perp-базис линии; + = как offset/steer/curv).
+	OVERTAKE = сторона обгона (TORCS getOffset); DEFEND = прикрытие; RACE = персональная полоса."""
+	var lim: float = maxf(0.0, _bb_half_ahead - CAR_HALF_W - 0.3)
 	match mode:
-		Mode.RACE:
-			return _line_bias
+		Mode.OVERTAKE:
+			return clampf(_pass_side() * OFFSET_STEP, -lim, lim)
+		Mode.DEFEND:
+			return clampf(_defend_side * OFFSET_STEP * 0.8, -lim, lim)
 		_:
-			return _line_bias  # P2 stub
+			return clampf(_line_bias, -lim, lim)
+
+
+func _pass_side() -> float:
+	"""Сторона обгона (TORCS getOffset): машина сбоку → её ОТКРЫТАЯ сторона; по центру → ВНУТРЬ
+	следующего поворота (sign кривизны). Всё в perp-базисе (+ = как offset/curv), без human L/R."""
+	if _bb_nearest_front.is_empty():
+		return signf(_line_bias)
+	var opp_lat: float = float(_bb_nearest_front["lat"])  # + = соперник справа (в +perp)
+	if opp_lat > 1.0:
+		return -1.0   # соперник справа → обгон слева
+	elif opp_lat < -1.0:
+		return 1.0    # соперник слева → обгон справа
+	# по центру: внутрь следующего поворота (+curv = правый поворот = +perp)
+	if absf(_bb_curv_ahead) > 0.001:
+		return signf(_bb_curv_ahead)
+	return 1.0 if _line_bias >= 0.0 else -1.0
+
+
+func _filter_scoll(steer: float) -> float:
+	"""TORCS filterSColl: машина сбоку в пределах SIDECOLL_MARGIN → корректирующий руль ПРОЧЬ от неё
+	(держим полосу, не въезжаем). Не борется с pursuit — лишь подталкивает от соседа."""
+	if _bb_side_car.is_empty():
+		return steer
+	var lat: float = float(_bb_side_car["lat"])  # + = сосед справа
+	if absf(lat) < SIDECOLL_MARGIN and absf(lat) > 0.01:
+		var push: float = (SIDECOLL_MARGIN - absf(lat)) / SIDECOLL_MARGIN  # 0..1, сильнее вблизи
+		steer -= signf(lat) * push * 0.4   # сосед справа → руль влево (прочь)
+	return clampf(steer, -1.0, 1.0)
+
+
+func _filter_bcoll(brake: float) -> float:
+	"""TORCS filterBColl: неминуемый догон машины прямо впереди (OPP_COLL) → подмешиваем тормоз по TTC."""
+	if _bb_nearest_front.is_empty():
+		return brake
+	if (int(_bb_nearest_front["flags"]) & OPP_COLL) != 0:
+		var gap: float = float(_bb_nearest_front["gap"])
+		return maxf(brake, clampf(1.0 - gap / 12.0, 0.2, 0.9))
+	return brake
 
 
 func _biorhythm() -> float:

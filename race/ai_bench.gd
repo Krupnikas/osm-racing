@@ -65,6 +65,8 @@ var _npc_contacts := 0
 var _player_punts := 0
 var _position_swaps := 0
 var _pair_ahead := {}              # "i_j" -> bool (i ahead of j)
+var _ghost_passes := 0             # opponents crossing from behind→ahead of the ghost player
+var _ghost_ahead := {}             # i -> bool (opp i ahead of ghost)
 var _finished := false
 
 
@@ -398,7 +400,7 @@ func _spawn_cast() -> void:
 			_spawn_opponent(0, 8.0, 1.0)
 			_spawn_opponent(1, 18.0, -1.0)
 			_spawn_opponent(2, 28.0, 0.0)
-			_spawn_ghost(60.0, 0.5, 0.0, GHOST_CRUISE)   # slow, ahead → rivals pass it
+			_spawn_ghost(60.0, 0.5, 1.4, GHOST_CRUISE)   # slow, ahead, hugs right lane → rivals pass left (open side)
 		"defend":
 			_spawn_opponent(0, 45.0, 0.0)
 			_spawn_ghost(8.0, 1.25, 0.0, GHOST_CRUISE)   # fast, behind → rival defends
@@ -474,6 +476,7 @@ func _update_metrics() -> void:
 
 	_update_events()
 	_update_swaps()
+	_update_passes()
 
 
 func _update_events() -> void:
@@ -540,6 +543,19 @@ func _update_swaps() -> void:
 			_pair_ahead[key] = ahead
 
 
+func _update_passes() -> void:
+	if _ghost == null or not is_instance_valid(_ghost):
+		return
+	var ga: float = _ghost._arc
+	for i in range(_opponents.size()):
+		if not is_instance_valid(_opponents[i]):
+			continue
+		var ahead: bool = _opponents[i].get_race_progress() > ga
+		if _ghost_ahead.has(i) and not bool(_ghost_ahead[i]) and ahead:
+			_ghost_passes += 1
+		_ghost_ahead[i] = ahead
+
+
 func _print_tick() -> void:
 	var parts: Array = []
 	for i in range(_opponents.size()):
@@ -556,7 +572,8 @@ func _print_tick() -> void:
 			o.global_position.x, o.global_position.z, o.global_position.y, vel.length(),
 			fwd.x, fwd.z, o.throttle_input, o.brake_input, o.steering_input, o._line.size(), int(o.ai_state)])
 		if o.has_method("get_perception_debug"):
-			print("=>PERC ", o.get_perception_debug())
+			var md: int = o.get_mode() if o.has_method("get_mode") else -1
+			print("=>PERC mode=%d " % md, o.get_perception_debug())
 
 
 func _finish() -> void:
@@ -568,8 +585,8 @@ func _finish() -> void:
 		print("=>OPP%d prog=%.0f/%.0f onroad_moving=%.0f%% under_map=%.0f%% weave=%d recover_ticks=%d" % [
 			i, st.max_prog, _route.total_length, 100.0 * st.moving_ticks / tot,
 			100.0 * st.under_ticks / tot, st.weave_flips, st.recover_ticks])
-	print("=>EVENTS pole_hits=%d building_hits=%d npc_passthroughs=%d npc_contacts=%d player_punts=%d position_swaps=%d" % [
-		_pole_hits, _building_hits, _npc_passthroughs, _npc_contacts, _player_punts, _position_swaps])
+	print("=>EVENTS pole_hits=%d building_hits=%d npc_passthroughs=%d npc_contacts=%d player_punts=%d position_swaps=%d ghost_passes=%d" % [
+		_pole_hits, _building_hits, _npc_passthroughs, _npc_contacts, _player_punts, _position_swaps, _ghost_passes])
 	print("=>DONE")
 	if DisplayServer.get_name() == "headless":
 		get_tree().quit()
