@@ -42,19 +42,67 @@ stream logger) lives in `main.gd` and is **test-only, uncommitted**.
 - **Honest testing** — ground-truth verifier in `main.tscn` (`RACE_AUTOTEST`) + a **moving-camera drive-test**
   (`RACE_DRIVETEST`) that actually reproduces streaming/unload, a block-test, and a stream-state logger.
 
-### ❗ Current problems (open)
-1. **Rivals don't convincingly COMPETE** — they don't visibly overtake/jockey. Profiles + draft + cohesion
-   aren't enough; needs deliberate **attack-vs-hold / overtake / block** behaviour (racecraft theme A).
-2. **Hit poles where they shouldn't** — on corners or while avoiding something else. ShapeCast helped but
-   apex-overshoot at speed + feeler gaps remain.
-3. **NPC traffic avoidance NOT implemented** — opponents drive **through** NPC traffic cars. Opponent body
-   `collision_mask = 131` excludes NPCTraffic (layer-8 value 8); feelers *do* see layer 8 but the classify/
-   response for NPC traffic isn't wired. TODO: detect + go around NPC traffic (and decide whether to collide).
-4. **Intermittent off-route** — a rival occasionally loses the route (rare `FAIL:stuck/slow`).
-5. **Speed feel** — `RACER_SPEED_SCALE=0.72` still being tuned against the player.
-6. **Possible FPS from thick feelers** — 16 sphere ShapeCasts / opponent / 20 Hz; optimise if profiling shows cost.
-7. **Terrain-level elevation pop** — chunks still generate flat then rise (the racer LOD only hides it for
-   rivals). A deeper fix is making chunk terrain wait for (preloaded) elevation before generating.
+### ❗ Current problems (open) — with dead ends recorded so we don't repeat them
+
+**1. Rivals don't convincingly COMPETE (no visible overtaking / jockeying).**
+They hold the line and keep pace, but they don't attack, defend, or trade positions in a way you can see.
+- *Tried — symmetric pack cohesion* (leader eases + trailer boosts toward the pack centre): **glued them into
+  one blob** at the same speed (worse — user: "склеиваются и едут пачкой"). Reverted to catch-up-only (boost
+  the straggler, never hold the leader).
+- *Tried — static per-car lateral lane bias* (`_line_bias` ±0.9 m): spreads them off one centreline but does
+  **not** produce actual passes. (NB: the *original* redesign deleted the old `lane_offset` +
+  `_neighbor_separation` because a per-frame lateral shift of the pursuit target **caused the sinusoid** — so
+  any new lateral racecraft must be a smooth/steady offset, not per-frame target jitter.)
+- *Tried — distinct drivers* (`_pace`/`_corner` anti-correlated) + **draft/slipstream**: they trade a little on
+  straights vs corners, but it reads as pace variance, not racecraft.
+- **Missing / next:** deliberate **attack-vs-hold** logic — context steering currently *avoids* a car ahead but
+  never *commits to a pass* (pick a side, use the draft, complete it) or *defends* a line. That's racecraft
+  theme A (Sophy/GT-style: crossover pass, slipstream slingshot, blocking). Needs a real overtake state machine,
+  not just per-tick avoidance.
+
+**2. Rivals hit poles where they shouldn't (on corners, or while avoiding something else).**
+- *Tried — classify poles as static hazards* (`LampCol`, layer-1 default): poles are now detected & marked
+  danger. Helped, not enough.
+- *Tried — 16 radial RayCast feelers 13° apart*: **thin poles slip BETWEEN the rays** (a pole ≈1° at reach) →
+  undetected → hit. This was the core miss.
+- *Tried — thick sphere ShapeCast feelers* (r=0.7 m): catches thin obstacles far better (verified routing around
+  a 2.2 m wall in the block-test). But **apex-overshoot at the new higher speeds** still throws them wide toward
+  the roadside where poles live, and feeler coverage still has gaps at long (high-speed) reach.
+- **Missing / next:** slow corner entry a touch (tune the friction profile so they don't run wide), and/or a
+  dedicated forward-corridor cast at the car's width; consider querying known pole positions from the terrain
+  instead of relying only on feelers.
+
+**3. NPC-traffic avoidance NOT implemented — opponents drive THROUGH NPC cars.**
+- *Not yet attempted.* Facts for whoever picks it up: the opponent body's `collision_mask = 131` (1+2+128)
+  **excludes** NPCTraffic (layer 8, value 8) → no physical collision, they pass through. The **feeler** mask is
+  `2|8|128|1 = 139` so feelers *do* hit layer 8, but `_classify_hit` only treats `race_opponent`/`player`/`car`
+  as dynamic — **need to confirm what group NPC traffic cars are in** and wire them into avoidance (likely as
+  dynamic-ahead, same as rivals). Decide separately whether opponents should physically collide with NPCs
+  (add layer 8 to the body mask) or just steer around them.
+
+**4. Intermittent off-route rival** — occasionally a rival's `race_progress` freezes and it doesn't re-acquire
+the line (rare `FAIL:stuck/slow`). Related to the known fact that **`race_progress` freezes whenever a car is
+off the route** (that discovery fixed the false-reverse bug — see [E]); here the pursuit isn't steering it back
+onto the line reliably. Not yet dedicated-fixed. Likely the forward-only projection getting stuck on a far
+segment; the far-segment re-projection guard may need widening.
+
+**5. Speed feel** — `RACER_SPEED_SCALE = 0.72` (one constant) still being tuned against the player. No dead ends.
+
+**6. Possible FPS cost from thick feelers** — 16 sphere ShapeCasts / opponent / 20 Hz. Not yet profiled;
+optimise (fewer slots, or cast only when a car/hazard is near) if it shows up.
+
+**7. Terrain-level elevation pop (underlying, not a racer bug)** — chunks still generate **flat then rise** as
+network elevation arrives; the kinematic racer-LOD only *hides* it for rivals (they ride the surface up).
+- *Tried — chunk-pin* (`unload_distance=3000` + preload full route chunks): kept everything loaded → **FPS
+  collapse** (unbounded chunk growth). Removed.
+- *Tried — route elevation preload* (`preload_route_elevation`, light height data only): helps (terrain correct
+  sooner) but **can't beat the network** — beyond ~300 m it was still flat in tests.
+- **Missing / next (deeper fix):** make chunk terrain **wait for its (preloaded) elevation** before generating,
+  so it never appears flat. Bigger terrain change; risk of slower chunk appearance / more placeholders.
+
+> **Testing note for all of the above:** verify with `RACE_DRIVETEST` (moving camera reproduces streaming/
+> unload) — the **static autotest hides streaming/elevation bugs**. Use the ground-truth verifier
+> (`RACE_AUTOTEST`), not `race_progress`, which can read fine while a car is off-route or under-map.
 
 ---
 
