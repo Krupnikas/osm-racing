@@ -52,8 +52,13 @@ const SP_A_BRAKE := 8.0           # м/с² — тормозное замедл�
 const SP_A_ACCEL := 6.0           # м/с² — продольный разгон (forward pass)
 const SP_TOP := 33.0              # м/с (~120 км/ч) — общий потолок профиля; per-car cap отдельно
 const SP_CURV_EPS := 1.0e-4       # 1/м — защита от деления на нулевую кривизну
-const RACER_SPEED_SCALE := 0.72   # общий множитель темпа соперников (конкурентно, но не быстрее игрока;
-                                  # профиль давал ~90 км/ч ср. — слишком быстро; крутить ТУТ вверх/вниз)
+const RACER_SPEED_SCALE := 0.78   # множитель темпа для КИНЕМАТИКИ (оффскрин); гонка использует ниже дифф. масштаб
+# P6: масштаб темпа ДИФФЕРЕНЦИРОВАН по кривизне — быстро на ПРЯМЫХ (конкурентно vs игрок), безопасно
+# в АПЕКСАХ (иначе overshoot → столбы/вылеты). Раньше был единый 0.72 (недооценивал) → 0.85 (столбы).
+const RACER_SCALE_STRAIGHT := 0.72  # прямые: bench-чистое значение. ★ ЭТО главный knob КОНКУРЕНТНОСТИ —
+                                    # крутить ВВЕРХ в feel-pass main.tscn vs реальный игрок (стенд не может
+                                    # это оценить: ghost не skilled; выше → влёт в столбы pole-alley/hairpin)
+const RACER_SCALE_CORNER := 0.70    # апексы: безопасно, без overshoot (крутить ТУТ, если задевают столбы)
 const KINEMATIC_SAFE_RADIUS := 200.0  # м — радиус вокруг камеры, где террейн НАДЁЖЕН (загружен + elevation
                                       # применён). Дальше edem кинематически по линии (физика свалилась бы
                                       # с elevation-обрыва). Физика/гонка колесо-в-колесо — только вблизи игрока.
@@ -219,6 +224,18 @@ const COLL_COUNT_WINDOW := 1.2     # с — окно накопления (бы�
 const COLL_DEBOUNCE := 0.2         # с — дедуп (Bullet шлёт контакт много раз)
 const COLL_AGE := 4.0              # с — старше этого выбрасываем
 const LOST_SPEED_CAP := 45.0       # км/ч — потолок скорости пока машина далеко от линии (re-acquire)
+
+# P6: IDM follow-brake (Treiber) + rubber-band (умеренный аркадный) — закрывают punt/passthrough + держат гонку близкой
+const IDM_T := 1.4                 # с — safe time gap
+const IDM_S0 := 3.0                # м — min standstill gap
+const IDM_A := 3.0                 # м/с² — accel scale (для s*)
+const IDM_B := 4.0                 # м/с² — comfort brake (для s*)
+const IDM_LANE_W := 1.9            # м — машина впереди в этом боковом зазоре = «в моей полосе» → тормозим
+const RB_DEADZONE := 25.0          # м — мёртвая зона (честно колесо-в-колесо, никакой резинки рядом)
+const RB_K_AHEAD := 0.0018         # наклон forward banding (впереди игрока → чуть медленнее)
+const RB_MIN_AHEAD := 0.88         # −12% макс (throttle-ahead виден игроку → держим слабым)
+const RB_K_BEHIND := 0.0024        # наклон reverse banding (позади игрока → помощь, сильнее)
+const RB_MAX_BEHIND := 1.16        # +16% макс (help-behind незаметно/оффскрин → сильнее; АСИММЕТРИЯ)
 
 # Телеметрия (off by default — нулевая стоимость в обычной игре; включает тест-сцена)
 var ai_debug := false
@@ -948,9 +965,12 @@ func _update_ai_driver() -> void:
 	var curviness: float = clampf(1.0 - v_prof_ms / SP_TOP, 0.0, 1.0)         # 0 прямая … 1 крутой поворот
 	var v_base_kmh: float = v_prof_ms * 3.6 * lerpf(0.95, 1.08, aggression) * lerpf(_pace, _corner, curviness) * _biorhythm()
 	var boost: float = 1.0 + (_catchup_factor() - 1.0 + _draft_boost() - 1.0) * (1.0 - curviness)
-	var v_want_kmh: float = v_base_kmh * boost * float(ctx["speed_scale"]) * RACER_SPEED_SCALE
+	var race_scale: float = lerpf(RACER_SCALE_CORNER, RACER_SCALE_STRAIGHT, 1.0 - curviness)  # прямые↑, апексы↓
+	var v_want_kmh: float = v_base_kmh * boost * float(ctx["speed_scale"]) * race_scale
 	if _bb_lost:
 		v_want_kmh = minf(v_want_kmh, LOST_SPEED_CAP)  # P4: далеко от линии → снижаем скорость, целимся к ближней точке
+	v_want_kmh = _idm_follow_cap(v_want_kmh)  # P6: не влетаем в машину/трафик прямо впереди в полосе
+	v_want_kmh *= _rubberband()               # P6: умеренная резинка (мёртвая зона + асимметрия + затухание)
 	var speed_error: float = v_want_kmh - current_speed_kmh
 	if speed_error < -8.0:
 		throttle_input = 0.0
@@ -1172,6 +1192,38 @@ func _filter_bcoll(brake: float) -> float:
 func _biorhythm() -> float:
 	"""Медленная модуляция темпа (Ch.38): ±BIO_DEPTH синусоида → окна уязвимости → трейды позициями."""
 	return 1.0 + BIO_DEPTH * sin(TAU * _race_time / BIO_PERIOD + _bio_phase)
+
+
+func _idm_follow_cap(v_want_kmh: float) -> float:
+	"""IDM/TTC follow-brake (Treiber): не влетаем в машину/трафик ПРЯМО ВПЕРЕДИ В ПОЛОСЕ. Если ушли
+	вбок (обгон) — не тормозим. s* = s0 + v·T + v·Δv/(2√(a·b)); слишком близко → держим скорость передней."""
+	if _bb_nearest_front.is_empty():
+		return v_want_kmh
+	if absf(float(_bb_nearest_front["lat"])) > IDM_LANE_W:
+		return v_want_kmh  # передняя машина сбоку (обходим) — тормоз не нужен
+	var gap_bumper: float = maxf(0.1, float(_bb_nearest_front["gap"]) - PERC_CAR_LEN)
+	var dv: float = _bb_speed_ms - float(_bb_nearest_front["speed"])  # closing (+ = догоняем)
+	var s_star: float = IDM_S0 + _bb_speed_ms * IDM_T + _bb_speed_ms * dv / (2.0 * sqrt(IDM_A * IDM_B))
+	if s_star > gap_bumper:
+		return minf(v_want_kmh, float(_bb_nearest_front["speed"]) * 3.6 + 4.0)
+	return v_want_kmh
+
+
+func _rubberband() -> float:
+	"""Умеренный аркадный rubber-band (Melder): мёртвая зона у игрока (честно), кламп ±~15%, АСИММЕТРИЯ
+	(help-behind сильнее throttle-ahead), затухание в последней четверти (заработанный отрыв держится)."""
+	if race_route == null or race_route.total_length < 1.0:
+		return 1.0
+	var d := _bb_gap_to_player  # + = я впереди игрока
+	var band := 1.0
+	if absf(d) >= RB_DEADZONE:
+		if d > 0.0:
+			band = clampf(1.0 - RB_K_AHEAD * (d - RB_DEADZONE), RB_MIN_AHEAD, 1.0)
+		else:
+			band = clampf(1.0 + RB_K_BEHIND * (-d - RB_DEADZONE), 1.0, RB_MAX_BEHIND)
+	var frac: float = race_progress / race_route.total_length
+	var fade: float = clampf((1.0 - frac) / 0.25, 0.0, 1.0) if frac > 0.75 else 1.0
+	return 1.0 + (band - 1.0) * fade
 
 
 func get_mode() -> int:
