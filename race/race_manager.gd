@@ -241,6 +241,7 @@ func _on_race_ready() -> void:
 			_terrain_generator.preload_route_elevation(epts)
 		_spawn_opponents()
 		_load_route_poles()   # известные позиции придорожных столбов → danger-map соперников (Fray)
+		_load_route_trees()   # известные позиции придорожных деревьев → danger-map соперников
 
 	# Отправляем маршрут на мини-карту для визуализации (после _build_race_route)
 	_update_minimap_route()
@@ -476,6 +477,27 @@ func _load_route_poles() -> void:
 		for v in near:
 			nd = minf(nd, here.distance_to(v))
 		print("  POLECACHE %s nearest=%.1fm within40m=%d" % [opp.name, nd, near.size()])
+
+
+func _load_route_trees() -> void:
+	"""Грузит запечённые позиции придорожных деревьев (data/race_trees/<track>.json) → PoleCache → соперникам.
+	Нет файла/битый → соперники без древесной danger (без регресса)."""
+	if not current_track:
+		return
+	var path := "res://data/race_trees/%s.json" % current_track.track_id
+	if not FileAccess.file_exists(path):
+		print("RaceManager: no tree cache at %s → feeler-only for trees" % path)
+		return
+	var data = JSON.parse_string(FileAccess.get_file_as_string(path))
+	if data == null or not (data is Dictionary) or not data.has("trees"):
+		push_warning("RaceManager: bad tree cache %s → feeler-only for trees" % path)
+		return
+	var cache = PoleCacheScript.new()
+	cache.add_poles(data["trees"])
+	print("RaceManager: loaded %d route trees for %s" % [cache.count, current_track.track_id])
+	for opp in _opponents:
+		if is_instance_valid(opp) and opp.has_method("set_tree_cache"):
+			opp.set_tree_cache(cache)
 
 
 func _spawn_opponents() -> void:
