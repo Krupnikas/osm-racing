@@ -29,6 +29,7 @@ const GROUND_LAYER := 1
 # Preload bench scripts directly (avoids global class_name cache timing on fresh headless runs).
 const GHOST_SCRIPT := preload("res://race/bench_ghost_player.gd")
 const NPC_SCRIPT := preload("res://race/bench_npc.gd")
+const POLE_CACHE_SCRIPT := preload("res://race/pole_cache.gd")
 const GHOST_CRUISE := 0
 const GHOST_BLOCK := 1
 const GHOST_PARK := 2
@@ -76,6 +77,13 @@ func _ready() -> void:
 	_build_world()
 	_build_static()
 	_spawn_cast()
+	# P8: скармливаем ИЗВЕСТНЫЕ позиции столбов соперникам (danger-map по позиции), если не отключено.
+	if OS.get_environment("RACE_BENCH_NOPOLECACHE") == "" and not _poles.is_empty():
+		var pc = POLE_CACHE_SCRIPT.new()
+		pc.add_points(_poles)
+		for opp in _opponents:
+			if is_instance_valid(opp) and opp.has_method("set_pole_cache"):
+				opp.set_pole_cache(pc)
 	print("=>BENCH scenario=%s seconds=%.0f route_len=%.0f opps=%d npcs=%d poles=%d houses=%d ghost=%s" % [
 		_scenario, _run_seconds, _route.total_length, _opponents.size(), _npcs.size(),
 		_poles.size(), _houses.size(), "yes" if _ghost != null else "no"])
@@ -345,6 +353,14 @@ func _build_static() -> void:
 			# a wall straight on the racing line to crash into
 			var pose := _pose_at(60.0)
 			_make_house(pose.pos, Vector2(8, 3))
+		"curb_poles":
+			# ОДИН ряд столбов вдоль ПРЯМОЙ (реальный бордюр, 2.2 м) — чистый тест threading, 1 машина, без свалки
+			var cs := _find_section("pole_alley")
+			if not cs.is_empty():
+				var ca: float = cs.start
+				while ca <= cs.end:
+					_make_pole(_pose_at(ca).pos + _pose_at(ca).perp * 2.2)
+					ca += 9.0
 		"npc_overtake", "overtake", "defend", "rubberband", "fieldchurn", "linefollow":
 			pass
 
@@ -432,6 +448,9 @@ func _spawn_cast() -> void:
 				a += 45.0
 		"recover":
 			_spawn_opponent(0, 45.0, 0.0)    # 15 m before the wall at arc 60
+		"curb_poles":
+			var cb: float = maxf(4.0, _find_section("pole_alley").start - 30.0)
+			_spawn_opponent(0, cb, 0.6)      # 1 машина, чуть смещена к столбам → должна держать линию, не чиркать
 
 
 # ================= METRICS =================

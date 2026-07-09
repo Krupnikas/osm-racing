@@ -9,6 +9,7 @@ enum AIState { FROZEN, RACING, RECOVERING, FINISHED }
 
 # Маршрут гонки
 var race_route: RaceRoute
+var _pole_cache = null           # PoleCache: известные позиции придорожных столбов (danger-map)
 var race_progress: float = 0.0  # Дистанция от старта (метры)
 var race_position: int = 0      # Место в гонке (1, 2, 3...)
 var current_segment_idx: int = 0  # Текущий сегмент маршрута
@@ -101,6 +102,9 @@ const CTX_CLEAR := 0.15           # danger по курсу ниже этого =
 const CTX_FEELER_Y := 0.7         # м — высота feeler'ов (выше бордюров ~0.15м; ловит столбы/машины/здания)
 const CTX_CAR_AHEAD_COS := 0.5    # машина в ±60° от курса = ВПЕРЕДИ (объезд/обгон); дальше = СБОКУ (держим линию)
 const CTX_STATIC_SLOW := 0.2      # danger статики по курсу выше этого → замедляемся (стена/столб); машины — темп
+# P8: danger по ИЗВЕСТНЫМ позициям столбов (PoleCache) — точная позиция, без ray-gap, видит за поворотом
+const POLE_DANGER_HALF := 1.2     # м — полуширина danger-полосы столба (полуширина машины + радиус + берма)
+const POLE_SKIRT_RAD := 0.14      # рад (~8°) — растекание danger за полосой (skirt на соседние слоты)
 
 # ================= REDESIGN v4 — Blackboard + Perception (Phase 1) =================
 # Типизированная классификация соперников (TORCS opponent.cpp) — заполняется раз в тик,
@@ -384,6 +388,11 @@ func set_race_route(route: RaceRoute) -> void:
 	_build_racing_line()        # K1999 линия + профиль скорости (Phase 2: подключена к рулю)
 	_line_arc = 0.0
 	_line_seg = 0
+
+
+func set_pole_cache(cache) -> void:
+	"""Известные позиции придорожных столбов вдоль трассы (PoleCache) → danger-map по позиции."""
+	_pole_cache = cache
 
 
 func set_persona(pace: float, aggr: float, bias: float, bio_phase: float = 0.0) -> void:
@@ -1361,6 +1370,30 @@ func _context_steer(desired_dir: Vector3, forward_flat: Vector3) -> Dictionary:
 			danger[i + 1] = maxf(float(danger[i + 1]), prox * CTX_SPILL)
 			if is_static:
 				stat[i + 1] = true
+
+	# P8: ИЗВЕСТНЫЕ столбы (PoleCache) → danger по ТОЧНОЙ позиции (Fray): без ray-gap, видит за поворотом.
+	# Слот выбираем по dot(dirs[i], направление_на_столб) — тот же world-базис, что feeler'ы → без путаницы L/R.
+	# ТОЛЬКО steering-danger (не stat): торможение перед столбом по курсу оставляем feeler'у, иначе бордюрные
+	# столбы сбоку вызывают ложное торможение → застревание. Reach = feeler'ный (just-in-time, не на весь ряд).
+	if _pole_cache != null:
+		var pole_reach: float = reach
+		var fwd_lim: float = cos(deg_to_rad(CTX_ARC_DEG + 10.0))  # столбы вне переднего сектора — игнор
+		for pole in _pole_cache.query_near(global_position, pole_reach):
+			var prel := Vector3(pole.x - global_position.x, 0.0, pole.z - global_position.z)
+			var pdist: float = maxf(0.5, prel.length())
+			var preln := prel / pdist
+			if preln.dot(forward_flat) < fwd_lim:
+				continue
+			var half_ang: float = atan2(POLE_DANGER_HALF, pdist)  # ближе столб → шире danger-полоса
+			var cos_half: float = cos(half_ang)
+			var cos_skirt: float = cos(half_ang + POLE_SKIRT_RAD)
+			var pprox: float = clampf(1.0 - pdist / pole_reach, 0.0, 1.0)
+			for i in CTX_SLOTS:
+				var al: float = (dirs[i] as Vector3).dot(preln)
+				if al >= cos_half:
+					danger[i] = maxf(float(danger[i]), pprox)
+				elif al >= cos_skirt:
+					danger[i] = maxf(float(danger[i]), pprox * CTX_SPILL)
 
 	# Слот, наиболее совпадающий с pursuit-направлением (куда мы и так хотим)
 	var fwd_i: int = 0
