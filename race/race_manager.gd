@@ -7,7 +7,6 @@ const RaceTrackScript = preload("res://race/race_tracks.gd")
 const RaceBarriersScript = preload("res://race/race_barriers.gd")
 const RaceRouteScript = preload("res://race/race_route.gd")
 const RaceGridScript = preload("res://race/race_grid.gd")
-const PoleCacheScript = preload("res://race/pole_cache.gd")
 
 # Сцены AI соперников
 const OPPONENT_SCENES := [
@@ -240,8 +239,6 @@ func _on_race_ready() -> void:
 				epts.append(rp.position)
 			_terrain_generator.preload_route_elevation(epts)
 		_spawn_opponents()
-		_load_route_poles()   # известные позиции придорожных столбов → danger-map соперников (Fray)
-		_load_route_trees()   # известные позиции придорожных деревьев → danger-map соперников
 
 	# Отправляем маршрут на мини-карту для визуализации (после _build_race_route)
 	_update_minimap_route()
@@ -447,57 +444,6 @@ func _build_race_route() -> void:
 		])
 	else:
 		push_error("RaceManager: Failed to build race route!")
-
-
-func _load_route_poles() -> void:
-	"""Грузит запечённые позиции столбов (data/race_poles/<track>.json) → PoleCache → соперникам.
-	Мгновенно (килобайты), без force-load. Нет файла/битый → соперники остаются на feeler-only (без регресса)."""
-	if not current_track:
-		return
-	var path := "res://data/race_poles/%s.json" % current_track.track_id
-	if not FileAccess.file_exists(path):
-		print("RaceManager: no pole cache at %s → feeler-only" % path)
-		return
-	var data = JSON.parse_string(FileAccess.get_file_as_string(path))
-	if data == null or not (data is Dictionary) or not data.has("poles"):
-		push_warning("RaceManager: bad pole cache %s → feeler-only" % path)
-		return
-	var cache = PoleCacheScript.new()
-	cache.add_poles(data["poles"])
-	print("RaceManager: loaded %d route poles for %s" % [cache.count, current_track.track_id])
-	# Проверка выравнивания кэша с рантайм-фреймом: у соперника на старте столб должен быть ~в 5–12 м.
-	for opp in _opponents:
-		if not is_instance_valid(opp):
-			continue
-		if opp.has_method("set_pole_cache"):
-			opp.set_pole_cache(cache)
-		var near: Array = cache.query_near(opp.global_position, 40.0)
-		var nd := 9999.0
-		var here := Vector2(opp.global_position.x, opp.global_position.z)
-		for v in near:
-			nd = minf(nd, here.distance_to(v))
-		print("  POLECACHE %s nearest=%.1fm within40m=%d" % [opp.name, nd, near.size()])
-
-
-func _load_route_trees() -> void:
-	"""Грузит запечённые позиции придорожных деревьев (data/race_trees/<track>.json) → PoleCache → соперникам.
-	Нет файла/битый → соперники без древесной danger (без регресса)."""
-	if not current_track:
-		return
-	var path := "res://data/race_trees/%s.json" % current_track.track_id
-	if not FileAccess.file_exists(path):
-		print("RaceManager: no tree cache at %s → feeler-only for trees" % path)
-		return
-	var data = JSON.parse_string(FileAccess.get_file_as_string(path))
-	if data == null or not (data is Dictionary) or not data.has("trees"):
-		push_warning("RaceManager: bad tree cache %s → feeler-only for trees" % path)
-		return
-	var cache = PoleCacheScript.new()
-	cache.add_poles(data["trees"])
-	print("RaceManager: loaded %d route trees for %s" % [cache.count, current_track.track_id])
-	for opp in _opponents:
-		if is_instance_valid(opp) and opp.has_method("set_tree_cache"):
-			opp.set_tree_cache(cache)
 
 
 func _spawn_opponents() -> void:

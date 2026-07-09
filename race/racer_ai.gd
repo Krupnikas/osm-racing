@@ -9,8 +9,6 @@ enum AIState { FROZEN, RACING, RECOVERING, FINISHED }
 
 # Маршрут гонки
 var race_route: RaceRoute
-var _pole_cache = null           # PoleCache: известные позиции придорожных столбов (danger-map)
-var _tree_cache = null           # PoleCache: известные позиции придорожных деревьев (danger-map)
 var race_progress: float = 0.0  # Дистанция от старта (метры)
 var race_position: int = 0      # Место в гонке (1, 2, 3...)
 var current_segment_idx: int = 0  # Текущий сегмент маршрута
@@ -103,10 +101,6 @@ const CTX_CLEAR := 0.15           # danger по курсу ниже этого =
 const CTX_FEELER_Y := 0.7         # м — высота feeler'ов (выше бордюров ~0.15м; ловит столбы/машины/здания)
 const CTX_CAR_AHEAD_COS := 0.5    # машина в ±60° от курса = ВПЕРЕДИ (объезд/обгон); дальше = СБОКУ (держим линию)
 const CTX_STATIC_SLOW := 0.2      # danger статики по курсу выше этого → замедляемся (стена/столб); машины — темп
-# P8: danger по ИЗВЕСТНЫМ позициям столбов (PoleCache) — точная позиция, без ray-gap, видит за поворотом
-const POLE_DANGER_HALF := 1.2     # м — полуширина danger-полосы столба (полуширина машины + радиус + берма)
-const TREE_DANGER_HALF := 1.8     # м — полуширина danger-полосы дерева (ствол толще → берма больше)
-const POLE_SKIRT_RAD := 0.14      # рад (~8°) — растекание danger за полосой (skirt на соседние слоты)
 
 # ================= REDESIGN v4 — Blackboard + Perception (Phase 1) =================
 # Типизированная классификация соперников (TORCS opponent.cpp) — заполняется раз в тик,
@@ -390,16 +384,6 @@ func set_race_route(route: RaceRoute) -> void:
 	_build_racing_line()        # K1999 линия + профиль скорости (Phase 2: подключена к рулю)
 	_line_arc = 0.0
 	_line_seg = 0
-
-
-func set_pole_cache(cache) -> void:
-	"""Известные позиции придорожных столбов вдоль трассы (PoleCache) → danger-map по позиции."""
-	_pole_cache = cache
-
-
-func set_tree_cache(cache) -> void:
-	"""Известные позиции придорожных деревьев вдоль трассы (PoleCache) → danger-map по позиции."""
-	_tree_cache = cache
 
 
 func set_persona(pace: float, aggr: float, bias: float, bio_phase: float = 0.0) -> void:
@@ -1322,37 +1306,6 @@ func _classify_hit(col: Object, hitpoint: Vector3, forward_flat: Vector3) -> int
 	return 1  # столб/здание/дерево/прочая статика
 
 
-func _inject_hazard_danger(cache, berth: float, reach: float, forward_flat: Vector3, dirs: Array, danger: Array) -> void:
-	"""Вписывает ИЗВЕСТНЫЕ помехи (столбы/деревья) из PoleCache в danger[] по точной позиции. Только
-	steering-danger. Слот по dot(dirs[i], dir_на_помеху) — world-базис как у feeler'ов (без путаницы L/R)."""
-	if cache == null:
-		return
-	var fwd_lim: float = cos(deg_to_rad(CTX_ARC_DEG + 10.0))  # помехи вне переднего сектора — игнор
-	var corridor: float = _bb_half_ahead + berth + 0.5  # ширина реагирования: дорога + берма
-	for h in cache.query_near(global_position, reach):
-		var rel := Vector3(h.x - global_position.x, 0.0, h.y - global_position.z)  # h — Vector2(x,z)
-		var dist: float = maxf(0.5, rel.length())
-		var reln := rel / dist
-		if reln.dot(forward_flat) < fwd_lim:
-			continue
-		# CORRIDOR GATE: помеха вне ДОРОГИ (|боковое смещение от линии| > коридор) → машина туда не едет,
-		# не реагируем (иначе объезжаем обочинные деревья/столбы, которых и так минуем → лишний руль/занос).
-		if race_route != null:
-			var hp: Dictionary = race_route.project_position(Vector3(h.x, global_position.y, h.y), current_segment_idx)
-			if absf(float(hp.get("lateral_offset", 0.0))) > corridor:
-				continue
-		var half_ang: float = atan2(berth, dist)  # ближе помеха → шире danger-полоса
-		var cos_half: float = cos(half_ang)
-		var cos_skirt: float = cos(half_ang + POLE_SKIRT_RAD)
-		var prox: float = clampf(1.0 - dist / reach, 0.0, 1.0)
-		for i in CTX_SLOTS:
-			var al: float = (dirs[i] as Vector3).dot(reln)
-			if al >= cos_half:
-				danger[i] = maxf(float(danger[i]), prox)
-			elif al >= cos_skirt:
-				danger[i] = maxf(float(danger[i]), prox * CTX_SPILL)
-
-
 func _context_steer(desired_dir: Vector3, forward_flat: Vector3) -> Dictionary:
 	"""[D] Context steering (Fray) с классификацией помех по узлу (см. _classify_hit).
 	interest=совпадение с pursuit; danger=feeler-хиты (кроме земли и машин сбоку). Выбор:
@@ -1408,13 +1361,6 @@ func _context_steer(desired_dir: Vector3, forward_flat: Vector3) -> Dictionary:
 			danger[i + 1] = maxf(float(danger[i + 1]), prox * CTX_SPILL)
 			if is_static:
 				stat[i + 1] = true
-
-	# P8: ИЗВЕСТНЫЕ помехи (столбы + деревья) → danger по ТОЧНОЙ позиции (Fray): без ray-gap, видит за
-	# поворотом. Слот по dot(dirs[i], dir_на_помеху) — тот же world-базис, что feeler'ы → без путаницы L/R.
-	# ТОЛЬКО steering-danger (не stat): торможение по курсу оставляем feeler'у, иначе бордюрные помехи сбоку
-	# дают ложное торможение → застревание. Reach = feeler'ный (just-in-time). У деревьев берма больше (ствол).
-	_inject_hazard_danger(_pole_cache, POLE_DANGER_HALF, reach, forward_flat, dirs, danger)
-	_inject_hazard_danger(_tree_cache, TREE_DANGER_HALF, reach, forward_flat, dirs, danger)
 
 	# Слот, наиболее совпадающий с pursuit-направлением (куда мы и так хотим)
 	var fwd_i: int = 0
