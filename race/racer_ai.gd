@@ -151,6 +151,9 @@ const RECOVERY_REVERSE_TIME := 1.2  # с длительность одного �
 const FLIP_UP_Y := 0.2              # up-вектор ниже → считаем перевёрнутой
 const FLIP_TIMEOUT := 1.5           # с перевёрнутой → сразу респавн (реверсом не встать)
 const RESPAWN_HIDE_DIST := 60.0     # м — ближе к игроку жёсткий телепорт не делаем (маскируем)
+# P7 anti-spin: traction-control кламп (замер: нормальная езда slip<1 м/с → в норме no-op)
+const TCL_SLIP := 2.0               # м/с допустимого переспина колёс (TORCS filterTCL) — дальше режем газ
+const TCL_RANGE := 10.0             # м/с диапазон, за который газ сбрасывается в ноль по мере роста slip
 
 # ShapeCast (толстый «луч»-сфера) для обнаружения помех: тонкие объекты (столбы, узкие стены)
 # проскакивают МЕЖДУ обычными лучами; сфера радиуса CTX_FEELER_RADIUS их ловит.
@@ -981,6 +984,8 @@ func _update_ai_driver() -> void:
 	else:
 		throttle_input = clampf(speed_error / 8.0, 0.3, 1.0)
 		brake_input = 0.0
+	# P7 P1: кламп тяги (TORCS filterTCL) — срезаем газ при пробуксовке (slip>2 м/с). В нормале slip<1 → no-op.
+	throttle_input = _filter_tcl(throttle_input)
 	brake_input = _filter_bcoll(brake_input)  # P3: тормоз при неминуемом догоне машины прямо впереди
 
 	# Диагностика
@@ -1870,3 +1875,19 @@ func _apply_body_color(color: Color) -> void:
 				mat.metallic = 0.6
 				mat.roughness = 0.35
 				mesh_instance.material_override = mat
+
+
+func _filter_tcl(throttle: float) -> float:
+	"""Traction-control клампа (TORCS filterTCL): при переспине ведущих колёс (ω·r − v > TCL_SLIP)
+	срезаем газ, линейно до нуля за TCL_RANGE. Абсолютный переспин (не slip-ratio) → устойчив при v≈0.
+	В нормальной езде slip<1 м/с → возвращаем throttle без изменений (no-op)."""
+	if throttle <= 0.0:
+		return throttle
+	var drive := wheels_rear if not wheels_rear.is_empty() else wheels_front
+	if drive.is_empty():
+		return throttle
+	var wheel_ms: float = (_get_average_wheel_rpm() / 60.0) * TAU * drive[0].wheel_radius
+	var slip: float = wheel_ms - current_speed_kmh / 3.6
+	if slip > TCL_SLIP:
+		throttle -= minf(throttle, (slip - TCL_SLIP) / TCL_RANGE)
+	return maxf(0.0, throttle)

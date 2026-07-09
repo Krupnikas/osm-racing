@@ -372,6 +372,7 @@ func _spawn_opponent(idx: int, arc: float, lane: float) -> void:
 		"prev_steer_sign": 0, "weave_flips": 0, "under_ticks": 0, "moving_ticks": 0,
 		"total_ticks": 0, "max_prog": 0.0, "recover_ticks": 0,
 		"was_recovering": false, "reverse_events": 0,
+		"max_yaw": 0.0, "spin_ticks": 0,   # P7: спин-метрика (|yaw|>2.5 рад/с = крутит)
 	})
 
 
@@ -478,6 +479,11 @@ func _update_metrics() -> void:
 		if recovering and not bool(st.was_recovering):
 			st.reverse_events += 1
 		st.was_recovering = recovering
+		# P7 спин-метрика: пик и длительность высокой угловой скорости (крутит после удара/на выходе)
+		var yaw_rate: float = absf(opp.angular_velocity.y)
+		st.max_yaw = maxf(st.max_yaw, yaw_rate)
+		if yaw_rate > 2.5:
+			st.spin_ticks += 1
 
 	_update_events()
 	_update_swaps()
@@ -587,9 +593,10 @@ func _finish() -> void:
 	for i in range(_opponents.size()):
 		var st: Dictionary = _opp_stats[i]
 		var tot: float = maxf(1.0, float(st.total_ticks))
-		print("=>OPP%d prog=%.0f/%.0f onroad_moving=%.0f%% under_map=%.0f%% weave=%d recover_ticks=%d reverse_events=%d" % [
+		print("=>OPP%d prog=%.0f/%.0f onroad_moving=%.0f%% under_map=%.0f%% weave=%d recover_ticks=%d reverse_events=%d max_yaw=%.1f spin_ticks=%d" % [
 			i, st.max_prog, _route.total_length, 100.0 * st.moving_ticks / tot,
-			100.0 * st.under_ticks / tot, st.weave_flips, st.recover_ticks, st.reverse_events])
+			100.0 * st.under_ticks / tot, st.weave_flips, st.recover_ticks, st.reverse_events,
+			st.max_yaw, st.spin_ticks])
 	print("=>EVENTS pole_hits=%d building_hits=%d npc_passthroughs=%d npc_contacts=%d player_punts=%d position_swaps=%d ghost_passes=%d" % [
 		_pole_hits, _building_hits, _npc_passthroughs, _npc_contacts, _player_punts, _position_swaps, _ghost_passes])
 	print("=>DONE")
