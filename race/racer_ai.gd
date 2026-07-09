@@ -1328,12 +1328,19 @@ func _inject_hazard_danger(cache, berth: float, reach: float, forward_flat: Vect
 	if cache == null:
 		return
 	var fwd_lim: float = cos(deg_to_rad(CTX_ARC_DEG + 10.0))  # помехи вне переднего сектора — игнор
+	var corridor: float = _bb_half_ahead + berth + 0.5  # ширина реагирования: дорога + берма
 	for h in cache.query_near(global_position, reach):
 		var rel := Vector3(h.x - global_position.x, 0.0, h.y - global_position.z)  # h — Vector2(x,z)
 		var dist: float = maxf(0.5, rel.length())
 		var reln := rel / dist
 		if reln.dot(forward_flat) < fwd_lim:
 			continue
+		# CORRIDOR GATE: помеха вне ДОРОГИ (|боковое смещение от линии| > коридор) → машина туда не едет,
+		# не реагируем (иначе объезжаем обочинные деревья/столбы, которых и так минуем → лишний руль/занос).
+		if race_route != null:
+			var hp: Dictionary = race_route.project_position(Vector3(h.x, global_position.y, h.y), current_segment_idx)
+			if absf(float(hp.get("lateral_offset", 0.0))) > corridor:
+				continue
 		var half_ang: float = atan2(berth, dist)  # ближе помеха → шире danger-полоса
 		var cos_half: float = cos(half_ang)
 		var cos_skirt: float = cos(half_ang + POLE_SKIRT_RAD)

@@ -361,6 +361,9 @@ func _build_static() -> void:
 				while ca <= cs.end:
 					_make_pole(_pose_at(ca).pos + _pose_at(ca).perp * 2.2)
 					ca += 9.0
+		"hairpin_poles":
+			# ОДНА машина через крутой поворot со столбами обеих сторон — изолируем «занос в повороте от инъекции»
+			_poles_along("hairpin", 8.0, 3.0)
 		"npc_overtake", "overtake", "defend", "rubberband", "fieldchurn", "linefollow":
 			pass
 
@@ -451,6 +454,9 @@ func _spawn_cast() -> void:
 		"curb_poles":
 			var cb: float = maxf(4.0, _find_section("pole_alley").start - 30.0)
 			_spawn_opponent(0, cb, 0.6)      # 1 машина, чуть смещена к столбам → должна держать линию, не чиркать
+		"hairpin_poles":
+			var hb: float = maxf(4.0, _find_section("hairpin").start - 25.0)
+			_spawn_opponent(0, hb, 0.0)      # 1 машина в поворот со столбами — изоляция инъекции
 
 
 # ================= METRICS =================
