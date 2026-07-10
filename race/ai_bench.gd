@@ -364,6 +364,10 @@ func _build_static() -> void:
 		"hairpin_poles":
 			# ОДНА машина через крутой поворot со столбами обеих сторон — изолируем «занос в повороте от инъекции»
 			_poles_along("hairpin", 8.0, 3.0)
+		"corner_pole":
+			# Phase 0 репро «снос в повороте → столб»: столбы у самого края поворота (2.4м), 1 машина.
+			# Понесёт наружу → цепляет внешние. corner_static_hits — метрика, которую роняем в Фазе 1.
+			_poles_along("hairpin", 5.0, 2.4)
 		"npc_overtake", "overtake", "defend", "rubberband", "fieldchurn", "linefollow":
 			pass
 
@@ -385,6 +389,8 @@ func _spawn_opponent(idx: int, arc: float, lane: float) -> void:
 	# they drive with +Z toward the route, so -Z (look_at) faces backward. Match that 180° flip.
 	opp.look_at(opp.global_position + pose.tang, Vector3.UP)
 	opp.global_transform.basis = opp.global_transform.basis * Basis(Vector3.UP, PI)
+	if opp.has_method("enable_collision_metric"):
+		opp.enable_collision_metric()   # Phase 0: реальный счётчик столкновений
 	opp.start_racing()
 	_opponents.append(opp)
 	_opp_stats.append({
@@ -457,6 +463,9 @@ func _spawn_cast() -> void:
 		"hairpin_poles":
 			var hb: float = maxf(4.0, _find_section("hairpin").start - 25.0)
 			_spawn_opponent(0, hb, 0.0)      # 1 машина в поворот со столбами — изоляция инъекции
+		"corner_pole":
+			var cpb: float = maxf(4.0, _find_section("hairpin").start - 25.0)
+			_spawn_opponent(0, cpb, 0.0)     # Phase 0: 1 машина в поворот со столбами у края
 
 
 # ================= METRICS =================
@@ -622,6 +631,11 @@ func _finish() -> void:
 			i, st.max_prog, _route.total_length, 100.0 * st.moving_ticks / tot,
 			100.0 * st.under_ticks / tot, st.weave_flips, st.recover_ticks, st.reverse_events,
 			st.max_yaw, st.spin_ticks])
+		var opp = _opponents[i]
+		if is_instance_valid(opp) and opp.has_method("get_collision_metric"):
+			var cm: Dictionary = opp.get_collision_metric()
+			print("=>COLL%d static=%d corner_static=%d dynamic=%d static_curvs=%s" % [
+				i, cm.static, cm.corner_static, cm.dynamic, str(cm.get("static_curvs", []))])
 	print("=>EVENTS pole_hits=%d building_hits=%d npc_passthroughs=%d npc_contacts=%d player_punts=%d position_swaps=%d ghost_passes=%d" % [
 		_pole_hits, _building_hits, _npc_passthroughs, _npc_contacts, _player_punts, _position_swaps, _ghost_passes])
 	print("=>DONE")

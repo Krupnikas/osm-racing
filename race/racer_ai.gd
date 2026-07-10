@@ -247,6 +247,18 @@ var _debug_samples: Array = []
 var _debug_sections: Array = []   # [{name, start_m, end_m}]
 var _debug_t := 0.0               # аккумулятор времени (детерминированно, без Time/Date)
 var _recovery_count := 0
+# Phase 0 — метрика столкновений (ТЕСТ-ONLY, armed через enable_collision_metric). contact_monitor уже включён.
+# Считаем НОВЫЕ контакты по слою: статика (столб/дерево/здание, слой 2) vs динамика (NPC 4 / соперник 128).
+# Статику дополнительно тегаем «в повороте» (|кривизна|>порог) — это число, которое надо ронять.
+var _collmetric := false
+var m_static_hits := 0
+var m_dynamic_hits := 0
+var m_npc_hits := 0        # контакты с NPC-трафиком (слой 4)
+var m_racer_hits := 0      # контакты с другими соперниками (слой 128)
+var m_corner_static_hits := 0
+var _coll_touching: Dictionary = {}   # instance_id → true (дебаунс контакта)
+var _static_hit_curvs: Array = []     # |кривизна| на каждом статическом контакте (corner vs straight из данных)
+const CORNER_CURV_METRIC := 0.012     # |кривизна|>0.012 → R<~83 м → «поворот» (city sweepers)
 # Цвета для рандомизации
 const RACER_COLORS := [
 	Color(0.9, 0.1, 0.1),   # Красный
@@ -359,6 +371,9 @@ func _physics_process(delta: float) -> void:
 			# Проверяем застревание
 			_check_stuck(delta)
 
+			if _collmetric:
+				_tally_collisions()
+
 		AIState.RECOVERING:
 			# Выполняем восстановление
 			_execute_recovery(delta)
@@ -384,6 +399,43 @@ func set_race_route(route: RaceRoute) -> void:
 	_build_racing_line()        # K1999 линия + профиль скорости (Phase 2: подключена к рулю)
 	_line_arc = 0.0
 	_line_seg = 0
+
+
+func enable_collision_metric() -> void:
+	"""Phase 0 (ТЕСТ-ONLY): включить подсчёт столкновений. contact_monitor уже true в _ready."""
+	_collmetric = true
+	max_contacts_reported = maxi(max_contacts_reported, 8)
+
+
+func get_collision_metric() -> Dictionary:
+	return {"static": m_static_hits, "dynamic": m_dynamic_hits, "corner_static": m_corner_static_hits,
+		"npc": m_npc_hits, "racer": m_racer_hits, "static_curvs": _static_hit_curvs}
+
+
+func _tally_collisions() -> void:
+	"""Считаем НОВЫЕ контакты по слою столкновения (дебаунс через _coll_touching). Слой земли/дороги (1)
+	игнорируем — машина всегда на ней. Слой 2 = статика (столб/дерево/здание); 4/128 = NPC/соперник."""
+	var now: Dictionary = {}
+	for b in get_colliding_bodies():
+		if b == null:
+			continue
+		var iid: int = b.get_instance_id()
+		now[iid] = true
+		if _coll_touching.has(iid):
+			continue
+		var layer: int = b.collision_layer
+		if layer & 2:
+			m_static_hits += 1
+			_static_hit_curvs.append(snappedf(absf(_bb_curv_ahead), 0.001))
+			if absf(_bb_curv_ahead) > CORNER_CURV_METRIC:
+				m_corner_static_hits += 1
+		elif layer & 128:
+			m_dynamic_hits += 1
+			m_racer_hits += 1
+		elif layer & 4:
+			m_dynamic_hits += 1
+			m_npc_hits += 1
+	_coll_touching = now
 
 
 func set_persona(pace: float, aggr: float, bias: float, bio_phase: float = 0.0) -> void:
