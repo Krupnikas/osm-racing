@@ -258,6 +258,7 @@ var m_racer_hits := 0      # контакты с другими соперник
 var m_corner_static_hits := 0
 var _coll_touching: Dictionary = {}   # instance_id → true (дебаунс контакта)
 var _static_hit_curvs: Array = []     # |кривизна| на каждом статическом контакте (corner vs straight из данных)
+var _coll_events: Array = []          # [prog_m, speed_kmh, kind] на каждый контакт — где/почему бьются
 const CORNER_CURV_METRIC := 0.012     # |кривизна|>0.012 → R<~83 м → «поворот» (city sweepers)
 # Цвета для рандомизации
 const RACER_COLORS := [
@@ -409,7 +410,7 @@ func enable_collision_metric() -> void:
 
 func get_collision_metric() -> Dictionary:
 	return {"static": m_static_hits, "dynamic": m_dynamic_hits, "corner_static": m_corner_static_hits,
-		"npc": m_npc_hits, "racer": m_racer_hits, "static_curvs": _static_hit_curvs}
+		"npc": m_npc_hits, "racer": m_racer_hits, "static_curvs": _static_hit_curvs, "events": _coll_events}
 
 
 func _tally_collisions() -> void:
@@ -424,17 +425,23 @@ func _tally_collisions() -> void:
 		if _coll_touching.has(iid):
 			continue
 		var layer: int = b.collision_layer
+		var kind := ""
 		if layer & 2:
 			m_static_hits += 1
 			_static_hit_curvs.append(snappedf(absf(_bb_curv_ahead), 0.001))
 			if absf(_bb_curv_ahead) > CORNER_CURV_METRIC:
 				m_corner_static_hits += 1
+			kind = "corner" if absf(_bb_curv_ahead) > CORNER_CURV_METRIC else "static"
 		elif layer & 128:
 			m_dynamic_hits += 1
 			m_racer_hits += 1
+			kind = "racer"
 		elif layer & 4:
 			m_dynamic_hits += 1
 			m_npc_hits += 1
+			kind = "npc"
+		if kind != "" and _coll_events.size() < 60:
+			_coll_events.append([roundi(race_progress), roundi(current_speed_kmh), kind])
 	_coll_touching = now
 
 
