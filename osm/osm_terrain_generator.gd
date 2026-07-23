@@ -245,6 +245,14 @@ var _created_sign_positions: Dictionary = {}  # Позиции созданны�
 var _created_bus_stop_positions: Dictionary = {}  # Позиции созданных остановок для избежания дубликатов
 var _custom_model_cache: Dictionary = {}  # path -> PackedScene
 var _pending_parking_signs: Array = []  # Отложенные знаки парковки
+var _pending_parked_cars: Array = []  # [{pos, rand, rotation_y, parent, chunk_key}] — по 1 машине/кадр
+# Пул припаркованных машин: ~95мс add_child тяжёлой VehicleBody3D-сцены платится
+# только пока пул наполняется; при выгрузке чанка машины не фрятся, а прячутся в
+# _parked_free и переиспользуются (reposition/show — дёшево).
+var _parked_free: Array = []          # свободные машины (под генератором, скрыты)
+var _parked_active: Dictionary = {}   # chunk_key -> Array[Node3D] активных
+var _parked_total: int = 0            # всего создано (для потолка)
+const PARKED_POOL_MAX := 28           # потолок пула (в плотных районах лишние пропускаем)
 var _crossing_sign_front_mat: StandardMaterial3D
 var _crossing_sign_back_mat: StandardMaterial3D
 
@@ -399,6 +407,19 @@ var _tree_batches_to_finalize: Array[String] = []  # Chunk keys ready for finali
 var _veg_mutex: Mutex
 var _veg_thread_results: Array = []  # Готовые результаты из воркер-тредов
 var _pending_veg_tasks: int = 0  # Счётчик активных задач
+# Фасады зданий (FacadeAssembler) — compute в воркер-треде (~150мс), commit на главном
+var _facade_mutex: Mutex
+var _facade_results: Array = []  # Готовые фасады, ждут commit на главном потоке
+var _pending_facade_tasks: int = 0
+# Финализация дорог — carving впадин + сборка массивов в воркер-треде (~95мс),
+# commit (ArrayMesh + материал + RS + коллизия) на главном потоке.
+var _road_finalize_mutex: Mutex
+var _road_finalize_results: Array = []  # Готовые дорожные батчи, ждут commit
+var _pending_road_finalize_tasks: int = 0
+# Тротуары/бордюры (footway) — клиппинг+триангуляция+бордюры в воркере (~96мс).
+# Path-батч кладётся в _road_finalize_results; бордюр — сюда. Делят _road_finalize_mutex.
+var _footway_kerb_results: Array = []
+var _pending_footway_tasks: int = 0
 var _bush_mesh: ArrayMesh  # Меш куста (Buxus), нормализован до BUSH_HEIGHT
 var _bush_shadow_mesh: ArrayMesh  # Плоский эллипс-диск (blob-тень под кустом)
 var _bush_available := false  # true если модель куста загрузилась
@@ -1021,7 +1042,12 @@ func _ready() -> void:
 	_curb_collision_mutex = Mutex.new()
 	_road_mutex = Mutex.new()
 	_veg_mutex = Mutex.new()
+	_facade_mutex = Mutex.new()
+	_road_finalize_mutex = Mutex.new()
 	_terrain_thread_mutex = Mutex.new()
+	# Пред-прогрев atom-кэша фасадов (на главном потоке), чтобы compute() в воркере
+	# только читал статик-кэш — иначе гонка данных при записи из потоков.
+	FacadeAssembler.prewarm_atom_cache()
 
 	osm_loader = OSMLoaderScript.new()
 	add_child(osm_loader)
@@ -2226,6 +2252,30 @@ func _process(delta: float) -> void:
 		_process_road_extract_queue()
 		_record_perf("road_extract", Time.get_ticks_usec() - t0)
 
+	# Commit готовых фасадов зданий (геометрия посчитана в воркер-треде)
+	if not _facade_results.is_empty():
+		t0 = Time.get_ticks_usec()
+		_process_facade_results()
+		_record_perf("facade_commit", Time.get_ticks_usec() - t0)
+
+	# Commit готовых дорожных батчей (carving впадин + тротуары посчитаны в воркере)
+	if not _road_finalize_results.is_empty():
+		t0 = Time.get_ticks_usec()
+		_process_road_finalize_results()
+		_record_perf("fin_roads_commit", Time.get_ticks_usec() - t0)
+
+	# Commit бордюров тротуаров (геометрия посчитана в воркере)
+	if not _footway_kerb_results.is_empty():
+		t0 = Time.get_ticks_usec()
+		_process_footway_kerb_results()
+		_record_perf("fin_footway_commit", Time.get_ticks_usec() - t0)
+
+	# Спавн припаркованных машин — по одной парковке за кадр (instantiate дорого)
+	if not _pending_parked_cars.is_empty():
+		t0 = Time.get_ticks_usec()
+		_process_parked_cars_queue()
+		_record_perf("parked_cars", Time.get_ticks_usec() - t0)
+
 	# Lazy chunk activation — включаем видимость через N кадров после финализации
 	t0 = Time.get_ticks_usec()
 	_process_chunk_activation()
@@ -2552,7 +2602,7 @@ func _check_initial_load_complete() -> void:
 	var pending_road_snapshot: int = _pending_road_tasks
 	var road_results_pending: int = _road_results.size()
 	_road_mutex.unlock()
-	var total_queued: int = _building_results.size() + _road_queue_total_size() + road_results_pending + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + pending_road_snapshot + _pending_veg_tasks + _pending_terrain_tasks + _deferred_total_size(_deferred_lamp_queue) + _deferred_total_size(_deferred_manhole_queue) + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_total_size(_deferred_footway_queue) + _deferred_total_size(_deferred_billboard_queue) + _chunk_activation_pending.size() + _deferred_total_size(_deferred_lamp_lights) + _phase3_queue.size()
+	var total_queued: int = _building_results.size() + _road_queue_total_size() + road_results_pending + _terrain_objects_queue.size() + _infrastructure_queue.size() + _pending_building_tasks + pending_road_snapshot + _pending_veg_tasks + _pending_terrain_tasks + _deferred_total_size(_deferred_lamp_queue) + _deferred_total_size(_deferred_manhole_queue) + _deferred_traffic_queue.size() + _pending_batch_chunks.size() + _building_geo_finalize_queue.size() + _curb_geo_batch.size() + _lamp_batches_to_finalize.size() + _tree_batches_to_finalize.size() + _billboard_batches_to_finalize.size() + _window_finalize_queue.size() + _deferred_total_size(_deferred_footway_queue) + _deferred_total_size(_deferred_billboard_queue) + _chunk_activation_pending.size() + _deferred_total_size(_deferred_lamp_lights) + _phase3_queue.size() + _pending_facade_tasks + _facade_results.size() + _pending_road_finalize_tasks + _road_finalize_results.size() + _pending_footway_tasks + _footway_kerb_results.size() + _pending_parked_cars.size()
 
 	# DEBUG: Детальное логирование очередей
 	if loaded_count >= total_chunks and total_queued > 0:
@@ -3535,6 +3585,15 @@ func _unload_chunk(chunk_key: String) -> void:
 		_deferred_lamp_lights.erase(chunk_key)
 		_deferred_road_collisions.erase(chunk_key)
 		_deferred_terrain_collisions.erase(chunk_key)
+		# Возвращаем припаркованные машины в пул (живут под генератором, не фрятся с чанком)
+		_return_parked_cars(chunk_key)
+		# Отбрасываем ещё не обработанные заявки на машины этого чанка
+		if not _pending_parked_cars.is_empty():
+			var _kept_pc: Array = []
+			for _pcr in _pending_parked_cars:
+				if _pcr.get("chunk_key", "") != chunk_key:
+					_kept_pc.append(_pcr)
+			_pending_parked_cars = _kept_pc
 		_deferred_footway_queue.erase(chunk_key)
 		_deferred_billboard_queue.erase(chunk_key)
 		_deferred_billboard_road_queue.erase(chunk_key)
@@ -3812,6 +3871,16 @@ func reset_terrain() -> void:
 	_veg_thread_results.clear()
 	_pending_veg_tasks = 0
 	_veg_mutex.unlock()
+	_facade_mutex.lock()
+	_facade_results.clear()
+	_pending_facade_tasks = 0
+	_facade_mutex.unlock()
+	_road_finalize_mutex.lock()
+	_road_finalize_results.clear()
+	_pending_road_finalize_tasks = 0
+	_footway_kerb_results.clear()
+	_pending_footway_tasks = 0
+	_road_finalize_mutex.unlock()
 	_terrain_objects_queue.clear()
 	_infrastructure_queue.clear()
 	if _clutter_manager:
@@ -3819,6 +3888,12 @@ func reset_terrain() -> void:
 	_paving_dispatched.clear()
 	_vegetation_queue.clear()
 	_pending_parking_signs.clear()
+	_pending_parked_cars.clear()
+	# Припаркованные машины: возвращаем активные в пул (скрыты, переиспользуются в новом мире)
+	for _pck in _parked_active.keys():
+		for _pcar in _parked_active[_pck]:
+			_release_parked_car(_pcar)
+	_parked_active.clear()
 	_curb_queue.clear()
 	_curb_smoothed_queue.clear()
 	_curb_mesh_state.clear()
@@ -4885,6 +4960,7 @@ func _process_phase3_queue() -> bool:
 			elif tags.has("waterway") and enable_water:
 				_create_waterway(nodes, tags, target, null)
 		# Done with ways — move to intersections
+		_record_perf("p3_ways", Time.get_ticks_usec() - t0)
 		entry.phase = "intersections"
 		entry.way_idx = 0
 		# Pre-build intersection keys list for iteration
@@ -4937,8 +5013,10 @@ func _process_phase3_queue() -> bool:
 					"residential", "unclassified": ho = 0.006
 					"service": ho = 0.004
 				max_height_offset = maxf(max_height_offset, ho)
-			# Search ALL chunks — intersection may be registered under a different chunk due to overlap
-			var intersection_idx := _find_nearest_intersection(pos, 2.0)
+			# Search ALL chunks — intersection may be registered under a different chunk due to overlap.
+			# Радиус 12м (не 2м): узлы, слитые дедупликацией в соседний перекрёсток, должны найти
+			# родительский перекрёсток и взять его bezier-контур, а не падать в эллипс-fallback.
+			var intersection_idx := _find_nearest_intersection(pos, 12.0)
 			# Signs only in the chunk that contains the center (avoid duplicates)
 			if inside_chunk:
 				var sign_offset := Vector2(5, 5)
@@ -4959,6 +5037,7 @@ func _process_phase3_queue() -> bool:
 			if major_road_count >= 1:
 				_create_intersection_patch(pos, target, intersection_idx, max_height_offset, chunk_key)
 		# Done with intersections — move to points
+		_record_perf("p3_intersections", Time.get_ticks_usec() - t0)
 		entry.phase = "points"
 		entry.way_idx = 0
 		return true
@@ -4993,6 +5072,7 @@ func _process_phase3_queue() -> bool:
 					else:
 						_create_street_lamp(local, pt_elev, target)
 		# Done with points — move to bus stops
+		_record_perf("p3_points", Time.get_ticks_usec() - t0)
 		entry.phase = "bus_stops"
 		entry.way_idx = 0
 		return true
@@ -5101,11 +5181,33 @@ func _process_phase3_queue() -> bool:
 		return true
 
 	if phase == "finalize":
+		# Инкрементальный finalize: custom-модели и market-стенды (load+instantiate
+		# до ~68мс и ~33мс на чанк) ставятся порциями по бюджету кадра с курсором,
+		# чтобы один чанк не пробивал кадр. Бухгалтерия завершения — только в конце.
 		if chunk_key != "":
-			_place_custom_models_for_chunk(chunk_key, target)
+			var fin_step: int = entry.get("fin_step", 0)
+			if fin_step == 0:
+				var _c0 := Time.get_ticks_usec()
+				var ci: int = _place_custom_models_incremental(chunk_key, target, entry.get("fin_idx", 0), t0, budget_us)
+				_record_perf("p3_fin_custom", Time.get_ticks_usec() - _c0)
+				if ci >= 0:
+					entry["fin_idx"] = ci
+					return true  # не закончили — продолжим в следующем кадре
+				entry["fin_step"] = 1
+				entry["fin_idx"] = 0
+				return true
+			if fin_step == 1:
+				var _m0 := Time.get_ticks_usec()
+				var mi: int = _place_market_stands_incremental(chunk_key, target, entry.get("fin_idx", 0), t0, budget_us)
+				_record_perf("p3_fin_market", Time.get_ticks_usec() - _m0)
+				if mi >= 0:
+					entry["fin_idx"] = mi
+					return true
+				entry["fin_step"] = 2
+				return true
+			# fin_step >= 2: дешёвые шаги (props + queue деревьев + ландмарки), затем бухгалтерия
 			_place_landmarks_for_chunk(chunk_key, osm_data)
 			_place_manual_props_for_chunk(chunk_key, target)
-			_place_market_stands_for_chunk(chunk_key, target)
 			_generate_trees_for_chunk(chunk_key, target)
 		var batch_chunk_key := chunk_key if chunk_key != "" else "initial"
 		if not _pending_batch_chunks.has(batch_chunk_key):
@@ -9336,6 +9438,276 @@ func _swkerb_add_quad(bucket: Dictionary, a: Vector2, b: Vector2, nrm: Vector2, 
 	ki.append(base + 8); ki.append(base + 10); ki.append(base + 11)
 
 
+# ─── Footway/sidewalk threaded finalize (Stage 3) ─────────────────────────────
+# Геометрия тротуаров/бордюров (~96мс синхронно) уезжает в воркер. Все снапшоты
+# регистров делаются на главном потоке при диспатче; воркер читает только их.
+
+## Сэмпл высоты по переданному grid (thread-safe). 0 если elevation выключен/пуст.
+func _sample_elev_grid(eg: Dictionary, x: float, z: float) -> float:
+	var grid: Array = eg.get("grid", [])
+	var gres: int = eg.get("grid_res", 0)
+	if not enable_elevation or grid.size() < gres or gres < 2:
+		return 0.0
+	return _sample_elevation_local(x, z, true, grid, gres,
+		eg.get("base_x", 0.0), eg.get("base_z", 0.0), eg.get("grid_step", 5.0))
+
+
+## Thread-safe вариант _clip_path_polys_by_roads_and_intersections: коридоры,
+## контуры и парковки уже отфильтрованы/скопированы на главном потоке.
+func _clip_path_polys_threadsafe(polys: Array[PackedVector2Array], corridors: Array,
+		contours: Array, parking_polys: Array) -> Array[PackedVector2Array]:
+	for road_corridor in corridors:
+		if road_corridor.size() < 4:
+			continue
+		var np: Array[PackedVector2Array] = []
+		for poly in polys:
+			for cp in Geometry2D.clip_polygons(poly, road_corridor):
+				if cp.size() >= 3:
+					np.append(cp)
+		polys = np
+		if polys.is_empty():
+			return polys
+	for contour in contours:
+		if contour.size() < 3:
+			continue
+		var np: Array[PackedVector2Array] = []
+		for poly in polys:
+			for cp in Geometry2D.clip_polygons(poly, contour):
+				if cp.size() >= 3:
+					np.append(cp)
+		polys = np
+		if polys.is_empty():
+			return polys
+	for parking_poly in parking_polys:
+		if parking_poly.size() < 3:
+			continue
+		var np: Array[PackedVector2Array] = []
+		for poly in polys:
+			for cp in Geometry2D.clip_polygons(poly, parking_poly):
+				if cp.size() >= 3:
+					np.append(cp)
+		polys = np
+		if polys.is_empty():
+			return polys
+	return polys
+
+
+## Thread-safe вариант _add_path_polys_to_batch: пишет в переданный batch-dict.
+func _add_path_polys_to_batch_threadsafe(batch: Dictionary, filtered: Array[PackedVector2Array],
+		validated: PackedVector2Array, width: float, height_offset: float, eg: Dictionary) -> void:
+	var hbx: float = validated[0].x if validated.size() > 0 else 0.0
+	var hby: float = validated[0].y if validated.size() > 0 else 0.0
+	var hash_val: int = int(abs(hbx * 1000 + hby * 7919)) % 100
+	var z_offset: float = hash_val * 0.000005
+	var uv_scale: float = 1.0 / width if width > 0.0 else 1.0
+	var grid_polys: Array[PackedVector2Array] = []
+	for poly in filtered:
+		grid_polys.append_array(_split_polygon_by_grid(poly, 5.0))
+	var verts: PackedVector3Array = batch["vertices"]
+	var uvs: PackedVector2Array = batch["uvs"]
+	var norms: PackedVector3Array = batch["normals"]
+	var idxs: PackedInt32Array = batch["indices"]
+	for poly in grid_polys:
+		var indices := _triangulate_cell_nw_se(poly)
+		if indices.size() < 3:
+			continue
+		var base_idx: int = verts.size()
+		for p in poly:
+			var h: float = _sample_elev_grid(eg, p.x, p.y) + height_offset + z_offset
+			verts.append(Vector3(p.x, h, p.y))
+			uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
+			norms.append(Vector3.UP)
+		for idx in indices:
+			idxs.append(base_idx + idx)
+	batch["vertices"] = verts
+	batch["uvs"] = uvs
+	batch["normals"] = norms
+	batch["indices"] = idxs
+
+
+## Thread-safe: точка на проезжей части (width>=4) или контуре перекрёстка.
+func _is_point_on_vehicle_road_threadsafe(point: Vector2, margin: float, road_hash: Dictionary,
+		contours: Array, parking_hash: Dictionary, parking_polys: Array) -> bool:
+	if _is_point_in_any_parking_threadsafe(point, parking_hash, parking_polys):
+		return false
+	var cell_x := int(floor(point.x / ROAD_CELL_SIZE))
+	var cell_y := int(floor(point.y / ROAD_CELL_SIZE))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			var key := Vector2i(cell_x + dx, cell_y + dy)
+			if not road_hash.has(key):
+				continue
+			for seg in road_hash[key]:
+				if seg.width < 4.0:
+					continue
+				var closest := Geometry2D.get_closest_point_to_segment(point, seg.p1, seg.p2)
+				if point.distance_to(closest) < seg.width / 2.0 + margin:
+					return true
+	for contour in contours:
+		if contour.size() >= 3 and Geometry2D.is_point_in_polygon(point, contour):
+			return true
+	return false
+
+
+## Thread-safe вариант _build_sidewalk_kerbs: пишет в bucket, не создаёт меш.
+func _build_sidewalk_kerbs_threadsafe(bucket: Dictionary, merged: Array, road_hash: Dictionary,
+		contours: Array, parking_hash: Dictionary, parking_polys: Array, eg: Dictionary) -> void:
+	var curb_w := 0.12
+	var top_off := 0.135
+	var bot_off := -0.30
+	for loop in merged:
+		var n: int = loop.size()
+		if n < 3:
+			continue
+		for ei in range(n):
+			var p1: Vector2 = loop[ei]
+			var p2: Vector2 = loop[(ei + 1) % n]
+			var seg := p2 - p1
+			var seglen := seg.length()
+			if seglen < 0.30:
+				continue
+			var dir := seg / seglen
+			var nrm := Vector2(-dir.y, dir.x)
+			var mid := (p1 + p2) * 0.5
+			if Geometry2D.is_point_in_polygon(mid + nrm * 0.2, loop):
+				nrm = -nrm
+			var nsub := maxi(1, int(ceil(seglen / 3.0)))
+			for j in range(nsub):
+				var a := p1.lerp(p2, float(j) / float(nsub))
+				var b := p1.lerp(p2, float(j + 1) / float(nsub))
+				var submid := (a + b) * 0.5
+				if _is_point_on_vehicle_road_threadsafe(submid + nrm * 0.45, 0.5, road_hash, contours, parking_hash, parking_polys):
+					continue
+				_swkerb_add_quad_ts(bucket, a, b, nrm, curb_w, top_off, bot_off, eg)
+
+
+## Thread-safe вариант _swkerb_add_quad: высота из переданного grid.
+func _swkerb_add_quad_ts(bucket: Dictionary, a: Vector2, b: Vector2, nrm: Vector2,
+		curb_w: float, top_off: float, bot_off: float, eg: Dictionary) -> void:
+	var ea := _sample_elev_grid(eg, a.x, a.y)
+	var eb := _sample_elev_grid(eg, b.x, b.y)
+	var oa := a + nrm * curb_w
+	var ob := b + nrm * curb_w
+	var it1 := Vector3(a.x, ea + top_off, a.y)
+	var it2 := Vector3(b.x, eb + top_off, b.y)
+	var ot1 := Vector3(oa.x, ea + top_off, oa.y)
+	var ot2 := Vector3(ob.x, eb + top_off, ob.y)
+	var ob1 := Vector3(oa.x, ea + bot_off, oa.y)
+	var ob2 := Vector3(ob.x, eb + bot_off, ob.y)
+	var ib1 := Vector3(a.x, ea + bot_off, a.y)
+	var ib2 := Vector3(b.x, eb + bot_off, b.y)
+	var nrm3 := Vector3(nrm.x, 0.0, nrm.y)
+	var kv: PackedVector3Array = bucket["v"]
+	var kn: PackedVector3Array = bucket["n"]
+	var ki: PackedInt32Array = bucket["i"]
+	var base := kv.size()
+	kv.append(it1); kv.append(it2); kv.append(ot2); kv.append(ot1)
+	for _j in 4: kn.append(Vector3.UP)
+	kv.append(ot1); kv.append(ot2); kv.append(ob2); kv.append(ob1)
+	for _j in 4: kn.append(nrm3)
+	kv.append(it1); kv.append(it2); kv.append(ib2); kv.append(ib1)
+	for _j in 4: kn.append(-nrm3)
+	ki.append(base + 0); ki.append(base + 2); ki.append(base + 1)
+	ki.append(base + 0); ki.append(base + 3); ki.append(base + 2)
+	ki.append(base + 4); ki.append(base + 6); ki.append(base + 5)
+	ki.append(base + 4); ki.append(base + 7); ki.append(base + 6)
+	ki.append(base + 8); ki.append(base + 9); ki.append(base + 10)
+	ki.append(base + 8); ki.append(base + 10); ki.append(base + 11)
+	bucket["v"] = kv
+	bucket["n"] = kn
+	bucket["i"] = ki
+
+
+## Воркер: клиппинг + триангуляция тротуаров + сборка бордюров. Path-батч кладём
+## в _road_finalize_results (commit делает ArrayMesh+материал+коллизию как у дорог),
+## бордюр — в _footway_kerb_results.
+func _compute_footway_thread(task: Dictionary) -> void:
+	var path_batch := {
+		"vertices": PackedVector3Array(),
+		"uvs": PackedVector2Array(),
+		"normals": PackedVector3Array(),
+		"indices": PackedInt32Array(),
+	}
+	var all_fw_polys: Array[PackedVector2Array] = []
+	var eg: Dictionary = task["elev_grid"]
+	for item in task["items"]:
+		var polys: Array[PackedVector2Array] = item["polys"]
+		polys = _clip_path_polys_threadsafe(polys, task["corridors"], task["contours"], task["clip_parking"])
+		var filtered: Array[PackedVector2Array] = []
+		for poly in polys:
+			if poly.size() >= 3 and absf(_polygon_area(poly)) >= 0.5:
+				filtered.append(poly)
+		if not filtered.is_empty():
+			_add_path_polys_to_batch_threadsafe(path_batch, filtered, item["validated"], item["width"], item["height_offset"], eg)
+			all_fw_polys.append_array(filtered)
+
+	var kerb_bucket := {"v": PackedVector3Array(), "n": PackedVector3Array(), "i": PackedInt32Array()}
+	if task["enable_curbs"] and all_fw_polys.size() > 0:
+		var merged: Array[PackedVector2Array] = _union_footway_polys(all_fw_polys)
+		_build_sidewalk_kerbs_threadsafe(kerb_bucket, merged, task["road_hash"], task["contours"], task["parking_hash"], task["parking_polys"], eg)
+
+	_road_finalize_mutex.lock()
+	if path_batch["vertices"].size() > 0:
+		_road_finalize_results.append({
+			"chunk_key": task["chunk_key"],
+			"texture_key": "path",
+			"vertices": path_batch["vertices"],
+			"uvs": path_batch["uvs"],
+			"uv2s": PackedVector2Array(),
+			"normals": path_batch["normals"],
+			"indices": path_batch["indices"],
+			"parent": task["parent"],
+			"gen": int(task["gen"]),
+			"road_width": 6.0,
+		})
+	if kerb_bucket["v"].size() > 0:
+		_footway_kerb_results.append({
+			"chunk_key": task["chunk_key"],
+			"v": kerb_bucket["v"],
+			"n": kerb_bucket["n"],
+			"i": kerb_bucket["i"],
+			"parent": task["parent"],
+			"gen": int(task["gen"]),
+		})
+	_pending_footway_tasks -= 1
+	_road_finalize_mutex.unlock()
+
+
+## Главный поток: commit бордюров тротуаров (ArrayMesh + RS). Бюджет на кадр.
+func _process_footway_kerb_results() -> void:
+	if _footway_kerb_results.is_empty():
+		return
+	_road_finalize_mutex.lock()
+	var batch_results: Array = _footway_kerb_results
+	_footway_kerb_results = []
+	_road_finalize_mutex.unlock()
+
+	var t0 := Time.get_ticks_usec()
+	var budget_us: int = 500000 if _initial_loading else 4000
+	var applied := 0
+	for r in batch_results:
+		applied += 1
+		var parent: Node3D = r["parent"]
+		if not is_instance_valid(parent) or int(r["gen"]) != _load_generation \
+				or not _is_chunk_alive_for_async_work(r["chunk_key"]):
+			continue
+		var arr := []
+		arr.resize(Mesh.ARRAY_MAX)
+		arr[Mesh.ARRAY_VERTEX] = r["v"]
+		arr[Mesh.ARRAY_NORMAL] = r["n"]
+		arr[Mesh.ARRAY_INDEX] = r["i"]
+		var mesh := ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+		_rs_add_mesh(r["chunk_key"], mesh, _curb_material, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_CURB)
+		if applied > 1 and (Time.get_ticks_usec() - t0) > budget_us:
+			break
+	if applied < batch_results.size():
+		_road_finalize_mutex.lock()
+		for i in range(applied, batch_results.size()):
+			_footway_kerb_results.append(batch_results[i])
+		_road_finalize_mutex.unlock()
+
+
 ## Ensures albedo + marking textures exist for a lane-aware texture_key like "ow2", "bi4".
 ## Called lazily — generates and caches on first use.
 func _ensure_lane_textures(texture_key: String) -> void:
@@ -9364,38 +9736,91 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 	if _profiler:
 		prof_start_total = _profiler.start_measure("road_batch_finalize_total_" + chunk_key)
 
-	# Flush deferred path polygons — clip against now-populated road corridors
-	var _had_deferred_paths := false
+	# Flush deferred path polygons — клиппинг+триангуляция+бордюры (~96мс) уезжают
+	# в воркер. Снапшотим читаемые регистры здесь (главный поток), воркер читает их.
+	var _fw_t0 := Time.get_ticks_usec()
 	if _deferred_path_polys.has(chunk_key):
 		var deferred_items: Array = _deferred_path_polys[chunk_key]
 		_deferred_path_polys.erase(chunk_key)
-		var all_fw_polys: Array[PackedVector2Array] = []  # Phase 4: union для поребрика
+		var _ck_parts := chunk_key.split(",")
+		var ck_x := int(_ck_parts[0])
+		var ck_z := int(_ck_parts[1])
+
 		var fw_parent: Node3D = null
+		var fw_items: Array = []
 		for item in deferred_items:
-			# Chunk may have unloaded (freeing item.parent) before this deferred
-			# flush runs — skip stale items, otherwise _add_path_polys_to_batch
-			# gets a freed Node3D for arg 6 and the debugger trips.
+			# Чанк мог выгрузиться (parent freed) до flush — пропускаем устаревшее.
 			if not is_instance_valid(item.parent):
 				continue
-			var polys: Array[PackedVector2Array] = item.polys
-			polys = _clip_path_polys_by_roads_and_intersections(polys, item.ck_x, item.ck_z, chunk_key)
-			var filtered: Array[PackedVector2Array] = []
-			for poly in polys:
-				if poly.size() >= 3 and absf(_polygon_area(poly)) >= 0.5:
-					filtered.append(poly)
-			if not filtered.is_empty():
-				_add_path_polys_to_batch(filtered, item.validated, item.width, item.height_offset, chunk_key, item.parent)
-				all_fw_polys.append_array(filtered)
-				if fw_parent == null:
-					fw_parent = item.parent
-				_had_deferred_paths = true
-		# Phase 4: поребрик по ВНЕШНЕМУ контуру тротуаров. Union убирает внутренние
-		# рёбра на пересечениях тротуаров (бордюр только снаружи перекрёстка), а
-		# проверка "снаружи дорога?" убирает бордюр там, где тротуар вплотную к
-		# проезжей части (там уже есть бордюр террейна).
-		if enable_sidewalk_curbs and all_fw_polys.size() > 0 and is_instance_valid(fw_parent):
-			var merged_fw: Array[PackedVector2Array] = _union_footway_polys(all_fw_polys)
-			_build_sidewalk_kerbs(merged_fw, chunk_key, fw_parent)
+			if fw_parent == null:
+				fw_parent = item.parent
+			fw_items.append({
+				"polys": item.polys,
+				"validated": item.validated,
+				"width": item.width,
+				"height_offset": item.height_offset,
+				"ck_x": item.ck_x,
+				"ck_z": item.ck_z,
+			})
+
+		if not fw_items.is_empty() and is_instance_valid(fw_parent):
+			# 3×3 коридоры дорог (для клиппинга тротуаров)
+			var fw_corridors: Array = []
+			for dx in range(-1, 2):
+				for dz in range(-1, 2):
+					var nk := "%d,%d" % [ck_x + dx, ck_z + dz]
+					if _chunk_terrain_roads.has(nk):
+						fw_corridors.append_array(_chunk_terrain_roads[nk])
+			# Контуры перекрёстков (копия среза по AABB ±30м — глобальный массив мутируется)
+			var ch_min_x := float(ck_x) * chunk_size
+			var ch_max_x := ch_min_x + chunk_size
+			var ch_min_z := float(ck_z) * chunk_size
+			var ch_max_z := ch_min_z + chunk_size
+			var fw_contours: Array[PackedVector2Array] = []
+			for i in range(_intersection_contours.size()):
+				var contour: PackedVector2Array = _intersection_contours[i]
+				if contour.size() < 3:
+					continue
+				if i < _intersection_positions.size():
+					var ipos: Vector2 = _intersection_positions[i]
+					if ipos.x < ch_min_x - 30.0 or ipos.x > ch_max_x + 30.0 or ipos.y < ch_min_z - 30.0 or ipos.y > ch_max_z + 30.0:
+						continue
+				fw_contours.append(contour)
+			# Парковки для клиппинга (копия полигонов рядом с чанком)
+			var fw_clip_parking: Array[PackedVector2Array] = []
+			for ck_p in _chunk_parking_hashes:
+				for pp in _chunk_parking_hashes[ck_p].get("polys", []):
+					if pp.size() < 3:
+						continue
+					for ppv in pp:
+						if ppv.x >= ch_min_x - 5.0 and ppv.x <= ch_max_x + 5.0 and ppv.y >= ch_min_z - 5.0 and ppv.y <= ch_max_z + 5.0:
+							fw_clip_parking.append(pp)
+							break
+			# Per-chunk хэши (по ссылке — после финализации дорог не мутируются; прецедент veg-воркера)
+			var fw_road_hash: Dictionary = _chunk_road_hashes.get(chunk_key, {})
+			var ck_parking_data: Dictionary = _chunk_parking_hashes.get(chunk_key, {})
+			var fw_parking_hash: Dictionary = ck_parking_data.get("hash", {})
+			var fw_parking_polys: Array = ck_parking_data.get("polys", [])
+			var fw_elev: Dictionary = _chunk_elevation_data.get(chunk_key, {})
+
+			_road_finalize_mutex.lock()
+			_pending_footway_tasks += 1
+			_road_finalize_mutex.unlock()
+			WorkerThreadPool.add_task(_compute_footway_thread.bind({
+				"chunk_key": chunk_key,
+				"items": fw_items,
+				"corridors": fw_corridors,
+				"contours": fw_contours,
+				"clip_parking": fw_clip_parking,
+				"road_hash": fw_road_hash,
+				"parking_hash": fw_parking_hash,
+				"parking_polys": fw_parking_polys,
+				"elev_grid": fw_elev,
+				"enable_curbs": enable_sidewalk_curbs,
+				"parent": fw_parent,
+				"gen": _load_generation,
+			}))
+		_record_perf("fin_footway", Time.get_ticks_usec() - _fw_t0)
 
 	if not _road_batch_data.has(chunk_key):
 		# Нет дорог — но террейн всё равно создаём
@@ -9438,122 +9863,177 @@ func _finalize_road_batches_for_chunk(chunk_key: String) -> void:
 			_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
 		return
 
-	# Дорожная просадка: врезаем В МАССИВЫ БАТЧА до создания visual+collision, чтобы оба
-	# строились из одних вершин (без устаревшей плоской коллизии над ямой).
-	if enable_road_depressions and _road_depressions.has(chunk_key):
-		_apply_road_depressions(chunk_key, texture_key, batch)
-
-	# Создаём ArrayMesh из накопленных данных
-	var arrays: Array = []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = batch["vertices"]
-	arrays[Mesh.ARRAY_TEX_UV] = batch["uvs"]
-	# UV2 несёт метрическое расстояние от осевой (для колеи постоянной ширины).
-	# Ставим только если размеры совпадают — иначе ArrayMesh упадёт.
-	if batch.has("uv2s") and batch["uv2s"].size() == batch["vertices"].size():
-		arrays[Mesh.ARRAY_TEX_UV2] = batch["uv2s"]
-	arrays[Mesh.ARRAY_NORMAL] = batch["normals"]
-	arrays[Mesh.ARRAY_INDEX] = batch["indices"]
-
-	var arr_mesh: ArrayMesh = ArrayMesh.new()
-	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-
-	# Track draw calls
-	if _draw_call_logging_enabled:
-		_draw_call_stats["roads"] += 1
-
-	# Lazy-register lane-aware textures (e.g., "ow2", "bi4")
-	_ensure_lane_textures(texture_key)
-
-	# Создаём материал с шейдером (noise вариация roughness + лужи + разметка)
-	var albedo_tex: Texture2D = _road_textures.get(texture_key, null)
-	var is_sidewalk := texture_key == "path"
-	var material: Material
-	if texture_key == "tram_bed":
-		var mat := StandardMaterial3D.new()
-		mat.albedo_texture = albedo_tex
-		mat.roughness = 0.7
-		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
-		material = mat
-	elif texture_key == "tram_rails":
-		var mat := StandardMaterial3D.new()
-		mat.albedo_texture = albedo_tex
-		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
-		mat.alpha_scissor_threshold = 0.5
-		mat.metallic = 0.7
-		mat.roughness = 0.3
-		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
-		material = mat
-	else:
-		var normal_tex: Texture2D = _normal_textures.get("sidewalk" if is_sidewalk else "asphalt", null)
-		var roughness_tex: Texture2D = _road_textures.get("sidewalk_roughness" if is_sidewalk else "road_roughness", null)
-		var marking_tex: Texture2D = _road_textures.get("marking_" + texture_key, null)
-		material = WetRoadMaterial.create_road_shader_material(
-			albedo_tex, normal_tex, _is_wet_mode, _is_night_mode,
-			_noise_textures.get("micro", null),
-			_noise_textures.get("macro", null),
-			roughness_tex,
-			marking_tex
-		)
-		if material is ShaderMaterial:
-			WetRoadMaterial.apply_road_type_params(material, texture_key, float(batch.get("road_width", 6.0)))
-
-	# Добавляем в parent (chunk node)
+	# Тяжёлая часть (carving впадин + сборка ArrayMesh) уезжает в воркер-тред;
+	# commit (ArrayMesh + материал + RS + коллизия) — в _process_road_finalize_results.
 	var parent: Node3D = batch["parent"]
 
 	# SAFETY: Проверяем что parent ещё существует (чанк не был выгружен)
 	if not is_instance_valid(parent):
 		print("OSM: ⚠️ Skipped road batch %s/%s - chunk was unloaded" % [chunk_key, texture_key])
-		_emit_road_debug("ROAD_DROP key=%s reason=finalize_invalid_parent texture=%s verts=%d indices=%d" % [
-			chunk_key,
-			texture_key,
-			int(batch["vertices"].size()),
-			int(batch["indices"].size())
-		])
 		if _profiler:
 			_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
 		return
 
-	# Road visual — RenderingServer (no scene tree overhead)
-	_rs_add_mesh(chunk_key, arr_mesh, material, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_ROAD)
+	# Снапшот впадин — carving выполнит воркер. _road_depressions мутируется на
+	# главном потоке другими чанками → копируем срез этого чанка перед диспатчем.
+	var deps_snapshot: Array = []
+	if enable_road_depressions and _road_depressions.has(chunk_key) and not (texture_key in ["path", "tram_bed", "tram_rails"]):
+		deps_snapshot = _road_depressions[chunk_key].duplicate(true)
 
-	# Track material for wet mode toggle
-	if material is ShaderMaterial:
-		if not _chunk_road_materials.has(chunk_key):
-			_chunk_road_materials[chunk_key] = []
-		_chunk_road_materials[chunk_key].append(material)
+	# batch уже erase-нут из _road_batch_data выше → воркер единолично владеет массивами.
+	_road_finalize_mutex.lock()
+	_pending_road_finalize_tasks += 1
+	_road_finalize_mutex.unlock()
+	WorkerThreadPool.add_task(_compute_road_finalize_thread.bind({
+		"chunk_key": chunk_key,
+		"texture_key": texture_key,
+		"batch": batch,
+		"deps": deps_snapshot,
+		"parent": parent,
+		"gen": _load_generation,
+		"road_width": float(batch.get("road_width", 6.0)),
+	}))
 
-	_emit_road_debug("ROAD_FINALIZE key=%s texture=%s verts=%d tris=%d rs_instances=%d remaining_batches=%d" % [
-		chunk_key,
-		texture_key,
-		int(batch["vertices"].size()),
-		int(batch["indices"].size() / 3),
-		int(_chunk_rs_instances.get(chunk_key, []).size()),
-		int(_road_batch_data.get(chunk_key, {}).size())
-	])
-
-	# Road collision — StaticBody3D (deferred shape creation)
-	var road_body := StaticBody3D.new()
-	road_body.name = "RoadBatchCollision_" + texture_key
-	road_body.collision_layer = 1
-	road_body.collision_mask = 1
-	road_body.add_to_group("Road")  # GEVP - дорога
-
-	_budgeted_add_child(parent, road_body)
-
-	# Collision shape — отложенное создание (ConcavePolygonShape3D ~5-26ms)
-	_deferred_append(_deferred_road_collisions, chunk_key, {
-		"body": road_body,
-		"vertices": batch["vertices"],
-		"indices": batch["indices"]
-	})
-
-	# Измерить общее время финализации
 	if _profiler:
 		_profiler.end_measure("road_batch_finalize_total_" + chunk_key, prof_start_total)
-		var total_time_ms = (Time.get_ticks_usec() - prof_start_total) / 1000.0
-		if total_time_ms > 8.0:
-			print("⚠️ SLOW: road batch finalization took %.1f ms for chunk %s" % [total_time_ms, chunk_key])
+
+
+## Воркер: врезает впадины в массивы батча (carving — главный хотспот ~10-50мс).
+## Чистый компьют: _carve_road_depression и его хелперы трогают только аргументы.
+## batch erase-нут из _road_batch_data → ничто не алиасит массивы. Результат → commit.
+func _compute_road_finalize_thread(task: Dictionary) -> void:
+	var batch: Dictionary = task["batch"]
+	for dep in task["deps"]:
+		_carve_road_depression(batch, dep)  # COW: пишет назад в batch только при успехе
+	var result := {
+		"chunk_key": task["chunk_key"],
+		"texture_key": task["texture_key"],
+		"vertices": batch["vertices"],
+		"uvs": batch["uvs"],
+		"uv2s": batch.get("uv2s", PackedVector2Array()),
+		"normals": batch["normals"],
+		"indices": batch["indices"],
+		"parent": task["parent"],
+		"gen": int(task["gen"]),
+		"road_width": float(task["road_width"]),
+	}
+	_road_finalize_mutex.lock()
+	_road_finalize_results.append(result)
+	_pending_road_finalize_tasks -= 1
+	_road_finalize_mutex.unlock()
+
+
+## Главный поток: commit дорожных батчей (ArrayMesh + материал + RS + коллизия).
+## Бюджет на кадр, как _process_facade_results.
+func _process_road_finalize_results() -> void:
+	if _road_finalize_results.is_empty():
+		return
+	_road_finalize_mutex.lock()
+	var batch_results: Array = _road_finalize_results
+	_road_finalize_results = []
+	_road_finalize_mutex.unlock()
+
+	var t0 := Time.get_ticks_usec()
+	var budget_us: int = 500000 if _initial_loading else 4000
+	var applied := 0
+	for r in batch_results:
+		applied += 1
+		var parent: Node3D = r["parent"]
+		var chunk_key: String = r["chunk_key"]
+		if not is_instance_valid(parent) or int(r["gen"]) != _load_generation \
+				or not _is_chunk_alive_for_async_work(chunk_key):
+			continue
+
+		var texture_key: String = r["texture_key"]
+		var verts: PackedVector3Array = r["vertices"]
+		if verts.size() == 0:
+			continue
+
+		# ArrayMesh из посчитанных воркером массивов
+		var arrays: Array = []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = verts
+		arrays[Mesh.ARRAY_TEX_UV] = r["uvs"]
+		var uv2s: PackedVector2Array = r["uv2s"]
+		if uv2s.size() == verts.size():
+			arrays[Mesh.ARRAY_TEX_UV2] = uv2s
+		arrays[Mesh.ARRAY_NORMAL] = r["normals"]
+		arrays[Mesh.ARRAY_INDEX] = r["indices"]
+		var arr_mesh: ArrayMesh = ArrayMesh.new()
+		arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+		if _draw_call_logging_enabled:
+			_draw_call_stats["roads"] += 1
+
+		# Lazy-register lane-aware textures (e.g., "ow2", "bi4")
+		_ensure_lane_textures(texture_key)
+
+		# Материал с шейдером (noise roughness + лужи + разметка)
+		var albedo_tex: Texture2D = _road_textures.get(texture_key, null)
+		var is_sidewalk := texture_key == "path"
+		var material: Material
+		if texture_key == "tram_bed":
+			var mat := StandardMaterial3D.new()
+			mat.albedo_texture = albedo_tex
+			mat.roughness = 0.7
+			mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+			material = mat
+		elif texture_key == "tram_rails":
+			var mat := StandardMaterial3D.new()
+			mat.albedo_texture = albedo_tex
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+			mat.alpha_scissor_threshold = 0.5
+			mat.metallic = 0.7
+			mat.roughness = 0.3
+			mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+			material = mat
+		else:
+			var normal_tex: Texture2D = _normal_textures.get("sidewalk" if is_sidewalk else "asphalt", null)
+			var roughness_tex: Texture2D = _road_textures.get("sidewalk_roughness" if is_sidewalk else "road_roughness", null)
+			var marking_tex: Texture2D = _road_textures.get("marking_" + texture_key, null)
+			material = WetRoadMaterial.create_road_shader_material(
+				albedo_tex, normal_tex, _is_wet_mode, _is_night_mode,
+				_noise_textures.get("micro", null),
+				_noise_textures.get("macro", null),
+				roughness_tex,
+				marking_tex
+			)
+			if material is ShaderMaterial:
+				WetRoadMaterial.apply_road_type_params(material, texture_key, r["road_width"])
+
+		# Road visual — RenderingServer (no scene tree overhead)
+		_rs_add_mesh(chunk_key, arr_mesh, material, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_ROAD)
+
+		# Track material for wet mode toggle
+		if material is ShaderMaterial:
+			if not _chunk_road_materials.has(chunk_key):
+				_chunk_road_materials[chunk_key] = []
+			_chunk_road_materials[chunk_key].append(material)
+
+		# Road collision — StaticBody3D (deferred shape creation)
+		var road_body := StaticBody3D.new()
+		road_body.name = "RoadBatchCollision_" + texture_key
+		road_body.collision_layer = 1
+		road_body.collision_mask = 1
+		road_body.add_to_group("Road")  # GEVP - дорога
+		_budgeted_add_child(parent, road_body)
+
+		# Collision shape — отложенное создание (ConcavePolygonShape3D ~5-26ms)
+		_deferred_append(_deferred_road_collisions, chunk_key, {
+			"body": road_body,
+			"vertices": verts,
+			"indices": r["indices"]
+		})
+
+		if applied > 1 and (Time.get_ticks_usec() - t0) > budget_us:
+			break
+
+	# Вернуть необработанные обратно
+	if applied < batch_results.size():
+		_road_finalize_mutex.lock()
+		for i in range(applied, batch_results.size()):
+			_road_finalize_results.append(batch_results[i])
+		_road_finalize_mutex.unlock()
 
 ## Создаёт террейн чанка используя сглажённые точки из road rendering thread.
 ## Теперь НЕ выполняет тяжёлый клиппинг синхронно, а ставит задачу в инкрементальную очередь.
@@ -9674,7 +10154,14 @@ func _create_deferred_terrain(chunk_key: String) -> void:
 		"parking": relevant_parking,
 		"water_shore": relevant_water_shore,
 		"chunk_rect": chunk_rect,
-		"chunk_size": chunk_size
+		"chunk_size": chunk_size,
+		# Mesh-build inputs (curb + grid triangulation now run on the worker too).
+		# elev_grid dict is assigned wholesale on elevation arrival, never mutated
+		# in place → safe to pass by reference. gen guards against stale chunks.
+		"elev_grid": _chunk_elevation_data.get(chunk_key, {}),
+		"enable_elevation": enable_elevation,
+		"enable_ground_plane": enable_ground_plane,
+		"gen": _load_generation,
 	}
 	_pending_terrain_tasks += 1
 	WorkerThreadPool.add_task(_compute_terrain_clipping_thread.bind(task_data))
@@ -10533,13 +11020,24 @@ func _create_building(nodes: Array, tags: Dictionary, parent: Node3D, loader: No
 						fa_arch = FacadeAssembler.select_archetype(way_id, "brick" if hsf < 26214 else "panel", fa_floors, "")
 					if FacadeAssembler.has_atoms(fa_arch):
 						var fnd_h: float = 0.0 if (building_override and building_override.no_foundation) else _get_foundation_height(points)
+						# База-коробка остаётся синхронной (дёшево, ~0.4мс) — здание сразу видно.
 						_create_3d_building_with_custom_texture(points, building_height, BuildingOverride.new(), parent, base_elev, debug_name, true)
+						# Геометрия фасада (~150мс) выносится в воркер-тред: compute() считает
+						# меши в потоке, commit() создаёт MeshInstance на главном (_process_facade_results).
+						# Главная причина лётного фриза зданий.
 						var _fa := FacadeAssembler.new()
-						_fa.build(points, building_height, base_elev, parent, fnd_h, way_id, fa_arch, fa_floors)
-						_facade_emission_materials.append_array(_fa.emission_materials)
-						fa_bays = _fa.edge_patterns.duplicate()
+						_facade_mutex.lock()
+						_pending_facade_tasks += 1
+						_facade_mutex.unlock()
+						WorkerThreadPool.add_task(_compute_facade_thread.bind({
+							"fa": _fa, "points": points, "height": building_height,
+							"base_elev": base_elev, "fnd_h": fnd_h, "way_id": way_id,
+							"arch": fa_arch, "floors": fa_floors, "parent": parent,
+							"chunk_key": _get_chunk_key_from_node(parent), "gen": _load_generation,
+						}))
+						# fa_bays недоступны (фасад отложен) — для жилых домов витрин почти нет.
+						fa_bays = {}
 						fa_handled = true
-						print("[FacadeAssembler] archetype=%s way=%d floors=%d" % [fa_arch.get("id", "?"), way_id, fa_floors])
 
 			if not fa_handled:
 					# Fallback: original flat-texture logic.
@@ -10607,8 +11105,8 @@ func _create_parking(points: PackedVector2Array, parent: Node3D, chunk_key: Stri
 
 	# Примечание: полигон уже добавлен в _chunk_parking_hashes в первом проходе
 
-	# 1. Создаём асфальтовую поверхность
-	_create_parking_surface(points, parent)
+	# 1. Создаём асфальтовую поверхность (коллизия отложена)
+	_create_parking_surface(points, parent, chunk_key)
 
 	# 2. Сохраняем данные для отложенного создания знака
 	# (знак создаётся после загрузки всех чанков, когда все дороги известны)
@@ -10617,7 +11115,8 @@ func _create_parking(points: PackedVector2Array, parent: Node3D, chunk_key: Stri
 		"parent": parent
 	})
 
-	# 3. Добавляем припаркованные машины (0-2 штуки)
+	# 3. Припаркованные машины: планирование дёшево (математика) — выполняем сразу,
+	# а тяжёлый instantiate каждой машины очередь раскидывает по 1/кадр.
 	_spawn_parked_cars(points, parent)
 
 
@@ -10676,18 +11175,33 @@ func _find_parking_sign_position(parking_points: PackedVector2Array) -> Dictiona
 	return {"position": sign_pos, "rotation": rotation}
 
 
-func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void:
-	"""Создаёт асфальтовую поверхность парковки"""
+func _create_parking_surface(points: PackedVector2Array, parent: Node3D, chunk_key: String = "") -> void:
+	"""Создаёт асфальтовую поверхность парковки (ArrayMesh + ОТЛОЖЕННАЯ коллизия)."""
 	# Split into grid cells so parking follows terrain slope accurately
 	var grid_polys := _split_polygon_by_grid(points, 5.0)
 
-	var mesh := MeshInstance3D.new()
-	mesh.name = "ParkingSurface"
+	# Строим индексированные массивы (нужны и для меша, и для отложенной коллизии).
+	var verts := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var norms := PackedVector3Array()
+	var idxs := PackedInt32Array()
+	var height_offset := 0.005  # Высота парковки вровень с дорогами
+	var uv_ws := 1.0 / 6.0      # World-space UV (совпадает с дорогами/перекрёстками)
+	for cell_poly in grid_polys:
+		var tri := Geometry2D.triangulate_polygon(cell_poly)
+		if tri.size() < 3:
+			continue
+		var base_idx: int = verts.size()
+		for p in cell_poly:
+			verts.append(Vector3(p.x, _sample_elevation(p.x, p.y) + height_offset, p.y))
+			uvs.append(Vector2(p.x * uv_ws, p.y * uv_ws))
+			norms.append(Vector3.UP)
+		for ix in tri:
+			idxs.append(base_idx + ix)
+	if idxs.is_empty():
+		return
 
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-
-	# Создаём материал — тот же шейдер что и дороги (PBR текстура + roughness + wet mode)
+	# Материал — тот же шейдер что и дороги (PBR текстура + roughness + wet mode)
 	var albedo_tex: Texture2D = _road_textures.get("intersection", null)
 	var normal_tex: Texture2D = _normal_textures.get("asphalt", null)
 	var roughness_tex: Texture2D = _road_textures.get("road_roughness", null)
@@ -10700,54 +11214,44 @@ func _create_parking_surface(points: PackedVector2Array, parent: Node3D) -> void
 	if material is ShaderMaterial:
 		WetRoadMaterial.apply_road_type_params(material, "intersection")
 
-	st.set_material(material)
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = verts
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	arr[Mesh.ARRAY_NORMAL] = norms
+	arr[Mesh.ARRAY_INDEX] = idxs
+	var arr_mesh := ArrayMesh.new()
+	arr_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
 
-	# Высота парковки вровень с дорогами (service = 0.004)
-	var height_offset := 0.005
+	var mesh := MeshInstance3D.new()
+	mesh.name = "ParkingSurface"
+	mesh.mesh = arr_mesh
+	mesh.material_override = material
+	mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mesh)
 
-	# Добавляем вершины треугольников
-	var uv_ws := 1.0 / 6.0  # World-space UV (совпадает с дорогами и перекрёстками)
-	for cell_poly in grid_polys:
-		var indices := Geometry2D.triangulate_polygon(cell_poly)
-		if indices.size() < 3:
-			continue
-		for i in range(0, indices.size(), 3):
-			for j in range(3):
-				var idx = indices[i + j]
-				var p = cell_poly[idx]
-				var h = _sample_elevation(p.x, p.y) + height_offset
-				st.set_uv(Vector2(p.x * uv_ws, p.y * uv_ws))
-				st.set_normal(Vector3.UP)
-				st.add_vertex(Vector3(p.x, h, p.y))
-
-	mesh.mesh = st.commit()
-
-	# Collision — StaticBody3D with trimesh collision
+	# Коллизия — ОТЛОЖЕННАЯ (ConcavePolygonShape3D ~5-25мс BVH вместо синхронного
+	# create_trimesh_collision, который и давал ~25мс фриз в фазе ways).
+	var ck := chunk_key
+	if ck.is_empty() and parent.name.begins_with("Chunk_"):
+		ck = parent.name.substr(6)
 	var body := StaticBody3D.new()
 	body.name = "ParkingCollision"
 	body.collision_layer = 1
 	body.collision_mask = 1
 	body.add_to_group("Road")
-	body.add_child(mesh)
-	mesh.create_trimesh_collision()
-	for child in mesh.get_children():
-		if child is StaticBody3D:
-			var col_shape := child.get_child(0)
-			if col_shape is CollisionShape3D:
-				child.remove_child(col_shape)
-				body.add_child(col_shape)
-			child.queue_free()
-	parent.add_child(body)
+	_budgeted_add_child(parent, body)
+	_deferred_append(_deferred_road_collisions, ck, {
+		"body": body,
+		"vertices": verts,
+		"indices": idxs,
+	})
 
 	# Track material for wet mode toggle
-	if material is ShaderMaterial:
-		var chunk_key := ""
-		if parent.name.begins_with("Chunk_"):
-			chunk_key = parent.name.substr(6)
-		if chunk_key != "":
-			if not _chunk_road_materials.has(chunk_key):
-				_chunk_road_materials[chunk_key] = []
-			_chunk_road_materials[chunk_key].append(material)
+	if material is ShaderMaterial and ck != "":
+		if not _chunk_road_materials.has(ck):
+			_chunk_road_materials[ck] = []
+		_chunk_road_materials[ck].append(material)
 
 
 func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_key: String = "") -> void:
@@ -10805,71 +11309,123 @@ func _create_pedestrian_area(points: PackedVector2Array, parent: Node3D, chunk_k
 			_chunk_road_materials[ck].append(material)
 
 
+## Бюджетно выдаёт припаркованные машины ПО ОДНОЙ за кадр. Переиспользует машины
+## из пула (дёшево); создаёт новую (~95мс add_child) только если пул пуст и не достигнут
+## потолок. Пропускает выгруженные чанки.
+func _process_parked_cars_queue() -> void:
+	var t0 := Time.get_ticks_usec()
+	var budget_us: int = 500000 if _initial_loading else 4000
+	while not _pending_parked_cars.is_empty():
+		var req: Dictionary = _pending_parked_cars.pop_front()
+		var ck: String = req.get("chunk_key", "")
+		# Чанк выгрузился, пока заявка ждала — пропускаем.
+		if ck == "" or not _loaded_chunks.has(ck):
+			continue
+		var car: Node3D = _acquire_parked_car()
+		if car == null:
+			break  # пул на потолке — больше в этом проходе не создаём
+		_configure_parked_car(car, req)
+		if not _parked_active.has(ck):
+			_parked_active[ck] = []
+		_parked_active[ck].append(car)
+		# Один свежий instantiate уже пробивает 4мс-бюджет → ~1 новая машина за кадр.
+		if (Time.get_ticks_usec() - t0) > budget_us:
+			break
+
+
+## Планировщик (дёшево, на главном потоке в фазе ways): считает позиции/модели и
+## кладёт по-машинно в очередь. Без instantiate — тяжёлая часть отложена в очередь.
 func _spawn_parked_cars(parking_points: PackedVector2Array, parent: Node3D) -> void:
-	"""Спавнит 0-2 припаркованных машины на парковке"""
 	if parking_points.size() < 3:
 		return
-
-	# Количество машин: 0, 1 или 2 (случайно)
-	var car_count: int = randi() % 3
+	var car_count: int = randi() % 3  # 0, 1 или 2
 	if car_count == 0:
 		return
-
-	# Вычисляем центр парковки
+	var ck := _get_chunk_key_from_node(parent)
 	var center := Vector2.ZERO
 	for pt in parking_points:
 		center += pt
 	center /= parking_points.size()
-
-	# Направление "вдоль" парковки (параллельно ближайшей дороге)
 	var parking_dir := _get_parking_direction(parking_points, center)
-
-	# Позиции для машин (разнесённые)
 	var spawned_positions: Array[Vector2] = []
-
 	for i in range(car_count):
 		var pos := _find_parking_spot(parking_points, center, i, spawned_positions)
 		if pos == Vector2.ZERO:
 			continue
-
 		spawned_positions.append(pos)
+		var rotation_y: float = atan2(parking_dir.x, parking_dir.y) + (randf() - 0.5) * deg_to_rad(10)
+		_pending_parked_cars.append({
+			"pos": pos,
+			"rotation_y": rotation_y,
+			"parent": parent,
+			"chunk_key": ck,
+		})
 
-		# Выбираем случайную модель (60% коробка, 20% такси, 20% лада ДПС)
-		var car: Node3D
-		var rand := randf()
-		if rand < 0.6:
-			car = _parked_car_scene.instantiate()
-		elif rand < 0.8:
-			car = _parked_taxi_scene.instantiate()
-		else:
-			car = _parked_lada_scene.instantiate()
 
-		# Получаем высоту
-		var elevation: float = _sample_elevation(pos.x, pos.y)
+## Берёт машину из пула (дёшево) или создаёт новую (~95мс, пока пул наполняется).
+## null если достигнут потолок пула.
+func _acquire_parked_car() -> Node3D:
+	while not _parked_free.is_empty():
+		var c: Node3D = _parked_free.pop_back()
+		if is_instance_valid(c):
+			return c
+	if _parked_total >= PARKED_POOL_MAX:
+		return null
+	# Создаём новую vehicle-сцену (тяжёлый add_child — один раз на слот пула).
+	var rand := randf()
+	var car: Node3D
+	if rand < 0.6:
+		car = _parked_car_scene.instantiate()
+	elif rand < 0.8:
+		car = _parked_taxi_scene.instantiate()
+	else:
+		car = _parked_lada_scene.instantiate()
+	car.set_process(false)  # отключаем AI/_process; physics_process остаётся
+	if car is RigidBody3D:
+		car.contact_monitor = true
+		car.max_contacts_reported = 4
+	# Машины пула живут под генератором (не под чанком) → не фрятся при выгрузке.
+	add_child(car)
+	var alarm := preload("res://traffic/parked_car_alarm.gd").new()
+	alarm.name = "ParkedCarAlarm"
+	car.add_child(alarm)
+	_parked_total += 1
+	return car
 
-		# Позиционируем
-		car.position = Vector3(pos.x, elevation, pos.y)
 
-		# Поворот вдоль парковки (+ небольшая вариация ±5°)
-		var rotation_variation: float = (randf() - 0.5) * deg_to_rad(10)
-		car.rotation.y = atan2(parking_dir.x, parking_dir.y) + rotation_variation
+## Размещает машину пула на парковке (дёшево: позиция/цвет/видимость).
+func _configure_parked_car(car: Node3D, req: Dictionary) -> void:
+	var pos: Vector2 = req["pos"]
+	car.global_position = Vector3(pos.x, _sample_elevation(pos.x, pos.y), pos.y)
+	car.rotation.y = float(req["rotation_y"])
+	car.collision_layer = 4
+	car.collision_mask = 1
+	if car is RigidBody3D:
+		car.freeze = false  # реагирует на удары (alarm на столкновении)
+	car.visible = true
+	_apply_parked_car_color(car)
 
-		# Отключаем только AI/управление, физика остаётся для столкновений
-		# freeze = false - машина реагирует на удары
-		car.set_process(false)  # Отключаем _process (AI логику)
-		# Оставляем physics_process для физики столкновений
 
-		# Применяем случайный цвет
-		_apply_parked_car_color(car)
+## Возвращает машину в пул: прячет, замораживает, отключает коллизию, убирает вниз.
+func _release_parked_car(car: Node3D) -> void:
+	if not is_instance_valid(car):
+		return
+	car.visible = false
+	car.collision_layer = 0
+	car.collision_mask = 0
+	if car is RigidBody3D:
+		car.freeze = true
+	car.global_position = Vector3(0.0, -3000.0, 0.0)
+	_parked_free.append(car)
 
-		# Parked-car alarm: enable contact reporting + attach the alarm component (it connects body_entered).
-		if car is RigidBody3D:
-			car.contact_monitor = true
-			car.max_contacts_reported = 4
-		parent.add_child(car)
-		var alarm := preload("res://traffic/parked_car_alarm.gd").new()
-		alarm.name = "ParkedCarAlarm"
-		car.add_child(alarm)
+
+## Вызывается при выгрузке чанка — возвращает все его машины в пул (не фрит).
+func _return_parked_cars(chunk_key: String) -> void:
+	if not _parked_active.has(chunk_key):
+		return
+	for car in _parked_active[chunk_key]:
+		_release_parked_car(car)
+	_parked_active.erase(chunk_key)
 
 
 func _find_parking_spot(parking_points: PackedVector2Array, center: Vector2, index: int, existing: Array[Vector2]) -> Vector2:
@@ -19237,10 +19793,17 @@ func _footprint_pca_xz(pts: Array, centre: Vector2) -> Dictionary:
 	return {"angle": phi, "ev": ev, "length": max_u - min_u, "width": max_v - min_v}
 
 
-func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
+## Инкрементальный: ставит custom-модели этого чанка порциями. start_idx — курсор
+## по get_custom_models(); возвращает следующий индекс если бюджет исчерпан, или -1
+## когда все модели чанка размещены.
+func _place_custom_models_incremental(chunk_key: String, parent: Node3D, start_idx: int, t0: int, budget_us: int) -> int:
 	if not _decoration_layer:
-		return
-	for entry in _decoration_layer.get_custom_models():
+		return -1
+	var _models: Array = _decoration_layer.get_custom_models()
+	var _mi := start_idx
+	while _mi < _models.size():
+		var entry: Dictionary = _models[_mi]
+		_mi += 1
 		var model_path: String = entry.model
 		if model_path.is_empty():
 			continue
@@ -19303,6 +19866,10 @@ func _place_custom_models_for_chunk(chunk_key: String, parent: Node3D) -> void:
 			parent.add_child(inst)
 		print("OSM: Placed custom model '%s' at (%.1f, %.1f) in chunk %s, scale=%.1f" % [
 			model_path.get_file(), pos.x, pos.y, chunk_key, scale_val])
+		# Бюджет: проверяем после каждой РАЗМЕЩЁННОЙ модели (load+instantiate дорого)
+		if (Time.get_ticks_usec() - t0) > budget_us:
+			return _mi
+	return -1
 
 
 var _market_stand_scene: PackedScene = null
@@ -19312,16 +19879,19 @@ var _debug_market_stands: bool = false  # default OFF (placement + per-stand log
 # no auto-search, no relocation, no default coordinate (empty config → nothing spawns). See
 # docs/WATERMELON_STAND_PLAN.md §6. Chunk-owned (parented to the chunk → freed on unload, rebuilt
 # intact on reload). Overlaps are NOT fixed here — the stand logs and keeps its configured position.
-func _place_market_stands_for_chunk(chunk_key: String, parent: Node3D) -> void:
+## Инкрементальный: ставит market-стенды порциями. start_idx — плоский курсор по
+## (entry × stand). Возвращает следующий индекс если бюджет исчерпан, или -1 когда всё.
+func _place_market_stands_incremental(chunk_key: String, parent: Node3D, start_idx: int, t0: int, budget_us: int) -> int:
 	if not _decoration_layer:
-		return
+		return -1
 	var entries: Array = _decoration_layer.get_market_stands()
 	if entries.is_empty():
-		return
+		return -1
 	if _market_stand_scene == null:
 		if not ResourceLoader.exists("res://models/market/market_watermelon_stand.tscn"):
-			return
+			return -1
 		_market_stand_scene = load("res://models/market/market_watermelon_stand.tscn")
+	var _flat := 0
 	for ei in range(entries.size()):
 		var e: Dictionary = entries[ei]
 		var lat: float = e.lat
@@ -19335,6 +19905,10 @@ func _place_market_stands_for_chunk(chunk_key: String, parent: Node3D) -> void:
 		var count: int = int(e.stand_count)
 		var spacing: float = float(e.spacing)
 		for i in range(count):
+			var this_flat := _flat
+			_flat += 1
+			if this_flat < start_idx:
+				continue  # уже размещён в предыдущем кадре
 			var off := (float(i) - float(count - 1) * 0.5) * spacing
 			var pos := anchor + frontage * off  # EXACT: anchor + configured offset only
 			var cx := int(floor(pos.x / chunk_size))
@@ -19357,6 +19931,10 @@ func _place_market_stands_for_chunk(chunk_key: String, parent: Node3D) -> void:
 			if _debug_market_stands:
 				print("[WMELON] placed %s anchor(%.6f,%.6f) local=(%.2f,%.2f) yaw=%.0f chunk=%s" % [
 					sname, lat, lon, pos.x, pos.y, float(e.yaw), chunk_key])
+			# Бюджет: после каждого размещённого стенда (instantiate дорого)
+			if (Time.get_ticks_usec() - t0) > budget_us:
+				return _flat
+	return -1
 
 
 func _set_visibility_range_recursive(node: Node, range_end: float) -> void:
@@ -21383,14 +21961,182 @@ func _compute_terrain_clipping_thread(task_data: Dictionary) -> void:
 		ccw_polys = new_ccw
 	var filtered_polys: Array[PackedVector2Array] = ccw_polys
 
+	# Build mesh arrays here on the worker (curb + 5m-grid triangulation +
+	# per-vertex elevation sampling). This is the heavy ~47ms that used to run
+	# on the main thread in _finalize_terrain_mesh. Pure compute: only touches
+	# the immutable elev_grid passed in task_data + Geometry2D + static helpers.
+	var geo: Dictionary = _build_terrain_geometry(chunk_key, filtered_polys, task_data)
+
 	# Отправляем результат в main thread через mutex-protected массив
 	var result := {
 		"chunk_key": chunk_key,
-		"terrain_polys": filtered_polys
+		"geo": geo,
+		"gen": int(task_data.get("gen", _load_generation)),
 	}
 	_terrain_thread_mutex.lock()
 	_terrain_thread_results.append(result)
 	_terrain_thread_mutex.unlock()
+
+
+## Строит массивы вершин/индексов для меша террейна (бордюры + триангуляция по
+## сетке 5м + сэмплинг высоты). Чистый компьют — вызывается из worker thread.
+## Читает только переданные аргументы (elev_grid иммутабелен) + Geometry2D +
+## статические хелперы. НИКАКИХ Node/RenderingServer/Material вызовов.
+func _build_terrain_geometry(chunk_key: String, terrain_polys: Array[PackedVector2Array], task_data: Dictionary) -> Dictionary:
+	var coords: PackedStringArray = chunk_key.split(",")
+	var chunk_x := int(coords[0])
+	var chunk_z := int(coords[1])
+	var t_chunk_size: float = task_data.get("chunk_size", chunk_size)
+	var min_x := float(chunk_x) * t_chunk_size
+	var max_x := min_x + t_chunk_size
+	var min_z := float(chunk_z) * t_chunk_size
+	var max_z := min_z + t_chunk_size
+	var sidewalk_height := 0.11
+
+	var _te_grid_data: Dictionary = task_data.get("elev_grid", {})
+	var _te_grid: Array = _te_grid_data.get("grid", [])
+	var _te_grid_res: int = _te_grid_data.get("grid_res", 0)
+	var _te_base_x: float = _te_grid_data.get("base_x", 0.0)
+	var _te_base_z: float = _te_grid_data.get("base_z", 0.0)
+	var _te_step: float = _te_grid_data.get("grid_step", 5.0)
+	var _enable_elev: bool = task_data.get("enable_elevation", false)
+	var _enable_gp: bool = task_data.get("enable_ground_plane", false)
+	var _te_has_elev: bool = _enable_elev and _te_grid.size() >= _te_grid_res and _te_grid_res >= 2
+
+	# Бордюры по внутренним краям (где террейн граничит с дорогой)
+	var curb_verts := PackedVector3Array()
+	var curb_norms := PackedVector3Array()
+	var curb_idxs := PackedInt32Array()
+	var boundary_eps := 0.1
+
+	for poly in terrain_polys:
+		var pn := poly.size()
+		var curb_w := 0.15
+		var top := sidewalk_height
+		var bot := -3.0  # Extend below terrain to cover elevation differences
+
+		# Miter outer-точка для каждой вершины — внешняя сторона встык
+		var miter_out: PackedVector2Array = PackedVector2Array()
+		miter_out.resize(pn)
+		for vi in range(pn):
+			var d_prev := (poly[vi] - poly[(vi - 1 + pn) % pn]).normalized()
+			var d_next := (poly[(vi + 1) % pn] - poly[vi]).normalized()
+			var out_prev := Vector2(d_prev.y, -d_prev.x)
+			var out_next := Vector2(d_next.y, -d_next.x)
+			var avg := out_prev + out_next
+			if avg.length_squared() > 0.001:
+				var n := avg.normalized()
+				var dot := n.dot(out_next)
+				if dot > 0.3:
+					miter_out[vi] = poly[vi] + n * (curb_w / dot)
+				else:
+					miter_out[vi] = poly[vi] + out_next * curb_w
+			else:
+				miter_out[vi] = poly[vi] + Vector2(d_next.y, -d_next.x) * curb_w
+
+		for ei in range(pn):
+			var p1: Vector2 = poly[ei]
+			var p2: Vector2 = poly[(ei + 1) % pn]
+			var p1_on_boundary := absf(p1.x - min_x) < boundary_eps or absf(p1.x - max_x) < boundary_eps or absf(p1.y - min_z) < boundary_eps or absf(p1.y - max_z) < boundary_eps
+			var p2_on_boundary := absf(p2.x - min_x) < boundary_eps or absf(p2.x - max_x) < boundary_eps or absf(p2.y - min_z) < boundary_eps or absf(p2.y - max_z) < boundary_eps
+			if p1_on_boundary and p2_on_boundary:
+				continue
+			var dir := (p2 - p1).normalized()
+			var outward := Vector2(dir.y, -dir.x)
+			# Outer: miter (встык), на границе чанка — простое смещение по outward
+			var p1_out: Vector2
+			var p2_out: Vector2
+			if p1_on_boundary:
+				p1_out = p1 + outward * curb_w
+			else:
+				p1_out = miter_out[ei]
+			if p2_on_boundary:
+				p2_out = p2 + outward * curb_w
+			else:
+				p2_out = miter_out[(ei + 1) % pn]
+			# Inner: overlap (пересекаются), на границе — без overlap
+			if not p1_on_boundary:
+				p1 -= dir * curb_w
+			if not p2_on_boundary:
+				p2 += dir * curb_w
+			var e1 := _sample_elevation_local(p1.x, p1.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
+			var e2 := _sample_elevation_local(p2.x, p2.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
+			var top1 := top + e1
+			var top2 := top + e2
+			var bot1 := bot + e1
+			var bot2 := bot + e2
+			var n_front := Vector3(outward.x, 0.0, outward.y)
+			var ci := curb_verts.size()
+			# Передняя грань
+			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))
+			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))
+			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))
+			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))
+			for _j in 4: curb_norms.append(n_front)
+			# Верхняя грань
+			curb_verts.append(Vector3(p1.x, top1, p1.y))
+			curb_verts.append(Vector3(p2.x, top2, p2.y))
+			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))
+			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))
+			for _j in 4: curb_norms.append(Vector3.UP)
+			# Нижняя грань
+			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))
+			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))
+			curb_verts.append(Vector3(p2.x, bot2, p2.y))
+			curb_verts.append(Vector3(p1.x, bot1, p1.y))
+			for _j in 4: curb_norms.append(Vector3.DOWN)
+			# Передняя грань (offset 0) — 0,1,2 / 0,2,3
+			curb_idxs.append(ci + 0); curb_idxs.append(ci + 1); curb_idxs.append(ci + 2)
+			curb_idxs.append(ci + 0); curb_idxs.append(ci + 2); curb_idxs.append(ci + 3)
+			# Верхняя грань (offset 4) — 0,2,1 / 0,3,2
+			curb_idxs.append(ci + 4); curb_idxs.append(ci + 6); curb_idxs.append(ci + 5)
+			curb_idxs.append(ci + 4); curb_idxs.append(ci + 7); curb_idxs.append(ci + 6)
+			# Нижняя грань (offset 8) — 0,1,2 / 0,2,3
+			curb_idxs.append(ci + 8); curb_idxs.append(ci + 9); curb_idxs.append(ci + 10)
+			curb_idxs.append(ci + 8); curb_idxs.append(ci + 10); curb_idxs.append(ci + 11)
+
+	# Split terrain polygons into 5m grid cells, triangulate, sample elevation.
+	var grid_polys: Array[PackedVector2Array] = []
+	for poly in terrain_polys:
+		grid_polys.append_array(_split_polygon_by_grid(poly, 5.0))
+
+	var all_vertices := PackedVector3Array()
+	var all_uvs := PackedVector2Array()
+	var all_normals := PackedVector3Array()
+	var all_indices := PackedInt32Array()
+	var uv_scale := 0.25
+
+	for poly in grid_polys:
+		var indices := _triangulate_cell_nw_se(poly)
+		if indices.size() < 3:
+			continue
+		var base_idx: int = all_vertices.size()
+		for p in poly:
+			var h := sidewalk_height + _sample_elevation_local(p.x, p.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
+			all_vertices.append(Vector3(p.x, h, p.y))
+			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
+			all_normals.append(Vector3.UP)
+		for idx in indices:
+			all_indices.append(base_idx + idx)
+
+	# Ground plane verts (same polys, sidewalk_height below) — only if enabled
+	var gp_verts := PackedVector3Array()
+	if _enable_gp and _enable_elev and not all_vertices.is_empty():
+		gp_verts.resize(all_vertices.size())
+		for vi in all_vertices.size():
+			var v := all_vertices[vi]
+			gp_verts[vi] = Vector3(v.x, v.y - sidewalk_height, v.z)
+
+	return {
+		"curb_verts": curb_verts,
+		"curb_norms": curb_norms,
+		"curb_idxs": curb_idxs,
+		"t_verts": all_vertices,
+		"t_uvs": all_uvs,
+		"t_norms": all_normals,
+		"t_idxs": all_indices,
+		"gp_verts": gp_verts,
+	}
 
 
 ## Применяет готовые результаты клиппинга террейна из worker threads (main thread).
@@ -21411,19 +22157,23 @@ func _apply_terrain_thread_results() -> void:
 	for result in batch:
 		_pending_terrain_tasks -= 1
 		var chunk_key: String = result.chunk_key
-		var terrain_polys: Array[PackedVector2Array] = result.terrain_polys
+		var geo: Dictionary = result.get("geo", {})
 
 		var parent: Node3D = _get_chunk_node(chunk_key)
 		if not parent or not _is_chunk_alive(chunk_key):
 			applied += 1
 			continue
-
-		if terrain_polys.is_empty():
-			print("OSM: ChunkTerrain %s: no polygons after clipping" % chunk_key)
+		# Discard results from a superseded load generation (chunk reloaded).
+		if int(result.get("gen", _load_generation)) != _load_generation:
 			applied += 1
 			continue
 
-		_finalize_terrain_mesh(chunk_key, parent, terrain_polys)
+		var t_idxs: PackedInt32Array = geo.get("t_idxs", PackedInt32Array())
+		if t_idxs.is_empty():
+			applied += 1
+			continue
+
+		_finalize_terrain_mesh(chunk_key, parent, geo)
 		applied += 1
 		if applied > 1 and (Time.get_ticks_usec() - t0) > TERRAIN_APPLY_BUDGET_USEC:
 			break
@@ -21818,163 +22568,29 @@ func _process_lod_chunk_queue() -> void:
 
 ## Финализация террейн меша: триангуляция + бордюры + ArrayMesh + коллизия.
 ## Вызывается из _process_terrain_gen_queue после завершения клиппинга.
-func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Array[PackedVector2Array]) -> void:
+## Commit-only: массивы уже построены в worker thread (_build_terrain_geometry).
+## Здесь — только main-thread работа: ArrayMesh + материал + _rs_add_mesh +
+## отложенная коллизия. Никакого тяжёлого компьюта.
+func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, geo: Dictionary) -> void:
 	if not is_instance_valid(parent):
 		return
 
-	var coords: Array = chunk_key.split(",")
-	var chunk_x := int(coords[0])
-	var chunk_z := int(coords[1])
-	var min_x := float(chunk_x) * chunk_size
-	var max_x := min_x + chunk_size
-	var min_z := float(chunk_z) * chunk_size
-	var max_z := min_z + chunk_size
-	var sidewalk_height := 0.11
-
-	# Use this chunk's own elevation data directly to avoid float precision
-	# issues at chunk boundaries where floor(pos / chunk_size) might map
-	# a boundary vertex to an adjacent chunk that has no elevation data → y=0 spike.
-	var _te_grid_data: Dictionary = _chunk_elevation_data.get(chunk_key, {})
-	var _te_grid: Array = _te_grid_data.get("grid", [])
-	var _te_grid_res: int = _te_grid_data.get("grid_res", 0)
-	var _te_base_x: float = _te_grid_data.get("base_x", 0.0)
-	var _te_base_z: float = _te_grid_data.get("base_z", 0.0)
-	var _te_step: float = _te_grid_data.get("grid_step", 5.0)
-	var _te_has_elev: bool = enable_elevation and _te_grid.size() >= _te_grid_res and _te_grid_res >= 2
-
-	# Бордюры по внутренним краям (где террейн граничит с дорогой)
-	var curb_verts := PackedVector3Array()
-	var curb_norms := PackedVector3Array()
-	var curb_idxs := PackedInt32Array()
-	var boundary_eps := 0.1
-
-	for poly in terrain_polys:
-		var pn := poly.size()
-		var curb_w := 0.15
-		var top := sidewalk_height
-		var bot := -3.0  # Extend below terrain to cover elevation differences
-
-		# Miter outer-точка для каждой вершины — внешняя сторона встык
-		var miter_out: PackedVector2Array = PackedVector2Array()
-		miter_out.resize(pn)
-		for vi in range(pn):
-			var d_prev := (poly[vi] - poly[(vi - 1 + pn) % pn]).normalized()
-			var d_next := (poly[(vi + 1) % pn] - poly[vi]).normalized()
-			var out_prev := Vector2(d_prev.y, -d_prev.x)
-			var out_next := Vector2(d_next.y, -d_next.x)
-			var avg := out_prev + out_next
-			if avg.length_squared() > 0.001:
-				var n := avg.normalized()
-				var dot := n.dot(out_next)
-				if dot > 0.3:
-					miter_out[vi] = poly[vi] + n * (curb_w / dot)
-				else:
-					miter_out[vi] = poly[vi] + out_next * curb_w
-			else:
-				miter_out[vi] = poly[vi] + Vector2(d_next.y, -d_next.x) * curb_w
-
-		for ei in range(pn):
-			var p1: Vector2 = poly[ei]
-			var p2: Vector2 = poly[(ei + 1) % pn]
-			var p1_on_boundary := absf(p1.x - min_x) < boundary_eps or absf(p1.x - max_x) < boundary_eps or absf(p1.y - min_z) < boundary_eps or absf(p1.y - max_z) < boundary_eps
-			var p2_on_boundary := absf(p2.x - min_x) < boundary_eps or absf(p2.x - max_x) < boundary_eps or absf(p2.y - min_z) < boundary_eps or absf(p2.y - max_z) < boundary_eps
-			if p1_on_boundary and p2_on_boundary:
-				continue
-			var dir := (p2 - p1).normalized()
-			var outward := Vector2(dir.y, -dir.x)
-			# Outer: miter (встык), на границе чанка — простое смещение по outward
-			var p1_out: Vector2
-			var p2_out: Vector2
-			if p1_on_boundary:
-				p1_out = p1 + outward * curb_w
-			else:
-				p1_out = miter_out[ei]
-			if p2_on_boundary:
-				p2_out = p2 + outward * curb_w
-			else:
-				p2_out = miter_out[(ei + 1) % pn]
-			# Inner: overlap (пересекаются), на границе — без overlap
-			if not p1_on_boundary:
-				p1 -= dir * curb_w
-			if not p2_on_boundary:
-				p2 += dir * curb_w
-			var e1 := _sample_elevation_local(p1.x, p1.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
-			var e2 := _sample_elevation_local(p2.x, p2.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
-			var top1 := top + e1
-			var top2 := top + e2
-			var bot1 := bot + e1
-			var bot2 := bot + e2
-			var n_front := Vector3(outward.x, 0.0, outward.y)
-			var ci := curb_verts.size()
-			# Передняя грань
-			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))
-			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))
-			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))
-			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))
-			for _j in 4: curb_norms.append(n_front)
-			# Верхняя грань
-			curb_verts.append(Vector3(p1.x, top1, p1.y))
-			curb_verts.append(Vector3(p2.x, top2, p2.y))
-			curb_verts.append(Vector3(p2_out.x, top2, p2_out.y))
-			curb_verts.append(Vector3(p1_out.x, top1, p1_out.y))
-			for _j in 4: curb_norms.append(Vector3.UP)
-			# Нижняя грань
-			curb_verts.append(Vector3(p1_out.x, bot1, p1_out.y))
-			curb_verts.append(Vector3(p2_out.x, bot2, p2_out.y))
-			curb_verts.append(Vector3(p2.x, bot2, p2.y))
-			curb_verts.append(Vector3(p1.x, bot1, p1.y))
-			for _j in 4: curb_norms.append(Vector3.DOWN)
-			# Передняя грань (offset 0) — 0,1,2 / 0,2,3
-			curb_idxs.append(ci + 0); curb_idxs.append(ci + 1); curb_idxs.append(ci + 2)
-			curb_idxs.append(ci + 0); curb_idxs.append(ci + 2); curb_idxs.append(ci + 3)
-			# Верхняя грань (offset 4) — 0,2,1 / 0,3,2
-			curb_idxs.append(ci + 4); curb_idxs.append(ci + 6); curb_idxs.append(ci + 5)
-			curb_idxs.append(ci + 4); curb_idxs.append(ci + 7); curb_idxs.append(ci + 6)
-			# Нижняя грань (offset 8) — 0,1,2 / 0,2,3
-			curb_idxs.append(ci + 8); curb_idxs.append(ci + 9); curb_idxs.append(ci + 10)
-			curb_idxs.append(ci + 8); curb_idxs.append(ci + 10); curb_idxs.append(ci + 11)
-
+	# Бордюры (геометрия посчитана в воркере)
+	var curb_verts: PackedVector3Array = geo.get("curb_verts", PackedVector3Array())
 	if curb_verts.size() > 0:
 		var curb_arrays := []
 		curb_arrays.resize(Mesh.ARRAY_MAX)
 		curb_arrays[Mesh.ARRAY_VERTEX] = curb_verts
-		curb_arrays[Mesh.ARRAY_NORMAL] = curb_norms
-		curb_arrays[Mesh.ARRAY_INDEX] = curb_idxs
+		curb_arrays[Mesh.ARRAY_NORMAL] = geo.get("curb_norms", PackedVector3Array())
+		curb_arrays[Mesh.ARRAY_INDEX] = geo.get("curb_idxs", PackedInt32Array())
 		var curb_mesh := ArrayMesh.new()
 		curb_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, curb_arrays)
 		_rs_add_mesh(chunk_key, curb_mesh, _curb_material, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_CURB)
 
-	# Split terrain polygons into 5m grid cells — same as sidewalk grid.
-	# Terrain and sidewalk both sample _sample_elevation at 5m multiples, so
-	# within each 5m triangle sidewalk = terrain + height_offset exactly.
-	# Coarser terrain grid causes linear interpolation to exceed bicubic at
-	# concave points, making terrain poke through sidewalks.
-	var grid_polys: Array[PackedVector2Array] = []
-	for poly in terrain_polys:
-		grid_polys.append_array(_split_polygon_by_grid(poly, 5.0))
-
-	# Триангулируем полигоны
-	var all_vertices := PackedVector3Array()
-	var all_uvs := PackedVector2Array()
-	var all_normals := PackedVector3Array()
-	var all_indices := PackedInt32Array()
-	var uv_scale := 0.25
-	var total_tris := 0
-
-	for poly in grid_polys:
-		var indices := _triangulate_cell_nw_se(poly)
-		if indices.size() < 3:
-			continue
-		var base_idx: int = all_vertices.size()
-		for p in poly:
-			var h := sidewalk_height + _sample_elevation_local(p.x, p.y, _te_has_elev, _te_grid, _te_grid_res, _te_base_x, _te_base_z, _te_step)
-			all_vertices.append(Vector3(p.x, h, p.y))
-			all_uvs.append(Vector2(p.x * uv_scale, p.y * uv_scale))
-			all_normals.append(Vector3.UP)
-		for idx in indices:
-			all_indices.append(base_idx + idx)
-		total_tris += indices.size() / 3
-
+	var all_vertices: PackedVector3Array = geo.get("t_verts", PackedVector3Array())
+	var all_uvs: PackedVector2Array = geo.get("t_uvs", PackedVector2Array())
+	var all_normals: PackedVector3Array = geo.get("t_norms", PackedVector3Array())
+	var all_indices: PackedInt32Array = geo.get("t_idxs", PackedInt32Array())
 	if all_indices.is_empty():
 		return
 
@@ -22001,13 +22617,9 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 
 	_rs_add_mesh(chunk_key, arr_mesh, material, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_TERRAIN)
 
-	# Ground plane: same polygons, 0.5m below raw elevation (fills holes)
-	if enable_ground_plane and enable_elevation:
-		var gp_verts := PackedVector3Array()
-		gp_verts.resize(all_vertices.size())
-		for vi in all_vertices.size():
-			var v := all_vertices[vi]
-			gp_verts[vi] = Vector3(v.x, v.y - sidewalk_height, v.z)
+	# Ground plane: vertices уже посчитаны в воркере (0.11м ниже)
+	var gp_verts: PackedVector3Array = geo.get("gp_verts", PackedVector3Array())
+	if gp_verts.size() > 0:
 		var gp_arrays := []
 		gp_arrays.resize(Mesh.ARRAY_MAX)
 		gp_arrays[Mesh.ARRAY_VERTEX] = gp_verts
@@ -22030,8 +22642,6 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, terrain_polys: Ar
 
 	if _draw_call_logging_enabled:
 		_draw_call_stats["terrain"] += 1
-
-	# Применяем elevation если уже готов
 
 
 
@@ -25980,6 +26590,52 @@ func _process_road_extract_queue() -> void:
 		_extract_road_for_traffic_fast(item.points, item.tags)
 		if not _initial_loading and (Time.get_ticks_usec() - t0) > budget_us:
 			break
+
+
+## Воркер-тред: считает геометрию фасада (тяжёлый цикл ~150мс) вне главного потока.
+## Только чтение статик-кэшей (atom-presence пред-прогрет). Результат — в _facade_results.
+func _compute_facade_thread(task: Dictionary) -> void:
+	var fa: FacadeAssembler = task["fa"]
+	var ok := false
+	if is_instance_valid(fa):
+		ok = fa.compute(task["points"], task["height"], task["base_elev"],
+				task["fnd_h"], task["way_id"], task["arch"], task["floors"])
+	_facade_mutex.lock()
+	if ok:
+		_facade_results.append(task)
+	_pending_facade_tasks -= 1
+	_facade_mutex.unlock()
+
+
+## Главный поток: commit готовых фасадов (создание MeshInstance, дёшево). Бюджет на кадр.
+func _process_facade_results() -> void:
+	if _facade_results.is_empty():
+		return
+	_facade_mutex.lock()
+	var batch: Array = _facade_results
+	_facade_results = []
+	_facade_mutex.unlock()
+
+	var t0 := Time.get_ticks_usec()
+	var budget_us: int = 500000 if _initial_loading else 4000
+	var applied := 0
+	for task in batch:
+		var parent: Node3D = task["parent"]
+		var fa: FacadeAssembler = task["fa"]
+		if is_instance_valid(parent) and int(task["gen"]) == _load_generation \
+				and _is_chunk_alive_for_async_work(task["chunk_key"]) and is_instance_valid(fa):
+			fa.commit(parent)
+			_facade_emission_materials.append_array(fa.emission_materials)
+		applied += 1
+		if applied > 1 and (Time.get_ticks_usec() - t0) > budget_us:
+			break
+
+	# Вернуть необработанные обратно
+	if applied < batch.size():
+		_facade_mutex.lock()
+		for i in range(applied, batch.size()):
+			_facade_results.append(batch[i])
+		_facade_mutex.unlock()
 
 
 # Fast variant: accepts pre-computed local_points

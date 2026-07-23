@@ -61,8 +61,13 @@ const Z_VSEAM  := 0.045
 
 # Static cache: archetype id → resolved archetype Dictionary.
 static var _cache: Dictionary = {}
-# Static texture cache: path → Texture2D|null.
+# Static texture cache: path → Texture2D|null. WRITTEN only on the main thread (commit/_load_tex).
 static var _tex_cache: Dictionary = {}
+static var _main_thread_id: int = 0  # set in prewarm_atom_cache (main thread) — guards off-main load()
+# Static atom-presence cache: path → bool. Pre-warmed on the main thread (prewarm_atom_cache),
+# then READ-ONLY during threaded compute() — separate from _tex_cache so the worker thread
+# never touches a dict the main thread is writing (no data race).
+static var _atom_exists: Dictionary = {}
 
 # Per-build mesh accumulators: atom_path → {verts, uvs, normals, indices, alpha}.
 var _batches: Dictionary = {}
@@ -144,8 +149,24 @@ func build(
 		way_id: int,
 		archetype: Dictionary,
 		floor_count: int = 0) -> void:
+	# Synchronous path (backward compat): compute geometry then commit nodes.
+	if compute(points, building_height, base_elev, foundation_h, way_id, archetype, floor_count):
+		commit(parent)
+
+
+## Computes facade geometry into _batches + edge_patterns. THREAD-SAFE: no Node access,
+## no texture loading. Requires prewarm_atom_cache() on the main thread beforehand so the
+## atom-presence cache (_tex_cache) is read-only here. Returns true if geometry was produced.
+func compute(
+		points: PackedVector2Array,
+		building_height: float,
+		base_elev: float,
+		foundation_h: float,
+		way_id: int,
+		archetype: Dictionary,
+		floor_count: int = 0) -> bool:
 	if points.size() < 3 or archetype.is_empty():
-		return
+		return false
 	_batches.clear()
 	emission_materials.clear()
 	edge_patterns.clear()
@@ -156,7 +177,7 @@ func build(
 	var roof_y       := base_elev + building_height
 	var avail_h      := roof_y - foundation_y
 	if avail_h <= 0.5:
-		return
+		return false
 
 	if floor_count <= 0:
 		floor_count = maxi(2, roundi(avail_h / 3.2))
@@ -188,7 +209,14 @@ func build(
 		_build_edge(p1, p2, edge_len, foundation_y, floor_h, seam_h,
 				crown_h, floor_count, is_ccw, edge_idx, archetype, edge_class)
 
-	# Commit accumulated geometry as MeshInstance3D children.
+	return not _batches.is_empty()
+
+
+## Commits the computed geometry as MeshInstance3D children. MAIN THREAD ONLY
+## (creates meshes/materials, loads textures, adds nodes). Call after compute().
+func commit(parent: Node3D) -> void:
+	if not is_instance_valid(parent):
+		return
 	for atom_path: String in _batches.keys():
 		var batch: Dictionary = _batches[atom_path]
 		var verts: PackedVector3Array = batch["verts"]
@@ -502,10 +530,11 @@ func _pick_atom(category: String, floor_idx: int, edge_idx: int, slot_idx: int, 
 	h = h * 1103515245 + 12345 + kind      * 2053
 	h = h & 0x7FFFFFFF
 	var path: String = arr[h % arr.size()]
-	# Presence check (cached).
-	if not _tex_cache.has(path):
-		_tex_cache[path] = ResourceLoader.exists(path)
-	return path if _tex_cache[path] else ""
+	# Presence check via read-only _atom_exists (pre-warmed on main thread). If a path
+	# wasn't pre-warmed, fall back to a non-caching exists() check (thread-safe, no write).
+	if _atom_exists.has(path):
+		return path if _atom_exists[path] else ""
+	return path if ResourceLoader.exists(path) else ""
 
 
 # ── Quad emission ──────────────────────────────────────────────────────────
@@ -669,6 +698,10 @@ func _emission_path_for(atom_path: String) -> String:
 	var suffix := base.substr(dash + 1)       # e.g. "1"
 	var emit_path := dir + prefix + "-emission-" + suffix + ".png"
 	if not _tex_cache.has(emit_path):
+		# Off-main cache miss: never write the shared cache from a worker (race) —
+		# treat as "no emission". Prewarm fills this on the main thread.
+		if _main_thread_id != 0 and OS.get_thread_caller_id() != _main_thread_id:
+			return ""
 		_tex_cache[emit_path] = ResourceLoader.exists(emit_path)
 	if _tex_cache[emit_path]:
 		return emit_path
@@ -678,6 +711,10 @@ func _emission_path_for(atom_path: String) -> String:
 func _load_tex(path: String) -> Texture2D:
 	if _tex_cache.has(path) and _tex_cache[path] is Texture2D:
 		return _tex_cache[path]
+	# Off-main cache miss: load() is main-thread-only and writing _tex_cache from a
+	# worker races → crash. Skip gracefully (prewarm should have filled this).
+	if _main_thread_id != 0 and OS.get_thread_caller_id() != _main_thread_id:
+		return null
 	var tex: Texture2D = null
 	if ResourceLoader.exists(path):
 		tex = load(path)
@@ -708,6 +745,50 @@ static func _ensure_loaded() -> void:
 					f.close()
 			fname = dir.get_next()
 		dir.list_dir_end()
+
+
+## Pre-resolves atom-presence for ALL archetypes into the static _tex_cache on the MAIN
+## thread. compute() reads _tex_cache via _pick_atom; pre-warming here means the worker
+## thread never WRITES the shared cache (no data race). Safe to call repeatedly.
+static func prewarm_atom_cache() -> void:
+	_main_thread_id = OS.get_thread_caller_id()  # prewarm runs on the main thread
+	_ensure_loaded()
+	for arch_id: String in _cache:
+		var ra: Dictionary = _cache[arch_id].get("_resolved_atoms", {})
+		for category: String in ra:
+			var paths = ra[category]
+			if paths is Array:
+				for p in paths:
+					var ps := str(p)
+					if not _atom_exists.has(ps):
+						_atom_exists[ps] = ResourceLoader.exists(ps)
+					# CRITICAL: pre-LOAD the actual textures (atom + emission) into the
+					# shared static _tex_cache on the MAIN thread. compute() runs on a
+					# worker and calls _load_tex/_emission_path_for to read texture sizes
+					# and emission presence; load() is main-thread-only and writing
+					# _tex_cache from the worker races (→ crash). Pre-filling here makes
+					# both worker AND commit pure cache reads — nobody writes _tex_cache.
+					if _atom_exists[ps] and not (_tex_cache.has(ps) and _tex_cache[ps] is Texture2D):
+						_tex_cache[ps] = load(ps)
+					_prewarm_emission(ps)
+
+
+## Pre-resolves the emission sibling of an atom path into _tex_cache (main thread).
+## Mirrors _emission_path_for's derivation, but LOADS the texture (or stores false)
+## so the worker's _emission_path_for / commit's _load_tex never write the cache.
+static func _prewarm_emission(atom_path: String) -> void:
+	var dir := atom_path.get_base_dir() + "/"
+	var base := atom_path.get_file().get_basename()
+	var dash := base.rfind("-")
+	if dash < 0:
+		return
+	var emit_path := dir + base.substr(0, dash) + "-emission-" + base.substr(dash + 1) + ".png"
+	if _tex_cache.has(emit_path) and _tex_cache[emit_path] is Texture2D:
+		return
+	if ResourceLoader.exists(emit_path):
+		_tex_cache[emit_path] = load(emit_path)   # Texture2D (truthy → presence ok)
+	else:
+		_tex_cache[emit_path] = false             # presence: missing
 
 
 # Pre-resolve all atom file references into absolute paths so runtime code
