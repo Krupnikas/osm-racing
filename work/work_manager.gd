@@ -783,6 +783,7 @@ func _straight_line_fallback(from_pos: Vector3, to_pos: Vector3) -> Array:
 
 
 func _update_minimap_pickups() -> void:
+	print("WorkManager: update minimap pickups (minimap=%s, orders=%d)" % [_minimap != null, _available_orders.size()])
 	if not _minimap:
 		return
 	var positions: Array = []

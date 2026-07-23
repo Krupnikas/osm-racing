@@ -16,6 +16,15 @@ var _pending_race_track = null
 
 
 func _ready() -> void:
+	# TEST-ONLY (env RACE_WORKTEST=<сек>): headless-запуск режима работы (= карьера «Выезд в город»).
+	if OS.get_environment("RACE_WORKTEST") != "":
+		RaceState.is_work_mode = true
+		RaceState.free_roam_location = "Череповец"
+		RaceState.free_roam_lat = 59.150406
+		RaceState.free_roam_lon = 37.948805
+		get_tree().create_timer(maxf(20.0, float(OS.get_environment("RACE_WORKTEST")))).timeout.connect(
+			func() -> void: get_tree().quit())
+
 	var new_car := CarSpawner.replace_player_car(self)
 	_terrain = $OSMTerrain
 	_car = new_car if new_car else $Car
@@ -86,6 +95,9 @@ func _ready() -> void:
 
 	await get_tree().process_frame
 	_start_loading()
+
+	if RaceState.is_work_mode:
+		_setup_work_mode()
 
 
 func _race_linedump_arm() -> void:
@@ -315,9 +327,6 @@ func _autotest_report() -> void:
 			var tr: Array = s.trace
 			for k in range(0, tr.size(), 2):
 				print("      [%s] %s" % [nm, tr[k]])
-
-	if RaceState.is_work_mode:
-		_setup_work_mode()
 
 
 func _start_loading() -> void:
