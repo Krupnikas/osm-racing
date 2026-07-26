@@ -561,7 +561,7 @@ func enable_night_mode() -> void:
 
 		# Tonemap — Reinhard (как дневной дефолт), ночью повышенная экспозиция
 		_environment.tonemap_mode = Environment.TONE_MAPPER_REINHARDT
-		_environment.tonemap_exposure = 2.25
+		_environment.tonemap_exposure = 1.5
 		_environment.tonemap_white = 6.0
 
 		# Насыщенность неона

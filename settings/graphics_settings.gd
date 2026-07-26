@@ -496,60 +496,15 @@ func _apply_audio() -> void:
 
 
 func _load_settings() -> void:
-	var config := ConfigFile.new()
-	var err := config.load("user://graphics.cfg")
-	if err == OK:
-		print("GraphicsSettings: Loading settings from file...")
-		ssr_enabled = config.get_value("graphics", "ssr", false)
-		fog_enabled = config.get_value("graphics", "fog", true)
-		glow_enabled = config.get_value("graphics", "glow", true)
-		ssao_enabled = config.get_value("graphics", "ssao", true)
-		sdfgi_enabled = config.get_value("graphics", "sdfgi", true)
-		normal_maps_enabled = config.get_value("graphics", "normal_maps", true)
-		clouds_enabled = config.get_value("graphics", "clouds", true)
-		msaa_mode = config.get_value("graphics", "msaa", Viewport.MSAA_4X)
-		taa_enabled = config.get_value("graphics", "taa", false)
-		fxaa_enabled = config.get_value("graphics", "fxaa", false)
-		motion_blur_enabled = config.get_value("graphics", "motion_blur", false)
-		dof_enabled = config.get_value("graphics", "dof", false)
-		vignette_enabled = config.get_value("graphics", "vignette", false)  # Дефолт false как при инициализации
-		simplified_trees = config.get_value("graphics", "simplified_trees", false)
-		sky_resolution = config.get_value("graphics", "sky_resolution", 1)
-		render_distance = config.get_value("graphics", "render_distance", 400.0)
-		music_volume = config.get_value("audio", "music_volume", 80.0)
-		sfx_volume = config.get_value("audio", "sfx_volume", 80.0)
-		print("GraphicsSettings: Settings loaded - FXAA: ", fxaa_enabled, ", TAA: ", taa_enabled, ", MSAA: ", msaa_mode)
-	else:
-		print("GraphicsSettings: No saved settings found (err: ", err, "), using defaults")
-		# Сохраняем дефолтные настройки в файл
-		save_settings()
+	# STATELESS: настройки графики/постпроцессинга НЕ читаются с диска — всегда берутся
+	# дефолты из кода (объявленные у переменных выше). Так устаревший user://graphics.cfg
+	# больше не перебивает правильные дефолты (напр. sdfgi/normal_maps).
+	print("GraphicsSettings: stateless — using in-code defaults (graphics.cfg ignored)")
 
 
 func save_settings() -> void:
-	var config := ConfigFile.new()
-	config.set_value("graphics", "ssr", ssr_enabled)
-	config.set_value("graphics", "fog", fog_enabled)
-	config.set_value("graphics", "glow", glow_enabled)
-	config.set_value("graphics", "ssao", ssao_enabled)
-	config.set_value("graphics", "sdfgi", sdfgi_enabled)
-	config.set_value("graphics", "normal_maps", normal_maps_enabled)
-	config.set_value("graphics", "clouds", clouds_enabled)
-	config.set_value("graphics", "msaa", msaa_mode)
-	config.set_value("graphics", "taa", taa_enabled)
-	config.set_value("graphics", "fxaa", fxaa_enabled)
-	config.set_value("graphics", "motion_blur", motion_blur_enabled)
-	config.set_value("graphics", "dof", dof_enabled)
-	config.set_value("graphics", "vignette", vignette_enabled)
-	config.set_value("graphics", "simplified_trees", simplified_trees)
-	config.set_value("graphics", "sky_resolution", sky_resolution)
-	config.set_value("graphics", "render_distance", render_distance)
-	config.set_value("audio", "music_volume", music_volume)
-	config.set_value("audio", "sfx_volume", sfx_volume)
-	var err := config.save("user://graphics.cfg")
-	if err == OK:
-		print("GraphicsSettings: Settings saved successfully")
-	else:
-		print("GraphicsSettings: ERROR - Failed to save settings: ", err)
+	# STATELESS: ничего не сохраняем на диск. Тумблеры (F1-F10) действуют только на сессию.
+	pass
 
 
 func get_settings_text() -> String:
