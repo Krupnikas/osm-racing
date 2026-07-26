@@ -1,0 +1,56 @@
+[gd_scene load_steps=11 format=3 uid="uid://visual_lookdev_001"]
+
+[ext_resource type="Script" path="res://tests/visual_lookdev.gd" id="ctrl"]
+[ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="osm"]
+[ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="car"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/vehicle_controllergd.gd" id="controller"]
+[ext_resource type="Script" path="res://traffic/traffic_manager.gd" id="traffic"]
+[ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="night"]
+[ext_resource type="Script" path="res://settings/graphics_settings.gd" id="graphics"]
+[ext_resource type="Script" path="res://settings/color_grading.gd" id="colorgrade"]
+[ext_resource type="Script" path="res://ui/postprocess_overlay.gd" id="postproc"]
+[ext_resource type="PackedScene" uid="uid://world_lighting_day_001" path="res://rendering/world_lighting.tscn" id="lighting"]
+
+[node name="VisualLookDev" type="Node3D"]
+script = ExtResource("ctrl")
+
+[node name="OSMTerrain" type="Node3D" parent="." groups=["osm_terrain"]]
+script = ExtResource("osm")
+start_lat = 59.149827
+start_lon = 37.948859
+spawn_lat = 59.149827
+spawn_lon = 37.948859
+chunk_size = 210.0
+enable_elevation = true
+load_distance = 400.0
+unload_distance = 600.0
+render_distance = 350.0
+show_debug_stats = false
+car_path = NodePath("../Car")
+
+[node name="Car" parent="." groups=["car", "player"] instance=ExtResource("car")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)
+
+[node name="VehicleController" type="Node3D" parent="Car" node_paths=PackedStringArray("vehicle_node")]
+script = ExtResource("controller")
+vehicle_node = NodePath("..")
+
+[node name="TrafficManager" type="Node" parent="."]
+script = ExtResource("traffic")
+car_path = NodePath("../Car")
+osm_terrain_path = NodePath("../OSMTerrain")
+
+[node name="NightModeManager" type="Node" parent="." groups=["night_mode_manager"]]
+script = ExtResource("night")
+is_night = false
+
+[node name="WorldLighting" parent="." instance=ExtResource("lighting")]
+
+[node name="GraphicsSettings" type="Node" parent="."]
+script = ExtResource("graphics")
+
+[node name="ColorGrading" type="CanvasLayer" parent="."]
+script = ExtResource("colorgrade")
+
+[node name="PostProcessOverlay" type="CanvasLayer" parent="."]
+script = ExtResource("postproc")

@@ -1360,11 +1360,8 @@ func _init_textures() -> void:
 		_ground_shader_material.set_shader_parameter("noise_macro_tex", _noise_textures.get("macro"))
 		_ground_shader_material.set_shader_parameter("noise_micro_tex", _noise_textures.get("micro"))
 		print("OSM: Ground shader material created")
-		# LOD2 variant: same shader but brighter to compensate mipmap darkening at distance
-		_ground_shader_material_lod2 = _ground_shader_material.duplicate()
-		_ground_shader_material_lod2.set_shader_parameter("wet_darkening", 0.3)
-		_ground_shader_material_lod2.set_shader_parameter("macro_albedo_intensity", 0.06)
-		_ground_shader_material_lod2.set_shader_parameter("dry_roughness_base", 0.80)
+		# LOD2 использует ТОТ ЖЕ материал, что LOD0 — просто более простая геометрия.
+		_ground_shader_material_lod2 = _ground_shader_material
 
 	# Прогрев кэша кастомных текстур зданий — загружаем все текстуры из textures/buildings/
 	# чтобы при генерации чанков не было фризов от файловых проверок
@@ -22207,7 +22204,10 @@ func _get_lod2_building_material(color: Color) -> StandardMaterial3D:
 
 ## Плоский террейн для LOD1/2 чанков (без вырезов дорог/зданий)
 func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void:
-	var grid_res := 21  # 210/21 = 10m cells, aligned with elevation 5m grid
+	# grid_res=42 → 5m cells (43×43 верт), совпадает с сеткой LOD0-террейна (тоже 5м) и
+	# с апскейл-сеткой высот 43×43. Это устраняет T-junction/трещины на стыке LOD0↔LOD2:
+	# граничные вершины LOD2 1:1 совпадают с вершинами LOD0 → бесшовный переход.
+	var grid_res := 42  # 210/42 = 5m cells
 	var step := chunk_size / grid_res
 	var vertices := PackedVector3Array()
 	var uvs := PackedVector2Array()
@@ -22236,12 +22236,15 @@ func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void
 	for iz in range(grid_res):
 		for ix in range(grid_res):
 			var i := iz * (grid_res + 1) + ix
+			# Winding как у LOD0 (перед-фейс вверх). Шейдер травы cull_disabled →
+			# при обратной намотке верх становится back-face, Godot инвертирует нормаль
+			# вниз → трава тёмная. Правильная намотка = верх front-face = освещён.
 			indices.append(i)
-			indices.append(i + grid_res + 1)
-			indices.append(i + 1)
 			indices.append(i + 1)
 			indices.append(i + grid_res + 1)
+			indices.append(i + 1)
 			indices.append(i + grid_res + 2)
+			indices.append(i + grid_res + 1)
 
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
@@ -22254,6 +22257,11 @@ func _create_flat_terrain(chunk_key: String, min_x: float, min_z: float) -> void
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	# Set material on surface directly (belt-and-suspenders with RS override)
 	var mat: Material = _ground_shader_material_lod2 if _ground_shader_material_lod2 else _ground_shader_material
+	if OS.has_environment("DEBUG_LOD2_MAGENTA"):
+		var dbg := StandardMaterial3D.new()
+		dbg.albedo_color = Color(1, 0, 1)
+		dbg.cull_mode = BaseMaterial3D.CULL_DISABLED
+		mat = dbg
 	if mat:
 		mesh.surface_set_material(0, mat)
 	else:
@@ -22628,9 +22636,13 @@ func _finalize_terrain_mesh(chunk_key: String, parent: Node3D, geo: Dictionary) 
 		gp_arrays[Mesh.ARRAY_INDEX] = all_indices
 		var gp_mesh := ArrayMesh.new()
 		gp_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, gp_arrays)
-		var gp_mat := StandardMaterial3D.new()
-		gp_mat.albedo_color = Color(0.35, 0.35, 0.32)
-		gp_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		# Ground plane использует ТОТ ЖЕ материал травы, что и верхний слой — иначе серый
+		# "терреин" проглядывает на стыках чанков/LOD как шов. Одинаковый материал = невидимый стык.
+		var gp_mat: Material = _ground_shader_material if _ground_shader_material else null
+		if gp_mat == null:
+			gp_mat = StandardMaterial3D.new()
+			(gp_mat as StandardMaterial3D).albedo_color = Color(0.35, 0.35, 0.32)
+			(gp_mat as StandardMaterial3D).cull_mode = BaseMaterial3D.CULL_DISABLED
 		_rs_add_mesh(chunk_key, gp_mesh, gp_mat, RenderingServer.SHADOW_CASTING_SETTING_OFF, 0.0, 0.0, RS_CAT_TERRAIN)
 
 	# Коллизия — отложенная (ConcavePolygonShape3D из реальной геометрии)

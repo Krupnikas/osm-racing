@@ -324,10 +324,10 @@ func _setup_headlights() -> void:
 		light.name = "Headlight_%d" % i
 		light.position = headlight_positions[i]
 		light.rotation_degrees = Vector3(0, 0, 0)  # Направлен вперёд (по -Z)
-		light.spot_range = 30.0
-		light.spot_angle = 45.0
-		light.light_energy = 2.0
-		light.light_color = Color(1.0, 0.95, 0.8)  # Тёплый белый
+		light.spot_range = 45.0
+		light.spot_angle = 48.0
+		light.light_energy = 5.0
+		light.light_color = Color(1.0, 0.96, 0.85)  # Тёплый белый, ярче ночью
 		light.shadow_enabled = true
 		light.visible = _is_night  # Включаются только ночью
 

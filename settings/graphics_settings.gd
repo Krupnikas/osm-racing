@@ -10,7 +10,7 @@ var ssr_enabled := false  # SSR выключен: дорого, на матов�
 var fog_enabled := true
 var glow_enabled := true
 var ssao_enabled := true
-var sdfgi_enabled := false  # SDFGI выключен по умолчанию (стоит ~12ms на M1 Pro)
+var sdfgi_enabled := true  # SDFGI ВКЛ по умолчанию (реалистичный отражённый свет; ~12ms на M1 Pro, дешевле на M-Max)
 var normal_maps_enabled := true
 var clouds_enabled := true
 
@@ -504,7 +504,7 @@ func _load_settings() -> void:
 		fog_enabled = config.get_value("graphics", "fog", true)
 		glow_enabled = config.get_value("graphics", "glow", true)
 		ssao_enabled = config.get_value("graphics", "ssao", true)
-		sdfgi_enabled = config.get_value("graphics", "sdfgi", false)
+		sdfgi_enabled = config.get_value("graphics", "sdfgi", true)
 		normal_maps_enabled = config.get_value("graphics", "normal_maps", true)
 		clouds_enabled = config.get_value("graphics", "clouds", true)
 		msaa_mode = config.get_value("graphics", "msaa", Viewport.MSAA_4X)

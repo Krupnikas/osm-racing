@@ -73,12 +73,13 @@ var _day_saturation := 1.0  # adjustment_saturation ясного дня (для 
 
 # Ночные настройки в стиле NFS Underground
 const NIGHT_SUN_ENERGY := 0.02
-const MOON_LIGHT_ENERGY := 0.2
-const MOON_LIGHT_COLOR := Color(0.7, 0.8, 1.0)
-const NIGHT_AMBIENT_COLOR := Color(0.03, 0.04, 0.08)
-const NIGHT_AMBIENT_ENERGY := 0.25
-const NIGHT_FOG_COLOR := Color(0.05, 0.06, 0.10)  # Нейтральная тёмно-синяя ночь (без NFS-фиолета), как в example-night
+const MOON_LIGHT_ENERGY := 0.55
+const MOON_LIGHT_COLOR := Color(0.62, 0.74, 1.0)
+const NIGHT_AMBIENT_COLOR := Color(0.06, 0.08, 0.16)  # насыщенный тёмно-синий (NFS), но читаемый
+const NIGHT_AMBIENT_ENERGY := 0.48
+const NIGHT_FOG_COLOR := Color(0.06, 0.08, 0.14)  # тёмно-синяя ночь с лёгким холодом
 const NIGHT_FOG_DENSITY := 0.003
+const NIGHT_SATURATION := 1.22  # приподнимаем насыщенность неона ночью
 
 # Transition
 var _transition_tween: Tween
@@ -371,7 +372,8 @@ func _create_moon_light() -> void:
 	_moon_light.light_energy = 0.0
 	_moon_light.shadow_enabled = true
 	_moon_light.directional_shadow_max_distance = 200.0
-	_moon_light.rotation_degrees = Vector3(-15, 145, 0)
+	_moon_light.light_angular_distance = 1.5  # мягкая полутень лунного света
+	_moon_light.rotation_degrees = Vector3(-52, 40, 0)  # луна высоко над горизонтом, свет сверху-сбоку
 	get_tree().current_scene.add_child(_moon_light)
 	# Диск луны в ночном небе — по реальному направлению лунного света (не хардкод),
 	# чтобы луна и её тени/подсветка совпадали. basis.z смотрит «к источнику» (в небо).
@@ -549,22 +551,26 @@ func enable_night_mode() -> void:
 		_transition_tween.tween_property(_environment, "fog_light_color", NIGHT_FOG_COLOR, 1.5)
 		_transition_tween.tween_property(_environment, "fog_density", NIGHT_FOG_DENSITY, 1.5)
 
-		# NFS Underground style bloom
+		# NFS Underground style bloom — тяжёлый цветной bloom
 		_environment.glow_enabled = true
-		_environment.glow_intensity = 1.2
-		_environment.glow_bloom = 0.2
+		_environment.glow_intensity = 1.5
+		_environment.glow_bloom = 0.35
 		_environment.glow_blend_mode = Environment.GLOW_BLEND_MODE_SCREEN
-		_environment.glow_hdr_threshold = 0.7
+		_environment.glow_hdr_threshold = 0.55
 		_environment.glow_hdr_scale = 2.0
 
-		# Tonemap
-		_environment.tonemap_mode = Environment.TONE_MAPPER_AGX
-		_environment.tonemap_exposure = 1.4
+		# Tonemap — Reinhard (как дневной дефолт), ночью повышенная экспозиция
+		_environment.tonemap_mode = Environment.TONE_MAPPER_REINHARDT
+		_environment.tonemap_exposure = 2.25
 		_environment.tonemap_white = 6.0
+
+		# Насыщенность неона
+		_environment.adjustment_enabled = true
+		_environment.adjustment_saturation = NIGHT_SATURATION
 
 		# Volumetric fog — атмосферная подсветка фонарей, но не «суп»
 		_environment.volumetric_fog_enabled = true
-		_transition_tween.tween_property(_environment, "volumetric_fog_density", 0.008, 1.5)
+		_transition_tween.tween_property(_environment, "volumetric_fog_density", 0.0035, 1.5)
 		_environment.volumetric_fog_albedo = Color(0.6, 0.65, 0.8)
 		_environment.volumetric_fog_emission = Color(0.02, 0.01, 0.03)
 		_environment.volumetric_fog_emission_energy = 0.3
@@ -636,6 +642,9 @@ func disable_night_mode() -> void:
 		_environment.tonemap_mode = _day_tonemap_mode
 		_environment.tonemap_exposure = _day_tonemap_exposure
 		_environment.tonemap_white = _day_tonemap_white
+
+		# Restore day saturation (ночью поднимали для неона)
+		_environment.adjustment_saturation = _day_saturation
 
 		# Restore volumetric fog
 		_transition_tween.tween_property(_environment, "volumetric_fog_density", _day_vfog_density, 1.5)

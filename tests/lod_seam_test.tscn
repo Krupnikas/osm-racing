@@ -1,0 +1,42 @@
+[gd_scene load_steps=8 format=3 uid="uid://lod_seam_test_001"]
+
+[ext_resource type="Script" path="res://tests/lod_seam_test.gd" id="ctrl"]
+[ext_resource type="Script" path="res://osm/osm_terrain_generator.gd" id="osm"]
+[ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="car"]
+[ext_resource type="Script" path="res://addons/gevp/scripts/vehicle_controllergd.gd" id="controller"]
+[ext_resource type="PackedScene" uid="uid://world_lighting_day_001" path="res://rendering/world_lighting.tscn" id="lighting"]
+[ext_resource type="Script" path="res://settings/graphics_settings.gd" id="graphics"]
+[ext_resource type="Script" path="res://night_mode/night_mode_manager.gd" id="night"]
+
+[node name="LODSeamTest" type="Node3D"]
+script = ExtResource("ctrl")
+
+[node name="OSMTerrain" type="Node3D" parent="." groups=["osm_terrain"]]
+script = ExtResource("osm")
+start_lat = 59.149827
+start_lon = 37.948859
+spawn_lat = 59.149827
+spawn_lon = 37.948859
+chunk_size = 210.0
+enable_elevation = true
+load_distance = 4000.0
+unload_distance = 4400.0
+render_distance = 800.0
+show_debug_stats = false
+car_path = NodePath("../Car")
+
+[node name="Car" parent="." groups=["car", "player"] instance=ExtResource("car")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)
+
+[node name="VehicleController" type="Node3D" parent="Car" node_paths=PackedStringArray("vehicle_node")]
+script = ExtResource("controller")
+vehicle_node = NodePath("..")
+
+[node name="WorldLighting" parent="." instance=ExtResource("lighting")]
+
+[node name="NightModeManager" type="Node" parent="." groups=["night_mode_manager"]]
+script = ExtResource("night")
+is_night = false
+
+[node name="GraphicsSettings" type="Node" parent="."]
+script = ExtResource("graphics")

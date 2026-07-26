@@ -1,4 +1,4 @@
-[gd_scene load_steps=20 format=3 uid="uid://bmain123"]
+[gd_scene load_steps=18 format=3 uid="uid://bmain123"]
 
 [ext_resource type="PackedScene" path="res://addons/gevp/scenes/nexia_car.tscn" id="2_car"]
 [ext_resource type="Script" path="res://race/race_manager.gd" id="20_race_mgr"]
@@ -31,67 +31,7 @@
 [ext_resource type="Script" path="res://ui/postprocess_overlay.gd" id="24_postprocess"]
 [ext_resource type="Script" path="res://car/lane_assist.gd" id="30_lane_assist"]
 [ext_resource type="Script" path="res://main.gd" id="25_main"]
-
-[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
-sky_top_color = Color(0.4, 0.6, 0.9, 1)
-sky_horizon_color = Color(0.7, 0.8, 0.9, 1)
-ground_bottom_color = Color(0.2, 0.2, 0.2, 1)
-ground_horizon_color = Color(0.5, 0.5, 0.5, 1)
-
-[sub_resource type="Sky" id="Sky_main"]
-sky_material = SubResource("ProceduralSkyMaterial_sky")
-
-[sub_resource type="Environment" id="Environment_main"]
-background_mode = 2
-sky = SubResource("Sky_main")
-ambient_light_source = 3
-ambient_light_color = Color(0.5, 0.5, 0.5, 1)
-ambient_light_sky_contribution = 1.0
-ambient_light_energy = 1.0
-tonemap_mode = 4
-tonemap_exposure = 1.4
-tonemap_white = 6.0
-tonemap_agx_white = 8.0
-adjustment_enabled = true
-adjustment_brightness = 1.0
-adjustment_contrast = 1.08
-adjustment_saturation = 0.9
-ssao_enabled = true
-ssr_enabled = false
-ssr_max_steps = 64
-ssr_fade_in = 0.15
-ssr_fade_out = 2.0
-glow_enabled = true
-glow_blend_mode = 1
-glow_intensity = 0.15
-glow_bloom = 0.0
-glow_hdr_threshold = 1.5
-sdfgi_enabled = false
-sdfgi_cascades = 4
-sdfgi_min_cell_size = 0.5
-sdfgi_cascade0_distance = 12.8
-sdfgi_energy = 0.8
-sdfgi_normal_bias = 1.1
-sdfgi_probe_bias = 1.1
-ssil_enabled = false
-ssil_radius = 5.0
-ssil_intensity = 0.8
-ssil_normal_rejection = 1.0
-fog_enabled = true
-fog_light_color = Color(0.72, 0.75, 0.8, 1)
-fog_density = 0.005
-fog_sky_affect = 0.0
-fog_aerial_perspective = 0.9
-fog_sun_scatter = 0.3
-volumetric_fog_enabled = false
-volumetric_fog_density = 0.005
-volumetric_fog_albedo = Color(1, 1, 1, 1)
-volumetric_fog_emission = Color(0, 0, 0, 1)
-volumetric_fog_emission_energy = 0.0
-volumetric_fog_length = 200.0
-volumetric_fog_detail_spread = 0.8
-volumetric_fog_sky_affect = 0.0
-volumetric_fog_ambient_inject = 0.0
+[ext_resource type="PackedScene" uid="uid://world_lighting_day_001" path="res://rendering/world_lighting.tscn" id="26_lighting"]
 
 [sub_resource type="WorldBoundaryShape3D" id="WorldBoundaryShape3D_fallback"]
 
@@ -154,21 +94,7 @@ target = NodePath("../../Car")
 script = ExtResource("16_orbit_cam")
 target = NodePath("../../Car")
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
-transform = Transform3D(0.866025, -0.353553, 0.353553, 0, 0.707107, 0.707107, -0.5, -0.612372, 0.612372, 0, 20, 0)
-light_color = Color(0.95, 0.95, 1, 1)
-light_energy = 1.0
-light_angular_distance = 0.6
-shadow_enabled = true
-blend_splits = true
-directional_shadow_max_distance = 250.0
-directional_shadow_split_1 = 0.06
-directional_shadow_split_2 = 0.16
-directional_shadow_split_3 = 0.4
-directional_shadow_fade_start = 0.6
-
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
-environment = SubResource("Environment_main")
+[node name="WorldLighting" parent="." instance=ExtResource("26_lighting")]
 
 [node name="UI" type="CanvasLayer" parent="."]
 
