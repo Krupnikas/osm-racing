@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://lod_forward_test_001"]
+
+[ext_resource type="Script" path="res://tests/lod_forward_test.gd" id="ctrl"]
+
+[node name="LODForwardTest" type="Node"]
+script = ExtResource("ctrl")

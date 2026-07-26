@@ -919,9 +919,14 @@ var _chunk_boundary_meshes: Dictionary = {}  # chunk_key -> MeshInstance3D
 @export var forward_load_multiplier := 2.0   # Множитель дистанции вперёд
 @export var side_load_multiplier := 0.5      # Множитель дистанции сбоку
 @export var min_speed_for_prediction := 5.0  # м/с - ниже этого радиальная загрузка
+# Скоростной форсаж LOD0 ВПЕРЁД по движению: eff_lod0 = lod0_distance + speed*factor*forwardness.
+# Чем быстрее едем — тем дальше вперёд полная детализация (чтобы не въезжать в LOD2/пустоту).
+@export var lod0_speed_factor := 6.0         # доп. метры LOD0 вперёд на каждый м/с скорости
+@export var lod0_forward_max_bonus := 300.0  # потолок форсажа LOD0 вперёд (м)
 
 var _smoothed_velocity := Vector3.ZERO
 var _velocity_smoothing := 0.7  # Фактор сглаживания скорости
+var _lod_fwd_speed := 0.0  # сглаженная скорость для форсажа LOD0 вперёд (без дёрганья LOD)
 var _chunk_load_queue: Array[Dictionary] = []  # Очередь загрузки {key, priority, distance}
 var _current_load_count := 0
 const MAX_CONCURRENT_LOADS := 5  # Макс параллельных запросов к OSM API (увеличено для маленьких чанков)
@@ -2830,7 +2835,7 @@ func _get_initial_chunks(player_pos: Vector3) -> Array[String]:
 	return result
 
 
-func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
+func _get_needed_chunks(player_pos: Vector3, speed: float = 0.0, min_lod: int = 0) -> Array[String]:
 	var result: Array[String] = []
 	var player_chunk_x := int(floor(player_pos.x / chunk_size))
 	var player_chunk_z := int(floor(player_pos.z / chunk_size))
@@ -2840,9 +2845,13 @@ func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 	var max_load_dist := lod2_distance if enable_lod else lod0_distance
 	var radius_chunks := int(ceil(max_load_dist / chunk_size))
 
-	# Направление для фильтра: не грузим LOD2 позади камеры
+	# Направление движения: LOD2 позади не грузим + LOD0 форсируем вперёд по скорости
 	var vel_dir := Vector2(_cached_velocity_dir.x, _cached_velocity_dir.z)
 	var has_dir := vel_dir.length_squared() > 0.5
+	# Скоростной бонус LOD0 вперёд (одинаков для всех чанков, домножается на forwardness)
+	var fwd_bonus := 0.0
+	if has_dir and speed > min_speed_for_prediction:
+		fwd_bonus = minf(speed * lod0_speed_factor, lod0_forward_max_bonus)
 
 	for dx in range(-radius_chunks, radius_chunks + 1):
 		for dz in range(-radius_chunks, radius_chunks + 1):
@@ -2851,9 +2860,17 @@ func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 			var chunk_center := Vector2(cx * chunk_size + chunk_size / 2, cz * chunk_size + chunk_size / 2)
 			var dist := player_xz.distance_to(chunk_center)
 
+			# forwardness ∈ [-1..1]: 1 — прямо по курсу, <0 — сзади
+			var forwardness := 0.0
+			if has_dir and dist > 1.0:
+				forwardness = vel_dir.dot((chunk_center - player_xz) / dist)
+
+			# LOD0 вперёд растёт со скоростью; по бокам/сзади — базовый lod0_distance
+			var eff_lod0 := lod0_distance + fwd_bonus * maxf(forwardness, 0.0)
+
 			# Определяем LOD уровень по дистанции
 			var lod := -1
-			if dist <= lod0_distance:
+			if dist <= eff_lod0:
 				lod = 0
 			elif enable_lod and dist <= lod1_distance:
 				lod = 1
@@ -2862,10 +2879,13 @@ func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 			else:
 				continue
 
+			# Пре-стрим вдали (min_lod=2): не создаём висящий LOD0-остров у ahead_pos
+			if lod < min_lod:
+				lod = min_lod
+
 			# LOD2 позади камеры — не загружаем (экономим ~60% чанков)
 			if lod == 2 and has_dir and dist > chunk_size * 2:
-				var to_chunk := (chunk_center - player_xz).normalized()
-				if vel_dir.dot(to_chunk) < -0.3:
+				if forwardness < -0.3:
 					continue
 
 			if chunk_filter.is_valid() and not chunk_filter.call(cx, cz):
@@ -2877,7 +2897,7 @@ func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 				var current_lod: int = _chunk_lod.get(key, 0)
 				if lod > current_lod:
 					# Понижение LOD — требуем доп. расстояние
-					var boundary := lod0_distance if current_lod == 0 else lod1_distance
+					var boundary := eff_lod0 if current_lod == 0 else lod1_distance
 					if dist < boundary + lod_hysteresis:
 						lod = current_lod
 
@@ -2891,14 +2911,15 @@ func _get_needed_chunks(player_pos: Vector3) -> Array[String]:
 func _update_chunks_simple_predictive(player_pos: Vector3, velocity: Vector3) -> void:
 	var speed := velocity.length()
 
-	# Базовые чанки вокруг игрока (всегда)
-	var needed_chunks := _get_needed_chunks(player_pos)
+	# Базовые чанки вокруг игрока (LOD0 форсируется вперёд по сглаженной скорости)
+	_lod_fwd_speed = lerpf(_lod_fwd_speed, speed, 0.1)
+	var needed_chunks := _get_needed_chunks(player_pos, _lod_fwd_speed)
 
-	# При быстром движении добавляем чанки впереди
+	# При быстром движении добавляем чанки впереди (пре-стрим — только LOD2, без LOD0-острова)
 	if speed > min_speed_for_prediction:
 		var look_ahead := velocity.normalized() * load_distance * forward_load_multiplier
 		var ahead_pos := player_pos + look_ahead
-		var ahead_chunks := _get_needed_chunks(ahead_pos)
+		var ahead_chunks := _get_needed_chunks(ahead_pos, 0.0, 2)
 		for chunk_key in ahead_chunks:
 			if chunk_key not in needed_chunks:
 				needed_chunks.append(chunk_key)

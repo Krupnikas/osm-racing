@@ -30,6 +30,7 @@ RaceState="*res://race/race_state.gd"
 CarSettings="*res://settings/car_settings.gd"
 CareerState="*res://career/career_state.gd"
 UI="*res://ui/ui_constants.gd"
+AppShutdown="*res://settings/app_shutdown.gd"
 
 [display]
 

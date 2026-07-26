@@ -436,7 +436,7 @@ func _on_other_pressed() -> void:
 
 func _on_quit_pressed() -> void:
 	"""Выход из игры"""
-	get_tree().quit()
+	AppShutdown.quit_clean()
 
 
 func _on_test_tracks_pressed() -> void:

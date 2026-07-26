@@ -25,6 +25,7 @@ var cam_pitch := -14.0
 var do_quit := true
 var lod0_dist := 105.0   # --lod0-dist= : поднять чтобы сосед тоже стал LOD0 (диагностика)
 var with_buildings := false  # --with-buildings : показать LOD2 коробки зданий
+var wm_quit := false  # --wm-quit : проверить чистый выход через NOTIFICATION_WM_CLOSE_REQUEST
 
 const OUT_DIR := "res://screenshots/visual/"
 
@@ -39,6 +40,7 @@ func _ready() -> void:
 		elif a.begins_with("--cam-pitch="): cam_pitch = float(a.substr(12))
 		elif a.begins_with("--lod0-dist="): lod0_dist = float(a.substr(12))
 		elif a == "--with-buildings": with_buildings = true
+		elif a == "--wm-quit": wm_quit = true
 		elif a == "--no-quit": do_quit = false
 
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(OUT_DIR))
@@ -132,7 +134,15 @@ func _run() -> void:
 	_shoot("lod_seam")
 
 	print("[seam] DONE")
-	if do_quit:
+	if wm_quit:
+		# Симулируем закрытие окна / Cmd+Q → должен сработать AppShutdown автолоад (чистый выход).
+		print("[seam] triggering NOTIFICATION_WM_CLOSE_REQUEST (AppShutdown should hard-exit cleanly)")
+		await _settle(2)
+		get_tree().root.propagate_notification(NOTIFICATION_WM_CLOSE_REQUEST)
+		await get_tree().create_timer(3.0).timeout
+		print("[seam] ERROR: still alive — AppShutdown did NOT catch WM_CLOSE_REQUEST")
+		OS.kill(OS.get_process_id())
+	elif do_quit:
 		await _safe_quit()
 
 
