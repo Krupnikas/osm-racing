@@ -95,6 +95,11 @@ Root cause and fixes (all in [osm/osm_terrain_generator.gd](../osm/osm_terrain_g
 Height offset (`0.11`), UV scale (world×0.25), normals (UP), and elevation function are already
 identical between LOD0 and LOD2, so with the above the transition is seamless.
 
+**LOD2 building boxes** had the same class of bug (`_generate_lod2_buildings`): walls set the
+outward normal via `normal_sign` but used a fixed triangle winding, so for CCW polygons (most OSM
+buildings) the outward wall face was a *back* face → `CULL_BACK` culled it → boxes looked inside-out.
+Fixed by normalizing each polygon to CW winding (reverse if CCW) so the outward face is a front face.
+
 ### LOD seam test
 [tests/lod_seam_test.tscn](../tests/lod_seam_test.tscn) forces the player's own chunk to LOD0 and
 all neighbours to flat LOD2 (via `lod0_distance=105` < chunk size), buildings/vegetation off, camera

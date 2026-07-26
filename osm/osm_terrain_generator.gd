@@ -22327,8 +22327,13 @@ func _generate_lod2_buildings(chunk_key: String, osm_data: Dictionary, min_x: fl
 		var building_height := _compute_building_height(tags)
 		var color := _compute_building_color(tags)
 		var base_elev := 0.11 + _sample_elevation(center_x2, center_z2)
-		var is_ccw := _is_polygon_ccw(points)
-		var normal_sign := -1.0 if is_ccw else 1.0
+		# OSM-полигоны зданий обычно CCW. Обмотка стен ниже фиксирована (0,1,2/0,2,3),
+		# поэтому при CCW внешняя грань становилась back-face → при CULL_BACK коробка
+		# выглядела вывернутой (видно изнанку). Нормализуем к CW, тогда внешняя грань =
+		# front-face и нормаль наружу совпадает с обмоткой.
+		if _is_polygon_ccw(points):
+			points.reverse()
+		var normal_sign := 1.0
 
 		# Квантизируем цвет для группировки
 		var r := snappedf(color.r, 0.1)

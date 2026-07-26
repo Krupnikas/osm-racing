@@ -24,6 +24,7 @@ var cam_back := 7.0
 var cam_pitch := -14.0
 var do_quit := true
 var lod0_dist := 105.0   # --lod0-dist= : поднять чтобы сосед тоже стал LOD0 (диагностика)
+var with_buildings := false  # --with-buildings : показать LOD2 коробки зданий
 
 const OUT_DIR := "res://screenshots/visual/"
 
@@ -37,6 +38,7 @@ func _ready() -> void:
 		elif a.begins_with("--cam-back="): cam_back = float(a.substr(11))
 		elif a.begins_with("--cam-pitch="): cam_pitch = float(a.substr(12))
 		elif a.begins_with("--lod0-dist="): lod0_dist = float(a.substr(12))
+		elif a == "--with-buildings": with_buildings = true
 		elif a == "--no-quit": do_quit = false
 
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(OUT_DIR))
@@ -52,8 +54,8 @@ func _ready() -> void:
 		osm_terrain.lod1_distance = lod0_dist    # пустая полоса LOD1 → сосед сразу LOD2
 		osm_terrain.lod2_distance = 4000.0
 		osm_terrain.lod_hysteresis = 0.0
-		# Чистый вид на стык травы: без зданий/растительности
-		osm_terrain.enable_buildings = false
+		# Чистый вид на стык травы: без зданий/растительности (если не --with-buildings)
+		osm_terrain.enable_buildings = with_buildings
 		osm_terrain.enable_vegetation = false
 
 	camera = Camera3D.new()
