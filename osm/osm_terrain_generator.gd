@@ -171,6 +171,11 @@ var chunk_filter: Callable = Callable()
 
 ## Тестовый режим: провайдер данных вместо HTTP (Callable(lat, lon, size) -> Dictionary)
 var test_data_provider: Callable = Callable()
+
+## Offline OSM: bundled .osm.pbf source (set in _ready via _init_local_osm_source).
+## When present, per-chunk loading reads from it instead of the Overpass network path.
+var _local_osm_source: LocalOSMSource = null
+var _use_local_osm := false
 ## Тестовый режим: провайдер высот (Callable(chunk_key, lat, lon) -> Dictionary)
 
 # Elevation system
@@ -1033,6 +1038,34 @@ func _apply_fixed_origin() -> void:
 		_world_offset = Vector2(float(_world_offset_chunks.x) * chunk_size, float(_world_offset_chunks.y) * chunk_size)
 
 
+## Offline OSM: if a bundled .osm.pbf covers the play location, load the whole world
+## from it on a worker thread (no Overpass). Falls back to the network path otherwise.
+## Must run after _apply_fixed_origin() so spawn/origin are resolved.
+func _init_local_osm_source() -> void:
+	if start_lat == 0.0:
+		return  # test track (fake_osm) — uses test_data_provider, no local source
+	var loc_lat: float = spawn_lat if spawn_lat != 0.0 else start_lat
+	var loc_lon: float = spawn_lon if spawn_lon != 0.0 else start_lon
+	var path := _cli_osm_file_override()
+	if path == "":
+		path = LocalOSMSource.select_file_for(loc_lat, loc_lon)
+	if path == "":
+		print("OSM: no bundled .osm.pbf covers %.4f,%.4f — using network Overpass" % [loc_lat, loc_lon])
+		return
+	print("OSM: OFFLINE mode — building world from %s (no Overpass)" % path)
+	_local_osm_source = LocalOSMSource.new()
+	_local_osm_source.begin_load(path)
+	_use_local_osm = true
+
+
+## Reads an optional `--osm-file=res://...` command-line override; "" if not given.
+func _cli_osm_file_override() -> String:
+	for arg in OS.get_cmdline_args():
+		if arg.begins_with("--osm-file="):
+			return arg.substr("--osm-file=".length())
+	return ""
+
+
 func _ready() -> void:
 	# Cache cosine for _latlon_to_local (avoids cos() every call)
 	_lon_scale = cos(deg_to_rad(start_lat)) * 111000.0
@@ -1058,6 +1091,9 @@ func _ready() -> void:
 	add_child(osm_loader)
 	osm_loader.data_loaded.connect(_on_osm_data_loaded)
 	osm_loader.load_failed.connect(_on_osm_load_failed)
+
+	# Offline OSM: prefer a bundled .osm.pbf (no Overpass) when one covers the location.
+	_init_local_osm_source()
 
 	# Инициализируем Decoration Layer
 	_decoration_layer = DecorationLayerScript.new()
@@ -3341,8 +3377,10 @@ func _load_chunk(chunk_x: int, chunk_z: int) -> void:
 		_on_chunk_data_loaded(osm_data, chunk_key, fake_loader, _load_generation)
 		return
 
-	# Создаём отдельный загрузчик для этого чанка
-	var loader := OSMLoaderScript.new()
+	# Создаём отдельный загрузчик для этого чанка.
+	# Offline mode: LocalOSMLoader reads from the bundled .osm.pbf (drop-in — same
+	# data_loaded/load_failed signals + load_area). Otherwise the network OSMLoader.
+	var loader = LocalOSMLoader.new(_local_osm_source) if (_use_local_osm and _local_osm_source != null) else OSMLoaderScript.new()
 	add_child(loader)
 	var gen := _load_generation  # Захватываем текущую генерацию
 	loader.data_loaded.connect(_on_chunk_data_loaded.bind(chunk_key, loader, gen))
