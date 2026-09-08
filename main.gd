@@ -13,6 +13,7 @@ var _car_rb: RigidBody3D
 var _hud: Control
 var _loading_screen: Control
 var _pending_race_track = null
+var _perf_drive := false  # -- --perf-drive: reproducible Pionerskaya→south perf test
 
 
 func _ready() -> void:
@@ -52,6 +53,8 @@ func _ready() -> void:
 			_terrain.enable_buildings = false
 			_terrain.enable_vegetation = false
 			_terrain.enable_street_lamps = false
+		elif args[i] == "--perf-drive":
+			_perf_drive = true
 
 	# Координаты из RaceState — spawn position (origin is always fixed)
 	if _terrain:
@@ -92,6 +95,13 @@ func _ready() -> void:
 			_race_linedump_arm()
 		else:
 			_race_autotest_arm()
+
+	# Reproducible performance drive: spawn Pionerskaya, auto-drive south (see perf_autodrive.gd)
+	if _perf_drive and _terrain:
+		_terrain.spawn_lat = 59.149827
+		_terrain.spawn_lon = 37.948859
+		add_child(preload("res://tests/perf_autodrive.gd").new())
+		print("[main] PERF-DRIVE mode: spawn Pionerskaya (%.5f, %.5f)" % [_terrain.spawn_lat, _terrain.spawn_lon])
 
 	await get_tree().process_frame
 	_start_loading()

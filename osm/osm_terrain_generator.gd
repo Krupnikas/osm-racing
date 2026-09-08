@@ -200,6 +200,10 @@ const CHUNK_STALL_WARN_MS := 10000
 const CHUNK_STALL_FAIL_MS := 30000
 var _last_check_pos := Vector3.ZERO
 var _last_player_pos := Vector3.ZERO
+## Perf test hook: when non-zero, this velocity is used for predictive chunk LOD
+## instead of the car's linear_velocity (lets a kinematic auto-drive reproduce the
+## real speed-dependent forward-LOD0 streaming). Default zero = no effect.
+var perf_velocity_override := Vector3.ZERO
 var _check_interval := 0.5  # Проверка каждые 0.5 сек
 var _check_timer := 0.0
 var _chunks_to_unload: Array[String] = []  # Очередь на выгрузку (1 чанк за кадр)
@@ -625,6 +629,14 @@ var _viewport_rid: RID  # Кешируем viewport RID для CPU/GPU метр�
 # Скользящее окно для per-function breakdown на экране (последние N кадров)
 var _perf_window: Dictionary = {}  # name → Array[float] (мс, последние 60 кадров)
 const PERF_WINDOW_SIZE := 60  # 1 секунда при 60fps
+# Общий бюджет стриминга на кадр: как только _process уже потратил столько, НЕкритичные
+# спайковые очереди (заборы, дальний LOD, дорожная сеть для NPC) откладываются на следующий
+# кадр, чтобы их стоимость не складывалась в фриз. Критичные шаги (phase3/terrain_gen/
+# road_queue = финализация видимых чанков) не гейтятся. Только в игре (не при initial load).
+const STREAM_SOFT_CAP_US := 8000  # 8ms
+# Макс. точек на один элемент очереди road_extract: длинные way'и (LOD2, до 1км) режем на
+# куски, чтобы один add_road_segment не строил тысячи waypoints за кадр (~74мс фриз).
+const ROAD_EXTRACT_MAX_PTS := 24  # ~192м при WAYPOINT_SPACING 8м
 # Собираем данные текущего кадра для slow-frame лога
 var _current_frame_perf: Dictionary = {}  # name → float (мс), заполняется каждый кадр
 
@@ -2272,20 +2284,25 @@ func _process(delta: float) -> void:
 	t_terrain_gen = Time.get_ticks_usec() - t0
 	_record_perf("terrain_gen", t_terrain_gen)
 
+	# Non-critical streaming (fences / distant LOD / NPC road network): defer to a later
+	# frame once this frame is already busy, so their per-item spikes don't stack into a
+	# hitch. Critical steps (phase3/terrain_gen/road_queue) ran above and are never gated.
+	var _stream_busy := not _initial_loading and (Time.get_ticks_usec() - _frame_start) > STREAM_SOFT_CAP_US
+
 	# Process deferred fence edges incrementally (own 2ms budget)
-	if not _deferred_fence_edges.is_empty():
+	if not _stream_busy and not _deferred_fence_edges.is_empty():
 		t0 = Time.get_ticks_usec()
 		_process_deferred_fence_edges(t0, 2000)
 		_record_perf("fence_gen", Time.get_ticks_usec() - t0)
 
 	# LOD chunk queue — генерируем LOD чанки по 2 за кадр
-	if not _lod_chunk_queue.is_empty():
+	if not _stream_busy and not _lod_chunk_queue.is_empty():
 		t0 = Time.get_ticks_usec()
 		_process_lod_chunk_queue()
 		_record_perf("lod_chunk_gen", Time.get_ticks_usec() - t0)
 
 	# Дороги в RoadNetwork (A*) — бюджетно, чтобы не фризить на LOD-чанках
-	if not _road_extract_queue.is_empty():
+	if not _stream_busy and not _road_extract_queue.is_empty():
 		t0 = Time.get_ticks_usec()
 		_process_road_extract_queue()
 		_record_perf("road_extract", Time.get_ticks_usec() - t0)
@@ -2456,7 +2473,9 @@ func _process(delta: float) -> void:
 	# Проверяем нужны ли новые чанки (с предиктивной загрузкой по направлению)
 	var _uc_t0 := Time.get_ticks_usec()
 	var velocity := Vector3.ZERO
-	if _car and is_instance_valid(_car) and _car is RigidBody3D:
+	if perf_velocity_override != Vector3.ZERO:
+		velocity = perf_velocity_override  # perf auto-drive: kinematic body has no linear_velocity
+	elif _car and is_instance_valid(_car) and _car is RigidBody3D:
 		velocity = _car.linear_velocity
 	elif delta > 0.001:
 		velocity = (player_pos - _last_player_pos) / delta
@@ -26651,7 +26670,19 @@ func _extract_lod2_roads_for_traffic(osm_data: Dictionary) -> void:
 		var local_points := PackedVector2Array()
 		for node in nodes:
 			local_points.append(_latlon_to_local(node.lat, node.lon))
-		_road_extract_queue.append({"points": local_points, "tags": tags})
+		# Cap points per queued item so one very long way can't make a single
+		# add_road_segment() call freeze the frame (measured up to ~74ms). Consecutive
+		# sub-segments SHARE the boundary point → the deferred intersection-connect stitches
+		# them into a continuous route (same mechanism that joins roads across chunk borders).
+		var np := local_points.size()
+		if np <= ROAD_EXTRACT_MAX_PTS:
+			_road_extract_queue.append({"points": local_points, "tags": tags})
+		else:
+			var seg_start := 0
+			while seg_start < np - 1:
+				var seg_end: int = mini(seg_start + ROAD_EXTRACT_MAX_PTS - 1, np - 1)
+				_road_extract_queue.append({"points": local_points.slice(seg_start, seg_end + 1), "tags": tags})
+				seg_start = seg_end  # share the boundary point with the next sub-segment
 
 
 ## Бюджетно добавляет дороги в RoadNetwork (A*) — несколько сегментов за кадр,

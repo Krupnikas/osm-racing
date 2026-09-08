@@ -5,7 +5,7 @@ class_name TrafficManager
 ## Управляет spawning, despawning и жизненным циклом NPC машин
 
 # Параметры spawning
-var max_npcs := 30  # Максимум машин одновременно
+var max_npcs := 22  # Максимум машин одновременно (было 30 — perf: каждый активный NPC = VehicleBody3D физика + AI каждый кадр)
 var spawn_distance := 200.0  # Радиус spawning от игрока
 var despawn_distance := 300.0  # Дистанция despawning
 var min_spawn_separation := 15.0  # Мин. расстояние между NPC
@@ -254,7 +254,7 @@ func _update_spawning() -> void:
 
 	# Спавним несколько машин за раз для быстрого заполнения
 	var spawns_this_frame := 0
-	const MAX_SPAWNS_PER_FRAME := 3
+	const MAX_SPAWNS_PER_FRAME := 1  # было 3 — spawn делает path-build + raycast, растягиваем на кадры
 
 	# Радиус актуальности спавна: только чанки рядом с игроком. Раньше цикл шёл
 	# по ВСЕМ загруженным чанкам (до 90, включая LOD2 за 1км) каждую секунду —
