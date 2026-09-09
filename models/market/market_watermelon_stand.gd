@@ -65,11 +65,16 @@ var _sfx_touch: AudioStream = null       # light touch (low-speed roll)
 var _sfx_high: AudioStream = null        # smash (high-speed pulp)
 
 
+static var _sfx_cache: Dictionary = {}  # loaded once, shared by all stands
+
 func _ready() -> void:
-	if ResourceLoader.exists("res://audio/sfx/watermelon_touch.mp3"):
-		_sfx_touch = load("res://audio/sfx/watermelon_touch.mp3")
-	if ResourceLoader.exists("res://audio/sfx/watermelon_high_speed.mp3"):
-		_sfx_high = load("res://audio/sfx/watermelon_high_speed.mp3")
+	if _sfx_cache.is_empty():
+		_sfx_cache = {
+			"touch": load("res://audio/sfx/watermelon_touch.mp3") if ResourceLoader.exists("res://audio/sfx/watermelon_touch.mp3") else null,
+			"high": load("res://audio/sfx/watermelon_high_speed.mp3") if ResourceLoader.exists("res://audio/sfx/watermelon_high_speed.mp3") else null,
+		}
+	_sfx_touch = _sfx_cache["touch"]
+	_sfx_high = _sfx_cache["high"]
 	_load_assets()
 	_build_pallet()
 	var layout := _build_layout()
@@ -172,21 +177,38 @@ func _bake_mesh(path: String, mode: String, target: float, target_axis: String, 
 	return {"mesh": out, "size": ab.size * scl}
 
 
+# Baked once, shared by every stand (assets + bake params are identical). Loading and
+# baking the 3 GLBs per instance was ~most of the ~36ms instantiate spike while driving.
+static var _asset_cache: Dictionary = {}
+
 func _load_assets() -> void:
-	var pal := _bake_mesh("res://models/market/pallet.glb", "base", pallet_footprint_x, "x")
-	if not pal.is_empty():
-		_pallet_mesh = pal.mesh
-		_pallet_top = (pal.size as Vector3).y
-	var wm := _bake_mesh("res://models/market/watermelon.glb", "sphere", watermelon_diameter, "maxxz", melon_darken)
-	if not wm.is_empty():
-		_melon_mesh = wm.mesh
-		var s: Vector3 = wm.size
-		_melon_d = maxf(s.x, s.z)
-		_melon_r = (s.x + s.y + s.z) / 6.0  # avg radius → rolls believably
-	var sl := _bake_mesh("res://models/market/watermelon-slice.glb", "base", slice_size, "maxxz", slice_darken)
-	if not sl.is_empty():
-		_slice_mesh = sl.mesh
-		_slice_half_y = (sl.size as Vector3).y * 0.5
+	if _asset_cache.is_empty():
+		var c := {}
+		var pal := _bake_mesh("res://models/market/pallet.glb", "base", pallet_footprint_x, "x")
+		if not pal.is_empty():
+			c["pallet_mesh"] = pal.mesh
+			c["pallet_top"] = (pal.size as Vector3).y
+		var wm := _bake_mesh("res://models/market/watermelon.glb", "sphere", watermelon_diameter, "maxxz", melon_darken)
+		if not wm.is_empty():
+			c["melon_mesh"] = wm.mesh
+			var s: Vector3 = wm.size
+			c["melon_d"] = maxf(s.x, s.z)
+			c["melon_r"] = (s.x + s.y + s.z) / 6.0  # avg radius → rolls believably
+		var sl := _bake_mesh("res://models/market/watermelon-slice.glb", "base", slice_size, "maxxz", slice_darken)
+		if not sl.is_empty():
+			c["slice_mesh"] = sl.mesh
+			c["slice_half_y"] = (sl.size as Vector3).y * 0.5
+		_asset_cache = c
+	if _asset_cache.has("pallet_mesh"):
+		_pallet_mesh = _asset_cache["pallet_mesh"]
+		_pallet_top = _asset_cache["pallet_top"]
+	if _asset_cache.has("melon_mesh"):
+		_melon_mesh = _asset_cache["melon_mesh"]
+		_melon_d = _asset_cache["melon_d"]
+		_melon_r = _asset_cache["melon_r"]
+	if _asset_cache.has("slice_mesh"):
+		_slice_mesh = _asset_cache["slice_mesh"]
+		_slice_half_y = _asset_cache["slice_half_y"]
 
 
 # ---------------------------------------------------------------- pallet
