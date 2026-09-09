@@ -159,6 +159,8 @@ const SHORE_WIDTH := 3.0          # Horizontal slope distance (~22° gentle slop
 @export var sign_visibility_range := 130.0  # Per-sign visibility_range_end (culling, not mesh LOD)
 @export var sign_style_profile := "default" # Country/style profile for the asset registry
 @export var enable_clutter := true  # Интерактивный реквизит (урны, конусы, мешки…)
+@export var enable_market_stands := true  # Арбузные ларьки (DecorationLayer, процедурные; тяжёлый instantiate ~36мс)
+@export var enable_custom_models := true  # Кастомные GLB (DecorationLayer: гаражи, пилон, скульптуры, ворота базара — процедурные)
 @export var enable_fences := true  # Включить заборы (промзоны, территории)
 @export var enable_elevation := false  # Включить elevation из SRTM30m
 @export var enable_ground_plane := false  # Grey fallback plane at raw elevation under terrain
@@ -19574,6 +19576,8 @@ func _finalize_tree_batches_for_chunk(chunk_key: String) -> void:
 
 ## Финализирует билборды из DecorationLayer для чанка
 func _finalize_billboard_batch_for_chunk(chunk_key: String) -> void:
+	if not enable_road_billboards:
+		return  # рекламные щиты (DecorationLayer) — гейтятся тем же флагом, что и road-биллборды
 	if not _decoration_layer:
 		return
 
@@ -19872,6 +19876,8 @@ func _footprint_pca_xz(pts: Array, centre: Vector2) -> Dictionary:
 ## по get_custom_models(); возвращает следующий индекс если бюджет исчерпан, или -1
 ## когда все модели чанка размещены.
 func _place_custom_models_incremental(chunk_key: String, parent: Node3D, start_idx: int, t0: int, budget_us: int) -> int:
+	if not enable_custom_models:
+		return -1
 	if not _decoration_layer:
 		return -1
 	var _models: Array = _decoration_layer.get_custom_models()
@@ -19957,6 +19963,8 @@ var _debug_market_stands: bool = false  # default OFF (placement + per-stand log
 ## Инкрементальный: ставит market-стенды порциями. start_idx — плоский курсор по
 ## (entry × stand). Возвращает следующий индекс если бюджет исчерпан, или -1 когда всё.
 func _place_market_stands_incremental(chunk_key: String, parent: Node3D, start_idx: int, t0: int, budget_us: int) -> int:
+	if not enable_market_stands:
+		return -1
 	if not _decoration_layer:
 		return -1
 	var entries: Array = _decoration_layer.get_market_stands()
@@ -20336,6 +20344,8 @@ func _create_debug_light_cone(spot_range: float, spot_angle: float) -> Node3D:
 
 # Создание автобусной остановки
 func _create_bus_stop(pos: Vector2, elevation: float, tags: Dictionary, parent: Node3D) -> void:
+	if not enable_bus_stop_signs:
+		return  # остановки (навес + плита) — общий флаг
 	# Дедупликация
 	var pos_key := "bs_%d_%d" % [int(pos.x), int(pos.y)]
 	if _created_bus_stop_positions.has(pos_key):

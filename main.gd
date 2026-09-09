@@ -26,6 +26,10 @@ func _ready() -> void:
 		get_tree().create_timer(maxf(20.0, float(OS.get_environment("RACE_WORKTEST")))).timeout.connect(
 			func() -> void: get_tree().quit())
 
+	# perf empty-flat test: force the Nexia player car (default anyway) for a known-light setup.
+	if "--empty-flat" in OS.get_cmdline_user_args():
+		CarSettings.selected_car_id = "nexia"
+
 	var new_car := CarSpawner.replace_player_car(self)
 	_terrain = $OSMTerrain
 	_car = new_car if new_car else $Car

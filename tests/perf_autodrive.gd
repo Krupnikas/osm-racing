@@ -19,13 +19,38 @@ class_name PerfAutodrive
 
 const PIONERSKAYA := Vector2(59.149827, 37.948859)  # sprint start lat/lon
 
+# Ablation: friendly name -> terrain enable_* flags to set false. "npcs" is special-cased.
+const DISABLE_MAP := {
+	"buildings": ["enable_buildings", "enable_windows", "enable_night_mode_windows"],
+	"windows": ["enable_windows", "enable_night_mode_windows"],
+	"roads": ["enable_roads"],
+	"curbs": ["enable_curbs", "enable_sidewalk_curbs"],
+	"fences": ["enable_fences", "enable_pedestrian_fences", "enable_pfence_shatter"],
+	"vegetation": ["enable_vegetation", "enable_bushes", "enable_bush_shadows", "enable_veg_rows"],
+	"lamps": ["enable_street_lamps", "enable_overhead_wires"],
+	"signs": ["enable_traffic_signs", "enable_crossing_signs", "enable_road_signs",
+		"enable_bus_stop_signs", "enable_speed_limit_signs", "enable_roundabout_signs",
+		"enable_give_way_signs", "enable_main_road_signs"],
+	"traffic_lights": ["enable_traffic_lights"],
+	"manholes": ["enable_manholes"],
+	"water": ["enable_water"],
+	"billboards": ["enable_road_billboards"],
+	"props": ["enable_roadside_props", "enable_clutter"],
+	"market": ["enable_market_stands"],
+	"custom_models": ["enable_custom_models"],
+	"lod": ["enable_lod"],
+}
+
 var terrain: Node
 var car: RigidBody3D
 var speed := 25.0
 var run_time := 45.0   # drive seconds after arming (override with --drive-time=)
 var no_npcs := false
+var disable_list: PackedStringArray = []
 const LOAD_BUDGET := 25.0  # extra wall-clock allowance for initial load before the hard cap
+const WARMUP := 1.0        # skip this many seconds after arming before recording frame times
 var _finished := false
+var _frame_ms: PackedFloat32Array = []  # every driving frame's delta (ms), for p99
 
 var _armed := false
 var _t := 0.0
@@ -39,7 +64,7 @@ var _south := Vector3(0, 0, 1)  # +Z = south in this coordinate convention
 
 static func parse_cmdline() -> Dictionary:
 	# Returns {enabled, speed, run_time} from `-- --perf-drive ...` user args.
-	var out := {"enabled": false, "speed": 25.0, "run_time": 45.0, "no_npcs": false}
+	var out := {"enabled": false, "speed": 25.0, "run_time": 45.0, "no_npcs": false, "disable": "", "empty_flat": false}
 	for arg in OS.get_cmdline_user_args():
 		if arg == "--perf-drive":
 			out["enabled"] = true
@@ -49,6 +74,10 @@ static func parse_cmdline() -> Dictionary:
 			out["run_time"] = float(arg.substr("--drive-time=".length()))
 		elif arg == "--no-npcs":
 			out["no_npcs"] = true
+		elif arg.begins_with("--disable="):
+			out["disable"] = arg.substr("--disable=".length())
+		elif arg == "--empty-flat":
+			out["empty_flat"] = true
 	return out
 
 
@@ -61,6 +90,19 @@ func _ready() -> void:
 	if terrain == null:
 		push_error("[PERFDRIVE] no terrain_generator in tree")
 		return
+	disable_list = String(cfg["disable"]).split(",", false)
+	if no_npcs and not ("npcs" in disable_list):
+		disable_list.append("npcs")
+	if cfg["empty_flat"]:
+		# Isolate the BASE chunk-streaming cost: no OSM content at all (empty ways/nodes) and
+		# flat terrain at elevation 0. Chunks still generate their flat ground mesh + collision.
+		terrain.test_data_provider = _empty_osm
+		terrain.enable_elevation = false
+		for key in DISABLE_MAP:  # belt-and-suspenders: nothing to build anyway
+			disable_list.append(key)
+		disable_list.append("npcs")
+		print("[PERFDRIVE] EMPTY-FLAT mode: empty OSM data + flat terrain (elevation 0)")
+	_apply_disables()  # must run before loading so chunks generate without those features
 	if terrain.has_signal("initial_load_complete"):
 		terrain.initial_load_complete.connect(_on_load_complete)
 	# Hard wall-clock cap: the test ALWAYS exits within run_time + load budget, even if the
@@ -68,6 +110,30 @@ func _ready() -> void:
 	get_tree().create_timer(run_time + LOAD_BUDGET).timeout.connect(_on_hard_cap)
 	print("[PERFDRIVE] waiting for terrain load — speed=%.1f m/s (%.0f km/h), run=%.0fs (hard cap %.0fs)" % [
 		speed, speed * 3.6, run_time, run_time + LOAD_BUDGET])
+
+
+func _empty_osm(_lat: float, _lon: float, _size: float) -> Dictionary:
+	return {
+		"nodes": {}, "ways": [], "point_objects": [], "entrance_nodes": [], "poi_nodes": [],
+		"bus_stops": [], "tram_stops": [], "pedestrian_areas": [], "bridge_decks": [],
+		"traffic_signals": [], "give_way_nodes": [], "landmarks": [],
+	}
+
+
+func _apply_disables() -> void:
+	for name in disable_list:
+		if name == "npcs":
+			var tm := get_tree().current_scene.find_child("TrafficManager", true, false)
+			if tm:
+				tm.max_npcs = 0
+				tm.set_process(false)  # also kill the per-frame chunk scan in _update_spawning
+			continue
+		if DISABLE_MAP.has(name):
+			for flag in DISABLE_MAP[name]:
+				if flag in terrain:
+					terrain.set(flag, false)
+	if disable_list.size() > 0:
+		print("[PERFDRIVE] DISABLED: %s" % ", ".join(disable_list))
 
 
 func _on_load_complete() -> void:
@@ -95,14 +161,7 @@ func _arm() -> void:
 	# Face south (visual only) and feed the predictive-LOD velocity signal.
 	car.global_rotation = Vector3(0, PI, 0)
 	terrain.perf_velocity_override = _south * speed
-	terrain._perf_verbose = true  # log EVERY slow frame with full breakdown
-
-	if no_npcs:
-		var tm := get_tree().current_scene.find_child("TrafficManager", true, false)
-		if tm:
-			tm.max_npcs = 0
-			tm.set_process(false)  # also kill the per-frame chunk scan in _update_spawning
-			print("[PERFDRIVE] NPC traffic DISABLED (max_npcs=0, _process off)")
+	terrain._perf_verbose = "--verbose" in OS.get_cmdline_user_args()  # opt-in per-slow-frame breakdown
 
 	_armed = true
 	print("\n========== PERFDRIVE ARMED ==========")
@@ -123,6 +182,8 @@ func _process(delta: float) -> void:
 		return
 	_t += delta
 	var ms := delta * 1000.0
+	if _t > WARMUP:
+		_frame_ms.append(ms)  # steady-state sample for p99 (skip first WARMUP sec)
 	if ms > 16.0:
 		_slow16 += 1
 	if ms > 33.0:
@@ -180,6 +241,27 @@ func _finish() -> void:
 	var dist := _spawn_pos.distance_to(car.global_position) if car else 0.0
 	print("\n========== PERFDRIVE DONE ==========")
 	print("drove %.0f m in %.0f s (avg %.1f m/s)" % [dist, _t, dist / maxf(_t, 0.001)])
+
+	# Steady-state frame-time stats (the whole point of the sweep).
+	var arr := _frame_ms.duplicate()
+	arr.sort()
+	var n := arr.size()
+	var label := ", ".join(disable_list) if disable_list.size() > 0 else "none"
+	if n > 0:
+		var pct := func(q: float) -> float: return arr[clampi(int(n * q), 0, n - 1)]
+		var over := func(t: float) -> float:
+			var c := 0
+			for v in arr:
+				if v > t: c += 1
+			return 100.0 * c / n
+		var mean := 0.0
+		for v in arr: mean += v
+		mean /= n
+		print("PERFSUMMARY disable=[%s] frames=%d avgfps=%.0f p50=%.1f p90=%.1f p99=%.1f p99.9=%.1f pct16=%.1f%% pct33=%.2f%% pct50=%.2f%% worst=%.1f" % [
+			label, n, 1000.0 / maxf(mean, 0.001), pct.call(0.5), pct.call(0.9), pct.call(0.99), pct.call(0.999),
+			over.call(16.7), over.call(33.0), over.call(50.0), arr[n - 1]])
+	else:
+		print("PERFSUMMARY disable=[%s] frames=0 (never armed)" % label)
 	print("====================================\n")
 	await get_tree().create_timer(0.5).timeout
 	# Use the project's crash-free exit (SIGKILL) — a plain get_tree().quit() hits the
