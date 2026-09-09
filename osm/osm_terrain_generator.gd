@@ -19899,6 +19899,12 @@ func _place_custom_models_incremental(chunk_key: String, parent: Node3D, start_i
 		var pos_chunk_key := "%d,%d" % [cx, cz]
 		if pos_chunk_key != chunk_key:
 			continue
+		# Dedup: each custom model is placed ONCE per session and parented persistently, so
+		# driving back and forth never re-instantiates it (~27ms GLB instantiate + AABB walk).
+		# Checked BEFORE load/instantiate so a duplicate costs nothing.
+		var model_key := "%s_%.4f_%.4f" % [model_path, lat, lon]
+		if _placed_bridge_model_keys.has(model_key):
+			continue
 		# Load and cache PackedScene
 		if not _custom_model_cache.has(model_path):
 			if ResourceLoader.exists(model_path):
@@ -19909,6 +19915,7 @@ func _place_custom_models_incremental(chunk_key: String, parent: Node3D, start_i
 		var scene: PackedScene = _custom_model_cache[model_path]
 		if not scene:
 			continue
+		_placed_bridge_model_keys[model_key] = true
 		var inst: Node3D = scene.instantiate()
 		var scale_val: float = entry.scale
 		var y_offset: float = entry.get("y_offset", 0.0)
@@ -19929,22 +19936,14 @@ func _place_custom_models_incremental(chunk_key: String, parent: Node3D, start_i
 				for s in signs_arr:
 					_add_gate_sign(inst, mab, s)
 		var vis_range: float = entry.get("visibility_range", 150.0)
-		if vis_range > 300.0:
-			# Large-range model (e.g. bridge pylon) — parent to self so it
-			# persists like bridge deck nodes and isn't unloaded with the chunk.
-			# Guard against duplicate placement on chunk reload.
-			var model_key := "%s_%.4f_%.4f" % [model_path, lat, lon]
-			if _placed_bridge_model_keys.has(model_key):
-				inst.queue_free()
-				continue
-			_placed_bridge_model_keys[model_key] = true
-			_set_visibility_range_recursive(inst, vis_range)
-			self.add_child(inst)
-			_custom_bridge_models.append(inst)
-		else:
-			_set_visibility_range_recursive(inst, vis_range)
+		_set_visibility_range_recursive(inst, vis_range)
+		if vis_range <= 300.0:
 			_set_no_shadow_recursive(inst)
-			parent.add_child(inst)
+		# Parent to self (persistent), not the chunk — so custom models instantiate once per
+		# session and survive chunk unload/reload (bounded small set). Engine culls rendering
+		# by visibility_range. Freed with _custom_bridge_models on reset_terrain.
+		self.add_child(inst)
+		_custom_bridge_models.append(inst)
 		print("OSM: Placed custom model '%s' at (%.1f, %.1f) in chunk %s, scale=%.1f" % [
 			model_path.get_file(), pos.x, pos.y, chunk_key, scale_val])
 		# Бюджет: проверяем после каждой РАЗМЕЩЁННОЙ модели (load+instantiate дорого)
@@ -22593,74 +22592,76 @@ func _process_lod_chunk_queue() -> void:
 	# Сортируем по приоритету: ближайшие впереди первыми
 	if _lod_chunk_queue.size() > 1:
 		_lod_chunk_queue.sort_custom(func(a, b): return _chunk_priority_score(a["chunk_key"]) < _chunk_priority_score(b["chunk_key"]))
+	# One SUB-STEP per iteration (not a whole chunk): a full LOD2 chunk was flat_terrain +
+	# buildings + roads + trees atomically (6-14ms). Now the budget is checked between steps,
+	# so per-frame LOD2 cost is capped even mid-chunk. Task carries "step"; peek front, pop on done.
 	while not _lod_chunk_queue.is_empty():
-		# Бюджет проверяем ПОСЛЕ первого чанка (минимум 1 за вызов)
+		# Бюджет проверяем ПОСЛЕ первого шага (минимум 1 шаг за вызов → прогресс гарантирован)
 		if processed > 0 and (Time.get_ticks_usec() - t0) > budget_us:
 			break
-		var task: Dictionary = _lod_chunk_queue.pop_front()
+		var task: Dictionary = _lod_chunk_queue[0]  # peek — pop only when the chunk is done
 		var chunk_key: String = task["chunk_key"]
 		var gen: int = task["gen"]
 		var lod_level: int = task["lod_level"]
 		var osm_data: Dictionary = task["osm_data"]
 
 		if gen != _load_generation:
+			_lod_chunk_queue.pop_front()
 			continue
 		# Если чанк уже выгружен или отменён — пропускаем
-		if not _loading_chunks.has(chunk_key) and not _loaded_chunks.has(chunk_key):
-			if not _chunk_state.has(chunk_key):
-				continue
+		if not _loading_chunks.has(chunk_key) and not _loaded_chunks.has(chunk_key) and not _chunk_state.has(chunk_key):
+			_lod_chunk_queue.pop_front()
+			continue
 
 		# Ждём elevation данных — без них terrain рендерится на y=0
 		if enable_elevation and not _chunk_elevation_data.has(chunk_key):
-			deferred.append(task)
+			deferred.append(_lod_chunk_queue.pop_front())
 			continue
 
 		var parent: Node3D = null
 		if _chunk_state.has(chunk_key):
 			parent = _chunk_state[chunk_key].get("node", null)
 		if not parent or not is_instance_valid(parent):
+			_lod_chunk_queue.pop_front()
 			continue
 
 		var coords: Array = chunk_key.split(",")
-		var chunk_x := int(coords[0])
-		var chunk_z := int(coords[1])
-		var min_x := float(chunk_x) * chunk_size
-		var min_z := float(chunk_z) * chunk_size
+		var min_x := float(int(coords[0])) * chunk_size
+		var min_z := float(int(coords[1])) * chunk_size
 
-		# 1. Плоский террейн (трава с elevation)
+		var step: int = task.get("step", 0)
 		var _ls0 := Time.get_ticks_usec()
-		_create_flat_terrain(chunk_key, min_x, min_z)
-		_record_perf("lod_flat_terrain", Time.get_ticks_usec() - _ls0)
-
-		# 2. Здания
-		_ls0 = Time.get_ticks_usec()
-		_generate_lod2_buildings(chunk_key, osm_data, min_x, min_z)
-		_record_perf("lod_buildings", Time.get_ticks_usec() - _ls0)
-
-		# 3. Дороги → RoadNetwork (для A* маршрутизации в race/work mode)
-		_ls0 = Time.get_ticks_usec()
-		_extract_lod2_roads_for_traffic(osm_data)
-		_record_perf("lod_roads_extract", Time.get_ticks_usec() - _ls0)
-
-		# 4. Деревья (только LOD1)
-		if lod_level == 1:
-			_ls0 = Time.get_ticks_usec()
-			_create_lod1_trees(chunk_key, osm_data, min_x, min_z)
-			_record_perf("lod_trees", Time.get_ticks_usec() - _ls0)
-
-		# Пометить чанк как загруженный
-		_loading_chunks.erase(chunk_key)
-		_loaded_chunks[chunk_key] = parent
-		_initial_chunks_completed[chunk_key] = true
-		parent.visible = false
-		_chunk_activation_pending[chunk_key] = -1
-		_set_chunk_stage(chunk_key, "activating")
+		match step:
+			0:  # Плоский террейн (трава с elevation)
+				_create_flat_terrain(chunk_key, min_x, min_z)
+				_record_perf("lod_flat_terrain", Time.get_ticks_usec() - _ls0)
+				task["step"] = 1
+			1:  # Здания
+				_generate_lod2_buildings(chunk_key, osm_data, min_x, min_z)
+				_record_perf("lod_buildings", Time.get_ticks_usec() - _ls0)
+				task["step"] = 2
+			2:  # Дороги → RoadNetwork (для A* маршрутизации в race/work mode)
+				_extract_lod2_roads_for_traffic(osm_data)
+				_record_perf("lod_roads_extract", Time.get_ticks_usec() - _ls0)
+				task["step"] = 3
+			3:  # Деревья (только LOD1)
+				if lod_level == 1:
+					_create_lod1_trees(chunk_key, osm_data, min_x, min_z)
+					_record_perf("lod_trees", Time.get_ticks_usec() - _ls0)
+				task["step"] = 4
+			_:  # Готово — помечаем чанк загруженным
+				_lod_chunk_queue.pop_front()
+				_loading_chunks.erase(chunk_key)
+				_loaded_chunks[chunk_key] = parent
+				_initial_chunks_completed[chunk_key] = true
+				parent.visible = false
+				_chunk_activation_pending[chunk_key] = -1
+				_set_chunk_stage(chunk_key, "activating")
+				_emit_chunk_debug("LOD_CHUNK_READY key=%s lod=%d rs_instances=%d" % [
+					chunk_key, lod_level,
+					_chunk_rs_instances.get(chunk_key, []).size()
+				])
 		processed += 1
-
-		_emit_chunk_debug("LOD_CHUNK_READY key=%s lod=%d rs_instances=%d" % [
-			chunk_key, lod_level,
-			_chunk_rs_instances.get(chunk_key, []).size()
-		])
 	# Вернуть чанки ожидающие elevation обратно в начало очереди
 	if not deferred.is_empty():
 		for i in range(deferred.size() - 1, -1, -1):

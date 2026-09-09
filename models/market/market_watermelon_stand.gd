@@ -40,6 +40,8 @@ const SEED_DARK := Color(0.08, 0.08, 0.06)
 var _state: int = State.INTACT
 var _triggered: bool = false
 var _melons: Array[RigidBody3D] = []
+var _pending_melon_layout: Array = []  # incremental build queue (spread across frames)
+var _melon_build_i := 0
 var _slices: Array[RigidBody3D] = []
 
 # baked assets
@@ -77,14 +79,34 @@ func _ready() -> void:
 	_sfx_high = _sfx_cache["high"]
 	_load_assets()
 	_build_pallet()
-	var layout := _build_layout()
-	_build_melons(layout)
-	_build_slices()
-	_build_trigger()
-	if wmelon_debug:
-		_build_debug()
-		print("[WMELON] stand %d built: %d melons, %d slices, pallet_top=%.3f d=%.3f r=%.3f" % [
-			stand_index, _melons.size(), _slices.size(), _pallet_top, _melon_d, _melon_r])
+	# Spread the 29 watermelon RigidBody creations across frames (a few per frame) so
+	# instantiating the stand while driving past never spikes a frame. Slices + trigger
+	# are built once all melons exist. See _process.
+	_pending_melon_layout = _build_layout()
+	_melon_build_i = 0
+	set_process(true)
+
+
+const MELONS_PER_FRAME := 3
+
+func _process(_delta: float) -> void:
+	if _pending_melon_layout.is_empty():
+		set_process(false)
+		return
+	var built := 0
+	while _melon_build_i < _pending_melon_layout.size() and built < MELONS_PER_FRAME:
+		_build_one_melon(_pending_melon_layout[_melon_build_i], _melon_build_i)
+		_melon_build_i += 1
+		built += 1
+	if _melon_build_i >= _pending_melon_layout.size():
+		_pending_melon_layout = []
+		_build_slices()
+		_build_trigger()
+		if wmelon_debug:
+			_build_debug()
+			print("[WMELON] stand %d built: %d melons, %d slices, pallet_top=%.3f d=%.3f r=%.3f" % [
+				stand_index, _melons.size(), _slices.size(), _pallet_top, _melon_d, _melon_r])
+		set_process(false)
 
 
 # ---------------------------------------------------------------- assets
@@ -282,33 +304,41 @@ func _build_layout() -> Array:
 # ---------------------------------------------------------------- fruit bodies
 
 func _build_melons(layout: Array) -> void:
+	# Full synchronous build (used by the reset/rebuild path). The initial build in _ready()
+	# is spread across frames instead — see _process — so creating 29 RigidBodies never
+	# spikes a frame while driving past the stand.
 	if _melon_mesh == null:
 		return
 	for i in range(layout.size()):
-		var d: Dictionary = layout[i]
-		var body := RigidBody3D.new()
-		body.name = "Watermelon_%d" % i
-		body.mass = 2.5
-		body.transform = Transform3D(d.rot, d.pos)
-		body.freeze = true
-		body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
-		body.collision_layer = 4
-		body.collision_mask = 0
-		body.linear_damp = 0.25
-		body.angular_damp = 0.35
-		var mi := MeshInstance3D.new()
-		mi.mesh = _melon_mesh
-		mi.scale = Vector3.ONE * float(d.s)
-		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-		mi.visibility_range_end = 160.0
-		body.add_child(mi)
-		var cs := CollisionShape3D.new()
-		var sph := SphereShape3D.new()
-		sph.radius = _melon_r * float(d.s)
-		cs.shape = sph
-		body.add_child(cs)
-		add_child(body)
-		_melons.append(body)
+		_build_one_melon(layout[i], i)
+
+
+func _build_one_melon(d: Dictionary, i: int) -> void:
+	if _melon_mesh == null:
+		return
+	var body := RigidBody3D.new()
+	body.name = "Watermelon_%d" % i
+	body.mass = 2.5
+	body.transform = Transform3D(d.rot, d.pos)
+	body.freeze = true
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	body.collision_layer = 4
+	body.collision_mask = 0
+	body.linear_damp = 0.25
+	body.angular_damp = 0.35
+	var mi := MeshInstance3D.new()
+	mi.mesh = _melon_mesh
+	mi.scale = Vector3.ONE * float(d.s)
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	mi.visibility_range_end = 160.0
+	body.add_child(mi)
+	var cs := CollisionShape3D.new()
+	var sph := SphereShape3D.new()
+	sph.radius = _melon_r * float(d.s)
+	cs.shape = sph
+	body.add_child(cs)
+	add_child(body)
+	_melons.append(body)
 
 
 func _build_slices() -> void:
